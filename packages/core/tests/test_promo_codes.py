@@ -14,9 +14,11 @@ from daimon.core.promo_codes import (
     PromoCodeError,
     PromoRefusal,
     build_promo_code_terms,
+    channel_cap_refusal,
     describe_refusal,
     generate_promo_code,
     hash_promo_code,
+    is_channel_code,
     is_granted_on_redeem,
     is_well_formed_promo_code,
     normalize_chosen_promo_code,
@@ -170,6 +172,24 @@ def test_timed_terms_stop_redemption_when_the_credit_ends() -> None:
             "redemption start",
         ),
         ({"amount_usd": Decimal("1"), "timed": False, "max_redemptions": 0}, "at least 1"),
+        (
+            {"amount_usd": Decimal("5"), "timed": False, "channel_cap_usd": Decimal("4.99")},
+            "at least the amount",
+        ),
+        (
+            {
+                "amount_usd": Decimal("1"),
+                "timed": True,
+                "credit_starts_at": NOW,
+                "credit_ends_at": NOW + HOUR,
+                "channel_cap_usd": Decimal("5"),
+            },
+            "credit code, not a timed one",
+        ),
+        (
+            {"amount_usd": Decimal("1"), "timed": False, "channel_cap_usd": Decimal("2.001")},
+            "two decimal",
+        ),
     ],
 )
 def test_inconsistent_terms_are_refused(kwargs: dict[str, Any], message: str) -> None:
@@ -203,6 +223,21 @@ def test_timed_credit_is_granted_on_redeem_only_once_started() -> None:
     early = _code(kind="timed", credit_starts_at=NOW + HOUR, credit_ends_at=NOW + 2 * HOUR)
     assert not is_granted_on_redeem(early, now=NOW), "timed credit should wait for its window"
     assert is_granted_on_redeem(early, now=NOW + HOUR), "timed credit should grant once started"
+
+
+def test_channel_terms_and_cap() -> None:
+    """A channel cap makes a channel code; the cap admits whole redemptions only."""
+    terms = build_promo_code_terms(
+        amount_usd=Decimal("5"), timed=False, channel_cap_usd=Decimal("12")
+    )
+    assert terms.channel_cap_usd == Decimal("12") and terms.kind == "credit"
+    code = _code(amount_usd=Decimal("5"), channel_cap_usd=Decimal("12"))
+    assert is_channel_code(code) and not is_channel_code(_code())
+    assert channel_cap_refusal(code, channel_redeemed_usd=Decimal("5")) is None, "10 <= 12"
+    assert channel_cap_refusal(code, channel_redeemed_usd=Decimal("10")) == (
+        "channel_cap_reached"
+    ), "a third $5 would pass the $12 cap"
+    assert channel_cap_refusal(_code(), channel_redeemed_usd=Decimal("1000")) is None
 
 
 def test_every_refusal_has_a_sentence() -> None:

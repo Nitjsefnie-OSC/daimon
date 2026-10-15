@@ -292,7 +292,7 @@ async def test_prepared_foreign_failure_reconciles_real_usage_without_anthropic_
     monkeypatch.setattr(driver, "turn_io", factory)
     monkeypatch.setattr(run_module, "_replace_dead_session", forbidden_recovery)
     monkeypatch.setattr(run_module, "bind_recorder", forbidden_recovery)
-    monkeypatch.setattr(run_module, "reconcile_unbilled", forbidden_recovery)
+    monkeypatch.setattr(run_module, "settle_session", forbidden_recovery)
     result = await run_prepared_turn_impl(
         deps,
         prepared,

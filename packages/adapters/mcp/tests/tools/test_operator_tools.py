@@ -301,6 +301,8 @@ async def test_tenant_summary_omits_readers_and_writers_and_lists_timed_credit(
         account_id=None,
         code="TIMEDCREDIT1234",
         now=now,
+        channel=None,
+        is_admin=True,
     )
     assert isinstance(redeemed, PromoRedeemed), redeemed
 

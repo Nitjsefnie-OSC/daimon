@@ -130,7 +130,7 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(case, monkeypa
     token = mint_jwt(account_id=ACCOUNT, chat_agent_id=AGENT, secret=SECRET, now=NOW)
     async with old.client() as before, new.client() as after:
         # Original host leaf calls and literal payloads, independently pinned.
-        _ = [row async for row in before.beta.vaults.list()]
+        _ = [row async for row in before.beta.vaults.list(limit=100)]
         if case == "cold":
             await before.beta.vaults.create(display_name=name)
         else:
@@ -315,7 +315,8 @@ async def test_oauth_conflict_retries_the_same_requests_and_access_checks(resour
 
 async def test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callbacks():
     rows = [environment("old", "GH_TOKEN_OLD")]
-    created = environment("new", "GH_TOKEN_ORG_READ")
+    # One GH_TOKEN per session, whatever credential name the token was issued under.
+    created = environment("new", "GH_TOKEN")
     replies = [
         ("GET", "/v1/vaults/vault/credentials", 200, page(rows)),
         ("POST", "/v1/vaults/vault/credentials", 200, created),
@@ -333,7 +334,7 @@ async def test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callb
             vault_id="vault",
             auth={
                 "type": "environment_variable",
-                "secret_name": "GH_TOKEN_ORG_READ",
+                "secret_name": "GH_TOKEN",
                 "secret_value": "dummy-app",
                 "networking": {
                     "type": "limited",

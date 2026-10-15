@@ -42,7 +42,8 @@ class SkillRef(BaseModel):
     skills. `skill_id` is the name used to look up the skill at upload time
     (resolved to a MA skill ID by `resolve_refs`).
 
-    `extra="forbid"` rejects unknown fields from YAML at parse time.
+    `extra="forbid"` enforces a STRIDE threat mitigation: unknown
+    fields from YAML are rejected at parse time.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -219,7 +220,7 @@ class EnvironmentSpec(BaseModel):
 class SkillSpec(BaseModel):
     """Authoring shape for `SKILL.md`'s YAML frontmatter.
 
-    Per skills-design §5.2:
+    Per the skills design:
     - `name` and `description` are required.
     - Additional frontmatter keys are preserved (via `extra='allow'`) but
       daimon does not interpret them. Providers (e.g. `obra/superpowers`)

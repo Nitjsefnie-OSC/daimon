@@ -103,7 +103,7 @@ async def production_internal_resolver(context: MiddlewareContext) -> str | None
     A Discord vault token minted by ``mint_jwt`` never carries this claim. The admin gate
     keys on ``(role == ADMIN) OR (is_admin_claim AND internal_claim)`` so a stale pre-sweep
     Discord vault credential with ``is_admin=True`` and ``role=user`` is denied admin
-    elevation, closing the escalation independent of the credential sweep.
+    elevation, closing the admin escalation independent of the credential sweep.
     """
     del context
     token = get_access_token()

@@ -165,3 +165,92 @@ async def test_memory_hides_an_agent_isolation_keeps_out(db_session, db_session_
 
     text = interaction.followup.send.call_args.args[0]
     assert "no memory to show here." in text.lower(), "the deployment default answers elsewhere too"
+
+
+async def _seed_personal(db_session, runtime, *, user_id: int, files: dict[str, str]) -> str:
+    """Bind a personal store for the member `user_id`, as their first chat session would."""
+    from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+    from daimon.core.stores.agent_memory_stores import insert_personal_memory_store
+    from daimon.core.stores.identity import get_or_create_platform_principal
+
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
+    agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name="daimon")
+    assert agent is not None
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant_id, platform="discord", external_id=str(user_id)
+    )
+    store = await runtime.anthropic.beta.memory_stores.create(name=f"personal {user_id}")
+    for path, content in files.items():
+        await runtime.anthropic.beta.memory_stores.memories.create(
+            store.id, path=path, content=content
+        )
+    await insert_personal_memory_store(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
+        account_id=principal.account_id,
+        memory_store_id=store.id,
+    )
+    await db_session.commit()
+    return store.id
+
+
+async def _paths(runtime, store_id: str) -> list[str]:
+    page = await runtime.anthropic.beta.memory_stores.memories.list(store_id, path_prefix="/")
+    return sorted([item.path async for item in page])
+
+
+async def _say(runtime, *, user_id: int, path: str | None) -> str:
+    cog = MemoryCog(MagicMock())
+    interaction = _interaction(runtime)
+    interaction.user.id = user_id
+    await cog.memory.callback(cog, interaction, path=path)
+    sent = interaction.followup.send.call_args
+    assert sent.kwargs.get("ephemeral") is True
+    return sent.args[0]
+
+
+async def test_memory_mine_shows_only_the_invokers_own_personal_memory(
+    db_session, db_session_factory
+) -> None:
+    runtime = await _setup(db_session, db_session_factory, seed={"/notes/team.md": "fridays"})
+    await _seed_personal(db_session, runtime, user_id=777, files={"/style.md": "alice-tabs"})
+    await _seed_personal(db_session, runtime, user_id=888, files={"/tone.md": "bob-terse"})
+
+    alice = await _say(runtime, user_id=777, path="mine")
+    alice_file = await _say(runtime, user_id=777, path="mine /style.md")
+    bob_probe = await _say(runtime, user_id=888, path="mine /style.md")
+
+    assert "/style.md" in alice and "/tone.md" not in alice
+    assert "alice-tabs" in alice_file
+    assert "alice-tabs" not in bob_probe, "a path never reaches another member's store"
+    assert "No file called /style.md" in bob_probe
+
+
+async def test_forget_mine_needs_confirmation_and_never_clears_another_members(
+    db_session, db_session_factory
+) -> None:
+    import re
+
+    runtime = await _setup(db_session, db_session_factory, seed={"/notes/team.md": "fridays"})
+    alice_store = await _seed_personal(db_session, runtime, user_id=777, files={"/style.md": "x"})
+    bob_store = await _seed_personal(db_session, runtime, user_id=888, files={"/tone.md": "y"})
+    asked = await _say(runtime, user_id=777, path="forget-mine")
+    found = re.search(r"forget-mine ([0-9a-f]{6})", asked)
+    assert found is not None, "the preview offers the code"
+    alice_code = found.group(1)
+    assert await _paths(runtime, alice_store) == ["/style.md"], (
+        "the first step only shows what would go, with its code"
+    )
+
+    bob_with_alices_code = await _say(runtime, user_id=888, path=f"forget-mine {alice_code}")
+    assert "Nothing was deleted" in bob_with_alices_code
+    assert await _paths(runtime, alice_store) == ["/style.md"]
+    assert await _paths(runtime, bob_store) == ["/tone.md"]
+
+    done = await _say(runtime, user_id=777, path=f"forget-mine {alice_code}")
+    assert "Deleted 1 file " in done
+    assert await _paths(runtime, alice_store) == []
+    assert await _paths(runtime, bob_store) == ["/tone.md"], "only the invoker's store"
+    shared = await _say(runtime, user_id=777, path=None)
+    assert "/notes/team.md" in shared, "the shared memory is untouched"

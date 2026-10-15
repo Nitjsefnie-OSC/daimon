@@ -30,7 +30,7 @@ class ConnectCard:
 
     @property
     def detail(self) -> str | None:
-        return "Default access: Read and write" if self.variant != "A" else None
+        return None
 
     @property
     def footer(self) -> str | None:
@@ -211,7 +211,7 @@ CLOSE_TAB = "You can close this tab."
 
 
 def access_label(level: Literal["read", "write"] | None) -> str:
-    return "Read and write" if level == "write" else "Read only"
+    return "Connected"
 
 
 def agent_repos_title(agent_name: str) -> str:
@@ -220,7 +220,7 @@ def agent_repos_title(agent_name: str) -> str:
 
 def audience_line(agent_name: str, *, write: bool) -> str:
     """Who can use the repos. `write` only when every repo allows changes."""
-    verb = "read and change" if write else "read"
+    verb = "read and change"
     return f"Anyone who talks to {agent_name} can ask it to {verb} them."
 
 
@@ -290,7 +290,6 @@ def repo_detail_lines(repo: AgentRepoLine) -> tuple[str, ...]:
         lines.append(f"Added by {repo.added_by}")
     elif repo.added_on:
         lines.append(f"Added on {repo.added_on}")
-    lines.append(access_label(repo.access))
     return tuple(lines)
 
 

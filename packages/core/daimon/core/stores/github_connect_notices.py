@@ -29,20 +29,11 @@ class ConnectNotice(BaseModel):
     @property
     def text(self) -> str:
         names = ", ".join(repo["name"] for repo in self.connected_repos)
-        return f"Connected {names}, {self.level}. Ready."
+        return f"Connected {names}. Ready."
 
     @property
     def public_text(self) -> str:
-        return f"Connected {len(self.connected_repos)} repo(s), {self.level}. Ready."
-
-    @property
-    def level(self) -> str:
-        access = {repo["access"] for repo in self.connected_repos}
-        if access == {"write"}:
-            return "Read and write"
-        if access == {"read"}:
-            return "Read only"
-        return "Mixed access"
+        return f"Connected {len(self.connected_repos)} repo(s). Ready."
 
 
 async def expire_old(

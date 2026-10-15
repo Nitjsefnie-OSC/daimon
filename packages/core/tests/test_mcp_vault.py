@@ -132,6 +132,50 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
     )
 
 
+async def test_ensure_agent_mcp_vault_walks_vault_pages_at_max_page_size(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The vault lookup asks for 100-vault pages and finds a match past page one."""
+    account_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    display = f"daimon-mcp:{account_id}:{agent_id}"
+    list_params: list[dict[str, str]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path == "/v1/vaults":
+            list_params.append(dict(req.url.params))
+            if "page" not in req.url.params:
+                first = [_vault_obj("vlt_other", "unrelated", "2026-04-01T00:00:00Z")]
+                return httpx.Response(200, json={"data": first, "next_page": "p2"})
+            mine = [_vault_obj("vlt_mine", display, "2026-04-02T00:00:00Z")]
+            return httpx.Response(200, json={"data": mine, "next_page": None})
+        if req.method == "GET" and req.url.path == "/v1/vaults/vlt_mine/credentials":
+            credential = {
+                "id": "vcrd_existing",
+                "metadata": {"daimon_chat_identity": str(agent_id)},
+                "type": "credential",
+                "vault_id": "vlt_mine",
+                "auth": {"type": "static_bearer", "mcp_server_url": "https://mcp.example.com/mcp"},
+            }
+            return httpx.Response(200, json={"data": [credential], "has_more": False})
+        raise AssertionError(f"unexpected call: {req.method} {req.url}")
+
+    vault_id = await ensure_agent_mcp_vault(
+        _make_client(httpx.MockTransport(handler)),
+        account_id=account_id,
+        agent_id=agent_id,
+        jwt_secret=b"a" * 32,
+        public_url="https://mcp.example.com/mcp",
+        now=dt.datetime(2026, 4, 24, tzinfo=dt.UTC),
+        session_factory=db_session_factory,
+    )
+
+    assert vault_id == "vlt_mine", "the match on the second page must be found"
+    assert [p.get("limit") for p in list_params] == ["100", "100"], (
+        f"every vault page must request the maximum page size, got {list_params}"
+    )
+
+
 async def test_ensure_agent_mcp_vault_cold_path_creates_vault_and_credential(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1554,28 +1598,30 @@ async def test_app_refresh_updates_env_and_copilot_credentials_in_place() -> Non
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "GET" and req.url.path == "/v1/vaults/vlt_1/credentials":
             return httpx.Response(200, json={"data": credentials, "has_more": False})
-        writes.append((req.method, req.url.path, json.loads(req.content)))
+        writes.append((req.method, req.url.path, json.loads(req.content) if req.content else {}))
+        if req.method == "DELETE":
+            return httpx.Response(204)
         return httpx.Response(
             200, json=next(item for item in credentials if req.url.path.endswith(item["id"]))
         )
 
     access = AppSessionAccess(
         resources=(),
-        tokens=(AppToken(uuid.uuid4(), "fresh-token", 1, (11,), "read", "GH_TOKEN_OWNER_READ"),),
+        tokens=(AppToken(uuid.uuid4(), "fresh-token", 1, (11,), "write", "GH_TOKEN"),),
         working_token="fresh-token",
     )
     await add_app_credentials(
         _make_client(httpx.MockTransport(handler)), vault_id="vlt_1", access=access
     )
     assert {(method, path) for method, path, _ in writes} == {
-        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_repo"),
+        ("DELETE", "/v1/vaults/vlt_1/credentials/vcrd_repo"),
         ("POST", "/v1/vaults/vlt_1/credentials/vcrd_working"),
         ("POST", "/v1/vaults/vlt_1/credentials/vcrd_copilot"),
     }
     assert all(
         body["auth"]["secret_value"] == "fresh-token"
         for _, path, body in writes
-        if path.endswith(("vcrd_repo", "vcrd_working"))
+        if path.endswith("vcrd_working")
     )
     assert next(body for _, path, body in writes if path.endswith("vcrd_copilot"))["auth"] == {
         "type": "static_bearer",

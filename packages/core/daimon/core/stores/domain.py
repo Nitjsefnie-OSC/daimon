@@ -43,6 +43,7 @@ CHAT_PLATFORMS: tuple[ChatPlatform, ...] = ("discord", "slack", "teams")
 # a preparation's `stage` is its resume point.
 TransferKind = Literal["full", "transcript", "history"]
 PreparationStage = Literal["decided", "checkpointed", "uploaded", "created", "completed", "failed"]
+PreparationFailureKind = Literal["skill_unavailable"]
 # What the caller answered about uncommitted repository changes: carry them
 # into the successor's working files, or leave them in the old checkout.
 UnsavedWorkChoice = Literal["copy", "leave"]
@@ -273,6 +274,7 @@ class ThreadSessionRow(BaseModel):
     platform: str
     thread_id: str
     account_id: uuid.UUID | None
+    is_external: bool = False
     ma_session_id: str
     ma_agent_id: str | None = None
     channel_id: str | None = None
@@ -333,6 +335,7 @@ class SessionPreparationRow(BaseModel):
     transfer_kind: TransferKind | None
     new_mapping_id: uuid.UUID | None
     failure_reason: str | None
+    failure_kind: PreparationFailureKind | None
     attempts: int
     created_at: datetime
     updated_at: datetime
@@ -595,6 +598,8 @@ class PromoCodeRow(BaseModel):
     redeemed_count: int
     created_at: datetime
     revoked_at: datetime | None
+    channel_cap_usd: Decimal | None = None
+    """Set on a channel code: members redeem it into their channel, up to this much each."""
 
 
 class PromoRedemptionRow(BaseModel):
@@ -612,6 +617,8 @@ class PromoRedemptionRow(BaseModel):
     granted_at: datetime | None
     expired_at: datetime | None
     expired_usd: Decimal | None
+    channel_id: str | None = None
+    """The channel a channel code credited; None for a server-wide redemption."""
 
 
 class TimedPromoGrantRow(BaseModel):

@@ -1,0 +1,388 @@
+"""The Connect GitHub editor offers repos by the signed-in person's GitHub permission."""
+
+from __future__ import annotations
+
+import html
+import re
+import uuid
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
+
+import httpx
+import pytest
+from cryptography.fernet import Fernet
+from daimon.adapters.mcp import oauth_github
+from daimon.adapters.mcp.oauth_github import build_oauth_github_routes
+from daimon.core.config import (
+    AnthropicSettings,
+    CryptoSettings,
+    DatabaseSettings,
+    GithubAppSettings,
+    McpSettings,
+    Settings,
+)
+from daimon.core.github_credentials import build_multifernet
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import github_access, github_connect
+from daimon.core.stores.accounts import set_role
+from daimon.core.stores.domain import Role
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from pydantic import HttpUrl, PostgresDsn, SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.applications import Starlette
+from starlette.routing import Route
+
+WRITE_INSTALLATION = {
+    "metadata": "read",
+    "contents": "write",
+    "issues": "write",
+    "pull_requests": "write",
+}
+READ_INSTALLATION = {
+    "metadata": "read",
+    "contents": "read",
+    "issues": "read",
+    "pull_requests": "read",
+}
+#: GitHub's `permissions` object for each level, as the repository listing reports it.
+LEVELS: dict[str, dict[str, bool]] = {
+    "read": {"pull": True},
+    "triage": {"pull": True, "triage": True},
+    "write": {"pull": True, "triage": True, "push": True},
+    "maintain": {"pull": True, "triage": True, "push": True, "maintain": True},
+    "admin": {"pull": True, "triage": True, "push": True, "maintain": True, "admin": True},
+    "none": {},
+}
+
+
+def _settings(key: str) -> Settings:
+    return Settings(
+        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+        anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+        mcp=McpSettings(jwt_secret=SecretStr("a" * 32), public_url=HttpUrl("https://mcp.test/mcp")),
+        crypto=CryptoSettings(keys=(SecretStr(key),)),
+        github_app=GithubAppSettings(
+            app_id="42",
+            app_slug="sample-app",
+            private_key=SecretStr("pem"),
+            client_id="client",
+            client_secret=SecretStr("secret"),
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _Org:
+    installation_id: int
+    owner_id: int
+    login: str
+    installation_permissions: Mapping[str, str]
+    repos: list[tuple[int, str]]  # (repo id, level)
+
+
+@dataclass
+class _Editor:
+    browser: httpx.AsyncClient
+    sessionmaker: async_sessionmaker[AsyncSession]
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    account_id: uuid.UUID
+
+    async def page(self) -> tuple[dict[str, str], str]:
+        async with self.sessionmaker.begin() as session:
+            invitation = await github_connect.mint_invitation(
+                session,
+                tenant_id=self.tenant_id,
+                requester_account_id=self.account_id,
+                requester_label="Admin",
+                requester_platform_user_id="editor",
+                agent_id=self.agent_id,
+                agent_name="Editor",
+                agent_ma_id="ag_editor",
+                agent_manager_verified=True,
+                operator_issued=False,
+                origin_platform="discord",
+            )
+        start = await self.browser.get(f"/oauth/github/connect/{invitation}")
+        state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+        await self.browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
+        rendered = await self.browser.get("/oauth/github/confirm", params={"state": state})
+        assert rendered.status_code == 200
+        hidden = {
+            name: html.unescape(value)
+            for name, value in re.findall(
+                r'<input type="hidden" name="([^"]+)" value="([^"]*)">', rendered.text
+            )
+        }
+        return hidden, rendered.text
+
+    async def save(self, hidden: dict[str, str], **choices: object) -> httpx.Response:
+        return await self.browser.post(
+            "/oauth/github/confirm",
+            data={**hidden, "access": "read", "working": "keep", **choices},
+        )
+
+    async def grants(self) -> dict[int, str]:
+        async with self.sessionmaker() as session:
+            rows = await github_access.list_agent_repos(
+                session, tenant_id=self.tenant_id, agent_id=self.agent_id
+            )
+        return {row.repo_id: row.ceiling_access for row in rows}
+
+
+@asynccontextmanager
+async def _editor(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    orgs: list[_Org],
+) -> AsyncIterator[_Editor]:
+    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_editor")
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, id=tenant_id, workspace_id="perm-workspace")
+        account = await make_account(session, tenant=tenant, id=account_id)
+        await set_role(session, account_id, Role.ADMIN)
+        await make_platform_principal(
+            session, platform="discord", external_id="editor", tenant=tenant, account=account
+        )
+
+    def paged(request: httpx.Request, rows: list[dict[str, object]], key: str) -> httpx.Response:
+        per_page = int(request.url.params["per_page"])
+        page = int(request.url.params["page"])
+        return httpx.Response(200, json={key: rows[(page - 1) * per_page : page * per_page]})
+
+    def github_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "user-token"})
+        if path == "/applications/client/token":
+            return httpx.Response(204)
+        if path == "/user":
+            return httpx.Response(200, json={"id": 17})
+        if path == "/user/installations":
+            return paged(
+                request,
+                [
+                    {
+                        "id": org.installation_id,
+                        "account": {"id": org.owner_id, "login": org.login, "type": "Organization"},
+                        "repository_selection": "all",
+                    }
+                    for org in orgs
+                ],
+                "installations",
+            )
+        for org in orgs:
+            if path == f"/user/installations/{org.installation_id}/repositories":
+                return paged(
+                    request,
+                    [
+                        {
+                            "id": repo_id,
+                            "owner": {"id": org.owner_id},
+                            "full_name": f"{org.login}/repo-{repo_id}",
+                            "permissions": LEVELS[level],
+                        }
+                        for repo_id, level in org.repos
+                    ],
+                    "repositories",
+                )
+            if path == f"/app/installations/{org.installation_id}":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": org.installation_id,
+                        "account": {"id": org.owner_id, "login": org.login, "type": "Organization"},
+                        "repository_selection": "all",
+                        "suspended_at": None,
+                        "permissions": dict(org.installation_permissions),
+                    },
+                )
+        raise AssertionError(path)
+
+    async def find_agent(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object:
+        return SimpleNamespace(name="Editor", metadata={})
+
+    monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
+    monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
+    key = Fernet.generate_key().decode()
+    connect, callback, setup, confirm = build_oauth_github_routes(
+        settings=_settings(key),
+        sessionmaker=sessionmaker,
+        fernet=build_multifernet((key,)),
+        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
+        deployment_default=DeploymentDefault(),
+        anthropic=object(),  # type: ignore[arg-type]
+    )
+    app = Starlette(
+        routes=[
+            Route("/oauth/github/connect/{token}", connect),
+            Route("/oauth/github/callback", callback),
+            Route("/oauth/github/setup", setup),
+            Route("/oauth/github/confirm", confirm, methods=["GET", "POST"]),
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
+    ) as browser:
+        yield _Editor(browser, sessionmaker, tenant_id, agent_id, account_id)
+
+
+def _choices(page: str) -> dict[int, dict[str, str]]:
+    """The picker dialog's repo choices, keyed by repo id, with their data attributes."""
+    found = re.findall(r'<div class="gh-picker-choice" ([^>]*)>', page)
+    return {
+        int(attrs["data-repo-id"]): attrs
+        for attrs in (dict(re.findall(r'(data-[\w-]+)="([^"]*)"', raw)) for raw in found)
+    }
+
+
+@pytest.mark.asyncio
+async def test_picker_offers_every_permission_level_and_counts_hidden(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    levels = ["read", "triage", "write", "maintain", "admin", "none"]
+    org = _Org(
+        77, 55, "alpha", WRITE_INSTALLATION, [(i + 1, level) for i, level in enumerate(levels)]
+    )
+    other = _Org(78, 56, "beta", WRITE_INSTALLATION, [(201, "read"), (202, "none"), (203, "none")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org, other]) as editor:
+        _hidden, page = await editor.page()
+    choices = _choices(page)
+    assert set(choices) == {1, 2, 3, 4, 5, 201}  # `none` repos are not offered
+    assert [choices[i]["data-max-access"] for i in (1, 2, 3, 4, 5)] == ["write"] * 5
+    assert choices[201]["data-installation"] == "78"
+    assert "hidden because your GitHub account" not in page
+    assert "Missing a repo? Add it to the Daimon GitHub App on GitHub." in page
+    # One bulk button per installation owner, a live shown count, and a clear button.
+    assert "Everything in alpha</button>" in page and "Everything in beta</button>" in page
+    assert 'id="select-shown"' in page and "Select all 6 shown" in page
+    assert 'id="clear-selection"' in page
+    assert 'name="picker_access"' not in page
+
+
+@pytest.mark.asyncio
+async def test_no_hidden_note_when_every_repo_is_usable(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(1, "read"), (2, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
+        _hidden, page = await editor.page()
+    assert "hidden-repos" not in page and "hidden because" not in page
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", ["read", "triage", "write", "maintain", "admin"])
+@pytest.mark.parametrize("installation_writes", [True, False])
+async def test_app_write_grant_requires_installation_write_but_not_person_write(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    installation_writes: bool,
+) -> None:
+    permissions = WRITE_INSTALLATION if installation_writes else READ_INSTALLATION
+    org = _Org(77, 55, "alpha", permissions, [(1, level)])
+    async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
+        hidden, _page = await editor.page()
+        saved = await editor.save(hidden, repo="1", access_1="write")
+        if not installation_writes:
+            assert saved.status_code == 403
+            assert await editor.grants() == {}
+            return
+        assert saved.status_code == 200
+        assert await editor.grants() == {1: "write"}
+        async with editor.sessionmaker() as session:
+            [row] = await github_access.list_authorized_repos(
+                session, tenant_id=editor.tenant_id, agent_id=editor.agent_id
+            )
+        assert row.max_access == "write"
+        assert row.authorized_permission == level
+
+
+@pytest.mark.asyncio
+async def test_bulk_write_repos_in_one_installation(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle = ["write", "maintain", "admin"]
+    big = _Org(77, 55, "pymc-labs", WRITE_INSTALLATION, [(i, cycle[i % 3]) for i in range(1, 301)])
+    readonly = _Org(
+        78, 56, "readonly-co", READ_INSTALLATION, [(1000 + i, cycle[i % 3]) for i in range(78)]
+    )
+    org_levels = {repo_id: level for repo_id, level in big.repos}
+    async with _editor(committing_sessionmaker, monkeypatch, [big, readonly]) as editor:
+        hidden, page = await editor.page()
+        # Every GitHub page was fetched: more than the 100 a page holds, and 378 in all.
+        assert len(_choices(page)) == 378
+        ids = sorted(org_levels)
+        body = {f"access_{repo_id}": "write" for repo_id in ids}
+        saved = await editor.save(hidden, repo=[str(repo_id) for repo_id in ids], **body)
+        assert saved.status_code == 200
+        grants = await editor.grants()
+    assert len(grants) == 300
+    assert set(grants.values()) == {"write"}
+
+
+@pytest.mark.asyncio
+async def test_removing_or_adding_a_repo_with_no_permission_is_refused(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(1, "write"), (2, "none")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
+        hidden, _page = await editor.page()
+        assert (await editor.save(hidden, repo="2")).status_code == 403
+        assert (await editor.save(hidden, repo="1")).status_code == 200
+
+
+def test_repo_confirmation_uses_app_write_for_read_level_people() -> None:
+    def repo(level: github_connect.GitHubPermission) -> oauth_github._Repo:
+        return oauth_github._Repo(1, 2, 3, "o/r", level)
+
+    def confirm(
+        level: github_connect.GitHubPermission, *, needs_write: bool, installation: bool = True
+    ) -> str:
+        return oauth_github._repo_confirmation(
+            repo(level),
+            requested="read",
+            needs_write=needs_write,
+            installation_writes={3: installation},
+        ).max_access
+
+    for level in ("admin", "write", "triage", "read"):
+        assert confirm(level, needs_write=True) == "write"
+    with pytest.raises(ValueError, match="GitHub App needs write access"):
+        confirm("admin", needs_write=True, installation=False)
+
+
+@pytest.mark.asyncio
+async def test_read_level_readd_after_admin_write_grant_stays_write(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reader re-adding a repo receives the App's write grant."""
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(1, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
+        hidden, _page = await editor.page()
+        assert (await editor.save(hidden, repo="1", access_1="write")).status_code == 200
+        assert await editor.grants() == {1: "write"}
+
+        hidden, _page = await editor.page()
+        assert (await editor.save(hidden, remove="1")).status_code == 200
+        assert await editor.grants() == {}
+
+        org.repos[0] = (1, "read")
+        hidden, _page = await editor.page()
+        assert (await editor.save(hidden, repo="1", access_1="write")).status_code == 200
+        assert await editor.grants() == {1: "write"}
+        async with editor.sessionmaker() as session:
+            [row] = await github_access.list_authorized_repos(
+                session, tenant_id=editor.tenant_id, agent_id=editor.agent_id
+            )
+        assert (row.max_access, row.authorized_permission) == ("write", "read")

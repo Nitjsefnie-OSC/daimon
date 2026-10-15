@@ -367,7 +367,8 @@ async def test_actual_native_sdk_host_footer_joins_complete_controlled_inventory
     plan = planner.planned(tmp_path, row, backend)
     # The source-only planner uses a readable qa-* tenant. Admit a real owned
     # fixture UUID before native dispatch so the same identity can join SQL.
-    tenant = uuid.UUID(int=506)
+    # Its own 8-hex prefix: tenant ids must differ in their first 8 hex chars.
+    tenant = uuid.UUID(int=506 << 96)
     plan = plan.model_copy(
         update={
             "bindings": tuple(

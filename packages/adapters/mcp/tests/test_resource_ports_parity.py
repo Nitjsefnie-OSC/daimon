@@ -386,6 +386,13 @@ def host_guards(monkeypatch: pytest.MonkeyPatch) -> list[Scope]:
     monkeypatch.setattr(agent_chat, "close_headless_app_session", AsyncMock())
     monkeypatch.setattr(agent_chat, "touch_unmapped_app_session", AsyncMock(return_value=True))
     monkeypatch.setattr(agent_chat, "_bound_seal", AsyncMock(return_value=frozenset()))
+    # The settle request written before a headless send is database-only; its own
+    # tests cover it, and it sends no provider request.
+    settle = agent_chat.session_settle_state
+    requested = (None, dt.datetime(2026, 1, 1, tzinfo=dt.UTC))
+    monkeypatch.setattr(settle, "request_settle", AsyncMock(return_value=requested))
+    monkeypatch.setattr(settle, "withdraw_settle_request", AsyncMock())
+    monkeypatch.setattr(settle, "name_settle_turn", AsyncMock())
     return scopes
 
 

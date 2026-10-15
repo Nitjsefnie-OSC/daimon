@@ -97,7 +97,13 @@ async def test_created_code_is_printed_once_and_redeemable(
 
     tenant = await make_tenant(db_session)
     result = await redeem_promo_code(
-        db_session_factory, tenant_id=tenant.id, account_id=None, code=code, now=datetime.now(UTC)
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=None,
+        code=code,
+        now=datetime.now(UTC),
+        channel=None,
+        is_admin=True,
     )
     assert isinstance(result, PromoRedeemed) and result.promo_code_id == code_id, (
         "the printed code should redeem"
@@ -139,6 +145,8 @@ async def test_custom_codes_are_unique_case_insensitively(db_session_factory: Fa
         ({"amount": "5", "code": "no"}, "12-64"),
         ({"amount": "5", "code": "SHORT-CODE1"}, "12-64"),
         ({"amount": "1000000"}, "at most"),
+        ({"amount": "5", "channel_cap": "lots"}, "channel cap must be a dollar amount"),
+        ({"amount": "5", "channel_cap": "4"}, "at least the amount"),
     ],
 )
 async def test_create_rejects_bad_input(
@@ -150,6 +158,20 @@ async def test_create_rejects_bad_input(
         await promo_create(rt=rt, console=_console(), **kwargs)  # type: ignore[arg-type]
     async with db_session_factory() as session:
         assert await promo_store.list_promo_codes(session) == [], f"{kwargs} should store nothing"
+
+
+async def test_channel_cap_creates_a_channel_code(db_session_factory: Factory) -> None:
+    """--channel-cap makes a code members redeem into their channel; list shows the cap."""
+    rt = build_cli_runtime(db_session_factory)
+    console = _console()
+    await promo_create(rt=rt, console=console, amount="5", max_redemptions=40, channel_cap="15")
+    assert "Any member can redeem it in their channel: $5.00 each, up to $15.00 per channel." in (
+        _out(console)
+    )
+    listed = _console()
+    await promo_list(rt=rt, console=listed, as_json=True)
+    [row] = json.loads(_out(listed))
+    assert Decimal(row["channel_cap_usd"]) == Decimal("15"), "the cap is listed"
 
 
 async def test_timed_code_stays_redeemable_until_its_credit_ends(

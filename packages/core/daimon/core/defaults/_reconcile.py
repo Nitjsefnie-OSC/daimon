@@ -36,8 +36,10 @@ from daimon.core.defaults.sweep import (
     sweep_removed_skills,
 )
 from daimon.core.errors import DaimonError, DefaultsError
+from daimon.core.stores.channel_skills import list_channel_skill_ids
 from daimon.core.stores.seeded_skills import prune_seeded_skills
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -57,9 +59,20 @@ async def _run_sweep(
     tenant_id: uuid.UUID,
     dry_run: bool,
     skills_view: list[SkillListResponse] | None = None,
+    channel_skill_ids: set[str] | None = None,
+    session: AsyncSession | None = None,
 ) -> None:
     try:
-        kwargs = {"skills_view": skills_view} if kind == "skill" and skills_view is not None else {}
+        kwargs: dict[str, object] = {}
+        if kind == "skill":
+            if channel_skill_ids is None:
+                # Without the channel rules the sweep could delete a skill one
+                # still adds, failing every turn in that channel. Skip it.
+                raise DefaultsError("channel skills could not be read; skill sweep skipped")
+            kwargs["channel_skill_ids"] = channel_skill_ids
+            kwargs["session"] = session
+            if skills_view is not None:
+                kwargs["skills_view"] = skills_view
         for outcome in await sweep_fn(
             client, present_names=present_names, tenant_id=tenant_id, dry_run=dry_run, **kwargs
         ):
@@ -67,6 +80,27 @@ async def _run_sweep(
     except (APIError, DaimonError) as err:
         _log.warning("defaults.sweep_failed", kind=kind, error=str(err))
         report.add(ResourceOutcome(kind=kind, name="<sweep>", action=Action.FAILED, error=str(err)))
+
+
+async def _channel_skill_ids(
+    session_factory: async_sessionmaker[AsyncSession], session: AsyncSession | None
+) -> set[str] | None:
+    """Every skill id a channel rule adds, or None when the read failed.
+
+    Reads on the lock session when there is one (a second checkout could
+    starve a one-connection pool), inside a savepoint so a failed read leaves
+    that transaction usable for the rest of the apply; a dry run reads on its
+    own short session.
+    """
+    try:
+        if session is not None:
+            async with session.begin_nested():
+                return await list_channel_skill_ids(session)
+        async with session_factory() as read_session:
+            return await list_channel_skill_ids(read_session)
+    except SQLAlchemyError as err:
+        _log.warning("defaults.channel_skills_read_failed", error=str(err))
+        return None
 
 
 async def _run_per_resource(
@@ -260,6 +294,8 @@ async def _reconcile_core(
             tenant_id,
             dry_run,
             skills_view=skills_view,
+            channel_skill_ids=await _channel_skill_ids(session_factory, skill_session),
+            session=skill_session,
         )
         return report
 

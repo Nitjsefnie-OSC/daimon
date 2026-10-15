@@ -1,4 +1,10 @@
-"""`daimon memory` — read-only view of an agent's MA memory store."""
+"""`daimon memory` — read-only view of an agent's MA memory store.
+
+`personal-report` scans every agent's SHARED store for entries that look
+personal (`daimon.core.memory_personal_scan`) and prints, per agent, a count
+and a few redacted examples. Like the rest of this group it only reads: it
+never moves, edits or deletes a memory.
+"""
 
 from __future__ import annotations
 
@@ -13,9 +19,10 @@ from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.memory_personal_scan import scan_shared_memory
 from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import list_memory_entries, read_memory
-from daimon.core.stores.agent_memory_stores import get_memory_store_id
+from daimon.core.mux_compat import list_memory_entries, read_memory, retrieve_memory_store
+from daimon.core.stores.agent_memory_stores import get_memory_store_id, list_memory_stores
 from daimon.core.stores.domain import Platform
 from pydantic import BaseModel
 from rich.console import Console
@@ -163,6 +170,87 @@ def memory_show_command(
                 platform=platform,
                 workspace=workspace,
                 agent=agent,
+            )
+
+    run_cli(_with_defaults(), console=console)
+
+
+class _PersonalReportRow(BaseModel):
+    """Report row for `memory personal-report`: counts and redacted examples only."""
+
+    tenant_id: str
+    agent: str
+    memories: int
+    looks_personal: int
+    examples: str
+
+
+async def memory_personal_report_impl(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str | None,
+    workspace: str | None,
+    max_examples: int,
+    as_json: bool,
+) -> None:
+    """Scan shared stores for personal-looking entries. Reads only."""
+    if (platform is None) != (workspace is None):
+        raise typer.BadParameter("--platform and --workspace go together")
+    tenant_id = (
+        derive_tenant_uuid(platform=_validate_platform(platform), workspace_id=workspace)
+        if platform is not None and workspace is not None
+        else None
+    )
+    async with rt.sessionmaker() as session:
+        bound = await list_memory_stores(session, tenant_id=tenant_id)
+    rows: list[_PersonalReportRow] = []
+    for store_tenant, agent_id, store_id in bound:
+        scope = resource_scope(tenant_id=str(store_tenant))
+        store = await retrieve_memory_store(rt.anthropic, store_id, scope=scope)
+        scan = await scan_shared_memory(
+            rt.anthropic, store_id, max_examples=max_examples, scope=scope
+        )
+        rows.append(
+            _PersonalReportRow(
+                tenant_id=str(store_tenant),
+                agent=store.name or str(agent_id),
+                memories=scan.memories,
+                looks_personal=scan.flagged,
+                examples=" | ".join(scan.examples),
+            )
+        )
+    if not rows:
+        console.print("No shared memory stores.")
+        return
+    emit_rows(
+        console,
+        rows,
+        columns=("tenant_id", "agent", "memories", "looks_personal", "examples"),
+        as_json=as_json,
+    )
+
+
+@memory_app.command("personal-report")
+def memory_personal_report_command(
+    platform: str | None = typer.Option(None, help="Only this platform (with --workspace)"),
+    workspace: str | None = typer.Option(None, help="Only this workspace/guild external id"),
+    max_examples: int = typer.Option(3, help="Redacted examples per agent"),
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Count shared-memory entries that look personal, per agent (read-only, redacted)."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _with_defaults() -> None:
+        async with build_runtime(settings) as rt:
+            await memory_personal_report_impl(
+                rt=rt,
+                console=console,
+                platform=platform,
+                workspace=workspace,
+                max_examples=max_examples,
+                as_json=as_json,
             )
 
     run_cli(_with_defaults(), console=console)

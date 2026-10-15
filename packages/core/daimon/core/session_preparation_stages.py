@@ -34,6 +34,7 @@ from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.config import GithubAppSettings
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.github_app_session import effective_repo_url_sets
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_fence_retry import try_fence
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
 from daimon.core.session_snapshot import (
@@ -45,7 +46,10 @@ from daimon.core.session_snapshot import (
     snapshot_from_retrieved_session,
 )
 from daimon.core.stores.agent_files import list_agent_files
-from daimon.core.stores.agent_memory_stores import get_memory_store_id
+from daimon.core.stores.agent_memory_stores import (
+    get_memory_store_id,
+    get_personal_memory_store_id,
+)
 from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.domain import (
     SessionPreparationRow,
@@ -237,7 +241,23 @@ async def recorded_snapshot(
                 return None
             raise
 
-    snapshot = snapshot_from_retrieved_session(observed)
+    personal_memory_store_id: str | None = None
+    if existing.account_id is not None:
+        async with sessionmaker() as session:
+            personal_memory_store_id = await get_personal_memory_store_id(
+                session,
+                tenant_id=existing.tenant_id,
+                agent_id=derive_agent_uuid(
+                    tenant_id=existing.tenant_id, ma_agent_id=observed.agent.id
+                ),
+                account_id=existing.account_id,
+            )
+    snapshot = snapshot_from_retrieved_session(
+        observed,
+        personal_memory_store_ids=(
+            () if personal_memory_store_id is None else (personal_memory_store_id,)
+        ),
+    )
     async with sessionmaker() as session, session.begin():
         await record_snapshot(
             session,
@@ -276,6 +296,10 @@ async def desired_snapshot_for(
     `create_session` leaves those off this caller's session and the hashes
     have to describe the session that would actually be created.
 
+    `account_id` also selects the caller's personal memory store, one more
+    primary-key read. A session recorded without one is not replaced to add
+    it (`session_compat`); the caller's next new session mounts it.
+
     Two fields are deliberately carried over from `recorded` rather than
     re-derived:
 
@@ -305,6 +329,10 @@ async def desired_snapshot_for(
         )
         memory_store_id = await get_memory_store_id(
             session, tenant_id=tenant_id, agent_id=agent_uuid
+        )
+        # Chat sessions mount the caller's personal store beside the shared one.
+        personal_memory_store_id = await get_personal_memory_store_id(
+            session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=account_id
         )
 
     app_urls = (
@@ -338,6 +366,7 @@ async def desired_snapshot_for(
         repo_branch=None if binding is None else binding.default_branch,
         memory_store_id=memory_store_id,
         memory_read_only=memory_read_only,
+        personal_memory_store_id=personal_memory_store_id,
         asks_before_publishing=asks_before_publishing,
         confirmed_tools=confirmed_tools,
         vault_id=None if recorded is None else recorded.vault_id,

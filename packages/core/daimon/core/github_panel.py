@@ -58,7 +58,7 @@ __all__ = [
     "requester_manages_agent",
 ]
 
-CONNECT_COPY = "Choose repos on GitHub. If someone else manages them, send them this link."
+CONNECT_COPY = "Choose repos on GitHub. If someone else has access to them, send them this link."
 
 
 async def can_manage_agent_github(
@@ -191,7 +191,6 @@ _PUBLIC_ERRORS = frozenset(
         "Only a workspace admin can connect GitHub.",
         CLIENT_AGENT_MESSAGE,
         SERVER_WIDE_GRANT_MESSAGE,
-        "Confirm read and write access on GitHub first.",
     }
 )
 

@@ -102,7 +102,7 @@ async def test_full_list_walk_makes_identical_requests(resource, include_archive
         if resource == "agent":
             expected = [
                 a.model_dump(mode="json")
-                async for a in before.beta.agents.list(include_archived=include_archived)
+                async for a in before.beta.agents.list(limit=100, include_archived=include_archived)
             ]
             actual = [
                 a.model_dump(mode="json")
@@ -115,7 +115,9 @@ async def test_full_list_walk_makes_identical_requests(resource, include_archive
         else:
             expected = [
                 e.model_dump(mode="json")
-                async for e in before.beta.environments.list(include_archived=include_archived)
+                async for e in before.beta.environments.list(
+                    limit=100, include_archived=include_archived
+                )
             ]
             actual = [
                 e.model_dump(mode="json")
@@ -494,7 +496,9 @@ async def test_missing_page_data_keeps_sdks_empty_iterator_behavior(resource, pa
     new = ScriptedTransport(deque([ScriptedReply("GET", path, httpx.Response(200, json=payload))]))
     async with old.client() as before, new.client() as after:
         if resource == "agent":
-            expected = [row async for row in before.beta.agents.list(include_archived=False)]
+            expected = [
+                row async for row in before.beta.agents.list(limit=100, include_archived=False)
+            ]
             actual = [
                 row
                 async for row in list_agents(
@@ -502,7 +506,10 @@ async def test_missing_page_data_keeps_sdks_empty_iterator_behavior(resource, pa
                 )
             ]
         else:
-            expected = [row async for row in before.beta.environments.list(include_archived=False)]
+            expected = [
+                row
+                async for row in before.beta.environments.list(limit=100, include_archived=False)
+            ]
             actual = [
                 row
                 async for row in list_environments(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 import uuid
 from collections.abc import AsyncIterator
@@ -12,7 +13,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillCreateResponse, SkillListResponse
+from anthropic.types.beta import BetaManagedAgentsAgent, SkillCreateResponse, SkillListResponse
 from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.commands import skills as skills_cmd
@@ -29,11 +30,14 @@ from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.skills.attachments import SkillStillAttached
+from daimon.core.stores.channel_skills import add_channel_skill, list_skill_channel_rules
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma import MARouter, json_body, list_response
+from daimon.testing.ma_models import ma_agent
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
@@ -368,6 +372,7 @@ async def test_skills_delete_with_yes_hits_delete_request(
         lambda req, _m: list_response([]),
     )
     router.add("DELETE", r"/v1/skills/[^/]+", _capture_delete)
+    router.add_agent_list()
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
     rt = _build_rt_with_router(db_session_factory, router)
@@ -405,6 +410,7 @@ async def test_skills_delete_with_yes(
         r"/v1/skills/[^/]+",
         lambda req, _m: httpx.Response(200, json={"id": "sk_1", "type": "deleted"}),
     )
+    router.add_agent_list()
 
     console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
     rt = _build_rt_with_router(db_session_factory, router)
@@ -468,6 +474,319 @@ async def test_skills_delete_not_found_raises(
 
     with pytest.raises(StoreError, match="no skill named"):
         await delete_skill(rt, console, name="ghost", yes=True)
+
+
+def _attached_delete_router(
+    canonical: str,
+    *,
+    agents: list[BetaManagedAgentsAgent],
+    deletes: list[httpx.Request],
+    updates: list[dict[str, Any]],
+) -> MARouter:
+    """A skill `sk_1` titled `canonical`, the given agents, and capture of every write."""
+    by_id = {agent.id: agent for agent in agents}
+
+    def _delete(req: httpx.Request, _m: object) -> httpx.Response:
+        deletes.append(req)
+        return httpx.Response(200, json={"id": "sk_1", "type": "deleted"})
+
+    def _retrieve(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        return httpx.Response(200, json=by_id[m.group(1)].model_dump(mode="json"))
+
+    def _update(req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        body = json_body(req)
+        updates.append(body)
+        fresh = by_id[m.group(1)]
+        updated = ma_agent(
+            id=fresh.id,
+            name=fresh.name,
+            metadata=fresh.metadata,
+            skills=body["skills"],
+            version=fresh.version + 1,
+        )
+        return httpx.Response(200, json=updated.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add("GET", r"/v1/skills", lambda _r, _m: list_response([_skill_row("sk_1", canonical)]))
+    router.add("GET", r"/v1/skills/[^/]+/versions", lambda _r, _m: list_response([]))
+    router.add("DELETE", r"/v1/skills/[^/]+", _delete)
+    router.add_agent_list(*agents)
+    router.add("GET", r"/v1/agents/([^/]+)", _retrieve)
+    router.add("POST", r"/v1/agents/([^/]+)", _update)
+    return router
+
+
+async def _cli_tenant(db_session_factory: async_sessionmaker[AsyncSession]) -> uuid.UUID:
+    async with db_session_factory() as s, s.begin():
+        tenant = await get_tenant(s, derive_tenant_uuid(platform="cli", workspace_id="local"))
+        assert tenant is not None, "conftest autoseeds the cli:local tenant"
+        await get_or_create_cli_principal(s, tenant_id=tenant.id, os_user="testuser")
+    return tenant.id
+
+
+@pytest.mark.asyncio
+async def test_skills_delete_refuses_while_an_agent_uses_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """QA-NEW19: deleting a skill an agent pins is refused, naming the agent; nothing is deleted."""
+    tenant_id = await _cli_tenant(db_session_factory)
+    canonical = tenant_scoped_display_title(tenant_id=tenant_id, name="my-skill")
+    agent = ma_agent(
+        id="agent_uses",
+        name="research-bot",
+        tenant_id=tenant_id,
+        skills=[{"type": "custom", "skill_id": "sk_1", "version": "latest"}],
+    )
+    deletes: list[httpx.Request] = []
+    updates: list[dict[str, Any]] = []
+    router = _attached_delete_router(canonical, agents=[agent], deletes=deletes, updates=updates)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = _build_rt_with_router(db_session_factory, router)
+
+    with pytest.raises(SkillStillAttached) as refused:
+        await delete_skill(rt, console, name="my-skill", yes=True)
+
+    message = str(refused.value)
+    assert re.search(r"(?i)skill is still attached|still attached to", message), message
+    assert "research-bot" in message, "the refusal names the agent the skill is attached to"
+    assert "remove_skill" in message and "--force" in message, "it says how to detach"
+    assert deletes == [] and updates == [], "a refused delete writes nothing"
+
+
+@pytest.mark.asyncio
+async def test_skills_delete_refuses_while_a_channel_rule_adds_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A skill only a channel rule adds is still in use: refused, naming the channel."""
+    tenant_id = await _cli_tenant(db_session_factory)
+    async with db_session_factory() as s, s.begin():
+        await add_channel_skill(
+            s,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id="555",
+            skill_id="sk_1",
+            version="1791633132940669",
+            name="my-skill",
+            owner_agent_name=None,
+            actor_account_id=None,
+        )
+    canonical = tenant_scoped_display_title(tenant_id=tenant_id, name="my-skill")
+    deletes: list[httpx.Request] = []
+    router = _attached_delete_router(canonical, agents=[], deletes=deletes, updates=[])
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+    rt = _build_rt_with_router(db_session_factory, router)
+
+    with pytest.raises(SkillStillAttached, match="still attached to") as refused:
+        await delete_skill(rt, console, name="my-skill", yes=True)
+
+    assert "discord channel 555" in str(refused.value)
+    assert "daimon channels skills remove" in str(refused.value)
+    assert deletes == []
+
+
+@pytest.mark.asyncio
+async def test_skills_delete_force_detaches_everywhere_then_deletes(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """--force removes the skill from each agent (keeping its other skills) and each channel."""
+    tenant_id = await _cli_tenant(db_session_factory)
+    async with db_session_factory() as s, s.begin():
+        await add_channel_skill(
+            s,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id="555",
+            skill_id="sk_1",
+            version="1",
+            name="my-skill",
+            owner_agent_name=None,
+            actor_account_id=None,
+        )
+    canonical = tenant_scoped_display_title(tenant_id=tenant_id, name="my-skill")
+    agent = ma_agent(
+        id="agent_uses",
+        name="research-bot",
+        tenant_id=tenant_id,
+        skills=[
+            {"type": "custom", "skill_id": "sk_1", "version": "latest"},
+            {"type": "custom", "skill_id": "sk_keep", "version": "7"},
+        ],
+    )
+    deletes: list[httpx.Request] = []
+    updates: list[dict[str, Any]] = []
+    router = _attached_delete_router(canonical, agents=[agent], deletes=deletes, updates=updates)
+    out = StringIO()
+    console = Console(file=out, force_terminal=False, highlight=False, width=120)
+    rt = _build_rt_with_router(db_session_factory, router)
+
+    await delete_skill(rt, console, name="my-skill", yes=True, force=True)
+
+    assert len(updates) == 1
+    assert updates[0]["skills"] == [{"type": "custom", "skill_id": "sk_keep", "version": "7"}], (
+        "the agent keeps its other skills at the versions it pinned"
+    )
+    async with db_session_factory() as s:
+        assert await list_skill_channel_rules(s, skill_id="sk_1") == []
+    assert len(deletes) == 1, "the skill is deleted after it is detached"
+    assert "detached 'my-skill' from 1 agent(s) and 1 channel rule(s)" in out.getvalue()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force", [False, True])
+async def test_skills_delete_honours_a_channel_rule_committed_after_the_first_look(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    force: bool,
+) -> None:
+    """PR #857 review repro: a rule committed between the preview and the delete.
+
+    The preview finds nothing; another request then commits a channel rule.
+    The decision is made again under the skill's lock, so a plain delete is
+    refused and --force removes the new rule too: no rule is left pinning a
+    deleted skill.
+    """
+    tenant_id = await _cli_tenant(db_session_factory)
+    canonical = tenant_scoped_display_title(tenant_id=tenant_id, name="my-skill")
+    deletes: list[httpx.Request] = []
+    router = _attached_delete_router(canonical, agents=[], deletes=deletes, updates=[])
+    pending: list[asyncio.Task[None]] = []
+
+    async def _commit_rule() -> None:
+        async with db_session_factory() as s, s.begin():
+            await add_channel_skill(
+                s,
+                tenant_id=tenant_id,
+                platform="discord",
+                channel_id="new-channel",
+                skill_id="sk_1",
+                version="1",
+                name="my-skill",
+                owner_agent_name=None,
+                actor_account_id=None,
+            )
+
+    def _confirm_while_another_request_attaches(
+        _console: Console, _question: str, *, yes: bool
+    ) -> None:
+        # Runs after the preview found nothing and before the delete.
+        pending.append(asyncio.ensure_future(_commit_rule()))
+
+    monkeypatch.setattr(skills_cmd, "confirm_or_abort", _confirm_while_another_request_attaches)
+    real_delete = skills_cmd.delete_skill_unless_attached
+
+    async def _delete_after_the_rule_commits(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.gather(*pending)
+        return await real_delete(*args, **kwargs)
+
+    monkeypatch.setattr(skills_cmd, "delete_skill_unless_attached", _delete_after_the_rule_commits)
+    rt = _build_rt_with_router(db_session_factory, router)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+
+    if force:
+        await delete_skill(rt, console, name="my-skill", yes=True, force=True)
+    else:
+        with pytest.raises(SkillStillAttached, match="new-channel"):
+            await delete_skill(rt, console, name="my-skill", yes=True)
+
+    async with db_session_factory() as s:
+        dangling = await list_skill_channel_rules(s, skill_id="sk_1")
+    if force:
+        assert dangling == [] and len(deletes) == 1
+    else:
+        assert len(dangling) == 1 and deletes == []
+
+
+@pytest.mark.asyncio
+async def test_skills_delete_force_confirmation_names_the_cross_tenant_scope(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--force detaches references in every tenant; the prompt says so, with counts."""
+    tenant_id = await _cli_tenant(db_session_factory)
+    async with db_session_factory() as s, s.begin():
+        foreign = await make_tenant(s, platform="discord", workspace_id="foreign-guild")
+        await add_channel_skill(
+            s,
+            tenant_id=foreign.id,
+            platform="discord",
+            channel_id="foreign-channel",
+            skill_id="sk_1",
+            version="1",
+            name="my-skill",
+            owner_agent_name=None,
+            actor_account_id=None,
+        )
+    agents = [
+        ma_agent(
+            id="agent_mine",
+            name="mine",
+            tenant_id=tenant_id,
+            skills=[{"type": "custom", "skill_id": "sk_1", "version": "1"}],
+        ),
+        ma_agent(
+            id="agent_foreign",
+            name="foreign",
+            tenant_id=foreign.id,
+            skills=[{"type": "custom", "skill_id": "sk_1", "version": "1"}],
+        ),
+    ]
+    deletes: list[httpx.Request] = []
+    updates: list[dict[str, Any]] = []
+    canonical = tenant_scoped_display_title(tenant_id=tenant_id, name="my-skill")
+    router = _attached_delete_router(canonical, agents=agents, deletes=deletes, updates=updates)
+    questions: list[str] = []
+
+    def _confirm(_console: Console, question: str, *, yes: bool) -> None:
+        questions.append(question)
+
+    monkeypatch.setattr(skills_cmd, "confirm_or_abort", _confirm)
+    rt = _build_rt_with_router(db_session_factory, router)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+
+    await delete_skill(rt, console, name="my-skill", yes=False, force=True)
+
+    assert len(questions) == 1
+    assert "2 agent(s) and 1 channel rule(s) across ALL tenants" in questions[0]
+    assert "1 agent(s) and 1 channel rule(s) outside" in questions[0]
+    assert len(updates) == 2, "both tenants' agents are detached"
+    async with db_session_factory() as s:
+        assert await list_skill_channel_rules(s, skill_id="sk_1") == []
+    assert len(deletes) == 1
+
+
+def test_skills_delete_cli_exits_1_with_the_refusal(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command itself exits 1 with the refusal QA-NEW19 matches on."""
+
+    async def seed() -> uuid.UUID:
+        async with schema_sessionmaker() as s, s.begin():
+            tenant = await make_tenant(s, platform="cli", workspace_id="local")
+        return tenant.id
+
+    tenant_id = asyncio.run(seed())
+    canonical = tenant_scoped_display_title(tenant_id=tenant_id, name="qa-echo-skill")
+    agent = ma_agent(
+        id="agent_uses",
+        name="qa-fork",
+        tenant_id=tenant_id,
+        skills=[{"type": "custom", "skill_id": "sk_1", "version": "latest"}],
+    )
+    deletes: list[httpx.Request] = []
+    router = _attached_delete_router(canonical, agents=[agent], deletes=deletes, updates=[])
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(router.dispatch), base_url="https://api.anthropic.com"
+    )
+    anthropic = AsyncAnthropic(api_key="test", http_client=http_client)
+    _install_skills_runtime(monkeypatch, anthropic=anthropic, sessionmaker=schema_sessionmaker)
+
+    result = CliRunner().invoke(main_mod.app, ["skills", "delete", "qa-echo-skill", "--yes"])
+
+    assert result.exit_code == 1, result.stdout
+    assert re.search(r"(?i)skill is still attached|still attached to", result.stdout)
+    assert deletes == []
 
 
 # ---------------------------------------------------------------------------
@@ -781,3 +1100,30 @@ def test_skills_list_with_guild_override_lists_that_guilds_skills(
     assert "guild-only-skill" in with_override.stdout, (
         "--guild must resolve to that guild's tenant and list its skills"
     )
+
+
+@pytest.mark.asyncio
+async def test_skills_delete_force_with_nothing_attached_still_names_all_tenants(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #857 re-review: --force reaches references added after the preview, in any tenant."""
+    tenant_id = await _cli_tenant(db_session_factory)
+    canonical = tenant_scoped_display_title(tenant_id=tenant_id, name="my-skill")
+    deletes: list[httpx.Request] = []
+    router = _attached_delete_router(canonical, agents=[], deletes=deletes, updates=[])
+    questions: list[str] = []
+
+    def _confirm(_console: Console, question: str, *, yes: bool) -> None:
+        questions.append(question)
+
+    monkeypatch.setattr(skills_cmd, "confirm_or_abort", _confirm)
+    rt = _build_rt_with_router(db_session_factory, router)
+    console = Console(file=StringIO(), force_terminal=False, highlight=False, width=120)
+
+    await delete_skill(rt, console, name="my-skill", yes=False, force=True)
+
+    assert len(questions) == 1
+    assert "0 agent(s) and 0 channel rule(s) across ALL tenants" in questions[0]
+    assert "plus any attached before the delete runs" in questions[0]
+    assert len(deletes) == 1

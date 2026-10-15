@@ -69,6 +69,11 @@ class AgentAvatar(Base):
     )
 
 
+# Skill titles name a tenant by the first 8 hex chars of its id, so no two
+# tenants may share them (migration 0091 creates this index).
+TENANT_ID_PREFIX_INDEX = "uq_tenants_id_prefix"
+
+
 class Tenant(Base):
     __tablename__ = "tenants"
     __table_args__ = (
@@ -77,6 +82,7 @@ class Tenant(Base):
             "funding_mode IN ('prepaid', 'operator_funded')", name="ck_tenants_funding_mode"
         ),
         CheckConstraint("turn_cap IS NULL OR turn_cap > 0", name="ck_tenants_turn_cap"),
+        Index(TENANT_ID_PREFIX_INDEX, text("left(CAST(id AS TEXT), 8)"), unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -477,6 +483,7 @@ class ThreadSession(Base):
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     ma_session_id: Mapped[str] = mapped_column(Text, nullable=False)
     ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The channel the session runs for, recorded at creation: a thread's parent,
@@ -852,7 +859,13 @@ class UsageEvent(Base):
             "event_id",
             name="uq_usage_events_managed_session_event",
         ),
-        Index("usage_events_user_tenant_idx", "tenant_id", "platform_user_id"),
+        # The cap gate's per-member window sum is a range scan on this.
+        Index(
+            "usage_events_tenant_user_occurred_idx",
+            "tenant_id",
+            "platform_user_id",
+            "occurred_at",
+        ),
         Index("usage_events_occurred_idx", "occurred_at"),
         Index("usage_events_tenant_idx", "tenant_id"),
     )
@@ -978,7 +991,8 @@ class TenantLedger(Base):
 
     __tablename__ = "tenant_ledger"
     __table_args__ = (
-        Index("tenant_ledger_tenant_idx", "tenant_id"),
+        # INCLUDE lets the per-turn balance SUM(delta_usd) run index-only.
+        Index("tenant_ledger_tenant_delta_idx", "tenant_id", postgresql_include=["delta_usd"]),
         Index("tenant_ledger_idem_idx", "idempotency_key", unique=True),
         Index(
             "tenant_ledger_tenant_channel_idx",
@@ -1009,7 +1023,8 @@ class TenantLedger(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # Set on debits only: the parent channel whose budget the spend counts against.
+    # On a debit: the parent channel whose budget the spend counts against. On a
+    # channel promo credit: the channel it was redeemed for (budgets read debits only).
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -1167,6 +1182,10 @@ class PromoCode(Base):
             " AND (max_redemptions IS NULL OR redeemed_count <= max_redemptions)",
             name="ck_promo_codes_redeemed_count",
         ),
+        CheckConstraint(
+            "channel_cap_usd IS NULL OR (kind = 'credit' AND channel_cap_usd >= amount_usd)",
+            name="ck_promo_codes_channel_cap",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1190,6 +1209,9 @@ class PromoCode(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set on a channel code: any member may redeem it into their own channel's
+    # budget, and one channel takes at most this much from it.
+    channel_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
 
 class PromoRedemption(Base):
@@ -1201,6 +1223,7 @@ class PromoRedemption(Base):
     and `reconciled_at` when late-recorded spend inside the window was
     credited back out of that remainder.
     The redeeming account is attribution only, severed by account erasure.
+    A channel code's redemptions live in `promo_channel_redemptions`.
     """
 
     __tablename__ = "promo_redemptions"
@@ -1231,11 +1254,56 @@ class PromoRedemption(Base):
     reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PromoChannelRedemption(Base):
+    """One person's redemption of a channel code into one channel of their tenant.
+
+    Once per code, tenant, channel and person; the code's `channel_cap_usd`
+    bounds how many rows one channel may have. The redeeming account is
+    attribution (severed by account erasure), and a severed row still counts
+    toward the channel's cap.
+    """
+
+    __tablename__ = "promo_channel_redemptions"
+    __table_args__ = (
+        UniqueConstraint(
+            "promo_code_id",
+            "tenant_id",
+            "channel_id",
+            "redeemed_by_account_id",
+            name="uq_promo_channel_redemptions_person",
+        ),
+        Index("promo_channel_redemptions_channel_idx", "promo_code_id", "tenant_id", "channel_id"),
+        Index("promo_channel_redemptions_tenant_idx", "tenant_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    promo_code_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("promo_codes.id", ondelete="RESTRICT"), nullable=False
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    redeemed_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class PromoRedeemFailure(Base):
-    """One refused redemption attempt, counted to throttle guessing per tenant."""
+    """One refused redemption attempt, counted to throttle guessing per person.
+
+    `account_id` is who tried; rows without one (written before it existed,
+    or by a caller with no account) form one shared bucket per tenant.
+    """
 
     __tablename__ = "promo_redeem_failures"
-    __table_args__ = (Index("promo_redeem_failures_tenant_idx", "tenant_id", "attempted_at"),)
+    __table_args__ = (
+        Index("promo_redeem_failures_tenant_idx", "tenant_id", "attempted_at"),
+        Index("promo_redeem_failures_account_idx", "tenant_id", "account_id", "attempted_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -1244,6 +1312,9 @@ class PromoRedeemFailure(Base):
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
     )
     attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True
+    )
 
 
 class AgentFile(Base):
@@ -1418,6 +1489,39 @@ class AgentMemoryStore(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class AgentPersonalMemoryStore(Base):
+    """Per-(tenant, agent, account) MA memory store binding: one person's own memory.
+
+    `account_id` deliberately has no foreign key. Account erasure deletes the
+    account row first and the MA store afterwards (`purge`), so the binding has
+    to outlive the account: it is the record of which store is still to delete.
+    For the same reason archiving the agent keeps the row and only stamps
+    `archived_at`: an archived store still holds the person's memories, and
+    the row is what erasure deletes it by. An archived row is never mounted.
+    """
+
+    __tablename__ = "agent_personal_memory_store"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "agent_id", "account_id", name="pk_agent_personal_memory_store"
+        ),
+        Index("ix_agent_personal_memory_store_account_id", "account_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    memory_store_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class GitHubAppInstallation(Base):
@@ -2400,6 +2504,7 @@ class SessionPreparation(Base):
         nullable=True,
     )
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -2593,6 +2698,9 @@ class TenantGitHubRepo(Base):
     authorized_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
     )
+    # The confirming person's GitHub permission on the repo: admin, maintain,
+    # write, triage or read. Null on rows authorized before it was recorded.
+    authorized_permission: Mapped[str | None] = mapped_column(Text)
     authorized_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -3009,6 +3117,7 @@ class GitHubAppSessionVault(Base):
     vault_id: Mapped[str] = mapped_column(Text)
     is_unmapped: Mapped[bool] = mapped_column(Boolean, nullable=False)
     is_mcp: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
@@ -3081,8 +3190,9 @@ class AgentPostedMessage(Base):
 
     Written at send time by `send_message` and `create_thread` (`source='tool'`),
     and by chat adapters for a turn's status cards, answers and notices
-    (`source='turn'`) and the thread it opens from a mention
-    (`source='auto_thread'`). The channel tidy tools edit or delete only what
+    (`source='turn'`), the thread it opens from a mention
+    (`source='auto_thread'`) and a routine's result (`source='routine'`).
+    The channel tidy tools edit or delete only what
     this table says the calling agent posted. Holds ids and a keyed HMAC of
     the text, never the text itself.
     `channel_id` is where the message lives (a Discord thread id for a
@@ -3102,7 +3212,8 @@ class AgentPostedMessage(Base):
         ),
         CheckConstraint("kind IN ('message', 'thread')", name="ck_agent_posted_messages_kind"),
         CheckConstraint(
-            "source IN ('tool', 'turn', 'auto_thread')", name="ck_agent_posted_messages_source"
+            "source IN ('tool', 'turn', 'auto_thread', 'routine')",
+            name="ck_agent_posted_messages_source",
         ),
         CheckConstraint(
             "source <> 'turn' OR turn_card_intent_id IS NOT NULL",
@@ -3125,8 +3236,9 @@ class AgentPostedMessage(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     content_hmac: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'tool'"))
-    # The person whose message started the turn (`turn`) or whose mention
-    # opened the thread (`auto_thread`). NULL for tool posts.
+    # The person whose message started the turn (`turn`), whose mention
+    # opened the thread (`auto_thread`) or who made the routine (`routine`).
+    # NULL for tool posts.
     requester_platform_user_id: Mapped[str | None] = mapped_column(Text)
     # The turn that posted a `turn` row; no FK, intents are pruned once retired.
     turn_card_intent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
@@ -3558,42 +3670,26 @@ class DiscordGatewayLease(Base):
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
-class UsageReconcileProgress(Base):
-    """Where the turn-end billing catch-up is in one MA session.
+class SessionSettleState(Base):
+    """Whether a headless send left one MA session to be settled.
 
-    The catch-up reads the session's `span.model_request_end` events in
-    `processed_at` order (`daimon.core.usage_reconcile`) with two scans:
+    `settle_requested_at` is written before the send and `settle_turn_event_id`
+    (the send's own `user.message`) once it is accepted; both are cleared when
+    that turn has been settled (`daimon.core.usage_sweep`). `covered_through`
+    is read only on the reserved `backlog-cutoff` row, where it records when
+    this settle path was deployed.
 
-    - forward: `covered_through`/`covered_ids` is the newest call time handled
-      and the ids handled at exactly that time. While a forward listing is
-      unfinished, `forward_since` is the filter it was opened with and
-      `forward_page` MA's cursor for its next page, so a resumed pass reads
-      the next unread page instead of rereading covered ones.
-    - repair: a rescan of history older than `repair_lt` (the forward
-      position when the cycle began), from `repair_since`, continued with
-      `repair_page`. NULL `repair_lt` means no cycle is in progress.
-
-    `repair_starved` is set when a pass starts with a repair page due and
-    cleared once one is handled; while it is set, the next pass runs the
-    repair scan first, so a slow forward read cannot starve it.
-
-    A missing row means "never read". Private to `daimon.core.stores.**` per
-    the import-linter ORM contract.
+    The table keeps its original name; the former catch-up's cursor columns
+    are no longer mapped and are dropped later. Private to
+    `daimon.core.stores.**` per the import-linter ORM contract.
     """
 
     __tablename__ = "usage_reconcile_progress"
 
     managed_session_id: Mapped[str] = mapped_column(Text, primary_key=True)
     covered_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    covered_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
-    forward_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    forward_page: Mapped[str | None] = mapped_column(Text)
-    repair_lt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    repair_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    repair_page: Mapped[str | None] = mapped_column(Text)
-    repair_starved: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    settle_turn_event_id: Mapped[str | None] = mapped_column(Text)
+    settle_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

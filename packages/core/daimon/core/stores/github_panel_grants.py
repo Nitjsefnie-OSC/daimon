@@ -55,8 +55,7 @@ class GrantsPanel:
         lines = [f"Repos {agent_name} uses"]
         visible = [r for r in self.repos if r.live_ceiling is not None]
         for repo in visible[page * page_size : (page + 1) * page_size]:
-            ability = "Read only" if repo.live_ceiling == "read" else "Read and write"
-            lines.append(f"• {repo.full_name} — {ability}")
+            lines.append(f"• {repo.full_name}")
         if self.has_pending:
             lines.append("Changes waiting to be saved.")
         if len(visible) > page_size:
@@ -179,6 +178,8 @@ async def stage_panel_grant(
     is_working_repo: bool,
 ) -> None:
     """Keep an active agent's changes separate from its current live grants."""
+    baseline_access = "write"
+    ceiling_access = "write"
     mode = await github_access.get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id)
     if mode == "legacy":
         await github_access.stage_grant(
@@ -356,10 +357,11 @@ async def activate_grants(
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 repo_id=draft.repo_id,
-                baseline_access=draft.baseline_access,
-                ceiling_access=draft.ceiling_access,
+                baseline_access="write",
+                ceiling_access="write",
                 granted_by_account_id=account_id,
                 is_working_repo=draft.is_working_repo,
+                agent_name=agent_name,
             )
     await github_access.activate_agent(
         session, tenant_id=tenant_id, agent_id=agent_id, changed_by_account_id=account_id

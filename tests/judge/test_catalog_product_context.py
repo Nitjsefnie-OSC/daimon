@@ -547,7 +547,7 @@ async def test_pinned_product_turn_executes_real_admission_preparation_and_postg
         == (
             ("beta", "true"),
             ("limit", "100"),
-            ("order", "asc"),
+            ("order", "desc"),
             ("types[]", "span.model_request_end"),
         )
         and catchups[0].request_json is None,

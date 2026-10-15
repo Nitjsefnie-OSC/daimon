@@ -289,9 +289,10 @@ def _patch_successful_post(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -329,9 +330,10 @@ def _patch_post_and_edit(
 
     async def handler(route: discord.http.Route, kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
-            return _guild_payload()
-        if route.path == "/guilds/{guild_id}/roles":
-            return [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)]
+            return {
+                **_guild_payload(),
+                "roles": [_everyone_role("111", _VIEW_CHANNEL | _SEND_MESSAGES)],
+            }
         if route.path == "/guilds/{guild_id}/members/{member_id}":
             return _member_payload()
         if route.path == "/channels/{channel_id}":
@@ -1078,6 +1080,61 @@ async def test_request_repo_binding_rejects_unknown_agent(
             channel_id="222",
         )
     assert await _row_count(db_session) == 0, "an unknown agent must create no row"
+
+
+async def test_request_repo_binding_refuses_an_app_mode_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An App-mode agent's repos change through Connect GitHub, never the token form."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_repo", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(tenant_id=tenant.id)
+    await make_account(db_session, tenant=tenant, id=auth.account_id)
+    await db_session.commit()
+    app_agent = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_repo")
+
+    async def _mode(_session: object, *, tenant_id: object, agent_id: object) -> str:
+        return "app" if agent_id == app_agent else "legacy"
+
+    monkeypatch.setattr(_credential_requests_mod, "get_agent_mode", _mode)
+    async with committing_sessionmaker.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=auth.account_id,
+            platform=auth.platform or "discord",
+            parent_channel_id="C_CRED" if auth.platform == "slack" else "1111",
+            thread_id="1700000000.000001" if auth.platform == "slack" else "222",
+            responder_ma_agent_id="ag_daimon",
+            responder_name="Daimon",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=auth.role,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            now=datetime.now(UTC),
+        )
+    posted: dict[str, Any] = {}
+    _patch_successful_post(monkeypatch, message_id="9205", posted=posted)
+
+    with pytest.raises(ToolError, match="github_connect"):
+        await _request_repo_binding_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            expected_ma_agent_id="ag_repo",
+            agent_name="daimon",
+            repo_url="https://github.com/clsandoval/daimon-qa-scratch",
+            purpose="binding the QA scratch repo",
+            channel_id="222",
+        )
+    assert posted == {}, "an App-mode agent must get no token form"
+    assert await _row_count(db_session) == 0, "an App-mode agent must create no row"
 
 
 async def test_request_repo_binding_rejects_invalid_repo_url(

@@ -1,4 +1,4 @@
-"""The shared Discord button never reveals its URL to another person."""
+"""The shared Discord button reveals its URL only privately, to whoever clicks it."""
 
 import uuid
 from contextlib import asynccontextmanager
@@ -20,15 +20,44 @@ class _Sessions:
 
 
 @pytest.mark.asyncio
-async def test_other_member_gets_only_ephemeral_refusal() -> None:
-    button = button_module.GitHubConnectButton(requester_id="456", intent_id=uuid.UUID(int=1))
+async def test_other_member_gets_the_link_while_requester_still_must_manage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = SecretStr(Fernet.generate_key().decode())
+    encrypted = encrypt_token(build_multifernet((key.get_secret_value(),)), "private-link-token")
+    bind = AsyncMock(return_value=(encrypted, "ResearchBot"))
+    refusal = AsyncMock(return_value=None)
+    monkeypatch.setattr(button_module, "bind_discord_connect_click", bind)
+    monkeypatch.setattr(button_module, "_manager_refusal", refusal)
+    monkeypatch.setattr(button_module, "is_member_guild_admin", lambda *_args, **_kwargs: False)
+    requester = SimpleNamespace(id=456)
     interaction = AsyncMock()
     interaction.user.id = 999
-    await button._reveal(interaction)  # pyright: ignore[reportPrivateUsage]
-    interaction.response.send_message.assert_awaited_once_with(
-        "Only <@456> can use this.", ephemeral=True
+    interaction.guild_id = 123
+    interaction.channel_id = 789
+    interaction.client.runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            crypto=SimpleNamespace(keys=[key]),
+            mcp=SimpleNamespace(app_root_url="https://mcp.test"),
+        ),
+        sessionmaker=_Sessions(),
     )
-    interaction.followup.send.assert_not_awaited()
+    interaction.guild = SimpleNamespace(owner_id=1, fetch_member=AsyncMock(return_value=requester))
+    button = button_module.GitHubConnectButton(requester_id="456", intent_id=uuid.UUID(int=1))
+    await button._reveal(interaction)  # pyright: ignore[reportPrivateUsage]
+    interaction.response.send_message.assert_not_awaited()
+    # The manager check is the requester's, not the clicker's.
+    interaction.guild.fetch_member.assert_awaited_once_with(456)
+    assert refusal.await_args is not None
+    assert refusal.await_args.args[1] is requester
+    assert bind.await_args is not None
+    assert bind.await_args.kwargs["requester_platform_user_id"] == "456"
+    assert bind.await_args.kwargs["requester_manages_agent"] is True
+    kwargs = interaction.followup.send.await_args.kwargs
+    assert kwargs["ephemeral"] is True
+    assert kwargs["view"].children[0].url == (
+        "https://mcp.test/oauth/github/connect/private-link-token"
+    )
 
 
 @pytest.mark.asyncio

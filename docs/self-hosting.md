@@ -216,10 +216,13 @@ Members can request setup; their request is recorded for an admin. For an
 operator fallback, print a seven-day, single-use invitation with
 `daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.
 The invitation is minted on that workspace admin's behalf. The recipient signs in
-to GitHub and confirms the repositories they administer. No repository is
-preselected.
-The confirmation page has **Select all repos you manage** for bulk selection;
-each selected repository still requires a fresh GitHub admin check at confirmation.
+to GitHub and confirms repositories they can read or write. No repository is
+preselected. The page lists the repositories on which GitHub gives the signed-in
+account read, triage, write, maintain or admin permission, and notes how many it
+hides because the account has none. Each selected repository is checked again
+against GitHub at confirmation, and the access granted is capped by the person's
+own permission: read and triage give read access, write, maintain and admin allow
+read and write, and never more than the GitHub App installation holds.
 
 In Discord or Slack, open `/github` to see the server connection, your personal
 GitHub link, and waiting requests. An admin can also open GitHub from

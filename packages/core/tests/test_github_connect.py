@@ -143,7 +143,7 @@ async def test_bare_connect_notice_claim_is_single_and_failure_retries(
     row.used_at = datetime.now(UTC)
     await github_connect.queue_connect_followup(db_session, invitation=invitation, repos=[repo])
     first = await claim_next(db_session, platform="slack", now=datetime.now(UTC))
-    assert first is not None and first.text == "Connected private/repo, Read only. Ready."
+    assert first is not None and first.text == "Connected private/repo. Ready."
     assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is None
     await settle(db_session, notice=first, delivered=False, now=datetime.now(UTC))
     assert await claim_next(db_session, platform="slack", now=datetime.now(UTC)) is None
@@ -216,8 +216,8 @@ def test_connect_notice_mixed_access_label() -> None:
         ],
         notice_claimed_at=datetime.now(UTC),
     )
-    assert notice.text == "Connected private/read, private/write, Mixed access. Ready."
-    assert notice.public_text == "Connected 2 repo(s), Mixed access. Ready."
+    assert notice.text == "Connected private/read, private/write. Ready."
+    assert notice.public_text == "Connected 2 repo(s). Ready."
 
 
 @pytest.mark.asyncio
@@ -457,7 +457,7 @@ async def test_headless_app_run_uses_baseline_not_ceiling(
             fernet=build_multifernet((Fernet.generate_key().decode(),)),
             cache=PermissionCache(),
         )
-    assert [access for _, _, access in rows] == ["read"]
+    assert [access for _, _, access in rows] == ["write"]
 
 
 def test_permission_cache_evicts_least_recently_used() -> None:
@@ -910,7 +910,7 @@ async def test_invitation_is_admin_only_and_single_use(db_session: AsyncSession)
                 owner_id=55,
                 installation_id=77,
                 full_name="example/repo",
-                max_access="read",
+                max_access="write",
             )
         ],
     )
@@ -1293,7 +1293,7 @@ async def test_connect_link_requester_resolves_platform_admin_not_cli_operator(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("previous_status", "expected_access"),
-    [("active", "write"), ("revoked", "read"), ("suspended", "read")],
+    [("active", "write"), ("revoked", "write"), ("suspended", "write")],
 )
 async def test_reconfirmation_respects_inactive_repo_choice(
     db_session: AsyncSession, previous_status: str, expected_access: str
@@ -1337,7 +1337,7 @@ async def test_reconfirmation_respects_inactive_repo_choice(
                 owner_id=55,
                 installation_id=77,
                 full_name="example/repo",
-                max_access="read",
+                max_access="write",
             )
         ],
     )
@@ -1347,6 +1347,112 @@ async def test_reconfirmation_respects_inactive_repo_choice(
     assert repo is not None
     assert repo.status == "active" and repo.max_access == expected_access
     assert repo.version == 2
+
+
+async def _confirm_repo(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    admin_id: uuid.UUID,
+    *,
+    github_user_id: int,
+    state: str,
+    max_access: str,
+    permission: str | None,
+) -> bool:
+    token = await github_connect.mint_invitation(
+        session, tenant_id=tenant_id, requester_account_id=admin_id
+    )
+    await github_connect.create_flow(
+        session,
+        invitation_hash=github_connect.digest(token),
+        state=state,
+        cookie="cookie",
+        encrypted_verifier=b"encrypted",
+    )
+    return await github_connect.confirm(
+        session,
+        state=state,
+        cookie="cookie",
+        github_user_id=github_user_id,
+        repos=[
+            github_connect.RepoConfirmation.model_validate(
+                {
+                    "repo_id": 101,
+                    "owner_id": 55,
+                    "installation_id": 77,
+                    "full_name": "example/repo",
+                    "max_access": max_access,
+                    "authorizer_permission": permission,
+                }
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirm_records_the_authorizers_permission(db_session: AsyncSession) -> None:
+    tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    assert await _confirm_repo(
+        db_session,
+        tenant_id,
+        admin_id,
+        github_user_id=17,
+        state="first",
+        max_access="write",
+        permission="maintain",
+    )
+    repo = await github_access.repo_for_agent(
+        db_session, tenant_id=tenant_id, repo_id=101, agent_id=None
+    )
+    assert repo is not None
+    assert repo.authorized_permission == "maintain" and repo.max_access == "write"
+
+    # A reader can authorize an App token with read and write access.
+    assert await _confirm_repo(
+        db_session,
+        tenant_id,
+        admin_id,
+        github_user_id=99,
+        state="second",
+        max_access="read",
+        permission="read",
+    )
+    repo = await github_access.repo_for_agent(
+        db_session, tenant_id=tenant_id, repo_id=101, agent_id=None
+    )
+    assert repo is not None
+    assert repo.max_access == "write"
+    assert (repo.authorized_by_github_user_id, repo.authorized_permission) == (99, "read")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission", ["read", "triage"])
+async def test_confirm_allows_app_write_from_a_read_level_authorizer(
+    db_session: AsyncSession, permission: str
+) -> None:
+    tenant_id, admin_id = uuid.uuid4(), uuid.uuid4()
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id="workspace"))
+    await db_session.flush()
+    db_session.add(Account(id=admin_id, tenant_id=tenant_id, role="admin"))
+    await db_session.flush()
+    assert await _confirm_repo(
+        db_session,
+        tenant_id,
+        admin_id,
+        github_user_id=17,
+        state="confirmed",
+        max_access="read",
+        permission=permission,
+    )
+    repo = await github_access.repo_for_agent(
+        db_session, tenant_id=tenant_id, repo_id=101, agent_id=None
+    )
+    assert repo is not None
+    assert repo.max_access == "write" and repo.authorized_permission == permission
 
 
 @pytest.mark.asyncio
@@ -1860,7 +1966,9 @@ async def test_unlink_bumps_generation_and_deletes_last_token(db_session: AsyncS
 
 
 @pytest.mark.asyncio
-async def test_issued_tokens_stale_after_bump_unlink_and_relink(db_session: AsyncSession) -> None:
+async def test_legacy_linked_tokens_rotate_before_link_change_revoke(
+    db_session: AsyncSession,
+) -> None:
     tenant_id, account_id, agent_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
     await db_session.flush()
@@ -1933,23 +2041,20 @@ async def test_issued_tokens_stale_after_bump_unlink_and_relink(db_session: Asyn
         await github_issued_tokens.store_token(
             db_session, token_id=row.token_id, token="issued", fernet=fernet
         )
+        await github_issued_tokens.mark_delivered(db_session, token_id=row.token_id)
         return row.token_id
 
-    first = await issued(1)
+    await issued(1)
     assert await github_issued_tokens.select_stale_tokens(db_session) == []
+    assert await github_issued_tokens.session_token_needs_rotation(
+        db_session, session_id="session-1"
+    )
     await github_links.bump_link_generation(db_session, github_user_id=501)
-    assert {row.token_id for row in await github_issued_tokens.select_stale_tokens(db_session)} == {
-        first
-    }
-    second = await issued(2)
-    assert {row.token_id for row in await github_issued_tokens.select_stale_tokens(db_session)} == {
-        first
-    }
+    assert await github_issued_tokens.select_stale_tokens(db_session) == []
+    await issued(2)
+    assert await github_issued_tokens.select_stale_tokens(db_session) == []
     assert await github_links.unlink_account(db_session, account_id=account_id) == 501
-    assert {row.token_id for row in await github_issued_tokens.select_stale_tokens(db_session)} == {
-        first,
-        second,
-    }
+    assert await github_issued_tokens.select_stale_tokens(db_session) == []
 
     db_session.add(
         GitHubUserLink(
@@ -1970,10 +2075,7 @@ async def test_issued_tokens_stale_after_bump_unlink_and_relink(db_session: Asyn
         )
     )
     await db_session.flush()
-    assert {row.token_id for row in await github_issued_tokens.select_stale_tokens(db_session)} == {
-        first,
-        second,
-    }
+    assert await github_issued_tokens.select_stale_tokens(db_session) == []
 
 
 @pytest.mark.asyncio
@@ -2195,12 +2297,12 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
     db_session.add(AgentGitHubMode(tenant_id=tenant_id, agent_id=agent_id, mode="app"))
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     old_ids: list[uuid.UUID] = []
-    for installation_id, repo_id, name in ((101, 11, "first"), (102, 12, "second")):
+    for installation_id, repo_id, name in ((101, 11, "first"), (101, 12, "second")):
         await github_app_installations.upsert(
             db_session,
             installation_id=installation_id,
             account_login="acme",
-            repo_full_names=[f"acme/{name}"],
+            repo_full_names=["acme/first", "acme/second"],
         )
         db_session.add(
             TenantGitHubRepo(
@@ -2209,28 +2311,28 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
                 owner_id=1,
                 installation_id=installation_id,
                 repo_full_name=f"acme/{name}",
-                max_access="read",
+                max_access="write",
                 authorized_by_github_user_id=501,
                 status="active",
                 version=1,
             )
         )
     await db_session.flush()
-    for _, repo_id, name in ((101, 11, "first"), (102, 12, "second")):
+    for _, repo_id, name in ((101, 11, "first"), (101, 12, "second")):
         db_session.add(
             AgentGitHubGrant(
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 repo_id=repo_id,
-                baseline_access="read",
-                ceiling_access="read",
+                baseline_access="write",
+                ceiling_access="write",
                 staged=False,
                 is_working_repo=name == "first",
                 version=1,
             )
         )
     await db_session.flush()
-    for installation_id, repo_id in ((101, 11), (102, 12)):
+    for installation_id, repo_id in ((101, 11), (101, 12)):
         row = await github_issued_tokens.create_pending(
             db_session,
             tenant_id=tenant_id,
@@ -2314,8 +2416,8 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
         fernet=fernet,
         active_turn=True,
     )
-    assert mint.await_count == 2
-    # Only the working repo is mounted; the other repo's token lives in the vault.
+    assert mint.await_count == 1
+    # Only the working repo is mounted; GH_TOKEN covers both repos.
     assert {path for _, path, _ in writes if "/resources/" in path} == {
         "/v1/sessions/rotating-session/resources/resource-first",
     }
@@ -2332,7 +2434,7 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
         assert all(row.revoke_after == row.expires_at + timedelta(minutes=6) for row in old)
         assert (
             len([row for row in issued if row.status == "delivered" and row.superseded_at is None])
-            == 2
+            == 1
         )
         assert (
             await github_issued_tokens.select_due_superseded_tokens(
@@ -2353,10 +2455,7 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
         agent_id=agent_id,
         fernet=fernet,
     )
-    assert [token.credential_name for token in current.tokens] == [
-        "GH_TOKEN_ACME_READ",
-        "GH_TOKEN_ACME_READ_1",
-    ]
+    assert [token.credential_name for token in current.tokens] == ["GH_TOKEN"]
     from daimon.adapters.scheduler.main import (
         _sweep_github_app_tokens,  # pyright: ignore[reportPrivateUsage]
     )
@@ -2432,7 +2531,7 @@ async def test_live_app_rotation_updates_ma_and_delays_revocation(
         (method, path) for method, path, _ in writes
     }
     await _sweep_github_app_tokens(db_session_factory, fernet=fernet)
-    assert revoked == ["new-second"]
+    assert revoked == ["new-first"]
 
 
 async def test_superseded_token_survives_version_bumps_but_not_hard_changes(
@@ -2510,7 +2609,10 @@ async def test_superseded_token_survives_version_bumps_but_not_hard_changes(
         text("UPDATE tenant_github_repos SET version = 2 WHERE tenant_id = :tenant_id"),
         {"tenant_id": tenant_id},
     )
-    assert await stale() == {token_ids["live"]}
+    assert await stale() == set()
+    assert await github_issued_tokens.session_token_needs_rotation(
+        db_session, session_id="long-turn"
+    )
 
     await db_session.execute(
         text("UPDATE agent_github_grants SET staged = true WHERE tenant_id = :tenant_id"),
@@ -2537,12 +2639,12 @@ async def test_superseded_token_survives_version_bumps_but_not_hard_changes(
         ),
         {"token_id": token_ids["old"]},
     )
-    assert await stale() == {token_ids["live"]}
+    assert await stale() == set()
     await db_session.execute(
         text("UPDATE agent_github_grants SET ceiling_access = 'read' WHERE tenant_id = :tenant_id"),
         {"tenant_id": tenant_id},
     )
-    assert await stale() == set(token_ids.values())
+    assert await stale() == {token_ids["old"]}
 
 
 async def test_later_narrowing_revokes_an_earlier_superseded_write_token_now(
@@ -2603,7 +2705,7 @@ async def test_active_turn_refresh_proceeds_without_a_rollback_snapshot(
     )
     monkeypatch.setattr(github_app_session, "prepare_app_access", AsyncMock(side_effect=Prepared))
     with pytest.raises(Prepared):
-        await github_app_session.rotate_live_app_tokens(
+        await github_app_session._rotate_live_app_tokens_unlocked(  # pyright: ignore[reportPrivateUsage]
             AsyncMock(),
             AsyncMock(),
             session_id="no-snapshot",
@@ -2617,6 +2719,51 @@ async def test_active_turn_refresh_proceeds_without_a_rollback_snapshot(
             fernet=build_multifernet((Fernet.generate_key().decode(),)),
             active_turn=True,
         )
+
+
+async def test_rotation_releases_grant_lock_during_github_network_call(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StopMint(Exception):
+        pass
+
+    tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_mint(*_args: object, **_kwargs: object) -> AppSessionAccess:
+        entered.set()
+        await release.wait()
+        raise StopMint
+
+    monkeypatch.setattr(github_app_session, "prepare_app_access", blocked_mint)
+    rotation = asyncio.create_task(
+        github_app_session.rotate_live_app_tokens(
+            AsyncMock(),
+            db_session_factory,
+            session_id="lock-test",
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            is_external=False,
+            vault_id="vault-test",
+            resource_ids={},
+            config=GithubAppSettings(),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        async with db_session_factory.begin() as session:
+            await asyncio.wait_for(
+                github_access.lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id),
+                timeout=2,
+            )
+    finally:
+        release.set()
+    with pytest.raises(StopMint):
+        await rotation
 
 
 async def test_app_rotation_keeps_old_session_when_first_resource_update_fails(
@@ -2663,14 +2810,44 @@ async def test_app_rotation_keeps_old_session_when_first_resource_update_fails(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("narrowing", [False, True])
-async def test_active_turn_failure_keeps_delivered_tokens_unless_wider(
+async def test_active_turn_failure_keeps_delivered_tokens_with_current_grants(
     db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_nullpool_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
     narrowing: bool,
 ) -> None:
+    db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     tenant_id, agent_id = uuid.uuid4(), uuid.uuid4()
     db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    await github_app_installations.upsert(
+        db_session, installation_id=101, account_login="acme", repo_full_names=["acme/repo"]
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant_id,
+            repo_id=11,
+            owner_id=1,
+            installation_id=101,
+            repo_full_name="acme/repo",
+            max_access="write",
+            authorized_by_github_user_id=2,
+            status="active",
+            version=1,
+        )
+    )
+    db_session.add(
+        AgentGitHubGrant(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=11,
+            baseline_access="write",
+            ceiling_access="write",
+            staged=False,
+            version=1,
+        )
+    )
+    db_session.add(AgentGitHubMode(tenant_id=tenant_id, agent_id=agent_id, mode="app"))
     await db_session.flush()
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     expires_at = datetime.now(UTC) + timedelta(minutes=55)
@@ -2770,17 +2947,13 @@ async def test_active_turn_failure_keeps_delivered_tokens_unless_wider(
     assert by_label["old"].superseded_at is None
     assert by_label["undelivered"].status == "revoked"
     mounted = by_label["mounted"]
-    if narrowing:
-        # Wider than the read token the session still holds: revoked now.
-        assert sorted(revoked) == ["mounted", "undelivered"]
-        assert mounted.status == "revoked"
-    else:
-        # Only the token MA never received is revoked; the mounted one expires.
-        assert revoked == ["undelivered"]
-        assert mounted.session_id == "running-session"
-        assert mounted.status == "delivered"
-        assert mounted.superseded_at is not None
-        assert mounted.revoke_after == mounted.expires_at + timedelta(minutes=6)
+    # Only the token MA never received is revoked. The mounted token stays
+    # because the current grant permits it, even when old session access was read.
+    assert revoked == ["undelivered"]
+    assert mounted.session_id == "running-session"
+    assert mounted.status == "delivered"
+    assert mounted.superseded_at is not None
+    assert mounted.revoke_after == mounted.expires_at + timedelta(minutes=6)
 
 
 async def test_active_turn_failure_after_swap_without_snapshot_is_not_archived(
@@ -2869,6 +3042,13 @@ async def test_active_turn_rotation_failure_restores_old_credentials_without_arc
     )
     monkeypatch.setattr(github_app_session, "_current_app_access", AsyncMock(return_value=old))
     monkeypatch.setattr(github_app_session, "prepare_app_access", AsyncMock(return_value=new))
+    monkeypatch.setattr(
+        github_app_session,
+        "list_session_tokens",
+        AsyncMock(return_value=[SimpleNamespace(token_id=old.tokens[0].token_id)]),
+    )
+    monkeypatch.setattr(github_app_session, "select_stale_tokens", AsyncMock(return_value=[]))
+    monkeypatch.setattr(github_app_session, "restore_session_tokens", AsyncMock())
     credentials = AsyncMock(side_effect=[RuntimeError("vault update failed"), None])
     monkeypatch.setattr(github_app_session, "add_app_credentials", credentials)
     revoke = AsyncMock()

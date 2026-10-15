@@ -90,4 +90,41 @@ async def remove_channel_skill(
     return cast(CursorResult[Any], result).rowcount > 0
 
 
-__all__ = ["add_channel_skill", "list_channel_skills", "remove_channel_skill"]
+async def list_skill_channel_rules(
+    session: AsyncSession, *, skill_id: str
+) -> list[ChannelSkillRow]:
+    """Every channel rule, in any tenant or platform, that adds `skill_id`.
+
+    Skills are workspace-wide on Managed Agents, so a rule anywhere still
+    resolves this skill at session creation and fails once it is deleted.
+    """
+    stmt = (
+        select(ChannelSkill)
+        .where(ChannelSkill.skill_id == skill_id)
+        .order_by(ChannelSkill.platform, ChannelSkill.channel_id)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [ChannelSkillRow.model_validate(row) for row in rows]
+
+
+async def list_channel_skill_ids(session: AsyncSession) -> set[str]:
+    """The skill ids any channel rule adds, across every tenant and platform."""
+    rows = (await session.execute(select(ChannelSkill.skill_id).distinct())).scalars().all()
+    return set(rows)
+
+
+async def remove_skill_from_every_channel(session: AsyncSession, *, skill_id: str) -> int:
+    """Remove `skill_id` from every channel rule. Returns how many rules held it."""
+    result = await session.execute(delete(ChannelSkill).where(ChannelSkill.skill_id == skill_id))
+    await session.flush()
+    return cast(CursorResult[Any], result).rowcount
+
+
+__all__ = [
+    "add_channel_skill",
+    "list_channel_skill_ids",
+    "list_channel_skills",
+    "list_skill_channel_rules",
+    "remove_channel_skill",
+    "remove_skill_from_every_channel",
+]

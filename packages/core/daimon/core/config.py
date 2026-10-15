@@ -462,6 +462,17 @@ class DiscordSettings(BaseModel):
             "Kept in memory, so a restart allows one more."
         ),
     )
+    protected_channel_notice_cooldown_min: float = Field(
+        default=10.0,
+        gt=0,
+        description=(
+            "Minutes before the same person is told again that Daimon can't reply in a "
+            "channel whose Who can post rule is Nobody. Their mention gets a 🔒 reaction and "
+            "a direct message naming the rule and who can change it; nothing else is posted "
+            "and no turn runs. Kept in memory per person and channel, so a restart allows "
+            "one more."
+        ),
+    )
     max_concurrent_turns_per_tenant: int = Field(
         default=3,
         description=(
@@ -1292,8 +1303,8 @@ class ThreadNamingSettings(BaseModel):
         description=(
             "Title bot-created Discord threads from the opening message with a short "
             "Haiku-generated name, chosen before the thread is created. The call is "
-            "metered to the tenant like any other model call. Set false to keep the "
-            "static 'Chat with <agent>' title."
+            "metered to the tenant like any other model call. Set false to title "
+            "threads with the opening message itself, cut to 50 characters."
         ),
     )
     max_input_chars: int = Field(
@@ -1310,9 +1321,9 @@ class ThreadNamingSettings(BaseModel):
         gt=0,
         le=60,
         description=(
-            "Seconds to wait for the naming model before the thread opens under the "
-            "static title. The thread is created only after this call, so this is "
-            "the most a mention can wait before anything appears."
+            "Seconds to wait for the naming model before the thread opens under a "
+            "title taken from the opening message. The thread is created only after "
+            "this call, so this is the most a mention can wait before anything appears."
         ),
     )
 
@@ -1544,9 +1555,9 @@ class Settings(BaseSettings):
     table_rendering: dict[uuid.UUID, bool] = Field(
         default_factory=dict[uuid.UUID, bool],
         description=(
-            "Per-tenant table rendering opt-in, keyed by tenant UUID. True renders "
-            "final Markdown tables as PNG on Discord and native tables on Slack. "
-            "Missing/false preserves plain text. Set DAIMON_TABLE_RENDERING to a JSON object."
+            "Per-tenant table rendering, keyed by tenant UUID. Discord renders final "
+            "Markdown tables as PNG unless the tenant is set to false. Slack renders "
+            "native tables only when set to true. Set DAIMON_TABLE_RENDERING to a JSON object."
         ),
     )
     database: DatabaseSettings

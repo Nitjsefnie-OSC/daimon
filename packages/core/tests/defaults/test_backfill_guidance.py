@@ -165,7 +165,7 @@ async def test_backfill_port_preserves_actual_sdk_requests_and_conflict_attempts
         # Main #718's native request sequence, including its tenant-filtered read.
         agents = [
             agent
-            async for agent in client.beta.agents.list(include_archived=False)
+            async for agent in client.beta.agents.list(include_archived=False, limit=100)
             if agent.metadata.get("daimon_tenant") == str(TENANT)
         ]
         assert len(agents) == 1

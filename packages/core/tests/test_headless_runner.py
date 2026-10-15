@@ -801,8 +801,8 @@ async def test_run_turn_stamps_session_metadata_with_tenant_and_account() -> Non
     """A scheduler-fired (headless) session must carry
     daimon_tenant + daimon_account metadata, mirroring create_session's stamp
     (test_sessions.py::test_create_session_tags_metadata_with_account_and_tenant_when_both_provided),
-    so sweep_headless_usage (usage_sweep.py:57-61) does not skip it and routine
-    sessions get billed.
+    so usage_sweep.session_billing does not skip it and routine sessions get
+    billed.
     """
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -1560,3 +1560,56 @@ async def test_headless_result_callback_only_receives_completed_turns(reason):
     state = TurnState(termination=TerminationReason(reason))
     await lifecycle.on_terminal_success(state)
     assert seen == ([state] if reason == "completed" else [])
+
+
+@pytest.mark.parametrize("answers_only_owner", [False, True])
+async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
+    answers_only_owner: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A routine that posts where others read runs on the shared store alone; one
+    whose result reaches only its owner also reads the owner's store, read-only."""
+    from daimon.core.stores.agent_memory_stores import (
+        insert_memory_store,
+        insert_personal_memory_store,
+    )
+    from daimon.testing.factories import make_account, make_tenant
+
+    tenant = await make_tenant(db_session)
+    owner = await make_account(db_session, tenant=tenant)
+    agent_id = uuid.uuid4()
+    await insert_memory_store(
+        db_session, tenant_id=tenant.id, agent_id=agent_id, memory_store_id="memstore_shared"
+    )
+    await insert_personal_memory_store(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=agent_id,
+        account_id=owner.id,
+        memory_store_id="memstore_owner",
+    )
+    await db_session.commit()
+    bodies: list[dict[str, Any]] = []
+    client = _build_client(_idle_events(), session_create_capture=bodies)
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+        account_id=owner.id,
+        tenant_id=tenant.id,
+        agent_uuid=agent_id,
+        session_factory=db_session_factory,
+        origin="routine",
+        personal_memory=answers_only_owner,
+    )
+    mounts = {
+        r["memory_store_id"]: r["access"]
+        for r in bodies[0]["resources"]
+        if r["type"] == "memory_store"
+    }
+    expected = {"memstore_shared": "read_only"}
+    if answers_only_owner:
+        expected["memstore_owner"] = "read_only"
+    assert mounts == expected

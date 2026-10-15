@@ -174,7 +174,7 @@ class DiscordPostTransport:
         self.client = client
         self.channel = channel
         # A turn's transport reports a gone or closed thread and refuses every
-        # write after one (#809). Other transports have no turn to stop.
+        # write after one. Other transports have no turn to stop.
         self._watch = watch
         self.name = discord_username(name)
         self.avatar_url = avatar_url

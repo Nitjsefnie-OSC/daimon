@@ -55,6 +55,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, NoReturn
+from unittest.mock import patch
 
 import aiohttp
 import daimon.adapters.slack.lifecycle as lifecycle_module
@@ -219,6 +220,7 @@ def _make_lifecycle(
     identity: AgentIdentity | None = None,
     ma_agent_id: str | None = None,
     intent_id: uuid.UUID | None = None,
+    requester_is_admin: bool = True,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -247,6 +249,7 @@ def _make_lifecycle(
         thread_ts="1700000000.000000",
         cancel=cancel,
         author_id="U_AUTHOR",
+        requester_is_admin=requester_is_admin,
         agent_name=agent_name,
         model_id=model_id,
         register=register,
@@ -411,6 +414,31 @@ async def test_second_event_within_debounce_no_update(fake_slack_web_client: Any
         "second render tick within debounce must not post a new message"
     )
     assert _update_count(fake_slack_web_client) == 0, "no chat.update within the 5s debounce window"
+
+
+async def test_render_tick_within_debounce_skips_building_the_card(
+    fake_slack_web_client: Any,
+) -> None:
+    """A tick that will not send must not pay for the Block Kit and mrkdwn render."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+    await lc.on_render(TurnState())  # initial post
+
+    with (
+        patch(
+            "daimon.adapters.slack.lifecycle.to_blocks", wraps=lifecycle_module.to_blocks
+        ) as blocks,
+        patch(
+            "daimon.adapters.slack.lifecycle.to_fallback_text",
+            wraps=lifecycle_module.to_fallback_text,
+        ) as text,
+    ):
+        await lc.on_render(_running_tool_turn())  # within the debounce window
+        assert (blocks.call_count, text.call_count) == (0, 0), "a skipped tick renders nothing"
+        lc._last_flush = time.monotonic() - 6.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce
+        await lc.on_render(_running_tool_turn())
+
+    assert (blocks.call_count, text.call_count) == (1, 1), "the tick that sends renders once"
+    assert _update_count(fake_slack_web_client) == 1, "only the elapsed tick updates the card"
 
 
 async def test_event_after_debounce_triggers_update(fake_slack_web_client: Any) -> None:
@@ -701,6 +729,44 @@ async def test_without_intent_id_cancel_value_still_uses_status_timestamp(
         for element in block.get("elements", [])
     )
     assert cancel_button["value"] == lc.status_ts
+
+
+async def test_unchanged_running_state_rerendered_moves_the_elapsed_time(
+    fake_slack_web_client: Any,
+) -> None:
+    """The driver re-renders an unchanged state on every tick during a long
+    tool call; the debounce turns those into edits of the same message, each
+    carrying a later elapsed time."""
+    clock_now = [100.0]
+    lc = SlackTurnLifecycle(
+        client=fake_slack_web_client.client,
+        channel="C_TEST",
+        thread_ts="1700000000.000000",
+        cancel=asyncio.Event(),
+        author_id="U_AUTHOR",
+        agent_name="test-agent",
+        model_id="claude-sonnet-4-6",
+        register=lambda ts, event, author: None,
+        deregister=lambda ts: None,
+        clock=lambda: clock_now[0],
+    )
+    running = TurnState(
+        content=[
+            ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+        ]
+    )
+
+    await lc.on_render(running)
+    footers: list[str] = []
+    for elapsed in (1, 12, 13, 24):
+        clock_now[0] = 100.0 + elapsed
+        updates_before = _update_count(fake_slack_web_client)
+        await lc.on_render(running)
+        if _update_count(fake_slack_web_client) > updates_before:
+            footers.append(_last_update_blocks(fake_slack_web_client)[-1]["elements"][0]["text"])
+
+    assert _post_count(fake_slack_web_client) == 1
+    assert footers == ["12s", "24s"]
 
 
 async def test_status_ts_is_none_before_anything_is_posted(fake_slack_web_client: Any) -> None:
@@ -1125,6 +1191,50 @@ async def test_the_card_reuses_the_rid_bound_for_the_turn(fake_slack_web_client:
         await lc.on_terminal_failure(TurnState(), RuntimeError("x"))
 
     assert "Ref UNDRID" in _block_text(_last_update_blocks(fake_slack_web_client))
+
+
+@pytest.mark.parametrize("admin", [True, False], ids=["admin", "not-admin"])
+@pytest.mark.parametrize(
+    "reason", [TerminationReason.INTERRUPTED, TerminationReason.UPSTREAM], ids=str
+)
+async def test_terminal_notice_shows_the_ref_to_admins_only(
+    fake_slack_web_client: Any, reason: TerminationReason, admin: bool
+) -> None:
+    """A stop or failure notice names the request ref for an admin, never for anyone else."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client, requester_is_admin=admin)
+    await lc.post_initial()
+
+    with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+        await lc.on_terminal_failure(TurnState(termination=reason), RuntimeError("x"))
+
+    rendered = _block_text(_last_update_blocks(fake_slack_web_client))
+    fallback = fake_slack_web_client.mock.requests[("POST", _UPDATE_URL)][-1].kwargs["json"]["text"]
+    assert ("Ref UNDRID" in rendered) is admin
+    assert ("Ref UNDRID" in fallback) is admin
+    if not admin:
+        assert "Ref" not in rendered + fallback
+
+
+async def test_a_lifecycle_defaults_to_no_ref_when_admin_status_is_unknown(
+    fake_slack_web_client: Any,
+) -> None:
+    lc = SlackTurnLifecycle(
+        client=fake_slack_web_client.client,
+        channel="C_TEST",
+        thread_ts="1700000000.000000",
+        cancel=asyncio.Event(),
+        author_id="U_AUTHOR",
+        agent_name="test-agent",
+        model_id="claude-sonnet-4-6",
+        register=lambda ts, ev, author_id: None,
+        deregister=lambda ts: None,
+    )
+    await lc.post_initial()
+
+    with structlog.contextvars.bound_contextvars(rid="01BOUNDRID"):
+        await lc.on_terminal_failure(TurnState(), RuntimeError("x"))
+
+    assert "Ref" not in _block_text(_last_update_blocks(fake_slack_web_client))
 
 
 async def test_dm_terminal_notice_asks_for_a_message(fake_slack_web_client: Any) -> None:

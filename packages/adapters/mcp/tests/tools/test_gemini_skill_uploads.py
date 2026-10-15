@@ -393,12 +393,21 @@ async def test_canonical_yes_adds_native_concrete_pin_with_real_readback_once(ca
     assert case.world.created == [], "the Anthropic upload path was not entered"
 
 
-async def test_yes_please_cancels_using_the_unchanged_shared_matcher(case: Case) -> None:
+@pytest.mark.parametrize("text,adds", [("yes please", True), ("yes please don't", False)])
+async def test_a_polite_reply_is_read_by_the_shared_matcher(
+    case: Case, text: str, adds: bool
+) -> None:
+    """A whole polite yes adds through the Gemini host; a qualified one cancels."""
     preview = await case.call()
-    async with case.reply("yes please") as reply:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
-            await case.call(origin=reply, content_hash=preview.preview.content_hash)
-    assert not case.wire.requests and case.world.created == []
+    async with case.reply(text) as reply:
+        if adds:
+            added = await case.call(origin=reply, content_hash=preview.preview.content_hash)
+            assert added.status == "added" and added.added is not None
+        else:
+            with pytest.raises(ToolError, match="did not start with the person replying"):
+                await case.call(origin=reply, content_hash=preview.preview.content_hash)
+            assert not case.wire.requests
+    assert case.world.created == [], "the Anthropic upload path was not entered"
 
 
 @pytest.mark.parametrize("expected", [None, "different-native-agent"])

@@ -46,6 +46,7 @@ type ChangeReason = Literal[
     "repo_branch",
     "memory_store",
     "memory_access",
+    "personal_memory_store",
     "vault",
     "tools",
     "mcp_servers",
@@ -166,6 +167,17 @@ def identity_change_reasons(
         (recorded.repo_branch != desired.repo_branch, "repo_branch"),
         (recorded.memory_store_id != desired.memory_store_id, "memory_store"),
         (recorded.memory_read_only != desired.memory_read_only, "memory_access"),
+        (
+            # A session running without the caller's personal store keeps
+            # running: adding it is no reason to end a live conversation, and
+            # the caller's next new session mounts it. One that has a store
+            # and should now have another (or none) is replaced, because a
+            # stale personal mount is the one memory difference that could
+            # expose a person's memory where it no longer belongs.
+            recorded.personal_memory_store_id is not None
+            and recorded.personal_memory_store_id != desired.personal_memory_store_id,
+            "personal_memory_store",
+        ),
         (recorded.vault_id != desired.vault_id, "vault"),
     )
     return tuple(reason for differs, reason in checks if differs)
@@ -178,6 +190,7 @@ def decide_session_compatibility(
     capabilities: MaCapabilities,
     now: datetime,
     repo_token_max_age_s: int = 2400,
+    force_app_token_rotation: bool = False,
 ) -> CompatibilityDecision:
     """Reuse, update in place, or replace the session `recorded` describes.
 
@@ -226,7 +239,7 @@ def decide_session_compatibility(
         issued_at = recorded.repo_token_issued_at
         # Installation tokens are recorded with a conservative 55-minute life.
         # Refresh at 40 minutes, leaving 15 minutes for vault propagation.
-        if issued_at is None or now.timestamp() - issued_at >= 2400:
+        if force_app_token_rotation or issued_at is None or now.timestamp() - issued_at >= 2400:
             reasons.append("repo_token_age")
             if capabilities.repo_token_rotatable:
                 ops.append(RotateAppTokens(resource_ids=recorded.repo_resource_ids))

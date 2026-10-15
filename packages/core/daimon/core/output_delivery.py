@@ -4,7 +4,7 @@ The sweep polls the session's Files API listing, downloads each downloadable
 entry, hands it to an injected ``post`` callable, and deletes the listing
 entry only after the post succeeded. Because a posted file leaves the listing,
 the listing itself is the delivery ledger: it only ever holds undelivered
-work, so there is no dedup state, no clock heuristic, and no age cutoff. A
+work, so delivery keeps no dedup state, no clock heuristic, and no age cutoff. A
 poster whose delivery finishes later (a consent prompt) raises
 ``OutputDeliveryDeferred`` and deletes the entry itself when it is done.
 
@@ -18,8 +18,9 @@ cumulative poll time has elapsed.
 
 An output over the per-file delivery cap is never deleted: the sweep leaves it
 listed, so the file stays downloadable and in the agent's workspace, and asks
-the poster to say so once per file (``noticed``). Only a delivered file, or an
-empty one, leaves the listing.
+the poster to say so once per file. That needs the one piece of dedup state,
+``NoticedFiles``: the ids already noticed. Only a delivered file, or an empty
+one, leaves the listing.
 
 Two trade-offs are accepted by design: the MA-side copy of a file is destroyed
 after a successful post, and a crash between the post and the delete
@@ -53,9 +54,16 @@ _log = structlog.get_logger(__name__)
 
 _MA_BETA = "managed-agents-2026-04-01"
 
-# Public: the skip notice quotes this limit to the user.
-MAX_BYTES_PER_FILE = 20 * 1024 * 1024
 _MIB = 1024 * 1024
+
+# Public. The default per-file cap, for a caller that passes no ``max_bytes``:
+# Teams, and what a transfer bundle must fit under (``checkpoint_prompt``). The
+# Slack and Discord adapters pass their own limit instead, and the skip notice
+# quotes whichever limit the sweep applied.
+MAX_BYTES_PER_FILE = 20 * _MIB
+# Public. No destination's cap goes above this: the sweep downloads each file
+# whole into memory before the poster re-uploads it.
+MAX_BYTES_CEILING = 200 * _MIB
 
 _POLL_DELAYS_S = (0.0, 2.0, 4.0, 8.0)
 _MIN_SETTLE_S = 6.0
@@ -103,6 +111,8 @@ def _mb(size_bytes: int) -> str:
 
 def render_oversize_notice(skipped: SkippedFile, *, max_bytes: int = MAX_BYTES_PER_FILE) -> str:
     """The chat notice for an output over the per-file delivery cap.
+
+    ``max_bytes`` is the limit the sweep applied; the notice quotes it.
 
     The file is kept, so the notice says so and names what the person can ask
     for instead; it never offers a download it cannot give.

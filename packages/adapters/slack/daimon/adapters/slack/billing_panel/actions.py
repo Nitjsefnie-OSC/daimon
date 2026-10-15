@@ -1,6 +1,6 @@
 """Slack /billing slash command handler + billing_topup block_actions handler.
 
-Follows ack-first Socket Mode discipline (S1) — callers ACK before spawning
+Follows ack-first Socket Mode discipline — callers ACK before spawning
 these functions as background tasks. These are the background side of the ack.
 
 Pattern sequence for slash command:
@@ -20,7 +20,7 @@ Pattern sequence for billing_topup block_action:
   7. On failure, views.update the open modal with a static "not configured" message
      instead of leaving the dropdown silently dead
 
-Error boundary (S3): catches DaimonError | httpx.HTTPStatusError | SlackApiError
+Error boundary: catches DaimonError | httpx.HTTPStatusError | SlackApiError
 at the handler level; logs + captures to Sentry, then answers the open modal
 via views.update. Never stripe.
 """

@@ -33,6 +33,7 @@ from aioresponses import CallbackResult, aioresponses
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from cryptography.fernet import Fernet
+from daimon.adapters.slack.admin import SlackRequester
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -1296,9 +1297,9 @@ async def test_initial_card_post_failure_keeps_prepared_intent(
 
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=SlackRequester(is_admin=False, display_name=None),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
         pytest.raises(SlackApiError),
@@ -1345,9 +1346,9 @@ async def test_initial_card_timestamp_write_failure_prevents_turn_and_preserves_
     admission.agent.model.id = "claude-sonnet-4-6"
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=SlackRequester(is_admin=False, display_name=None),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
         patch(
@@ -1426,9 +1427,9 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
 
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=SlackRequester(is_admin=False, display_name=None),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
         patch(
@@ -1503,9 +1504,9 @@ async def test_cancelled_initial_card_post_keeps_prepared_intent(
     admission.agent.model.id = "claude-sonnet-4-6"
     with (
         patch(
-            "daimon.adapters.slack.app.resolve_admin_status",
+            "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=False,
+            return_value=SlackRequester(is_admin=False, display_name=None),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
     ):
@@ -4239,6 +4240,7 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
         return state
 
     captured_deadlines: dict[str, datetime | None] = {}
+    render_tables: list[bool] = []
 
     async def _bind_session_wrapper(*args: Any, **kwargs: Any) -> Any:
         captured_deadlines["bind"] = kwargs.get("deadline")
@@ -4246,6 +4248,7 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
 
     async def _run_prepared_turn_wrapper(*args: Any, **kwargs: Any) -> Any:
         captured_deadlines["run"] = kwargs.get("deadline")
+        render_tables.append(kwargs["lifecycle"]._render_tables)
         return await real_run_prepared_turn(*args, **kwargs)
 
     with (
@@ -4291,6 +4294,7 @@ async def test_run_thread_turn_passes_one_shared_deadline_to_bind_and_run(
     assert captured_deadlines.get("bind") is not None, (
         "bind_session must receive a non-None deadline"
     )
+    assert render_tables == [False], "Slack tables stay plain text without a tenant entry"
     assert captured_deadlines.get("run") is not None, (
         "run_prepared_turn must receive a non-None deadline"
     )

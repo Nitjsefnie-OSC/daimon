@@ -93,6 +93,7 @@ from daimon.core.routine_delivery import (
     render_routine_controls,
 )
 from daimon.core.rule_views import (
+    routine_answers_only_owner,
     routine_destination_channel,
     routine_destination_place,
     routine_origin,
@@ -120,11 +121,13 @@ from daimon.core.stores.github_issued_tokens import (
     list_session_tokens,
     mark_headless_app_session_closed,
     mark_revoked,
+    recheck_token_revoke_due,
     record_revoke_attempt,
     select_abandoned_pending_tokens,
     select_deactivated_tokens,
     select_due_superseded_tokens,
     select_stale_tokens,
+    session_token_needs_rotation,
     touch_running_mcp_app_session,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -139,7 +142,7 @@ from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
-from daimon.core.usage_sweep import UsageSweepWatermark, sweep_headless_usage
+from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
 from mux.errors import ScopeViolation
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
@@ -171,6 +174,10 @@ async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnecti
     try:
         result = await conn.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": key})
         got = result.scalar_one()
+        # The lock is session-scoped and survives the commit. Leaving the
+        # autobegun transaction open would hold a snapshot for the process
+        # lifetime and block every CREATE INDEX CONCURRENTLY in migrations.
+        await conn.commit()
     except Exception:
         await conn.close()
         raise
@@ -347,7 +354,12 @@ async def _build_fire(
                 tenant_id=str(row.tenant_id),
             )
             async with sm() as s, s.begin():
-                await record_failure(s, row.id, error="balance_depleted")
+                await record_failure(
+                    s,
+                    row.id,
+                    error="balance_depleted",
+                    reason=TerminationReason.ADMISSION_BALANCE_DEPLETED,
+                )
             return
 
         # Bind routine context now; headless_runner calls the factory once
@@ -455,7 +467,12 @@ async def _build_fire(
                 channel_id=row.channel_id,
             )
             async with sm() as s, s.begin():
-                await record_failure(s, row.id, error="channel_budget_exceeded")
+                await record_failure(
+                    s,
+                    row.id,
+                    error="channel_budget_exceeded",
+                    reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+                )
             return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
@@ -520,6 +537,9 @@ async def _build_fire(
                 if fire_policy is not None
                 else None
             ),
+            # The owner's personal memory, read-only, only for a routine whose
+            # result goes to nobody else; decided again from the row each fire.
+            personal_memory=routine_answers_only_owner(row),
         )
 
         if row.destination_kind is None:
@@ -572,14 +592,13 @@ async def _sweep_headless_usage(
     sm: async_sessionmaker[AsyncSession],
     *,
     markup: Decimal,
-    watermark: UsageSweepWatermark,
 ) -> None:
-    """Backfill usage for headless MCP turns once. Boundary catch: a sweep
-    failure must not kill the scheduler — idempotent recording means the next
+    """Settle the headless sends nobody polled to the end, once. Boundary catch:
+    a failure must not kill the scheduler — idempotent recording means the next
     pass re-reads and records anything missed.
     """
     try:
-        await sweep_headless_usage(client, sm, markup=markup, watermark=watermark)
+        await sweep_headless_usage(client, sm, markup=markup)
     except (anthropic.APIError, SQLAlchemyError):
         # Named boundary: a sweep failure (upstream MA error OR a DB write that
         # trips a constraint, e.g. a stray foreign-tenant session) must not kill
@@ -649,33 +668,33 @@ async def _sweep_github_app_tokens(
         stale = await select_stale_tokens(session)
         stale.extend(await select_deactivated_tokens(session))
         stale.extend(await select_abandoned_pending_tokens(session))
-        stale_ids = {row.token_id for row in stale}
         due_superseded = await select_due_superseded_tokens(session)
-        natural_expired_ids = {
-            row.token_id
-            for row in due_superseded
-            if row.revoke_after is not None and row.revoke_after >= row.expires_at
-        }
         stale.extend(due_superseded)
     stale = list({row.token_id: row for row in stale}.values())
     async with httpx.AsyncClient() as github:
-        for row in stale:
-            if row.token_id in natural_expired_ids and row.token_id not in stale_ids:
-                # GitHub has already expired the token. No DELETE is needed.
-                async with sm.begin() as session:
-                    await mark_revoked(session, token_id=row.token_id)
-                continue
-            token = decrypt_issued_token(row, fernet=fernet)
-            if token is None:
-                continue
-            try:
-                await revoke_token(github, token)
-            except httpx.HTTPError:
-                async with sm.begin() as session:
-                    await record_revoke_attempt(session, token_id=row.token_id)
-                log.exception("scheduler.github_token_revoke.failed", token_id=str(row.token_id))
-                continue
-            async with sm.begin() as session:
+        for candidate in stale:
+            async with (
+                session_mutation_fence(sm, candidate.session_id, check=False),
+                sm.begin() as session,
+            ):
+                checked = await recheck_token_revoke_due(
+                    session, token_id=candidate.token_id, now=datetime.now(UTC)
+                )
+                if checked is None:
+                    continue
+                row, naturally_expired = checked
+                if not naturally_expired:
+                    token = decrypt_issued_token(row, fernet=fernet)
+                    if token is None:
+                        continue
+                    try:
+                        await revoke_token(github, token)
+                    except httpx.HTTPError:
+                        await record_revoke_attempt(session, token_id=row.token_id)
+                        log.exception(
+                            "scheduler.github_token_revoke.failed", token_id=str(row.token_id)
+                        )
+                        continue
                 await mark_revoked(session, token_id=row.token_id)
                 await append_github_token_event(
                     session,
@@ -755,7 +774,9 @@ async def _refresh_github_app_sessions(
         live = await list_live_app_sessions(session)
     for candidate in live:
         session_id = candidate.mapping.ma_session_id
-        due_for_expiry = candidate.expires_at <= now + timedelta(minutes=15)
+        due_for_expiry = candidate.expires_at is None or candidate.expires_at <= now + timedelta(
+            minutes=15
+        )
         last_check = _last_app_access_checks.get(session_id)
         due_for_access = last_check is None or last_check <= now - timedelta(minutes=5)
         if not due_for_expiry and not due_for_access:
@@ -785,7 +806,7 @@ async def _refresh_github_app_sessions(
                     tenant_id=item.mapping.tenant_id,
                     agent_id=item.agent_id,
                     account_id=item.mapping.account_id,
-                    is_external=False,
+                    is_external=item.mapping.is_external,
                     config=settings.github_app,
                     fernet=fernet,
                     mounted_only=True,
@@ -815,7 +836,11 @@ async def _refresh_github_app_sessions(
                     for repo_id, current in item.permissions_by_repo.items()
                     for key, value in current.items()
                 )
-                if not due_for_expiry and not narrowed:
+                async with sm() as session:
+                    changed_token = await session_token_needs_rotation(
+                        session, session_id=session_id
+                    )
+                if not due_for_expiry and not narrowed and not changed_token:
                     _last_app_access_checks[session_id] = now
                     _app_refresh_failures.pop(session_id, None)
                     continue
@@ -826,7 +851,7 @@ async def _refresh_github_app_sessions(
                     tenant_id=item.mapping.tenant_id,
                     agent_id=item.agent_id,
                     account_id=item.mapping.account_id,
-                    is_external=False,
+                    is_external=item.mapping.is_external,
                     vault_id=snapshot.vault_id,
                     resource_ids=snapshot.repo_resource_ids,
                     config=settings.github_app,
@@ -916,7 +941,7 @@ async def _refresh_github_app_sessions(
                     tenant_id=current.tenant_id,
                     agent_id=current.agent_id,
                     account_id=current.account_id,
-                    is_external=False,
+                    is_external=current.is_external,
                     config=settings.github_app,
                     fernet=fernet,
                     mounted_only=True,
@@ -931,11 +956,15 @@ async def _refresh_github_app_sessions(
                     for repo_id, permissions in current.permissions_by_repo.items()
                     for key, value in permissions.items()
                 )
-                if not due_for_expiry and not narrowed:
+                async with sm() as session:
+                    changed_token = await session_token_needs_rotation(
+                        session, session_id=current.session_id
+                    )
+                if not due_for_expiry and not narrowed and not changed_token:
                     _last_app_access_checks[current.session_id] = now
                     _app_refresh_failures.pop(current.session_id, None)
                     continue
-                if current.expires_at is not None or current.repo_urls:
+                if current.expires_at is not None or current.repo_urls or desired_permissions:
                     await rotate_live_app_tokens(
                         anthropic_client,
                         sm,
@@ -943,7 +972,7 @@ async def _refresh_github_app_sessions(
                         tenant_id=current.tenant_id,
                         agent_id=current.agent_id,
                         account_id=current.account_id,
-                        is_external=False,
+                        is_external=current.is_external,
                         vault_id=current.vault_id,
                         resource_ids=current.repo_resource_ids,
                         config=settings.github_app,
@@ -1094,10 +1123,10 @@ async def _run_loops(
     privacy deletion loop always runs, since a pending erasure must not wait on
     an unrelated setting.
 
-    A usage pass lists every session in the workspace and can outlast many
-    ticks; inline, routine claims waited for it. On stop the passes in flight
-    are cancelled: each model call commits on its own and an unfinished pass
-    leaves the watermark in place. An uncaught error in any loop ends all loops.
+    A usage pass settles whole session histories and can outlast many ticks;
+    inline, routine claims waited for it. On stop the passes in flight are
+    cancelled: each model call commits on its own and an unfinished session
+    keeps its settle request. An uncaught error in any loop ends all loops.
     """
     async with asyncio.TaskGroup() as loops:
         background = [
@@ -1210,7 +1239,6 @@ async def run(
     )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
-    usage_watermark = UsageSweepWatermark()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1237,9 +1265,7 @@ async def run(
             await _sweep_privacy_deletes(client, sm)
             await _usage_sweep_once(
                 enabled=scheduler_settings.usage_sweep_enabled,
-                sweep=lambda: _sweep_headless_usage(
-                    client, sm, markup=settings.billing.markup, watermark=usage_watermark
-                ),
+                sweep=lambda: _sweep_headless_usage(client, sm, markup=settings.billing.markup),
             )
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
@@ -1295,9 +1321,7 @@ async def run(
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
 
         async def usage_sweep() -> None:
-            await _sweep_headless_usage(
-                client, sm, markup=settings.billing.markup, watermark=usage_watermark
-            )
+            await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
 
         async def privacy_sweep() -> None:
             await _sweep_privacy_deletes(client, sm)

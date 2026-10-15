@@ -17,7 +17,7 @@ from mux.errors import ScopeViolation
 async def main_download(client, *, skill_id, version):
     # Unchanged main #494 algorithm: lazy lookup, native ID, omitted beta header.
     version_id = None
-    async for row in client.beta.skills.versions.list(skill_id=skill_id):
+    async for row in client.beta.skills.versions.list(skill_id=skill_id, limit=100):
         if row.version == version:
             version_id = row.id
             break
@@ -46,7 +46,7 @@ def script(case):
             "GET",
             path,
             httpx.Response(200, json={"data": first, "next_page": cursor}),
-            query=(("beta", "true"),),
+            query=(("beta", "true"), ("limit", "100")),
         )
     )
     if case == "second":
@@ -55,7 +55,7 @@ def script(case):
                 "GET",
                 path,
                 httpx.Response(200, json={"data": [target], "next_page": "unused"}),
-                query=(("beta", "true"), ("page", "second")),
+                query=(("beta", "true"), ("limit", "100"), ("page", "second")),
             )
         )
     if case in {"early", "second"}:

@@ -238,6 +238,24 @@ async def list_referenced_skill_ids(client: AsyncAnthropic) -> set[str]:
     return referenced
 
 
+async def list_agents_referencing_skill(
+    client: AsyncAnthropic, skill_id: str
+) -> list[BetaManagedAgentsAgent]:
+    """Every non-archived agent pinning `skill_id`, in any tenant (org-wide).
+
+    The cross-tenant read is the point: skills are org-wide, so a delete must
+    see every agent that would fail without the skill. Callers decide which of
+    these agents a reader may see named.
+    """
+    return [
+        ag
+        async for ag in list_agents(
+            client, include_archived=False, scope=platform_scope("defaults.ma_index")
+        )
+        if any(skill.skill_id == skill_id for skill in ag.skills)
+    ]
+
+
 async def list_environments_by_tenant(
     client: AsyncAnthropic, *, tenant_id: uuid.UUID
 ) -> list[BetaEnvironment]:

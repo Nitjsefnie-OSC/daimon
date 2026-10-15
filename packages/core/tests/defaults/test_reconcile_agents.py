@@ -245,7 +245,11 @@ async def test_reconcile_agent_appends_default_mcp_when_public_url_set_on_create
     client = build_fake_anthropic_http(router.dispatch)
 
     outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+        client,
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        public_url=_DEFAULT_MCP_URL,
     )
     assert outcome.action is Action.CREATED, "create path must fire when no MA match"
     mcp_servers = created_payload.get("mcp_servers")
@@ -316,7 +320,11 @@ async def test_reconcile_agent_preserves_author_mcp_and_appends_default_on_updat
     client = build_fake_anthropic_http(router.dispatch)
 
     outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+        client,
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        public_url=_DEFAULT_MCP_URL,
     )
     assert outcome.action is Action.UPDATED, "update path must fire when MA match found"
     mcp_servers = updated_payload.get("mcp_servers")
@@ -359,7 +367,11 @@ async def test_reconcile_agent_is_idempotent_when_default_already_in_spec() -> N
     client = build_fake_anthropic_http(router.dispatch)
 
     outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+        client,
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        public_url=_DEFAULT_MCP_URL,
     )
     assert outcome.action is Action.CREATED, "create path must fire when no MA match"
     mcp_servers = created_payload.get("mcp_servers", [])
@@ -664,7 +676,11 @@ async def test_reconcile_agent_preserves_user_attached_mcp_on_update() -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+        client,
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        public_url=_DEFAULT_MCP_URL,
     )
     assert outcome.action is Action.UPDATED
 
@@ -735,7 +751,11 @@ async def test_reconcile_agent_spec_wins_on_mcp_name_collision() -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+        client,
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        public_url=_DEFAULT_MCP_URL,
     )
     sent_mcp = updated_payload.get("mcp_servers", [])
     daimon_entries = [m for m in sent_mcp if m.get("name") == "daimon-mcp"]
@@ -976,7 +996,11 @@ async def test_reconcile_agent_bypasses_skipped_and_repairs_corrupted_daimon_mcp
     client = build_fake_anthropic_http(router.dispatch)
 
     outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+        client,
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        public_url=_DEFAULT_MCP_URL,
     )
     assert outcome.action is Action.UPDATED, (
         "corrupted daimon-mcp entry must bypass the L13 SKIPPED short-circuit"
@@ -1041,7 +1065,11 @@ async def test_reconcile_agent_stays_skipped_when_hash_matches_and_mcp_healthy()
     client = build_fake_anthropic_http(router.dispatch)
 
     outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+        client,
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        public_url=_DEFAULT_MCP_URL,
     )
     assert outcome.action is Action.SKIPPED, (
         "matching hash + healthy mcp_servers must short-circuit to SKIPPED (no perpetual churn)"
@@ -1153,7 +1181,11 @@ async def test_reconcile_agent_isolated_spec_gets_no_mcp_wiring_or_guidance() ->
     client = build_fake_anthropic_http(router.dispatch)
 
     outcome = await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+        client,
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        public_url=_DEFAULT_MCP_URL,
     )
     assert outcome.action is Action.CREATED
 
@@ -1215,7 +1247,11 @@ async def test_reconcile_agent_non_isolated_spec_still_gets_full_mcp_wiring() ->
     client = build_fake_anthropic_http(router.dispatch)
 
     await reconcile_agent(
-        client, spec, tenant_id=TENANT_ID, dry_run=False, public_url=_DEFAULT_MCP_URL
+        client,
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        public_url=_DEFAULT_MCP_URL,
     )
 
     mcp_servers = created_payload.get("mcp_servers")

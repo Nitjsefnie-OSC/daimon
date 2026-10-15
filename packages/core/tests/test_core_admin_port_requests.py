@@ -345,6 +345,10 @@ async def test_legacy_identity_lookup_keeps_partial_sdk_reply_and_one_request(
     if metadata:
         snapshot_backfill = AsyncMock()
         monkeypatch.setattr(session_preparation_stages, "record_snapshot", snapshot_backfill)
+        # The caller has no personal memory store, so the snapshot names none.
+        monkeypatch.setattr(
+            session_preparation_stages, "get_personal_memory_store_id", AsyncMock(return_value=None)
+        )
         recorded = await session_preparation_stages.recorded_snapshot(
             client, factory, existing=mapping, observed=result.observed
         )

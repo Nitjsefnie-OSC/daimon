@@ -118,6 +118,7 @@ async def create_blank_agent(
         # them sweep-eligible, so the next defaults apply (every boot/deploy)
         # archives them because they aren't in the seeded spec list.
         managed=False,
+        references=runtime.sessionmaker,
     )
     if outcome.anthropic_id is not None:
         queue_agent_face(

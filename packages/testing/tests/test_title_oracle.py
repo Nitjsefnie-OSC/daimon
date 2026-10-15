@@ -224,7 +224,7 @@ async def test_frozen_title_real_gateway_and_roundtrip_probes(
             assert judge(name, backend, None).status == "PENDING"
             if name == SCENARIOS[0]:
                 assert not receipt.naming_calls
-                assert result.actual_thread_name == "Chat with qa-agent"
+                assert result.actual_thread_name == "Chat with daimon"  # the bot, never the agent
                 return
             for kind in MUTATIONS:
                 raw = json.loads(receipt.model_dump_json())

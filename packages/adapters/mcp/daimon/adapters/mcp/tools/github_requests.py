@@ -180,8 +180,7 @@ async def request_github_access_impl(
             )
         linked_login = await account_link_status(session, account_id=origin.account_id)
         broken_link = await account_link_is_broken(session, account_id=origin.account_id)
-    rank = {"none": 0, "read": 1, "write": 2}
-    grant_covers = grant is not None and rank[grant.ceiling_access] >= rank[required_ability]
+    grant_covers = grant is not None and grant.ceiling_access == "write"
     personal_case = grant_covers and not linked_login
     if (
         auth.is_admin
@@ -201,8 +200,7 @@ async def request_github_access_impl(
                 fernet=runtime.fernet,
             )
             if f"https://github.com/{connected.repo_full_name}" in names and (
-                required_ability == "read"
-                or permissions.get(connected.repo_id, {}).get("contents") == "write"
+                permissions.get(connected.repo_id, {}).get("contents") == "write"
             ):
                 return GitHubRequestResult(
                     status="ready", message="GitHub access is ready. Continue the request."
@@ -228,7 +226,7 @@ async def request_github_access_impl(
                 agent_name=origin.responder_name,
                 repo_name=repo_name,
                 requested_work=remaining_work,
-                required_ability=required_ability,
+                required_ability="write",
                 is_admin=asker_is_admin,
             )
     except ValueError as error:
@@ -283,7 +281,7 @@ async def request_github_access_impl(
             status="waiting", message="I've asked an admin.", request_id=request.id
         )
     connected_names = (connected.repo_full_name,) if connected is not None else ()
-    ability = required_ability
+    ability: Literal["write"] = "write"
     if asker_is_admin:
         card = requester_card(
             request,
@@ -366,7 +364,6 @@ def register_github_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         origin_context_id: str,
         repo_name: str,
-        required_ability: Literal["read", "write"],
         remaining_work: str,
     ) -> GitHubRequestResult:
         """Ask for token access to a repo needed for this agent's current request.
@@ -385,6 +382,6 @@ def register_github_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             await _auth(ctx),
             origin_context_id=origin_context_id,
             repo_name=repo_name,
-            required_ability=required_ability,
+            required_ability="write",
             remaining_work=remaining_work,
         )

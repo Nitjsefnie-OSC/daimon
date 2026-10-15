@@ -2,7 +2,7 @@
 
 UPSERT on principal_id: re-OAuth replaces the row with fresh
 github_login + encrypted_token + scopes and bumps updated_at. No
-try/except — DB exceptions propagate to the route boundary in Plan 05.
+try/except — DB exceptions propagate to the route boundary.
 """
 
 from __future__ import annotations

@@ -126,6 +126,19 @@ def routine_destination_channel(row: RoutineRow) -> str | None:
     return _channel_in_thread_id(row.destination_id) or row.destination_id
 
 
+def routine_answers_only_owner(row: RoutineRow) -> bool:
+    """Whether a routine's result reaches nobody but its owner: its owner's DM.
+
+    A routine's result is posted to its destination (a channel or thread), or
+    by DM to its owner when it cannot post there. One with no destination and
+    no channel (made in a DM, or with no origin) posts nowhere: its result is
+    the owner's alone, read in their own DM or routine panels. Only such a
+    routine may read its owner's personal memory. Decided from the row at each
+    fire, so a destination added later stops it at the next run.
+    """
+    return row.destination_kind is None and row.destination_id is None and row.channel_id is None
+
+
 def is_routine_parent_unknown(row: RoutineRow) -> bool:
     """A thread destination saved before its parent channel was recorded, whose id
     doesn't carry it (a Discord thread; a Slack one is ``channel:ts``, a Teams one

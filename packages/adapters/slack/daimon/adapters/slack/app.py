@@ -25,7 +25,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import resolve_admin_status
+from daimon.adapters.slack.admin import resolve_admin_status, resolve_requester
 from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
@@ -705,7 +705,7 @@ class SlackApp:
         )
         received_before_drain = is_app_mention and not self.draining
 
-        # view_submission acks WITH the computed response_action payload (Pattern 2).
+        # view_submission acks WITH the computed response_action payload.
         # evaluate_delete_submission is PURE (no I/O), safe to call before the ack.
         # All other envelope types fall through to the unconditional empty ack below.
         if req.type == "interactive" and payload.get("type") == "view_submission":
@@ -885,7 +885,7 @@ class SlackApp:
 
                     self._spawn(_run_agent_setup_submission())
             elif cb_id.startswith("credential_request__"):
-                # Pure pre-ack evaluation (Pattern 2, as feedback/agent_setup).
+                # Pure pre-ack evaluation (as feedback/agent_setup).
                 _cred_decision = evaluate_credential_submission(payload)
                 await client.send_socket_mode_response(
                     SocketModeResponse(
@@ -1424,7 +1424,7 @@ class SlackApp:
             # Mentions that arrive during the drain window are acked by on_request
             # (ack-first is unconditional) but dropped here before the dedup insert.
             # Slack considers them delivered; they will not be redelivered to the
-            # replacement instance — this is inherent to ack-first + drain (IN-02).
+            # replacement instance — this is inherent to ack-first + drain.
             return
 
         await self._wait_for_orphan_recovery()
@@ -1470,12 +1470,11 @@ class SlackApp:
                 return
 
             # (3) PER-EVENT CLIENT — decrypt and construct; NEVER cache on self/runtime.
-            fernet = build_multifernet(
-                tuple(k.get_secret_value() for k in self.runtime.settings.crypto.keys)
-            )
-            token = decrypt_token(fernet, row.encrypted_token)
+            token = decrypt_token(self.runtime.fernet, row.encrypted_token)
             client = AsyncWebClient(  # per-event only
-                token=token, retry_handlers=build_retry_handlers()
+                token=token,
+                retry_handlers=build_retry_handlers(),
+                session=self.runtime.slack_http,
             )
 
             # (4) EXPLICIT MENTION GATE — Slack has been observed delivering
@@ -1703,7 +1702,7 @@ class SlackApp:
         # (1) Per-thread queue check — queued mentions don't consume a slot.
         if thread_key in self._processing:
             # Append before awaiting reactions_add so a Slack API error on the
-            # reaction call does not drop the enqueued event (WR-05).
+            # reaction call does not drop the enqueued event.
             self._pending.setdefault(thread_key, []).append(event)
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, asyncio.TimeoutError):
                 await web_client.reactions_add(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
@@ -2034,21 +2033,22 @@ class SlackApp:
         # call.
         account = responder_account(await self._bot_user_id(team_id, web_client))
         # --- Live admin lookup: one users.info per turn, before admit().
-        # admin_status distinguishes "not an admin" (False) from "lookup failed"
-        # (None) so the role write below can skip on failure rather than
-        # demoting a real admin on a transient Slack error. is_admin is the
-        # single local Task 2's context builders also consume — a second lookup
+        # requester is None on "lookup failed", distinct from "not an admin",
+        # so the role write below can skip on failure rather than demoting a
+        # real admin on a transient Slack error. is_admin and author_name are
+        # the local values the context builders also consume — a second lookup
         # would violate the one-call-per-turn constraint.
         author_id = str(event.get("user") or "")
-        admin_status = await resolve_admin_status(web_client, user_id=author_id)
-        if admin_status is None:
+        requester = await resolve_requester(web_client, user_id=author_id)
+        if requester is None:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                 channel=channel,
                 thread_ts=thread_id,
                 text="I couldn't verify your workspace role. Please retry; no turn was started.",
             )
             return
-        is_admin = admin_status
+        is_admin = requester.is_admin
+        author_name = requester.display_name
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
@@ -2218,6 +2218,7 @@ class SlackApp:
             thread_ts=thread_id,
             cancel=cancel_event,
             author_id=str(event.get("user") or ""),
+            requester_is_admin=is_admin,
             notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
             is True,
             trigger_ts=str(event.get("ts") or "") or None,
@@ -2575,6 +2576,7 @@ class SlackApp:
                         ),
                         author_id=author_id,
                         is_admin=is_admin,
+                        author_name=author_name,
                         proxy=proxy_ctx,
                         key_names=key_names,
                     )
@@ -2585,6 +2587,7 @@ class SlackApp:
                     user_query=user_text,
                     author_id=author_id,
                     is_admin=is_admin,
+                    author_name=author_name,
                     proxy=proxy_ctx,
                     key_names=key_names,
                     page_limit=self._history_page_limit(),
@@ -2603,6 +2606,7 @@ class SlackApp:
                     user_query=user_text,
                     author_id=author_id,
                     is_admin=is_admin,
+                    author_name=author_name,
                     proxy=proxy_ctx,
                     key_names=key_names,
                     page_limit=self._history_page_limit(),
@@ -2703,6 +2707,7 @@ class SlackApp:
                     thread_ts=thread_id,
                     cancel=cancel,
                     author_id=str(event.get("user") or ""),
+                    requester_is_admin=is_admin,
                     notify_on_completion=self.runtime.settings.completion_pings.get(
                         tenant_id, False
                     )
@@ -2877,7 +2882,7 @@ class SlackApp:
 
             # --- Watermark --- Preserves Slack's original gate exactly (unconditional
             # on final_ts, no state.error branch) -- Discord's inline sequence had an
-            # error-vs-success split here, but that is NOT one of SPEC Req 7's four
+            # error-vs-success split here, but that is NOT one of the spec's four
             # named behaviour changes, so it is not introduced for Slack either.
             if mapping_id is not None and final_lifecycle.final_ts is not None:
                 async with self.runtime.sessionmaker() as s:
@@ -3171,6 +3176,7 @@ class SlackApp:
             thread_ts=thread_id,
             cancel=follow_cancel,
             author_id=row.requester_external_user_id,
+            requester_is_admin=role is Role.ADMIN,
             notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
             is True,
             agent_name=follow_admission.agent.name,
@@ -3268,6 +3274,7 @@ class SlackApp:
                 thread_ts=thread_id,
                 cancel=cancel,
                 author_id=row.requester_external_user_id,
+                requester_is_admin=role is Role.ADMIN,
                 notify_on_completion=self.runtime.settings.completion_pings.get(tenant_id, False)
                 is True,
                 agent_name=follow_admission.agent.name,

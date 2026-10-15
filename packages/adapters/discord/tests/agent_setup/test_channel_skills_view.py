@@ -49,6 +49,8 @@ def _runtime(sessionmaker: object) -> DiscordRuntime:
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/skills/skill_lib":  # the attach's existence check
+            return httpx.Response(200, json=skill)
         rows = [skill] if request.url.path == "/v1/skills" else []
         return httpx.Response(200, json={"data": rows, "next_page": None})
 

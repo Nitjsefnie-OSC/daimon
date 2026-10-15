@@ -6,7 +6,7 @@ what new text arrived and is the turn over. ``run_turn`` is the thin
 imperative shell around it — the only place that calls the seam, sleeps, or
 touches the clock or the database.
 
-**The done rule** (SPEC D-07, §1.3): a turn is finished only when a
+**The done rule**: a turn is finished only when a
 ``session.status_idle`` event survives the boundary filter, or
 ``get_my_session`` reports ``terminated``. A bare ``status == "idle"`` is
 never trusted — right after a send the session has not started yet and
@@ -16,7 +16,7 @@ idle status and ended a follow-up question in three seconds with nothing.
 
 The budget reserved at turn start is reconciled against the seam's real cost
 on ANY terminal path — idle, terminated, cancelled-at-deadline, or a bundle
-push failure — never only on the clean one (SPEC D-06). Every reconciling
+push failure — never only on the clean one. Every reconciling
 call funnels through the single ``_settle_reservation`` helper below.
 """
 
@@ -39,6 +39,7 @@ from report_host.mcp_client import (
     SeamClient,
     SeamError,
     SeamUnauthorizedError,
+    SkillGoneError,
 )
 from report_host.reports_store import ReportRow
 from report_host.threads_store import ThreadRow
@@ -57,6 +58,10 @@ _CAP_REACHED_MESSAGE = (
 )
 _UNAUTHORIZED_MESSAGE = (
     "This report's connection to daimon has expired; ask the publisher to re-publish it."
+)
+_SKILL_GONE_MESSAGE = (
+    "This report uses a skill that has since been deleted, so it can't answer; "
+    "ask the publisher to re-publish it."
 )
 _REPORT_MISSING_MESSAGE = "This report could not be found; ask the publisher to re-publish it."
 _DEADLINE_MESSAGE = (
@@ -174,7 +179,7 @@ def _resolve_archive_path(*, settings: Settings, report: ReportRow) -> Path | No
 
     Returns ``None`` — never raises — when the path is null, is not on the
     volume, or resolves outside ``settings.data_dir``: the corrupted-row case
-    (T-21-14-H) a hand-edited database row could otherwise turn into reading
+    a hand-edited database row could otherwise turn into reading
     an arbitrary file. The caller takes the missing-archive branch on
     ``None`` rather than trusting the path.
     """
@@ -421,7 +426,9 @@ async def run_turn(
             thread_id=thread.id,
             role="system",
             text=(
-                f"daimon could not answer this ({type(err).__name__}). "
+                _SKILL_GONE_MESSAGE
+                if isinstance(err, SkillGoneError)
+                else f"daimon could not answer this ({type(err).__name__}). "
                 "Ask again; if it repeats, tell the report's publisher."
             ),
             now=now(),

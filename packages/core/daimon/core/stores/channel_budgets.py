@@ -89,6 +89,39 @@ async def set_channel_budget(
     return ChannelBudgetRow.model_validate(orm)
 
 
+async def raise_channel_budget(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    amount_usd: Decimal,
+) -> ChannelBudgetRow | None:
+    """Add ``amount_usd`` to the channel's limit in one statement; None when it has no budget.
+
+    A raised limit may lift the channel out of its exhausted state, so the
+    exhausted notice may go out again.
+    """
+    stmt = (
+        update(ChannelBudget)
+        .where(
+            ChannelBudget.tenant_id == tenant_id,
+            ChannelBudget.platform == platform,
+            ChannelBudget.channel_id == channel_id,
+        )
+        .values(
+            limit_usd=ChannelBudget.limit_usd + amount_usd,
+            updated_at=func.now(),
+            exhausted_notice_key=None,
+        )
+        .returning(ChannelBudget)
+        .execution_options(populate_existing=True)
+    )
+    orm = (await session.execute(stmt)).scalar_one_or_none()
+    await session.flush()
+    return None if orm is None else ChannelBudgetRow.model_validate(orm)
+
+
 async def delete_channel_budget(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
 ) -> bool:

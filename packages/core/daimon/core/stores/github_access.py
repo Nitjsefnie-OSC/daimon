@@ -17,7 +17,7 @@ from daimon.core._models import (
 from daimon.core.stores import agent_repo_binding
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import ColumnElement, or_, select
+from sqlalchemy import ColumnElement, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -32,6 +32,7 @@ class AuthorizedRepo(BaseModel):
     max_access: Literal["read", "write"]
     authorized_by_github_user_id: int
     authorized_by_account_id: uuid.UUID | None
+    authorized_permission: str | None = None
     authorized_at: datetime
     status: Literal["active", "suspended", "revoked"]
     status_reason: str | None
@@ -51,6 +52,20 @@ class AgentGrant(BaseModel):
     granted_by_account_id: uuid.UUID | None
     granted_at: datetime
     version: int
+
+
+class SecondInstallationError(ValueError):
+    """A grant would make one agent use two GitHub installations."""
+
+
+async def lock_agent_grants(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> None:
+    """Serialize grant creation even when the agent has no grant row yet."""
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"github-agent-grants:{tenant_id}:{agent_id}"},
+    )
 
 
 def _visible_to(agent_id: uuid.UUID | None) -> ColumnElement[bool]:
@@ -304,6 +319,7 @@ async def remove_agent_repo(
     only is disconnected too, since no other agent may use it; adding it back
     needs a new Connect. A server-wide repo stays connected for other agents.
     """
+    await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     working = await session.get(
         AgentGitHubGrant, (tenant_id, agent_id, repo_id), with_for_update=True
     )
@@ -395,6 +411,7 @@ async def stage_grant(
     granted_by_account_id: uuid.UUID | None,
     mount_path: str | None = None,
     is_working_repo: bool = False,
+    agent_name: str | None = None,
 ) -> AgentGrant:
     """Stage or update a grant. The caller owns the transaction and authorizes the actor."""
     if _ACCESS_RANK[baseline_access] > _ACCESS_RANK[ceiling_access]:
@@ -403,6 +420,7 @@ async def stage_grant(
         not mount_path.startswith("/workspace/") or ".." in mount_path.split("/")
     ):
         raise ValueError("mount path must be inside /workspace")
+    await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     authorized = await repo_for_agent(
         session, tenant_id=tenant_id, repo_id=repo_id, agent_id=agent_id, for_update=True
     )
@@ -412,8 +430,20 @@ async def stage_grant(
     installation = await session.get(GitHubAppInstallation, authorized.installation_id)
     if installation is None or installation.suspended_at is not None:
         raise ValueError("GitHub App installation is not active")
-    if _ACCESS_RANK[ceiling_access] > _ACCESS_RANK[authorized.max_access]:
-        raise ValueError("ceiling access exceeds repository authorization")
+    for grant in await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id):
+        if grant.repo_id == repo_id:
+            continue
+        other = await repo_for_agent(
+            session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
+        )
+        if other is not None and other.installation_id != authorized.installation_id:
+            org = other.repo_full_name.split("/", 1)[0]
+            raise SecondInstallationError(
+                f"{agent_name or agent_id} already uses repos from {org}. "
+                "Connect repos from one GitHub org per agent."
+            )
+    baseline_access = "write"
+    ceiling_access = "write"
     app_active = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_id) == "app"
     if is_working_repo:
         working = await session.scalars(
@@ -439,6 +469,14 @@ async def stage_grant(
             granted_at=datetime.now().astimezone(),
         )
         session.add(row)
+    elif (
+        row.baseline_access == baseline_access
+        and row.ceiling_access == ceiling_access
+        and row.staged == (not app_active)
+        and row.mount_path == mount_path
+        and row.is_working_repo == is_working_repo
+    ):
+        return AgentGrant.model_validate(row)
     else:
         row.version += 1
     row.baseline_access = baseline_access
@@ -472,6 +510,7 @@ async def remove_grant(
     repo_id: int,
     changed_by_account_id: uuid.UUID | None = None,
 ) -> bool:
+    await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
     row = await session.get(AgentGitHubGrant, (tenant_id, agent_id, repo_id), with_for_update=True)
     if row is None:
         return False
@@ -493,6 +532,63 @@ async def remove_grant(
     return True
 
 
+async def _keep_legacy_working_repo(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    grants: list[AgentGitHubGrant],
+    changed_by_account_id: uuid.UUID | None,
+) -> None:
+    """Carry a legacy agent's working repo over as the App working-repo grant.
+
+    App mode ignores the legacy repo binding and mounts only the grant marked
+    as the working repo, so an agent switched over without one silently stops
+    mounting its repo. A working repo chosen in the same flow wins: this acts
+    only when no grant is marked, and only when exactly one grant is the
+    binding's repo.
+    """
+    if any(grant.is_working_repo for grant in grants):
+        return
+    binding = await agent_repo_binding.get_binding(session, tenant_id=tenant_id, agent_id=agent_id)
+    if binding is None:
+        return
+    wanted = (
+        binding.repo_url.removeprefix("https://github.com/")
+        .removeprefix("http://github.com/")
+        .removeprefix("github.com/")
+        .rstrip("/")
+        .removesuffix(".git")
+        .rstrip("/")
+        .casefold()
+    )
+    matches: list[AgentGitHubGrant] = []
+    for grant in grants:
+        repo = await repo_for_agent(
+            session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
+        )
+        if repo is not None and repo.repo_full_name.casefold() == wanted:
+            matches.append(grant)
+    if len(matches) != 1:
+        return
+    matches[0].is_working_repo = True
+    matches[0].version += 1
+    await session.flush()
+    await append_event(
+        session,
+        tenant_id=tenant_id,
+        account_id=changed_by_account_id,
+        agent_id=agent_id,
+        platform=None,
+        platform_user_id=None,
+        tool_name="github_grants",
+        operation="github_grant",
+        outcome="allowed",
+        reason="working repo kept from legacy binding",
+        github_repo_ids=[matches[0].repo_id],
+    )
+
+
 async def activate_agent(
     session: AsyncSession,
     *,
@@ -506,20 +602,19 @@ async def activate_agent(
         mode = AgentGitHubMode(tenant_id=tenant_id, agent_id=agent_id, mode="legacy")
         session.add(mode)
         await session.flush()
-    grants = await session.scalars(
-        select(AgentGitHubGrant)
-        .where(AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id)
-        .with_for_update()
+    switching = mode.mode != "app"
+    grants = list(
+        await session.scalars(
+            select(AgentGitHubGrant)
+            .where(AgentGitHubGrant.tenant_id == tenant_id, AgentGitHubGrant.agent_id == agent_id)
+            .with_for_update()
+        )
     )
     for grant in grants:
         authorized = await repo_for_agent(
             session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
         )
-        if (
-            authorized is None
-            or authorized.status != "active"
-            or (_ACCESS_RANK[grant.ceiling_access] > _ACCESS_RANK[authorized.max_access])
-        ):
+        if authorized is None or authorized.status != "active":
             raise ValueError("staged grant is no longer authorized")
         installation = await session.get(GitHubAppInstallation, authorized.installation_id)
         if installation is None or installation.suspended_at is not None:
@@ -527,6 +622,14 @@ async def activate_agent(
         if grant.staged:
             grant.staged = False
             grant.version += 1
+    if switching:
+        await _keep_legacy_working_repo(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            grants=grants,
+            changed_by_account_id=changed_by_account_id,
+        )
     mode.mode = "app"
     await session.flush()
     await append_event(

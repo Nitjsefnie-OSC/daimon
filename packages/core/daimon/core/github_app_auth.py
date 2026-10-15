@@ -14,6 +14,8 @@ Pure functions:
 Shell functions (injected httpx):
   mint_installation_token — POST to GitHub to exchange an App JWT for an
     installation access token; raises on non-2xx (never swallows).
+  get_bot_identity — GET the App's bot user (``<slug>[bot]``) and build the git
+    commit identity GitHub links to it; returns None on 404.
   get_installation_id_for_repo — GET the App installation id for a repo;
     returns None on 404 (App not installed — a routing signal), raises on
     any other non-2xx (never swallows a real error).
@@ -24,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, cast
 
@@ -66,6 +68,16 @@ class AppInstallationDetails:
     account_type: str
     repository_selection: Literal["all", "selected"]
     suspended_at: datetime | None
+    permissions: Mapping[str, str] = field(default_factory=dict[str, str])
+
+
+def installation_supports_write(permissions: Mapping[str, str]) -> bool:
+    """True when `permissions` covers the write profile (contents, issues, pull requests)."""
+    rank = {"read": 1, "write": 2, "admin": 3}
+    return all(
+        rank.get(permissions.get(name, ""), 0) >= rank[level]
+        for name, level in WRITE_PERMISSIONS.items()
+    )
 
 
 class _InstallationAccount(BaseModel):
@@ -79,6 +91,7 @@ class _InstallationDetailsResponse(BaseModel):
     account: _InstallationAccount
     repository_selection: Literal["all", "selected"]
     suspended_at: datetime | None = None
+    permissions: dict[str, str] = Field(default_factory=dict)
 
 
 async def get_app_installation_details(
@@ -104,7 +117,39 @@ async def get_app_installation_details(
         account_type=body.account.type,
         repository_selection=body.repository_selection,
         suspended_at=body.suspended_at,
+        permissions=body.permissions,
     )
+
+
+@dataclass(frozen=True)
+class BotIdentity:
+    """The git commit identity of a GitHub App's bot user."""
+
+    name: str
+    email: str
+
+
+async def get_bot_identity(http_client: httpx.AsyncClient, *, slug: str) -> BotIdentity | None:
+    """Build the commit identity of the App's bot user, or None when GitHub has no such user.
+
+    GitHub attributes a commit to the bot only when its email is
+    ``<bot-user-id>+<slug>[bot]@users.noreply.github.com``, so the numeric id
+    is read from the public ``GET /users/<slug>[bot]`` (no credential needed).
+    The slug is validated at settings load, so it is safe to put in a URL.
+    """
+    login = f"{slug}[bot]"
+    response = await http_client.get(
+        f"https://api.github.com/users/{slug}%5Bbot%5D",
+        headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"},
+    )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    body: object = response.json()
+    bot_id = cast(dict[str, object], body).get("id") if isinstance(body, dict) else None
+    if not isinstance(bot_id, int) or isinstance(bot_id, bool) or bot_id <= 0:
+        raise ValueError(f"GitHub bot-user response has no numeric id ({login})")
+    return BotIdentity(name=login, email=f"{bot_id}+{login}@users.noreply.github.com")
 
 
 def group_repository_access(

@@ -92,7 +92,10 @@ async def test_legacy_replay_and_interrupt_forward_scope_and_match_original_sdk_
                 await io.interrupt(timeout_s=1)
             else:
                 events = [
-                    event async for event in client.beta.sessions.events.list(session_id="session")
+                    event
+                    async for event in client.beta.sessions.events.list(
+                        session_id="session", limit=100
+                    )
                 ]
                 stream = await client.beta.sessions.events.stream(session_id="session")
                 await client.beta.sessions.events.send(

@@ -652,6 +652,18 @@ async def list_vaults(
         yield BetaManagedAgentsVault.model_construct(_fields_set=None, **_mapping(record.native))
 
 
+async def retrieve_vault(
+    client: AsyncAnthropic, vault_id: str, *, scope: Scope
+) -> BetaManagedAgentsVault:
+    from anthropic.types.beta import BetaManagedAgentsVault
+
+    backend, port = _vault_port(client, scope=scope, vault_id=vault_id)
+    record = await legacy_call(
+        port.retrieve(scope, resource_ref(backend, "vault", vault_id, scope=scope))
+    )
+    return BetaManagedAgentsVault.model_construct(_fields_set=None, **_mapping(record.native))
+
+
 async def create_vault(
     client: AsyncAnthropic, display_name: str, *, scope: Scope
 ) -> BetaManagedAgentsVault:
@@ -869,6 +881,16 @@ async def create_memory_store(
     return BetaManagedAgentsMemoryStore.model_construct(_fields_set=None, **_mapping(record.native))
 
 
+async def retrieve_memory_store(
+    client: AsyncAnthropic, store_id: str, *, scope: Scope
+) -> BetaManagedAgentsMemoryStore:
+    backend, port = _memory_port(client, store_id, scope=scope)
+    record = await legacy_call(
+        port.retrieve(scope, resource_ref(backend, "memory_store", store_id, scope=scope))
+    )
+    return BetaManagedAgentsMemoryStore.model_construct(_fields_set=None, **_mapping(record.native))
+
+
 async def list_memory_entries(
     client: AsyncAnthropic, store_id: str, *, path_prefix: str, scope: Scope
 ) -> AsyncIterator[BetaManagedAgentsMemoryListItem]:
@@ -896,6 +918,26 @@ async def read_memory(
         )
     )
     return BetaManagedAgentsMemory.model_construct(_fields_set=None, **record.native)
+
+
+async def delete_memory(
+    client: AsyncAnthropic,
+    store_id: str,
+    memory_id: str,
+    *,
+    expected_content_sha256: str,
+    scope: Scope,
+) -> None:
+    backend, port = _memory_port(client, store_id, scope=scope)
+    await legacy_call(
+        port.delete_memory(
+            scope,
+            resource_ref(backend, "memory_store", store_id, scope=scope),
+            memory_id,
+            expected_content_sha256=expected_content_sha256,
+            key=str(uuid4()),
+        )
+    )
 
 
 async def delete_memory_store(client: AsyncAnthropic, store_id: str, *, scope: Scope) -> None:

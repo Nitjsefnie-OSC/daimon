@@ -6,10 +6,11 @@ executable record of that split is
 ``tests/parity/test_thread_naming_discord_only.py``.
 
 Functional core, imperative shell (`guideline:architecture`):
-``strip_mentions`` and ``parse_thread_name`` are pure; ``suggest_thread_name`` is the single I/O
-call, a plain ``messages.create`` like ``thread_classifier``. Metering is the caller's
-job (``usage_recording.record_thread_naming_usage``) because the caller
-owns the tenant and runs after the balance and cap gates.
+``strip_mentions``, ``parse_thread_name`` and ``fallback_thread_name`` are pure;
+``suggest_thread_name`` is the single I/O call, a plain ``messages.create`` like
+``thread_classifier``. Metering is the caller's job
+(``usage_recording.record_thread_naming_usage``) because the caller owns the tenant
+and runs after the balance and cap gates.
 """
 
 from __future__ import annotations
@@ -26,6 +27,28 @@ THREAD_NAMING_MODEL = "claude-haiku-4-5"
 THREAD_NAME_MAX_CHARS = 50
 _MAX_OUTPUT_TOKENS = 60
 _MENTION_RE = re.compile(r"<(?:@[!&]?|#)\d+>")
+# Titles that say nothing about the thread. Haiku answers some greetings with
+# one of these; the opening message itself makes a better title.
+_GENERIC_TITLES = frozenset(
+    {
+        "chat",
+        "chat with",
+        "conversation",
+        "general chat",
+        "general question",
+        "greeting",
+        "greetings",
+        "hello",
+        "help",
+        "help request",
+        "hey",
+        "hi",
+        "introduction",
+        "new chat",
+        "new conversation",
+        "question",
+    }
+)
 
 # Mirrors the prompt that has titled reliably in production. Two lessons from
 # the first version here: an escape hatch ("return NONE if unclear") was taken
@@ -98,11 +121,38 @@ def parse_thread_name(raw: str) -> str | None:
     title = first.strip("\"'“”‘’ ")
     if not title:
         return None
+    return _cut_at_word(title)
+
+
+def _cut_at_word(title: str) -> str:
     if len(title) <= THREAD_NAME_MAX_CHARS:
         return title
     head = title[:THREAD_NAME_MAX_CHARS]
+    if title[THREAD_NAME_MAX_CHARS] == " ":
+        return head.rstrip()  # the cap falls right after a whole word
     at_word = head.rsplit(" ", 1)[0].rstrip()
     return at_word or head
+
+
+def is_generic_thread_name(title: str) -> bool:
+    """True for a title that names nothing: a greeting, "Help request", or any "Chat with ..."."""
+    bare = title.strip().strip(" .!?,:;\"'").casefold()
+    return bare in _GENERIC_TITLES or bare.startswith("chat with ")
+
+
+def fallback_thread_name(text: str, *, default: str) -> str:
+    """Title used when no generated one is available: the opening message itself.
+
+    Takes the first non-empty line of ``text`` (mentions already stripped),
+    capitalises its first letter and cuts it at a word boundary. ``default``
+    covers a mention with nothing usable to quote. Never derived from an
+    agent's internal name: the thread title is the first thing a user reads.
+    """
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    title = " ".join(first.split())
+    if not title or is_generic_thread_name(title):
+        return default
+    return _cut_at_word(title[0].upper() + title[1:])
 
 
 async def suggest_thread_name(
@@ -116,7 +166,7 @@ async def suggest_thread_name(
     ``message_text`` must be non-empty; the caller skips a bare mention with
     no text and no file rather than paying for a call with nothing to title.
     SDK errors propagate: the adapter boundary decides what a failed
-    naming means (fall back to the static title).
+    naming means (fall back to the message-derived title).
     """
     response = await anthropic.messages.create(
         model=THREAD_NAMING_MODEL,

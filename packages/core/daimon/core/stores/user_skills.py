@@ -221,6 +221,16 @@ async def delete_uploaded_user_skills(
     return cast(CursorResult[Any], result).rowcount
 
 
+async def delete_user_skills_for_skill_id(session: AsyncSession, *, anthropic_id: str) -> int:
+    """Forget every row, in any tenant, that names a skill just deleted on Managed Agents.
+
+    A row's saved id is what an unchanged re-upload or sync re-attaches, so a
+    row naming a deleted skill would pin it again.
+    """
+    result = await session.execute(delete(UserSkill).where(UserSkill.anthropic_id == anthropic_id))
+    return cast(CursorResult[Any], result).rowcount
+
+
 async def delete_user_skills_for_principal(
     session: AsyncSession,
     *,

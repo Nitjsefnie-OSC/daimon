@@ -486,7 +486,7 @@ async def test_real_application_prepares_and_runs_using_builtin_runtime(
     async def forbidden_anthropic_backfill(*args: object, **kwargs: object) -> None:
         pytest.fail("foreign native sessions must not enter Anthropic billing catch-up")
 
-    monkeypatch.setattr("daimon.core.turn.run.reconcile_unbilled", forbidden_anthropic_backfill)
+    monkeypatch.setattr("daimon.core.turn.run.settle_session", forbidden_anthropic_backfill)
 
     result = await run_prepared_turn(
         application.deps,

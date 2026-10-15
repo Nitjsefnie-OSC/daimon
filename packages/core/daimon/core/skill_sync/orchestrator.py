@@ -69,7 +69,6 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import (
     create_skill,
-    delete_skill,
     publish_skill_version,
     retrieve_agent,
     update_agent,
@@ -88,6 +87,7 @@ from daimon.core.skill_sync.fetcher import (
     TarballTooLarge,
 )
 from daimon.core.skill_zip import canonical_zip_bytes
+from daimon.core.skills.attachments import delete_skill_unless_attached
 from daimon.core.specs import SkillRepo, merge_default_agent_toolset
 from daimon.core.stores.agent_repo_binding import get_tenant_repo_proof_kind
 from daimon.core.stores.agent_skill_repo_credentials import (
@@ -194,7 +194,7 @@ def _compute_skills_union_list(
 class SyncReport:
     synced: int = 0  # newly created skills on MA
     updated: int = 0  # new versions pushed to existing MA skills
-    deleted: int = 0  # orphan-deleted from MA + local (filled by 07b)
+    deleted: int = 0  # orphan-deleted from MA + local
     skipped_repos: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     failed_uploads: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     # (agent_name, reason) — attach step refused by MA (e.g. per-agent skill cap).
@@ -220,11 +220,11 @@ def _is_retryable_error(err: Exception) -> bool:
 class SyncRepoFailure(BaseModel):
     """Warning DTO for a repo or skill that failed during a sync run.
 
-    Consumed by the MCP envelope (Plan 02) and Discord toast (Plan 03).
+    Consumed by the MCP envelope and Discord toast.
 
     ``repo_url`` carries the repo URL for fetch-phase failures and the skill
     name for upload-phase failures (the repo URL is not cleanly derivable from
-    the skill name — Pitfall 4).
+    the skill name).
     """
 
     repo_url: str
@@ -240,7 +240,7 @@ def sync_report_failures(report: SyncReport) -> list[SyncRepoFailure]:
     Mapping rules:
     - ``skipped_repos`` tuples ``(repo_url, reason)`` → phase="fetch"
     - ``failed_uploads`` tuples ``(skill_name, reason)`` → phase="upload",
-      ``repo_url=skill_name`` (repo URL is not derivable; see Pitfall 4)
+      ``repo_url=skill_name`` (repo URL is not derivable)
     """
     failures: list[SyncRepoFailure] = []
     for repo_url, reason in report.skipped_repos:
@@ -409,7 +409,7 @@ async def _process_one(
                 raise DefaultsError(
                     f"duplicate-title collision resolved to a skill outside this tenant's "
                     f"namespace (tenant={str(tenant_id)[:8]}, recovered.display_title="
-                    f"{recovered.display_title!r}); push refused (#138)"
+                    f"{recovered.display_title!r}); push refused"
                 ) from err
             resp = await publish_skill_version(
                 anthropic_client,
@@ -612,7 +612,7 @@ async def sync_agent_skills(
         # Agent not found on MA — use agent_id=None (principal-default) only as
         # a safe fallback for public repos. Private repos will 404 as skipped_repos.
         resolved_agent_id = None
-    # WR-01: when the caller pre-selected a credential, it is the single authority —
+    # When the caller pre-selected a credential, it is the single authority —
     # do NOT re-resolve a per-agent PAT (that double-resolution is what silently
     # shadowed the App installation token).
     per_agent_credential: str | None = None
@@ -797,21 +797,38 @@ async def sync_agent_skills(
             principal_id=ledger_principal_id,
             agent_name=agent_name,
         )
-    for row in existing_rows:
-        if row.source_repo_url not in successfully_fetched:
-            continue
-        if row.name in pending:
-            continue
+    orphans = [
+        row
+        for row in existing_rows
+        if row.source_repo_url in successfully_fetched and row.name not in pending
+    ]
+    own_agent_ids: tuple[str, ...] = ()
+    if any(row.anthropic_id is not None for row in orphans):
+        owner = await _get_sync_target_agent(
+            anthropic_client=anthropic_client,
+            tenant_id=tenant_id,
+            agent_name=agent_name,
+            target_ma_agent_id=target_ma_agent_id,
+        )
+        own_agent_ids = (owner.id,) if owner is not None else ()
+    for row in orphans:
         # MA delete must succeed before the local row is removed: the row
         # intentionally survives an MA-delete failure so it is re-selected as
         # an orphan on the next sync (convergent retry, no new state).
+        # This agent's own pin goes with the skill, but another agent or a
+        # channel rule still using it keeps it (and its row) so their turns
+        # don't fail.
         if row.anthropic_id is not None:
             try:
-                await delete_skill(
-                    anthropic_client,
-                    row.anthropic_id,
-                    scope=resource_scope(tenant_id=str(tenant_id)),
-                )
+                async with sessionmaker() as session, session.begin():
+                    outcome = await delete_skill_unless_attached(
+                        anthropic_client,
+                        session,
+                        skill_id=row.anthropic_id,
+                        detach=False,
+                        own_agent_ids=own_agent_ids,
+                        scope=resource_scope(tenant_id=str(tenant_id)),
+                    )
             except anthropic.APIStatusError as err:
                 if err.status_code == 404:
                     # Already gone upstream — converges exactly like a
@@ -832,6 +849,16 @@ async def sync_agent_skills(
                     async with report_lock:
                         report.failed_uploads.append((row.name, str(err)))
                         report.retryable_failure |= _is_retryable_error(err)
+                    continue
+            else:
+                if not outcome.deleted:
+                    _log.info(
+                        "skill_sync.orphan_kept_in_use",
+                        name=row.name,
+                        anthropic_id=row.anthropic_id,
+                        agents=len(outcome.attachments.agents),
+                        channels=len(outcome.attachments.channels),
+                    )
                     continue
         async with sessionmaker() as session, session.begin():
             await delete_user_skill(

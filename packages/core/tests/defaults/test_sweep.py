@@ -22,10 +22,11 @@ from daimon.core.defaults.sweep import (
     sweep_removed_environments,
     sweep_removed_skills,
 )
-from daimon.core.errors import SkillsListTruncatedError
+from daimon.core.errors import DefaultsError, SkillsListTruncatedError
 from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 from daimon.testing.ma_models import ma_agent, ma_environment
+from sqlalchemy.ext.asyncio import AsyncSession
 
 TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 _T8 = str(TENANT_ID)[:8]
@@ -231,7 +232,7 @@ async def test_sweep_dry_run_environments() -> None:
     assert outcomes[0].action is Action.ARCHIVED, "dry_run env outcome must be ARCHIVED"
 
 
-async def test_sweep_deletes_removed_skills() -> None:
+async def test_sweep_deletes_removed_skills(db_session: AsyncSession) -> None:
     """Own-tenant skill not in present_names and unreferenced must be deleted.
 
     present_names carries canonical (tenant-prefixed) display titles.
@@ -282,7 +283,12 @@ async def test_sweep_deletes_removed_skills() -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sweep_removed_skills(
-        client, present_names={kept_title}, tenant_id=TENANT_ID, dry_run=False
+        client,
+        present_names={kept_title},
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        channel_skill_ids=(),
+        session=db_session,
     )
     assert [o.name for o in outcomes] == [gone_title], (
         "sweep must delete the removed canonical skill"
@@ -291,7 +297,7 @@ async def test_sweep_deletes_removed_skills() -> None:
     assert deleted == ["sk_1"], "skills.delete must have been called with sk_1"
 
 
-async def test_sweep_skips_non_daimon_skills() -> None:
+async def test_sweep_skips_non_daimon_skills(db_session: AsyncSession) -> None:
     """Skills with source='anthropic' are never sweep candidates."""
     other_skill = SkillListResponse(
         id="sk_other",
@@ -316,12 +322,17 @@ async def test_sweep_skips_non_daimon_skills() -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sweep_removed_skills(
-        client, present_names=set(), tenant_id=TENANT_ID, dry_run=False
+        client,
+        present_names=set(),
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        channel_skill_ids=(),
+        session=db_session,
     )
     assert outcomes == [], "non-daimon-system skills must not be swept"
 
 
-async def test_sweep_spares_skill_pinned_by_live_agent() -> None:
+async def test_sweep_spares_skill_pinned_by_live_agent(db_session: AsyncSession) -> None:
     """An own-tenant skill not in present_names but still pinned by an agent must be spared.
 
     The reference-guard (list_referenced_skill_ids) is the second belt: even if
@@ -357,13 +368,127 @@ async def test_sweep_spares_skill_pinned_by_live_agent() -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sweep_removed_skills(
-        client, present_names=set(), tenant_id=TENANT_ID, dry_run=False
+        client,
+        present_names=set(),
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        channel_skill_ids=(),
+        session=db_session,
     )
     assert outcomes == [], "sweep must spare a skill an agent still pins"
     assert deleted == [], "skills.delete must NOT be called for an agent-pinned skill"
 
 
-async def test_sweep_deletes_orphaned_skill_not_pinned_by_any_agent() -> None:
+async def test_sweep_spares_skill_only_a_channel_rule_adds(db_session: AsyncSession) -> None:
+    """Finding #6: a skill no agent pins but a channel rule adds must be spared.
+
+    A session in that channel resolves the skill; deleting it fails every turn
+    there with `Could not resolve one or more skills`.
+    """
+    deleted: list[str] = []
+    channel_title = tenant_scoped_display_title(tenant_id=TENANT_ID, name="qa-channel-skill")
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    router.add(
+        "GET",
+        r"/v1/skills",
+        lambda req, _m: list_response([_skill_row(id_="sk_chan", display_title=channel_title)]),
+    )
+    router.add(
+        "DELETE",
+        r"/v1/skills/sk_chan",
+        lambda req, _m: (
+            deleted.append("sk_chan")
+            or httpx.Response(500, json={"error": "should not have been called"})
+        ),
+    )
+    client = build_fake_anthropic_http(router.dispatch)
+
+    outcomes = await sweep_removed_skills(
+        client,
+        present_names=set(),
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        channel_skill_ids={"sk_chan"},
+        session=db_session,
+    )
+    assert outcomes == [], "sweep must spare a skill a channel rule still adds"
+    assert deleted == []
+
+
+async def test_sweep_rechecks_channel_rules_under_the_lock(db_session: AsyncSession) -> None:
+    """PR #857 review: a channel rule committed after the sweep's snapshot keeps its skill.
+
+    The snapshot says nothing adds `sk_late`; the rule is in the database by
+    the time the sweep takes the skill's lock, so the delete is skipped.
+    """
+    from daimon.core.stores.channel_skills import add_channel_skill
+    from daimon.testing.factories import make_tenant
+
+    tenant = await make_tenant(db_session, id=TENANT_ID)
+    await add_channel_skill(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="late",
+        skill_id="sk_late",
+        version="1",
+        name="late",
+        owner_agent_name=None,
+        actor_account_id=None,
+    )
+    deleted: list[str] = []
+    title = tenant_scoped_display_title(tenant_id=TENANT_ID, name="late")
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    router.add(
+        "GET",
+        r"/v1/skills",
+        lambda req, _m: list_response([_skill_row(id_="sk_late", display_title=title)]),
+    )
+    router.add(
+        "DELETE",
+        r"/v1/skills/sk_late",
+        lambda req, _m: deleted.append("sk_late") or httpx.Response(500),
+    )
+    client = build_fake_anthropic_http(router.dispatch)
+
+    outcomes = await sweep_removed_skills(
+        client,
+        present_names=set(),
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        channel_skill_ids=(),
+        session=db_session,
+    )
+
+    assert outcomes == [] and deleted == []
+
+
+async def test_sweep_refuses_to_delete_without_a_session() -> None:
+    title = tenant_scoped_display_title(tenant_id=TENANT_ID, name="stale")
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    router.add(
+        "GET",
+        r"/v1/skills",
+        lambda req, _m: list_response([_skill_row(id_="sk_stale", display_title=title)]),
+    )
+    with pytest.raises(DefaultsError):
+        await sweep_removed_skills(
+            build_fake_anthropic_http(router.dispatch),
+            present_names=set(),
+            tenant_id=TENANT_ID,
+            dry_run=False,
+            channel_skill_ids=(),
+            session=None,
+        )
+
+
+async def test_sweep_deletes_orphaned_skill_not_pinned_by_any_agent(
+    db_session: AsyncSession,
+) -> None:
     """The guard is reference-scoped: an own-tenant skill that no agent references is swept."""
     deleted: list[str] = []
 
@@ -404,7 +529,12 @@ async def test_sweep_deletes_orphaned_skill_not_pinned_by_any_agent() -> None:
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sweep_removed_skills(
-        client, present_names=set(), tenant_id=TENANT_ID, dry_run=False
+        client,
+        present_names=set(),
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        channel_skill_ids=(),
+        session=db_session,
     )
     assert [o.name for o in outcomes] == [orphan_title], (
         "an unreferenced orphan skill is still swept"
@@ -429,7 +559,7 @@ async def test_sweep_dry_run_agents() -> None:
     assert outcomes[0].action is Action.ARCHIVED
 
 
-async def test_sweep_noop_when_all_present() -> None:
+async def test_sweep_noop_when_all_present(db_session: AsyncSession) -> None:
     """Skills in present_names (canonical prefixed titles) are never sweep candidates."""
     brainstorming_title = tenant_scoped_display_title(tenant_id=TENANT_ID, name="brainstorming")
 
@@ -458,7 +588,12 @@ async def test_sweep_noop_when_all_present() -> None:
         client, present_names={"default"}, tenant_id=TENANT_ID, dry_run=False
     )
     skill_outcomes = await sweep_removed_skills(
-        client, present_names={brainstorming_title}, tenant_id=TENANT_ID, dry_run=False
+        client,
+        present_names={brainstorming_title},
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        channel_skill_ids=(),
+        session=db_session,
     )
     assert agent_outcomes == []
     assert env_outcomes == []
@@ -476,7 +611,9 @@ _T8_A = str(_TENANT_A)[:8]
 _T8_B = str(_TENANT_B)[:8]
 
 
-async def test_sweep_skips_cross_tenant_and_synced_and_legacy_skills_when_tenant_a_sweeps() -> None:
+async def test_sweep_skips_cross_tenant_and_synced_and_legacy_skills_when_tenant_a_sweeps(
+    db_session: AsyncSession,
+) -> None:
     """SC-2: Tenant A's sweep is structurally incapable of deleting any skill except its
     own removed seeded skills.
 
@@ -545,7 +682,12 @@ async def test_sweep_skips_cross_tenant_and_synced_and_legacy_skills_when_tenant
 
     present_names = {title_a_present, title_a_just_created}
     outcomes = await sweep_removed_skills(
-        client, present_names=present_names, tenant_id=_TENANT_A, dry_run=False
+        client,
+        present_names=present_names,
+        tenant_id=_TENANT_A,
+        dry_run=False,
+        channel_skill_ids=(),
+        session=db_session,
     )
 
     assert len(outcomes) == 1, (
@@ -561,7 +703,9 @@ async def test_sweep_skips_cross_tenant_and_synced_and_legacy_skills_when_tenant
     )
 
 
-async def test_sweep_spares_removed_own_skill_still_pinned_by_agent_when_tenant_a_sweeps() -> None:
+async def test_sweep_spares_removed_own_skill_still_pinned_by_agent_when_tenant_a_sweeps(
+    db_session: AsyncSession,
+) -> None:
     """SC-2 second belt: a removed own-tenant skill that an agent still pins is spared.
 
     (c) from the previous test is absent from present_names but referenced by an agent —
@@ -602,7 +746,12 @@ async def test_sweep_spares_removed_own_skill_still_pinned_by_agent_when_tenant_
     client = build_fake_anthropic_http(router.dispatch)
 
     outcomes = await sweep_removed_skills(
-        client, present_names=set(), tenant_id=_TENANT_A, dry_run=False
+        client,
+        present_names=set(),
+        tenant_id=_TENANT_A,
+        dry_run=False,
+        channel_skill_ids=(),
+        session=db_session,
     )
 
     assert outcomes == [], (
@@ -614,7 +763,9 @@ async def test_sweep_spares_removed_own_skill_still_pinned_by_agent_when_tenant_
     )
 
 
-async def test_sweep_aborts_with_zero_deletes_when_skills_list_is_truncated() -> None:
+async def test_sweep_aborts_with_zero_deletes_when_skills_list_is_truncated(
+    db_session: AsyncSession,
+) -> None:
     """SC-5 sweep half: a full _SKILLS_PAGE_LIMIT-row response causes sweep_removed_skills
     to raise SkillsListTruncatedError BEFORE issuing any delete requests.
 
@@ -651,7 +802,14 @@ async def test_sweep_aborts_with_zero_deletes_when_skills_list_is_truncated() ->
     client = build_fake_anthropic_http(router.dispatch)
 
     with pytest.raises(SkillsListTruncatedError):
-        await sweep_removed_skills(client, present_names=set(), tenant_id=_TENANT_A, dry_run=False)
+        await sweep_removed_skills(
+            client,
+            present_names=set(),
+            tenant_id=_TENANT_A,
+            dry_run=False,
+            channel_skill_ids=(),
+            session=db_session,
+        )
 
     assert deleted == [], (
         "sweep must not issue any HTTP DELETE requests when the skills list is truncated; "

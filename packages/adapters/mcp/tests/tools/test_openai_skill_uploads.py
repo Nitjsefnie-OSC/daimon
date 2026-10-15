@@ -215,12 +215,16 @@ async def test_openai_cards_off_yes_adds_through_the_authorized_host(
     assert call["operation_key"].startswith("mcp-skill-add:")
 
 
-async def test_openai_yes_please_cancels_the_preview_like_every_backend(
+@pytest.mark.parametrize("text,adds", [("yes please", True), ("yes please don't", False)])
+async def test_openai_reads_a_polite_reply_like_every_backend(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    text: str,
+    adds: bool,
 ) -> None:
-    """QA-NEW18 replies `yes please`: the shared matcher reads only a whole `yes`."""
+    """The shared matcher decides for every backend: a whole polite yes adds once
+    through the authorized host, a qualified one cancels the preview."""
     world = await _world(db_session_factory)
     auth, origin = await _cards_off_turn(world)
     hosts = await _openai_room(world, monkeypatch, tmp_path)
@@ -232,18 +236,29 @@ async def test_openai_yes_please_cancels_the_preview_like_every_backend(
         skill_md=_MD,
         origin_context_id=origin,
     )
-    async with _reply(world, auth, "yes please") as reply:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
-            await _add_skill_impl(
-                world.runtime,
-                auth,
-                agent_name="helper",
-                expected_ma_agent_id="openai_helper",
-                skill_md=_MD,
-                origin_context_id=reply,
-                content_hash=preview.preview.content_hash,
-            )
-    assert all(host.added == [] for host in hosts.hosts)
+
+    async def confirm(reply: str) -> Any:
+        return await _add_skill_impl(
+            world.runtime,
+            auth,
+            agent_name="helper",
+            expected_ma_agent_id="openai_helper",
+            skill_md=_MD,
+            origin_context_id=reply,
+            content_hash=preview.preview.content_hash,
+        )
+
+    async with _reply(world, auth, text) as reply:
+        if adds:
+            added = await confirm(reply)
+            assert added.status == "added"
+        else:
+            with pytest.raises(ToolError, match="did not start with the person replying"):
+                await confirm(reply)
+    assert [host.added for host in hosts.hosts] == (
+        [[], [("helper", "notes")]] if adds else [[], []]
+    )
+    assert world.created == [], "nothing reached the Anthropic skill path"
 
 
 @pytest.mark.parametrize("case", ["no_capability", "no_deployment"])

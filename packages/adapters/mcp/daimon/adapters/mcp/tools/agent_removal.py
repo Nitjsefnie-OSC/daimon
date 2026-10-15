@@ -85,7 +85,7 @@ async def _detach_mcp_server_impl(
     origin_context_id: str | None = None,
 ) -> AgentInfo:
     # Reserved-name check first and unconditionally — before any agent lookup
-    # or I/O, mirroring _attach_mcp_server_impl's reserved-entry guard.
+    # or I/O, mirroring _attach_mcp_server_impl's guard.
     rejection = get_reserved_mcp_rejection(server_name=server_name, url="", public_url=None)
     if rejection is not None:
         raise ToolError(rejection)

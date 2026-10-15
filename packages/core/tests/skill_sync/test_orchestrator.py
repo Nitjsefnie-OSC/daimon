@@ -1576,6 +1576,7 @@ async def test_orphan_delete_only_fires_for_successfully_fetched_repos(
     router.add("DELETE", r"/v1/skills/sk_r2", on_delete)
     # Attach step (41-02): kept_from_r2 user_skills row remains → lookup fires.
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    router.add("GET", r"/v1/skills/[^/]+/versions", lambda req, _m: list_response([]))
     anthropic_client = build_fake_anthropic(router.dispatch)
 
     report = await sync_agent_skills(
@@ -1732,6 +1733,7 @@ async def test_orphan_delete_local_row_survives_when_ma_delete_fails(
     router = MARouter()
     router.add("DELETE", r"/v1/skills/sk_doomed", on_delete)
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    router.add("GET", r"/v1/skills/[^/]+/versions", lambda req, _m: list_response([]))
     anthropic_client = build_fake_anthropic(router.dispatch)
 
     report = await sync_agent_skills(
@@ -1809,6 +1811,7 @@ async def test_orphan_delete_retries_and_succeeds_on_second_sync(
         ),
     )
     router1.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    router1.add("GET", r"/v1/skills/[^/]+/versions", lambda req, _m: list_response([]))
     anthropic_client_1 = build_fake_anthropic(router1.dispatch)
 
     report1 = await sync_agent_skills(
@@ -1837,6 +1840,7 @@ async def test_orphan_delete_retries_and_succeeds_on_second_sync(
     router2 = MARouter()
     router2.add("DELETE", r"/v1/skills/sk_retry", lambda req, _m: httpx.Response(204))
     router2.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    router2.add("GET", r"/v1/skills/[^/]+/versions", lambda req, _m: list_response([]))
     anthropic_client_2 = build_fake_anthropic(router2.dispatch)
 
     report2 = await sync_agent_skills(
@@ -1912,6 +1916,7 @@ async def test_orphan_delete_404_treated_as_already_deleted(
         ),
     )
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    router.add("GET", r"/v1/skills/[^/]+/versions", lambda req, _m: list_response([]))
     anthropic_client = build_fake_anthropic(router.dispatch)
 
     report = await sync_agent_skills(
@@ -2044,6 +2049,7 @@ async def test_orphan_delete_transient_failure_retains_row_without_poisoning_att
         ),
     )
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([agent_payload]))
+    router.add("GET", r"/v1/skills/[^/]+/versions", lambda req, _m: list_response([]))
     router.add(
         "GET",
         r"/v1/agents/ag_transient",
@@ -2123,6 +2129,7 @@ async def test_orphan_delete_lingering_row_dedups_readded_skill(
         ),
     )
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    router.add("GET", r"/v1/skills/[^/]+/versions", lambda req, _m: list_response([]))
     anthropic_client = build_fake_anthropic(router.dispatch)
 
     await sync_agent_skills(

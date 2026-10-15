@@ -114,8 +114,9 @@ async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:
     clock.now += 65
     await lifecycle.on_render(TurnState(content=[read, bash], finished_tool_ids=("t1",)))
 
-    headline, details, tools, draft, _actions = _card_body(sender, -1)
+    headline, details, tools, draft, elapsed, _actions = _card_body(sender, -1)
     assert headline["text"] == "**Working on it…**"
+    assert (elapsed["text"], elapsed["isSubtle"]) == ("1m 5s", True), "elapsed time, quiet"
     assert details["text"] == "Details"
     assert tools["text"] == "✔️ Read a file\n\n🖋️ Running a command", "one paragraph per line"
     assert tools["fontType"] == "Monospace", "a TextBlock draws no code fence"
@@ -727,3 +728,23 @@ async def test_an_unprompted_turn_without_an_answer_or_with_a_failure_stays_sile
     await _unprompted(sender).on_terminal_failure(TurnState(error=error), error)
     await _unprompted(sender).close_with_notice("Sorry, something went wrong.")
     assert sender.sent == [], "no tool trail, failure card or notice in a thread nobody asked in"
+
+
+async def test_unchanged_running_state_rerendered_moves_the_elapsed_time() -> None:
+    """The driver re-renders an unchanged state on every tick during a long
+    tool call; each debounced edit of the same card shows a later elapsed time."""
+    sender, clock = FakeSender(), Clock()
+    lifecycle = await _posted(sender, clock)
+    running = TurnState(
+        content=[
+            ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+        ]
+    )
+
+    for elapsed in (1, 12, 13, 24):
+        clock.now = 100.0 + elapsed
+        await lifecycle.on_render(running)
+
+    assert len(sender.activities) == 3
+    assert all(activity.id == "m-1" for activity in sender.activities[1:])
+    assert [_card_body(sender, i)[-2]["text"] for i in (1, 2)] == ["12s", "24s"]

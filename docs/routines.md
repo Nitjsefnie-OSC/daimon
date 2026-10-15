@@ -142,11 +142,12 @@ Each tick, 30 seconds apart by default:
    behavior even when a slow sibling runs past the freshness window. Additional
    unclaimed work remains in PostgreSQL when the bounded batch is full.
 
-The [usage sweep](billing.md#the-tables), when switched on
-(`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`, off by default; `--once` honours the
+The [usage sweep](billing.md#the-tables), unless switched off
+(`DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED`, on by default; `--once` honours the
 same switch), runs on its own loop with the same
-pause between passes, so a long pass no longer blocks claims. Shutdown cancels a
-pass in flight; the next process starts a full pass.
+pause between passes, so a long pass no longer blocks claims. It settles only
+the headless sessions with a pending settle request. Shutdown cancels a pass in
+flight; a session it did not finish keeps its request for the next pass.
 
 The per-routine catch-up policy controls downtime recovery:
 
@@ -303,6 +304,12 @@ the original line, since a workspace without `chat:write.customize` accepts the
 post but silently drops the agent's header. The built-in agent and Teams keep
 the original line. An empty result is `skipped/no_result`.
 
+On Discord each message of a delivered result is recorded as the routine
+agent's post, with the creator as the person who asked. A reply to any of
+them starts a turn like a reply to an answer, which matters with agent
+identity on, where a webhook post cannot be pinged. The channel tidy tools
+then let the agent edit or delete it only for the creator or a server admin.
+
 The fallback direct message to the creator stays Daimon's own notice: the
 agent and schedule (`team-020-analyst, every day at 09:00 UTC`), then why the
 result came by DM, then the result, a blank line between each. The reason
@@ -406,16 +413,18 @@ The request to the AI model failed.
 It will try again at its next scheduled time.
 ```
 
-The middle line says what failed in plain words, never the raw error: a
-model request that failed for good (`TurnError: upstream…` or an SDK error),
-a run that took too long (`timeout: …` or a ceiling breach), a depleted
-balance, a used-up channel budget or monthly cap (each saying who can fix
-it), or otherwise "Something went wrong while it was running." The notice is
-queued only while `last_error` is still null, so a routine that keeps failing
-posts once and stays quiet until a run succeeds; the panels still show every
-failure. It never replaces a post that is pending or claimed, so an
-undelivered result wins. The outbox row carries `delivery_note =
-failure_notice` until it settles. Nothing is posted for `scheduler_shutdown`,
+The middle line says what failed in plain words, never the raw error, by
+the `TerminationReason` the scheduler records where it catches the failure: a
+model request that failed for good (`UPSTREAM`), a run that took too long
+(`CEILING`), a used-up monthly cap, or otherwise "Something went wrong while
+it was running." A depleted balance or used-up channel budget says it in the
+turn refusal's words (`daimon.core.turn.notices`, naming the platform's
+billing command), then that it will try again. The notice is queued only
+while `last_error` is still null, so a routine that keeps failing posts once
+and stays quiet until a run succeeds; the panels still show every failure.
+It never replaces a post that is pending or claimed, so an undelivered result
+wins. The outbox row carries `delivery_note = failure_notice` until it
+settles. Nothing is posted for `scheduler_shutdown`,
 a routine with no tenant or creator, any access-policy refusal
 (`invoker_not_allowed`, `access_policy_unreadable`, `runs_elsewhere`,
 `own_agents_only`), or a routine without a destination.
@@ -457,7 +466,12 @@ verify evidence, and use delivery tools for requested output. Agents can customi
 it with `context_fragments.routine` in their YAML spec; see [architecture](architecture.md#invocation-context-fragments).
 
 Routine sessions always mount persistent agent memory read-only, regardless of the
-tenant's chat or DM policy. They can use saved memory but cannot change it.
+tenant's chat or DM policy. They can use saved memory but cannot change it. A routine
+with a destination (or a channel) mounts the agent's shared memory only: it posts where
+other people may read it, with nobody there to ask. A routine with neither, made in a DM
+or with no origin, answers its owner alone and also mounts its owner's personal memory,
+read-only. This is decided from the routine at every fire, so giving it a destination
+stops the personal mount at its next run.
 
 A routine session is stamped like a turn in the channel it fires into: the
 destination's channel (a thread's parent), the thread, and the readers limits

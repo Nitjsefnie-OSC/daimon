@@ -6,6 +6,7 @@ import hashlib
 import json
 import secrets
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
@@ -407,14 +408,6 @@ async def sweep_expired_click_intents(session: AsyncSession, *, now: datetime) -
     return cast(CursorResult[Any], result).rowcount
 
 
-_ACCESS_RANK: dict[str, int] = {"none": 0, "read": 1, "write": 2}
-_ACCESS_BY_RANK: tuple[Literal["none", "read", "write"], ...] = ("none", "read", "write")
-
-
-def _higher_access(existing: str, chosen: str, limit: int) -> Literal["none", "read", "write"]:
-    return _ACCESS_BY_RANK[min(max(_ACCESS_RANK[existing], _ACCESS_RANK[chosen]), limit)]
-
-
 class MissingRepo(BaseModel):
     """A repo the agent needs before its saved key can be retired."""
 
@@ -491,25 +484,19 @@ async def activate_confirmed_agent(
         existing = await session.get(
             AgentGitHubGrant, (invitation.tenant_id, agent_id, repo.repo_id)
         )
-        # Connecting only adds: never lower what the agent already has, up to
-        # what the repo's confirmation allows.
-        limit = _ACCESS_RANK[authorized.max_access]
-        baseline = _higher_access(
-            existing.baseline_access if existing is not None else "none", repo.max_access, limit
-        )
-        ceiling = _higher_access(
-            existing.ceiling_access if existing is not None else "read", repo.max_access, limit
-        )
+        # The person's GitHub permission governs who may grant. The App's
+        # installation token gives the agent read and write on connected repos.
         await github_access.stage_grant(
             session,
             tenant_id=invitation.tenant_id,
             agent_id=agent_id,
             repo_id=repo.repo_id,
-            baseline_access=baseline,
-            ceiling_access=cast(Literal["read", "write"], ceiling),
+            baseline_access="write",
+            ceiling_access="write",
             granted_by_account_id=invitation.requester_account_id,
             mount_path=existing.mount_path if existing is not None else None,
             is_working_repo=existing.is_working_repo if existing is not None else False,
+            agent_name=invitation.agent_name,
         )
         staged.append(repo)
     if not staged:
@@ -752,7 +739,6 @@ async def _drop_stale_grants(
             or repo.status != "active"
             or installation is None
             or installation.suspended_at is not None
-            or (grant.ceiling_access == "write" and repo.max_access != "write")
         ):
             await session.delete(grant)
     await session.flush()
@@ -1246,12 +1232,35 @@ async def finish_cancel_revocation(session: AsyncSession, *, state: str, cookie:
         await session.flush()
 
 
+GitHubPermission = Literal["admin", "maintain", "write", "triage", "read"]
+
+
+def github_permission(permissions: Mapping[str, bool]) -> GitHubPermission | None:
+    """The highest permission in a GitHub repo's `permissions` object, or None.
+
+    GitHub reports `admin`, `maintain`, `push` (write), `triage` and `pull`
+    (read) as booleans; None means the person has no usable access.
+    """
+    for key, level in (
+        ("admin", "admin"),
+        ("maintain", "maintain"),
+        ("push", "write"),
+        ("triage", "triage"),
+        ("pull", "read"),
+    ):
+        if permissions.get(key) is True:
+            return cast(GitHubPermission, level)
+    return None
+
+
 class RepoConfirmation(BaseModel):
     repo_id: int
     owner_id: int
     installation_id: int
     full_name: str
     max_access: Literal["read", "write"]
+    # The confirming person's GitHub permission on the repo; None when unknown.
+    authorizer_permission: GitHubPermission | None = None
 
 
 class StaleAgentReposError(ValueError):
@@ -1373,20 +1382,15 @@ async def confirm(
                 tenant_id=invitation.tenant_id, repo_id=repo.repo_id, scope_agent_id=scope
             )
             session.add(existing)
-            keep_higher = False
         else:
-            keep_higher = existing.status == "active"
             existing.version += 1
         existing.owner_id = repo.owner_id
         existing.installation_id = repo.installation_id
         existing.repo_full_name = repo.full_name
-        existing.max_access = (
-            "write"
-            if (keep_higher and existing.max_access == "write") or repo.max_access == "write"
-            else "read"
-        )
+        existing.max_access = "write"
         existing.authorized_by_github_user_id = github_user_id
         existing.authorized_by_account_id = invitation.requester_account_id
+        existing.authorized_permission = repo.authorizer_permission
         existing.authorized_at = now
         existing.status = "active"
         existing.status_reason = None
