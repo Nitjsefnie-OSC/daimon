@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -349,7 +350,7 @@ async def test_blocked_always_save_does_not_block_retirement(
         }
     )
     channel = MagicMock()
-    message = MagicMock(id=123, edit=AsyncMock())
+    message = SimpleNamespace(id=123, edit=AsyncMock())
     channel.send = AsyncMock(return_value=message)
     waiting = asyncio.create_task(discord_confirmation_hook(channel)(prompt))
     while not channel.send.await_count:
@@ -395,7 +396,7 @@ async def test_turn_cancel_after_always_settle_keeps_stopped_card(
         }
     )
     channel = MagicMock()
-    message = MagicMock(id=124, edit=AsyncMock())
+    message = SimpleNamespace(id=124, edit=AsyncMock())
     channel.send = AsyncMock(return_value=message)
     waiting = asyncio.create_task(discord_confirmation_hook(channel)(prompt))
     while not channel.send.await_count:
