@@ -883,3 +883,28 @@ def test_disabled_revert_command_refuses_before_runtime_construction(monkeypatch
     monkeypatch.setattr(agents, "run_cli", lambda work, **kwargs: asyncio.run(work))
     with pytest.raises(StoreError, match="disabled"):
         agents.agents_backend_revert_command(typer.Context(click.Command("backend")), "Research")
+
+
+@pytest.mark.parametrize("accepted", [None, "", " "])
+async def test_native_no_drop_switch_binds_empty_consent_without_loss_flags(operator, accepted):
+    from anthropic.types.beta import BetaManagedAgentsModelConfig
+
+    rt, _, agent, _, requests = operator
+    agent.model = BetaManagedAgentsModelConfig.model_validate(
+        {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
+    )
+    output = StringIO()
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=output, width=240),
+        name="Research",
+        backend="anthropic",
+        yes=True,
+        as_json=True,
+        accept_drops=accepted,
+    )
+    assert json.loads(output.getvalue())["preview"]["drop_consent"]["declared_drops"] == []
+    revision = await revisions(operator)
+    assert revision.backend == "anthropic" and revision.drop_consent is not None
+    assert revision.declared_drops == ()
+    assert all(request.method == "GET" for request in requests)

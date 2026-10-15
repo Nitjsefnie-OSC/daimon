@@ -11,6 +11,7 @@ from daimon.core.channel_backend import (
     AgentBackendService,
     resolve_turn_backend,
 )
+from daimon.core.config import McpSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.scope import ResolvedConfig
@@ -62,6 +63,12 @@ async def consent_request(owned, request):
                 "model": ma_model_config("claude-haiku-5-5"),
             }
         )
+    if "model" in params:
+        from anthropic.types.beta import BetaManagedAgentsAgent
+
+        native = BetaManagedAgentsAgent.model_validate(
+            {**native.model_dump(mode="json"), "model": params["model"]}
+        )
     if "environment" in params:
         from anthropic.types.beta import BetaEnvironment
 
@@ -91,7 +98,19 @@ async def consent_request(owned, request):
             backend_revision_origin="agent",
         )
         request = ProviderPreparationRequest(
-            deps=replace(deps_for(client, sessions), agent_backends=True, channel_backends=True),
+            deps=replace(
+                deps_for(client, sessions),
+                agent_backends=True,
+                channel_backends=True,
+                mcp=McpSettings.model_validate(
+                    {
+                        "public_url": "https://mcp.invalid/mcp",
+                        "jwt_secret": "offline-caller-presence",
+                    }
+                )
+                if params.get("caller_mcp")
+                else McpSettings(),
+            ),
             admission=admitted,
             scope=Scope(
                 tenant_id=str(identity.tenant_id),
@@ -1289,3 +1308,49 @@ async def test_well_formed_channel_skill_remains_a_declarable_loss(
     assert "skills" not in classify_source_obligations(
         captured, retained.model_copy(update={"declared_drops": ()}), environment=None
     )
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": "anthropic",
+            "caller_mcp": True,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+        }
+    ],
+    indirect=True,
+)
+async def test_portable_native_no_drop_consent_survives_store_and_retained_prepare(consent_request):
+    from mux.drivers.anthropic.resources.agents import agent_payload
+
+    request, service, source, actor, accepted, router, reads, _, _, _ = consent_request
+    assert accepted.drop_consent is not None
+    assert accepted.declared_drops == ()
+    assert request.admission.backend_revision.model is None
+    assert (await service.revision(source, accepted.local)).drop_consent == accepted.drop_consent
+    await service.clear_backend(source, accepted.local, actor)
+    prepared = await prepare_source(request)
+    assert prepared.target_spec == source.effective_spec
+    assert prepared.source.resource_requirements == source.resource_requirements
+    assert len(prepared.source.resource_requirements) == 1
+    assert classify_source_obligations(
+        source,
+        source.effective_spec,
+        environment=source.environment.spec,
+        resources=source.resource_requirements,
+        retained_agent=source.source.ref,
+        worker_ceiling=True,
+    )
+    assert agent_payload(prepared.target_spec)["model"] == {
+        "id": "claude-haiku-5-5",
+        "speed": "standard",
+        "effort": {"type": "medium"},
+    }
+    assert all(call.method == "GET" for call in reads)
+    changed = request.admission.agent.model.model_copy(update={"effort": {"type": "high"}})
+    router.routes.clear()
+    router.add_agent(request.admission.agent.model_copy(update={"model": changed}))
+    router.add_environment(request.admission.environment)
+    with pytest.raises(AgentBackendRefused, match="confirm"):
+        await prepare_source(request)

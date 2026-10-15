@@ -883,9 +883,9 @@ async def agents_backend_change(
             consent = type(preview.drop_consent).model_validate(
                 {
                     **preview.drop_consent.model_dump(),
-                    "declared_drops": tuple(
-                        part.strip() for part in (accept_drops or "").split(",")
-                    ),
+                    "declared_drops": tuple(part.strip() for part in accept_drops.split(","))
+                    if accept_drops and accept_drops.strip()
+                    else (),
                 }
             )
         except ValidationError as exc:
