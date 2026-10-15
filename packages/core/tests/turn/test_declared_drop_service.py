@@ -208,6 +208,30 @@ async def test_revert_cannot_remove_the_original_confirmation(switching, recaptu
     assert await service.audit(agent.tenant_id) == before
 
 
+async def test_a_switch_claiming_drops_against_an_undeclared_backend_refuses(owned):
+    """The service-side guard against a caller claiming accepted drops when the
+    real preview declares none (defense-in-depth alongside the chat card's own
+    recheck in `confirmation.py`): `owned`'s service has no `capture_source`, so
+    its preview always declares no drops.
+    """
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    preview = await service.preview(agent, "openai")
+    assert not preview.declared_drops and preview.drop_consent is None
+    before = await service.audit(agent.tenant_id)
+    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+        await service.set_backend(
+            agent,
+            "openai",
+            0,
+            actor,
+            accepted_drops=("memory",),
+            expected_preview_digest=preview.digest,
+        )
+    assert await service.current(agent) is None
+    assert await service.audit(agent.tenant_id) == before
+
+
 async def test_fleet_mutations_carry_consent_without_resurrecting_a_revoked_grant(switching):
     service, agent, actor, _, _, _ = switching
     preview = await service.preview(agent, "openai")

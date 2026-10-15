@@ -228,6 +228,42 @@ async def test_server_preview_and_current_admin_are_the_only_card_authority(owne
     assert not trace.violations and not trace.replies
 
 
+async def test_a_click_claiming_drops_against_an_undeclared_preview_refuses(owned_preview):
+    """`verified()`'s card-side recheck (confirmation.py) must refuse a click whose
+    reference claims accepted drops when the real, re-fetched preview declares none --
+    the chat-card mirror of `AgentBackendService`'s own service-side guard against the
+    same claim.
+    """
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    admin = AsyncMock(return_value=True)
+    _, check = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=admin,
+    )
+    preview = await service.preview(agent, "openai")
+    assert not preview.declared_drops, "this fixture's agent must declare no drops"
+    assert prompt.backend_switch is not None
+    claiming_drops = prompt.model_copy(
+        update={
+            "backend_switch": prompt.backend_switch.model_copy(
+                update={"accepted_drops": ("memory",)}
+            )
+        }
+    )
+    trace.queue(reply())
+    assert await check(claiming_drops, "requester") is not None
+    assert await service.current(agent) is None
+    assert await service.audit(agent.tenant_id, agent_id=agent.agent_id) == ()
+
+
 @pytest.mark.parametrize("change", ["admin", "allowlist", "configuration", "revision"])
 async def test_click_rechecks_real_preview_and_rejects_changed_facts(owned_preview, change):
     from unittest.mock import AsyncMock

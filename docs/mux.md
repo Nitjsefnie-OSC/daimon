@@ -2280,6 +2280,23 @@ priority over the agent setting; otherwise the agent setting applies.
 When backend selection is off, the chat tool and its card are absent and existing
 approval cards retain their behavior.
 
+A switch to another profile (for example OpenAI or Gemini) can lose source
+capabilities. The preview lists them as `declared_drops`, and the card shows
+"Won't be available on <backend>: ..." with "Revert any time; nothing is
+deleted." Both are computed from the server's own preview. The confirmed call
+must carry exactly those categories as `accepted_drops`; missing, partial or
+additional categories refuse, and a card whose drop list, digest or source
+changed after it was drawn is refused on the click. Discord, Slack and Teams
+cards read the source as the turn's own admitted caller and only in a public
+channel or thread: DMs refuse (`source_context_unavailable`), as the MCP
+tool's public-context gate does. "DM" is the canonical DM-shaped classifier
+(Slack `D…` IMs, Teams `a:…` personal chats, Discord DM channels) -- a Slack
+private channel or legacy `G…` group DM, or a Teams meeting thread, is not a
+DM by that classifier and is not refused here.
+Revert with `daimon agents backend revert`. A source carrying native tool
+controls (such as its own `daimon-mcp` toolset) cannot yet be previewed on
+another profile and refuses.
+
 Chat confirmation currently requires an Anthropic Managed Agents conversation.
 A native conversation without approved-card proof refuses the request. Saving a
 preference does not provision a native counterpart: agent-origin native turns
@@ -3038,3 +3055,24 @@ cannot replace them. No worker is fabricated, and ordinary chat does not inherit
 worker token controls. Missing consent, source drift or incomplete native proof
 refuses preparation. The existing explicit backend-selection flags remain
 required; unconfigured channels and the worker option-A limits are unchanged.
+### Preview and accept backend losses from the CLI
+
+With model backend selection enabled, `daimon agents backend set Research openai
+--dry-run` prints the server-derived preview without confirming or changing a
+setting. `--json --dry-run` needs no `--yes`. Applying a preview that declares
+losses requires `--accept-drops` with exactly its comma-separated categories;
+`--yes` only skips the interactive question. Unknown, duplicate, incomplete or
+additional categories refuse. Order and delimiter whitespace use the existing
+consent domain's normalization. Prices remain list-price previews.
+
+The preview reads the actual configured agent and environment and the current
+account, publishing, memory and resource policy. It never provisions defaults,
+resolves credential values or starts a provider session. Missing or foreign
+context, an unrelated configuration target, credentials, private resources and
+unknown source obligations remain refusals. The explicit feature-off path stays
+cold. A setting applies to new threads; existing threads retain their backend.
+
+`daimon agents backend revert Research` previews the actual preceding retained
+setting and applies the existing revision compare-and-set. Source drift requires
+confirmation again; revert does not restore historical fleet grants. `--dry-run`
+on revert is read-only. Clearing still uses the existing explicit clear operation.
