@@ -808,4 +808,4 @@ async def test_complete_backend_loss_list_survives_native_card_rendering(state):
         prompt, state=state, token="abcdefgh" if state == "pending" else None
     )
     rendered = "\n".join(_texts(build_confirmation_view(card, prompt)))
-    assert (losses in rendered) == (state in {"pending", "approved"})
+    assert (losses in rendered.replace(r"\_", "_")) == (state in {"pending", "approved"})
