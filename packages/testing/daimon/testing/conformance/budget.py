@@ -517,7 +517,7 @@ I7_TERMS: Final[Mapping[str, tuple[str, str, Decimal, int]]] = MappingProxyType(
         "ROOT": ("anthropic", "claude-haiku-5-5", Decimal(".06"), 3),
         "W1": ("anthropic", "claude-haiku-5-5", Decimal(".04"), 1),
         "W2": ("openai", "gpt-6-luna", Decimal(".055"), 1),
-        "W3": ("gemini", "gemini-3.5-flash-lite", Decimal(".49"), 1),
+        "W3": ("gemini", "gemini-3.8-flash", Decimal(".49"), 1),
         "W4": ("openai", "gpt-6-luna", Decimal(".055"), 1),
         "RESTORE-SMOKE": ("anthropic", "claude-haiku-5-5", Decimal(".03"), 1),
         "CANDIDATE-SMOKE": ("anthropic", "claude-haiku-5-5", Decimal(".03"), 1),

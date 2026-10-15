@@ -1254,3 +1254,11 @@ to the fleet pricing context and their native usage recorders. Default fleet
 startup discovers the callbacks without credentials or provider calls. Missing
 model rows do not reserve worker funds, and supplying a token tariff leaves
 unknown infrastructure and incomplete native counters pending.
+
+Gemini fleet workers with explicit input/output token ceilings execute one
+bounded, tool-free model interaction. The input ceiling includes cached tokens;
+output includes thinking. Worst-case reservations price every input token at
+the maximum applicable input/cache-write rate and every output token at the
+output rate. Cache discounts can reduce actual cost but cannot expand the
+worker's token authority. Existing worker cash holds, funding checks and
+unknown-usage handling remain authoritative.

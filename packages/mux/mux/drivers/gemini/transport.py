@@ -129,27 +129,46 @@ class SDKTransport:
         self._models = client.aio.models
 
     async def count_input_tokens(self, request: Mapping[str, JsonValue]) -> int:
-        from google.genai.types import Content, CountTokensConfig, Part
+        from google.genai.types import CountTokensConfig, HttpOptions
 
         bounded = dict(request)
         if not model_request(bounded) or "previous_interaction_id" in bounded:
             raise ProviderError("invalid_request", retryable=False, native_code="unbounded_prompt")
         inputs = bounded.get("input")
         if (
-            not isinstance(inputs, list) or len(inputs) != 1
-            or not isinstance(inputs[0], dict) or set(inputs[0]) != {"type", "text"}
-            or inputs[0].get("type") != "text" or not isinstance(inputs[0].get("text"), str)
+            not isinstance(inputs, list)
+            or len(inputs) != 1
+            or not isinstance(inputs[0], dict)
+            or set(inputs[0]) != {"type", "text"}
+            or inputs[0].get("type") != "text"
+            or not isinstance(inputs[0].get("text"), str)
         ):
             raise ProviderError("invalid_request", retryable=False, native_code="unbounded_prompt")
         system = bounded.get("system_instruction")
         if system is not None and not isinstance(system, str):
             raise ProviderError("invalid_request", retryable=False, native_code="unbounded_prompt")
-        result = await provider_call(self._models.count_tokens(
-            model=string(bounded["model"]),
-            contents=[Content(role="user", parts=[Part(text=cast(str, inputs[0]["text"]))])],
-            config=CountTokensConfig(system_instruction=system),
-        ))
-        if type(result.total_tokens) is not int or result.total_tokens < 0:
+        # The Developer API supports full request counting through
+        # generateContentRequest; the SDK's system_instruction convenience
+        # argument is Vertex-only. Use its supported extra_body escape hatch.
+        prompt: Object = {
+            "model": "models/" + string(bounded["model"]),
+            "contents": [{"role": "user", "parts": [{"text": inputs[0]["text"]}]}],
+        }
+        if system is not None:
+            prompt["systemInstruction"] = {"parts": [{"text": system}]}
+        result = await provider_call(
+            self._models.count_tokens(
+                model=string(bounded["model"]),
+                # The wire schema permits omitting contents for a full request.
+                contents=None,  # pyright: ignore[reportArgumentType]
+                config=CountTokensConfig(
+                    http_options=HttpOptions(
+                        extra_body={"generateContentRequest": prompt},
+                    )
+                ),
+            )
+        )
+        if type(result.total_tokens) is not int or result.total_tokens <= 0:
             raise ProviderError("upstream", retryable=False, native_code="unknown_input_tokens")
         # total_tokens includes cached content; never subtract a cache discount
         # from the token envelope. Pricing can reserve every input at the full rate.

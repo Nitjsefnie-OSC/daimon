@@ -927,7 +927,7 @@ class WorkerLimits(Contract):
             self.max_input_tokens is not None or self.max_output_tokens is not None
         ):
             if self.max_input_tokens is None or self.max_output_tokens is None:
-                raise WorkerSpecRefused("budget", "unbound")
+                raise WorkerSpecRefused("budget", "unsupported")
             if self.max_turns != 1 or self.max_output_tokens > 65_536:
                 raise WorkerSpecRefused("budget", "unsupported")
         capabilities: tuple[tuple[int | None, Capability], ...] = (

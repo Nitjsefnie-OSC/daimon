@@ -1046,3 +1046,21 @@ form from worker ceilings. Backend switches declare those losses. Builtin projec
 requires resolved controls and either disabled defaults or a complete builtin list;
 duplicate configs use the strictest enablement and permission. Anthropic neutral
 builtins compile to one explicit allowlist with disabled defaults.
+
+Explicit Gemini worker input/output envelopes use the existing capped model
+interaction path. Supply both `WorkerLimits.max_input_tokens` and
+`max_output_tokens` and set `max_turns=1`; output must be at most 65,536.
+This mode requires `gemini-3.8-flash`, explicit drops of memory and sandbox,
+and no tools, skills, MCP or mounted resources. Counterpart ownership is still
+verified and materialization still uses the existing catalog. Execution submits
+the verified instructions to the pinned model with no agent-side inference loop.
+
+Before a billable POST, the SDK counts the complete text prompt and system
+instructions with `models.countTokens.generateContentRequest`. Unknown or
+excess input refuses; cached tokens stay inside the inclusive input ceiling.
+`generation_config.max_output_tokens` natively bounds visible plus thinking
+output. The existing durable send claim permits at most one accepted or unknown
+interaction for the worker, including after restart, so these are aggregate
+worker ceilings. No second turn, tool result, model fallback or replacement on
+uncertain delivery can obtain another envelope. Omitting token ceilings retains
+the existing managed worker path and ordinary Gemini turns.

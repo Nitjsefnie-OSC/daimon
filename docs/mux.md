@@ -2749,8 +2749,8 @@ The existing driver compiles a model interaction with
 conversation history, and preserves the limit on subsequent turns and 503
 fallbacks. No sandbox environment is created or reused in this configuration.
 
-Managed tools, skills, MCP, mounts, native agent definitions and worker execution
-are incompatible with this configuration and refuse before provider access.
+Managed tools, skills, MCP, mounts and native agent definitions are incompatible
+with this ordinary-turn configuration and refuse before provider access.
 Omitting the field preserves existing managed-agent turns and worker option-A
 budgets. The native model response limit is distinct from the managed-agent
 `max_total_tokens` budget, which is best-effort and does not enforce an output
@@ -3076,3 +3076,16 @@ cold. A setting applies to new threads; existing threads retain their backend.
 setting and applies the existing revision compare-and-set. Source drift requires
 confirmation again; revert does not restore historical fleet grants. `--dry-run`
 on revert is read-only. Clearing still uses the existing explicit clear operation.
+
+Gemini fleet workers can explicitly request both `max_input_tokens` and
+`max_output_tokens` in their existing `WorkerLimits`. This requires
+`max_turns=1`, `gemini-3.8-flash`, no tools, skills, MCP or mounted resources,
+and explicit memory/sandbox drops. The worker retains counterpart verification
+and uses a model interaction for execution. The complete prompt, including
+system instructions, is counted before dispatch; missing counts or excess input
+refuse. Cached input remains inside the ceiling, and output includes thinking.
+The existing journal permits one accepted or uncertain interaction across the
+worker lifetime; subsequent turns refuse, including after restart. This mode
+has no fallback to another model. Worker limits remain monotonic under the
+existing permission resolver. Other profiles and uncapped Gemini turns retain
+their existing behavior.

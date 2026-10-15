@@ -631,7 +631,11 @@ class GeminiSessions(Base):
                 state="idle",
             )
             records.sessions[id_] = SessionRecord(
-                owner(scope), session, spec, agent.spec.model, request,
+                owner(scope),
+                session,
+                spec,
+                agent.spec.model,
+                request,
                 max_input_tokens=self._max_input_tokens,
             )
             records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
@@ -923,7 +927,7 @@ class GeminiEvents(Base):
                 if not isinstance(self._transport, TokenCountingTransport):
                     refuse("worker_input_token_count")
                 count = await self._transport.count_input_tokens(request)
-                if type(count) is not int or count < 0 or count > self._max_input_tokens:
+                if type(count) is not int or count <= 0 or count > self._max_input_tokens:
                     refuse("worker_input_token_limit")
             root = record.root if is_result else str(uuid4())
             if root is None:

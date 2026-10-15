@@ -7,7 +7,7 @@ import pytest
 from daimon.testing.drivers.gemini.fake import FakeTransport
 from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.resources import Agent, AgentSpec
-from mux.drivers.gemini.flash import FLASH_MODELS, FlashAttempt, FlashTransport
+from mux.drivers.gemini.flash import FLASH_MODELS, FLASH_PRIMARY, FlashAttempt, FlashTransport
 from mux.drivers.gemini.transport import object_value
 from mux.errors import ProviderError
 from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
@@ -178,3 +178,22 @@ async def test_output_cap_is_snapshotted_before_the_accounting_await() -> None:
     source.responses.append({"id": "capped", "status": "completed"})
     await FlashTransport(source, accounting).create(body)
     assert source.requests[0]["generation_config"] == {"max_output_tokens": 4096}
+
+
+async def test_bounded_worker_pins_counted_model_and_never_falls_back():
+    from .test_core import CountingTransport
+
+    source, accounting = CountingTransport(262144), Accounting()
+    transport = FlashTransport(source, accounting, bounded_worker=True)
+    body = {
+        "model": FLASH_PRIMARY,
+        "tools": [],
+        "generation_config": {"max_output_tokens": 65536},
+        "input": [{"type": "text", "text": "task"}],
+    }
+    assert await transport.count_input_tokens(body) == 262144
+    source.responses.append(ProviderError("overloaded", retryable=True, native_code="503"))
+    with pytest.raises(ProviderError):
+        await transport.create(body)
+    assert len(source.requests) == len(accounting.held) == 1
+    assert accounting.held[0].id == FLASH_PRIMARY

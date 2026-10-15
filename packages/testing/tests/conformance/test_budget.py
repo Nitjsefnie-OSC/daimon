@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -733,7 +733,7 @@ def fleet_plan(guard: BudgetGuard, role: str = "W3", **binding_updates: object) 
         "ROOT": ("anthropic", "claude-haiku-5-5", ".06"),
         "W1": ("anthropic", "claude-haiku-5-5", ".04"),
         "W2": ("openai", "gpt-6-luna", ".055"),
-        "W3": ("gemini", "gemini-3.5-flash-lite", ".49"),
+        "W3": ("gemini", "gemini-3.8-flash", ".49"),
         "W4": ("openai", "gpt-6-luna", ".055"),
         "RESTORE-SMOKE": ("anthropic", "claude-haiku-5-5", ".03"),
         "CANDIDATE-SMOKE": ("anthropic", "claude-haiku-5-5", ".03"),
@@ -894,7 +894,7 @@ def test_fleet_missing_or_mismatched_binding_refuses_without_spend(
     elif damage == "legacy":
         raw["h6"] = raw.pop("staging")
     elif damage == "model":
-        raw["model"] = "gemini-3.8-flash"
+        raw["model"] = "gemini-3.5-flash-lite"
     else:
         field, value = {
             "cash": ("maximum_hold_usd", Decimal(".48")),
@@ -963,7 +963,7 @@ def test_fleet_conditional_cash_still_requires_tariff_and_outer_room(
     guard = setup_guard(tmp_path, providers=tuple(TEST_MODELS))
     admitted = fleet_plan(guard)
     data = json.loads(guard.config_path.read_text())
-    price = data["providers"]["gemini"]["models"]["gemini-3.5-flash-lite"]
+    price = data["providers"]["gemini"]["models"]["gemini-3.8-flash"]
     if damage == "source":
         price.pop("source")
     elif damage == "date":
@@ -976,3 +976,38 @@ def test_fleet_conditional_cash_still_requires_tariff_and_outer_room(
     with pytest.raises(BudgetRefused):
         guard.reserve(ProbePlan.model_validate(raw))
     assert not guard.report()
+
+
+def test_fleet_flash_caps_quote_worst_case_and_keep_all_cash_terms(tmp_path):
+    from daimon.testing.conformance.budget import I7_TERMS, ModelPrice, TokenLimits, TokenUsage
+
+    guard = setup_guard(tmp_path, providers=tuple(TEST_MODELS))
+    admitted = fleet_plan(guard)
+    assert admitted.model == "gemini-3.8-flash"
+    assert {k: (v[0], v[2], v[3]) for k, v in I7_TERMS.items()} == {
+        "ROOT": ("anthropic", Decimal(".06"), 3),
+        "W1": ("anthropic", Decimal(".04"), 1),
+        "W2": ("openai", Decimal(".055"), 1),
+        "W3": ("gemini", Decimal(".49"), 1),
+        "W4": ("openai", Decimal(".055"), 1),
+        "RESTORE-SMOKE": ("anthropic", Decimal(".03"), 1),
+        "CANDIDATE-SMOKE": ("anthropic", Decimal(".03"), 1),
+    }
+    price = ModelPrice(
+        input=Decimal(".75"),
+        output=Decimal("3.75"),
+        cached_input=Decimal(".075"),
+        cache_write_input=Decimal(".75"),
+        effective_from=date(2026, 10, 15),
+        effective_until=date(2026, 10, 16),
+        source="https://ai.google.dev/gemini-api/docs/pricing",
+    )
+    limits = TokenLimits(input_tokens=262144, output_tokens=65536)
+    assert price.reserve(limits) == Decimal(".442368") < I7_TERMS["W3"][2]
+    usage = TokenUsage(
+        input_tokens=262144,
+        input_cached_tokens=200000,
+        input_cache_write_tokens=0,
+        output_tokens=65536,
+    )
+    assert price.actual(usage, datetime(2026, 10, 15, tzinfo=UTC)) == Decimal(".307368")

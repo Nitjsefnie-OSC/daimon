@@ -172,11 +172,17 @@ def gemini_backend(
         or deployment.agent.model != ModelRef(provider="gemini", id=required_model)
     ):
         raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
+    if deployment.max_input_tokens is not None and (
+        type(deployment.max_input_tokens) is not int
+        or deployment.max_input_tokens <= 0
+        or deployment.max_output_tokens is None
+        or required_model != FLASH_PRIMARY
+    ):
+        raise UnsupportedCapability(("worker_token_envelope",), PROFILE)
     if deployment.max_output_tokens is not None:
         if (
-            (deployment.native_agent is not None and deployment.max_input_tokens is None)
-            or deployment.max_total_tokens is not None
-        ):
+            deployment.native_agent is not None and deployment.max_input_tokens is None
+        ) or deployment.max_total_tokens is not None:
             raise UnsupportedCapability(("model_interaction_resources",), PROFILE)
         compile_agent(deployment.agent, max_output_tokens=deployment.max_output_tokens)
         if deployment.max_input_tokens is None:
@@ -187,7 +193,8 @@ def gemini_backend(
     if not isinstance(supplied, GeminiTransportRuntime):
         raise UnsupportedCapability(("gemini_private_transport",), PROFILE)
     transport = FlashTransport(
-        supplied.transport, runtime.usage_store.accounting,
+        supplied.transport,
+        runtime.usage_store.accounting,
         native_agent=deployment.native_agent if deployment.max_input_tokens is None else None,
         bounded_worker=deployment.max_input_tokens is not None,
     )

@@ -2093,3 +2093,31 @@ def test_explicit_worker_budget_cannot_exceed_global_ceiling():
     )
     with pytest.raises(WorkerSpecRefused, match="budget: not_subset"):
         resolve(root, limits=request)
+
+
+@pytest.mark.parametrize("field", ("max_input_tokens", "max_output_tokens"))
+@pytest.mark.parametrize("replacement", (None, 101))
+def test_gemini_worker_caps_attenuate_monotonically(field, replacement):
+    root = parent("gemini")
+    limits = WorkerLimits.model_validate(
+        root.limits.model_dump()
+        | {"max_input_tokens": 100, "max_output_tokens": 100, "max_turns": 1}
+    )
+    root = replace(root, limits=limits)
+    narrower = limits.model_copy(update={"max_input_tokens": 99, "max_output_tokens": 99})
+    assert resolve(root, limits=narrower).limits == narrower
+    with pytest.raises(WorkerSpecRefused, match=field):
+        resolve(root, limits=limits.model_copy(update={field: replacement}))
+
+
+@pytest.mark.parametrize(
+    "update", ({"max_turns": 2}, {"max_output_tokens": 65537}, {"max_model_requests": 1})
+)
+def test_gemini_unknown_or_expanded_execution_envelopes_refuse(update):
+    limits = WorkerLimits.model_validate(
+        parent("gemini").limits.model_dump()
+        | {"max_input_tokens": 262144, "max_output_tokens": 65536, "max_turns": 1}
+        | update
+    )
+    with pytest.raises(WorkerSpecRefused):
+        limits.require_profile(get_profile("gemini.inline_reuse"))

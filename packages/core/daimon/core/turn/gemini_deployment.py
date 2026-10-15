@@ -125,12 +125,7 @@ class GeminiPlan(BaseModel):
         spec, drops = worker.spec, worker.declared_drops
         worker.limits.require_profile(INLINE_REUSE)
         bounded = worker.limits.max_input_tokens is not None
-        if bounded and (
-            worker.limits.max_turns != 1
-            or revision.model != FLASH_PRIMARY
-            or spec.tools or spec.skills or spec.mcp_servers
-            or "sandbox" not in drops
-        ):
+        if bounded and (revision.model != FLASH_PRIMARY or "sandbox" not in drops):
             raise AdmissionDenied(reason="backend_unsupported")
         scope = worker.permissions.fleet.scope
         if (
@@ -190,7 +185,7 @@ class GeminiPlan(BaseModel):
         if environment.sources:
             raise AdmissionDenied(reason="backend_unsupported")
         try:
-            compile_agent(spec)
+            compile_agent(spec, max_output_tokens=worker.limits.max_output_tokens)
             if compile_environment(environment) != {"type": "remote", "sources": []}:
                 raise AdmissionDenied(reason="backend_unsupported")
         except UnsupportedCapability as error:

@@ -72,6 +72,7 @@ from ..test_native_tariffs import fixed_source_date as fixed_source_date
 from .test_agent_native_runtime import claimed_worker_request as claimed_worker_request
 from .test_agent_native_runtime import clone_source as clone_source
 from .test_agent_native_runtime import explicit_worker_request as explicit_worker_request
+from .test_agent_native_runtime import worker_token_caps as worker_token_caps
 from .test_gemini_codec import TrackedTransport, interaction
 from .test_native_counterpart import Owned
 from .test_native_counterpart import clean_sdk_environment as clean_sdk_environment
@@ -1874,3 +1875,46 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
     assert body["agent"]["model"] == config.model
     assert "service_tier" not in body and "service_tier" not in body["agent"]
     assert all(client.is_closed() for client in clients)
+
+
+@pytest.mark.parametrize("worker_token_caps", [True], indirect=True)
+async def test_capped_worker_materialization_runs_through_headless_preparation_and_sdk(
+    materialization_worker_request,
+):
+    from daimon.core.headless_runner import run_worker
+
+    (selected, root, worker, prices, owned, calls), _ = materialization_worker_request
+    assert selected.worker.limits.max_input_tokens == 262144
+    result = await run_worker(
+        selected,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the assigned task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded" and result.turns_used == 1
+    counts = [r for r in calls if r.url.path.endswith(":countTokens")]
+    inputs = [r for r in calls if r.url.path.endswith("/interactions") and r.method == "POST"]
+    assert len(counts) == len(inputs) == 1
+    sent = json.loads(inputs[0].content)
+    assert sent["model"] == "gemini-3.8-flash"
+    assert sent["system_instruction"] == selected.worker.spec.system
+    assert sent["generation_config"] == {"max_output_tokens": 65536}
+    assert not {"agent", "agent_config", "environment", "previous_interaction_id"} & sent.keys()
+    assert len([r for r in owned.wire.requests if r.method == "POST"]) == 1
+
+    from daimon.core.fleet import FleetConflict
+
+    with pytest.raises(FleetConflict):
+        await run_worker(
+            selected,
+            parent=root,
+            worker=result,
+            trigger_message="Continue",
+            prices=prices,
+            cancel=asyncio.Event(),
+        )
+    assert (
+        len([r for r in calls if r.url.path.endswith("/interactions") and r.method == "POST"]) == 1
+    )
