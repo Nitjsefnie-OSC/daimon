@@ -678,3 +678,125 @@ async def test_excluded_toolset_removes_its_credential_ref_only(captured):
     ceiling = worker_source_ceiling(source)
     assert not ceiling.effective_spec.mcp_servers
     assert ceiling.resource_requirements == (source.resource_requirements[1],)
+
+
+@pytest.mark.parametrize("captured", ["haiku55"], indirect=True)
+async def test_recorded_i7_heterogeneous_grant_prepares_all_four_workers(
+    captured, owned, record_property
+):
+    from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+    from daimon.core.scope import ResolvedConfig
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.prepare import DEFAULT_MA_CAPABILITIES, ProviderPreparationRequest
+    from daimon.core.turn.runtime_manifest import prepare_source
+    from daimon.testing.turn_fakes import deps_for
+    from mux.contracts.config import ConfigRevision
+
+    plan = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "fixtures/i7_r6_planned_fleet_grant.json"
+        ).read_text()
+    )
+    now = datetime.fromisoformat(plan["recorded_now"])
+    grant = AgentFleetGrant.model_validate_json(json.dumps(plan["grant"]))
+    source, admission, _, fleet, policy, _ = captured
+    root = fleet_root_permissions(source, admission, grant, fleet=fleet, policy=policy, now=now)
+    assert root.limits.budget_usd == Decimal("0.49")
+    assert dict(root.limits.provider_limits_usd) == {
+        "anthropic": Decimal("0.04"),
+        "openai": Decimal("0.055"),
+        "gemini": Decimal("0.49"),
+    }
+    assert grant.native_root_budget_usd == Decimal("0.02")
+    assert grant.root_cash_budget_usd == Decimal("0.06")
+    holds = {provider: Decimal(value) for provider, value in plan["provider_holds_usd"].items()}
+    assert sum(holds.values()) == Decimal("0.70")
+    assert holds["anthropic"] == grant.root_cash_budget_usd + Decimal("0.04")
+    assert holds["openai"] == Decimal("0.055") * 2
+    trace = ScriptedTransport()
+    async with trace.client() as client:
+        for row in plan["workers"]:
+            backend, model = next(
+                pair for pair in grant.choices if pair[1].provider == row["provider"]
+            )
+            native = model.provider == source.source.spec.model.provider
+            spec = (
+                root.spec
+                if native
+                else root.spec.model_copy(
+                    update={
+                        "model": model,
+                        "tools": (),
+                        "skills": (),
+                        "mcp_servers": (),
+                        "declared_drops": ("mcp", "memory", "sandbox", "skills", "tools"),
+                    }
+                )
+            )
+            limits = WorkerLimits(
+                budget_usd=Decimal(row["budget_usd"]), deadline=root.limits.deadline, max_turns=1
+            )
+            worker = resolve_worker_spec(
+                root,
+                spec,
+                policy=policy,
+                now=now,
+                backend=backend,
+                resources=root.resources if native else (),
+                environment=root.environment if native else None,
+                limits=limits,
+                captured_source=source,
+            )
+            assert worker.limits.budget_usd == min(
+                grant.limits.budget_usd, grant.limits.provider_limits_usd[model.provider]
+            )
+            assert worker.limits.provider_limits_usd == root.limits.provider_limits_usd
+            worker_source = source.model_copy(
+                update={"resource_scope": worker.permissions.fleet.scope}
+            )
+            prepared = await prepare_source(
+                ProviderPreparationRequest(
+                    deps=replace(
+                        deps_for(client, owned[3]),
+                        agent_backends=True,
+                        channel_backends=True,
+                        turn_path="mux",
+                    ),
+                    admission=Admission(
+                        account_id=fleet.account_id,
+                        agent=BetaManagedAgentsAgent.model_validate(source.source.native),
+                        environment=BetaEnvironment.model_validate(source.environment.native),
+                        config=ResolvedConfig(agent_name="helper", environment_name="default"),
+                        grant=admission,
+                        backend_revision=ConfigRevision.create(
+                            fleet.root.channel, 1, worker.backend
+                        ),
+                        backend_revision_origin="agent",
+                    ),
+                    scope=worker.permissions.fleet.scope,
+                    tenant_id=source.tenant_id,
+                    platform="discord",
+                    external_user_id="member",
+                    thread_id=fleet.root.thread_id,
+                    session_account_id=fleet.account_id,
+                    reuse_existing=True,
+                    capabilities=DEFAULT_MA_CAPABILITIES,
+                    transfer=None,
+                    deadline=worker.limits.deadline,
+                    now=lambda: now,
+                    source=worker_source,
+                    worker=worker,
+                )
+            )
+            assert prepared.target_spec == worker.spec, row["role"]
+            record_property(
+                row["role"],
+                json.dumps(
+                    {
+                        "provider": model.provider,
+                        "budget_usd": str(worker.limits.budget_usd),
+                        "preparation": "PASS",
+                    }
+                ),
+            )
+    assert not trace.requests

@@ -900,6 +900,18 @@ class WorkerLimits(Contract):
             raise ValueError("worker deadline must be aware")
         return self
 
+    def for_provider(self, provider: Provider) -> WorkerLimits:
+        """Attenuate an inherited global ceiling to the selected provider line."""
+        if self.provider_limits_usd is None:
+            return self
+        return self.model_copy(
+            update={
+                "budget_usd": min(
+                    self.budget_usd, self.provider_limits_usd.get(provider, Decimal(0))
+                )
+            }
+        )
+
     def require_profile(self, profile: Profile) -> None:
         """Refuse requested ceilings before a driver can allocate native work."""
         if (
@@ -1331,11 +1343,12 @@ def freeze_root_permissions(
         now=now,
         resources=grants.resources,
         environment=grants.environment,
-        limits=caps,
+        limits=caps.for_provider(grants.spec.model.provider),
         captured_source=source,
     ).permissions
     return replace(
         narrowed,
+        limits=caps,
         fleet=fleet,
         subject=admission.subject,
         agent=admission.agent,
@@ -1653,7 +1666,13 @@ def resolve_worker_spec(
         for tool in resolved.tools or ()
     ):
         raise WorkerSpecRefused("sandbox", "unbound")
-    cap = limits or parent.limits
+    cap = limits if limits is not None else parent.limits.for_provider(selected.backend)
+    if (
+        parent.limits.provider_limits_usd is not None
+        and "provider_limits_usd" not in cap.model_fields_set
+    ):
+        # Tool callers may omit inherited authority; explicit null still refuses.
+        cap = cap.model_copy(update={"provider_limits_usd": parent.limits.provider_limits_usd})
     cap.require_native_dispatch(now)
     if cap.budget_usd <= 0 or cap.budget_usd > parent.limits.budget_usd:
         raise WorkerSpecRefused("budget", "not_subset")
