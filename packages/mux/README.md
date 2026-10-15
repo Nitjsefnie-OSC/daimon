@@ -1040,3 +1040,9 @@ continuation and the existing 503 fallback policy. An unsupported or rejected
 limit never retries without it. Omission retains managed-agent requests and
 option-A worker defaults. This is an output limit per interaction, not an input
 or final-spend limit.
+
+Native toolset projection excludes well-formed capabilities without a complete neutral
+form from worker ceilings. Backend switches declare those losses. Builtin projection
+requires resolved controls and either disabled defaults or a complete builtin list;
+duplicate configs use the strictest enablement and permission. Anthropic neutral
+builtins compile to one explicit allowlist with disabled defaults.
