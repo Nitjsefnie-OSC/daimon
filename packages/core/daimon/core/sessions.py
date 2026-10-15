@@ -124,7 +124,7 @@ from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
-from mux.drivers.anthropic.resources.agents import UNCLASSIFIED_SOURCE_NAMESPACE
+from mux.drivers.anthropic.resources.agents import UNCLASSIFIED_SOURCE_NAMESPACE, agent_record
 from mux.drivers.anthropic.sessions_lifecycle import (
     SessionCreateRequest,
     SessionReads,
@@ -473,13 +473,20 @@ async def project_session_resources(
         requirements.append(ResourceBinding(id="caller-resources", kind="native"))
     effective = agent_spec(payload)
     if source.source is not None:
+        # Classify the complete session skill list before neutral projection loses
+        # native fields. The driver owns unknown-source detection for both paths.
+        session_source = agent_record(
+            agent.model_copy(update={"skills": session_skills(agent, channel_skills)}),
+            source.source.ref.account_scope_id,
+            scope,
+        )
         effective = effective.model_copy(
             update={
                 "extensions": (
                     *(effective.extensions or ()),
                     *(
                         extension
-                        for extension in source.source.spec.extensions or ()
+                        for extension in session_source.spec.extensions or ()
                         if extension.namespace == UNCLASSIFIED_SOURCE_NAMESPACE
                     ),
                 )

@@ -3039,7 +3039,7 @@ Source drift requires confirmation again. Provider and adapter owners supply the
 runtime and trusted capture implementations separately; no-consent execution
 retains its existing refusal and all feature defaults remain unchanged.
 
-Cross-backend source consent refuses unclassified native agent and environment fields, including unknown skill, MCP, tool and environment-config policy fields. Original native definitions are validated before requester filtering, including required discriminator presence, supported discriminator values and environment visibility scope. Hidden MCP attachments cannot erase unknown or invalid control fields. These remain nondroppable source-definition obligations even when all supported attachment losses are explicitly confirmed. Schema-supported omission and null values retain their existing meanings.
+Cross-backend source consent refuses unclassified native agent and environment fields, including unknown skill, MCP, tool and environment-config policy fields. Channel skills pass through the same native-source validation as agent skills before neutral projection; declaring a skills loss cannot discard unknown channel-skill fields or values. Original native definitions are validated before requester filtering, including required discriminator presence, supported discriminator values and environment visibility scope. Hidden MCP attachments cannot erase unknown or invalid control fields. These remain nondroppable source-definition obligations even when all supported attachment losses are explicitly confirmed. Schema-supported omission and null values retain their existing meanings.
 
 
 Ordinary Gemini agent-origin turns can use a plain chat counterpart after the

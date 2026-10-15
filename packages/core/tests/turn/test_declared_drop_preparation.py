@@ -30,7 +30,7 @@ from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import ChannelRef, ResourceRef, Revision, Scope
+from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Revision, Scope
 from mux.contracts.resources import Agent
 from mux.profiles import backend_selection
 
@@ -1205,3 +1205,87 @@ async def test_unlisted_native_defaults_are_declared_through_switch_preparation(
     assert accepted.declared_drops == ("memory", "sandbox", "tools")
     prepared = await read_preparation_counterpart(request)
     assert prepared.target_spec.declared_drops == accepted.declared_drops
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+@pytest.mark.parametrize("change", ["unknown_field", "null_field", "unknown_type"])
+async def test_unknown_channel_skill_refuses_even_with_all_losses_declared(
+    consent_request, provider, change
+):
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from mux.contracts.resources import AgentSpec
+
+    request, service, source, actor, accepted, _, reads, constructions, targets, _ = consent_request
+    payload = {"type": "custom", "skill_id": "channel-skill", "version": "1"}
+    if change != "unknown_type":
+        payload["future_execution_policy"] = (
+            {"requires_confirmation": True} if change == "unknown_field" else None
+        )
+    skill = BetaManagedAgentsCustomSkill.model_validate(payload)
+    if change == "unknown_type":
+        skill = skill.model_copy(update={"type": "future_skill"})
+    request = replace(request, admission=replace(request.admission, channel_skills=(skill,)))
+
+    async def capture(agent):
+        return await capture_preparation_source(request, fresh=True)
+
+    service._capture_source = capture
+    captured = await capture(source)
+    target = AgentSpec(
+        name=captured.effective_spec.name,
+        model=ModelRef(provider=provider, id=backend_selection(provider).model),
+        system=captured.effective_spec.system,
+        declared_drops=("files", "mcp", "memory", "repository", "sandbox", "skills", "tools"),
+    )
+    assert "source_definition" in classify_source_obligations(captured, None, environment=None)
+    assert classify_source_obligations(captured, target, environment=None) == frozenset(
+        {"source_definition"}
+    )
+    before = await service.audit(source.tenant_id)
+    with pytest.raises(AgentBackendRefused) as preview:
+        await service.preview(source, provider)
+    assert preview.value.reason == "source_unavailable"
+    with pytest.raises(AgentBackendRefused) as commit:
+        await service.set_backend(
+            source,
+            provider,
+            accepted.local,
+            actor,
+            accepted_drops=target.declared_drops,
+            expected_preview_digest=accepted.preview_digest,
+        )
+    assert commit.value.reason == "source_unavailable"
+    assert await service.current(source) == accepted
+    assert await service.audit(source.tenant_id) == before
+    with pytest.raises(AdmissionDenied):
+        await read_preparation_counterpart(request)
+    assert not constructions and not targets
+    assert all(call.method == "GET" for call in reads)
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+@pytest.mark.parametrize("version", ["latest", "1"])
+async def test_well_formed_channel_skill_remains_a_declarable_loss(
+    consent_request, provider, version
+):
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.turn.runtime_manifest import preview_source_drops
+    from mux.contracts.ids import SkillRef
+
+    request, _, _, _, _, _, _, _, _, _ = consent_request
+    skill = BetaManagedAgentsCustomSkill(type="custom", skill_id="channel-skill", version=version)
+    captured = await capture_preparation_source(
+        replace(request, admission=replace(request.admission, channel_skills=(skill,))), fresh=True
+    )
+    assert captured.effective_spec.skills == (
+        SkillRef(id="channel-skill", source="custom", version=version),
+    )
+    target = preview_source_drops(
+        captured, ModelRef(provider=provider, id=backend_selection(provider).model)
+    )
+    assert target.declared_drops == ("memory", "sandbox", "skills")
+    assert classify_source_obligations(captured, target, environment=None) == frozenset()
+    retained = target.model_copy(update={"skills": captured.effective_spec.skills})
+    assert "skills" not in classify_source_obligations(
+        captured, retained.model_copy(update={"declared_drops": ()}), environment=None
+    )
