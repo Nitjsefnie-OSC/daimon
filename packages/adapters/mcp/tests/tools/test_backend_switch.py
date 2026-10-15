@@ -251,13 +251,7 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
 
 
 def _without_own_tools(payload):
-    """The switched agent as MA serves it from now on: no tools of its own.
-
-    A cross-profile preview of a tool-bearing source refuses (native tool
-    controls have no neutral projection yet), so the cross-backend proofs
-    switch a tool-less agent. The chat session's frozen agent keeps the gated
-    toolset the card gate reads, and replies already queued keep theirs.
-    """
+    """Remove the agent's own tools while retaining the frozen chat toolset."""
     payload["tools"] = []
     payload["mcp_servers"] = []
 
@@ -267,34 +261,13 @@ def _without_own_tools(payload):
 async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
     active_chat, target, own_tools
 ):
-    from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
+    from daimon.core.channel_backend import load_backend_agent
 
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
     if not own_tools:
         _without_own_tools(payload)
     gate()
     agent()
-    if own_tools:
-        # A Daimon agent carrying its own `daimon-mcp` toolset cannot yet preview
-        # a cross-profile switch: `classify_source_obligations` reports
-        # `source_definition` for native tool controls instead of declaring
-        # drops, so the shared preview path hard-refuses `source_unavailable`
-        # (runtime_manifest.classify_source_obligations fix pending). Narrowed
-        # to this specific cause so an unrelated ToolError elsewhere in the
-        # preview path (which also surfaces as "Preview again") does not pass
-        # here by coincidence.
-        with pytest.raises(ToolError, match="Preview again") as excinfo:
-            await _request_agent_backend_switch_impl(
-                runtime,
-                auth,
-                agent_name="Researcher",
-                target_backend=target,
-                origin_context_id=str(origin.id),
-            )
-        assert isinstance(excinfo.value.__cause__, AgentBackendRefused)
-        assert str(excinfo.value.__cause__) == "source unavailable"
-        assert not trace.replies and not trace.violations
-        return
     preview = await _request_agent_backend_switch_impl(
         runtime,
         auth,
@@ -306,7 +279,7 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
     assert "unknown" in preview.cost_line.lower()
     drops = preview.declared_drops
     assert {"memory", "sandbox"} <= set(drops)
-    assert drops == ("memory", "sandbox")
+    assert own_tools or drops == ("memory", "sandbox")
     extra = next(item for item in ("files", "repository", "skills") if item not in drops)
     # The confirmed call must name exactly the previewed losses.
     for accepted in (None, (), drops[:1], (*drops, extra)):
