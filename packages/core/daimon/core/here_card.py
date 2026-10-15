@@ -104,6 +104,7 @@ class HereCardPresentation(BaseModel):
 def render_here_card(card: HereCard) -> HereCardPresentation:
     """Choose the approved card copy from existing facts, in priority order."""
     name = " ".join((card.agent_name or "").split())[:100]
+    setup = "setup" if card.platform == "teams" else "/agent-setup"
     if card.bot_can_view is False:
         state, title, colour, subline = (
             "no_view",
@@ -120,21 +121,21 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
             "no_replies",
             "Replies are off here",
             "#ED4245",
-            "An admin can turn them on in /agent-setup.",
+            f"An admin can turn them on in {setup}.",
         )
     elif card.agent_name is None:
         state, title, colour, subline = (
             "no_agent",
             "No agent answers here",
             "#95A5A6",
-            "An admin can pick one in /agent-setup.",
+            f"An admin can pick one in {setup}.",
         )
     elif card.agent_can_answer_here is False:
         state, title, colour, subline = (
             "blocked",
             f"{name} can't answer here",
             "#F0B429",
-            "An admin can change where it answers in /agent-setup.",
+            f"An admin can change where it answers in {setup}.",
         )
     elif card.tier == "thread":
         state, title, colour, subline = (

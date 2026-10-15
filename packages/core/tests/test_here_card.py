@@ -94,6 +94,33 @@ def test_mcp_plain_text_states(state: str, expected_lines: list[str]) -> None:
     assert " · " not in text
 
 
+@pytest.mark.parametrize(
+    ("state", "subline"),
+    [
+        ("no_replies", "An admin can turn them on in setup."),
+        ("no_agent", "An admin can pick one in setup."),
+        ("blocked", "An admin can change where it answers in setup."),
+    ],
+)
+def test_teams_sublines_name_its_setup_command(state: str, subline: str) -> None:
+    card = HereCard(
+        channel_rule=ChannelRule(),
+        who_may_answer="",
+        reads_kept_inside=False,
+        agent_name=None if state == "no_agent" else "ResearchBot",
+        tier="channel",
+        bot_can_view=True,
+        effective_writers="none" if state == "no_replies" else "any",
+        agent_can_answer_here=state != "blocked",
+        effective_readers="any",
+        publishing_needs_approval=False,
+        bot_can_read_history=True,
+        platform="teams",
+        text="",
+    )
+    assert render_here_card_text(card).splitlines()[1] == subline
+
+
 def test_unknown_reading_publishing_and_history_drop_their_lines() -> None:
     card = HereCard(
         channel_rule=ChannelRule(),
