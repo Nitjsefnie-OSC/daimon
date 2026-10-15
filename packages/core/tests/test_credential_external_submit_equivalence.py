@@ -663,8 +663,7 @@ async def test_external_submit_matches_real_base(
         assert results[0][8:] == results[1][8:]
         assert results[1][8] == ()
         assert ("dispatch",) not in results[1][7]
-        assert "admin of every channel named by its rule" in str(results[1][7])
-        assert "does not have that permission" in str(results[1][7])
+        assert "Only an admin can add or change connections" in str(results[1][7])
     elif kind == "skill_repo" and shared is True and admin and results[1][1] == "write_failed":
         # Imported skills cannot attach to the built-in target; the confirmed
         # import stays identical, while its failed form becomes reusable.
