@@ -22,6 +22,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.session_seal import session_facts
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -36,6 +37,7 @@ CardGap = Literal[
     "other_agents_session",
     "session_not_gated",
     "session_unreadable",
+    "source_context_unavailable",
 ]
 """Why a call's session can't show the card: no verified chat origin; no live
 session in the origin's thread for this caller; that session runs another
@@ -44,7 +46,12 @@ MA could not be read."""
 
 
 async def session_card_gap(
-    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None, *, tool_name: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow | None,
+    *,
+    tool_name: str,
+    require_public_context: bool = False,
 ) -> CardGap | None:
     """None when this call's session waits for the person's Approve, else why it does not.
 
@@ -69,6 +76,18 @@ async def session_card_gap(
         ma_session = await retrieve_session(
             runtime.client, live.ma_session_id, scope=mcp_scope(auth)
         )
+        if require_public_context:
+            facts = session_facts(
+                ma_session.metadata,
+                owned=True,
+                legacy_thread_id=origin.thread_id,
+            )
+            if (
+                facts.private
+                or facts.channel is None
+                or (facts.channel, facts.thread) != (origin.parent_channel_id, origin.thread_id)
+            ):
+                return "source_context_unavailable"
         if ma_session.agent.id != origin.responder_ma_agent_id:
             return "other_agents_session"
         if has_confirmation_gate(

@@ -31,7 +31,8 @@ from typing import TYPE_CHECKING, Final, Literal, cast
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, PUBLISH_TOOLS, ToolCall
 from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.ids import Provider
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from mux.contracts.resources import AgentSpec
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
@@ -70,6 +71,18 @@ class BackendSwitchReference(BaseModel):
     target_backend: Provider
     expected_revision: int = Field(ge=0, strict=True)
     preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    accepted_drops: tuple[str, ...] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @field_validator("accepted_drops", mode="before")
+    @classmethod
+    def _accepted_drops(cls, value: object) -> tuple[str, ...] | None:
+        if value is None:
+            return None
+        return TypeAdapter(
+            AgentSpec.model_fields["declared_drops"].rebuild_annotation()
+        ).validate_python(value)
 
 
 class ConfirmationPrompt(BaseModel):
@@ -192,6 +205,7 @@ def prompt_for_tool_call(
                 "target_backend": data.get("target_backend"),
                 "expected_revision": data.get("expected_revision"),
                 "preview_digest": data.get("preview_digest"),
+                "accepted_drops": data.get("accepted_drops"),
             }
         )
         # No model-supplied compatibility text is accepted. The host hook must
@@ -340,6 +354,8 @@ def backend_switch_callbacks(
             or not preview.allowed
             or preview.setting_revision != reference.expected_revision
             or preview.digest != reference.preview_digest
+            or (preview.declared_drops and reference.accepted_drops != preview.declared_drops)
+            or (not preview.declared_drops and reference.accepted_drops not in (None, ()))
         ):
             raise ValueError("This preview changed. Preview and confirm again.")
         subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
@@ -362,15 +378,25 @@ def backend_switch_callbacks(
             preview.cost_line,
         )
         action = f"Switch {agent.name} to {preview.target_backend}"
+        unavailable = (
+            f"Won't be available on {preview.target_backend}: " + ", ".join(preview.declared_drops)
+            if preview.declared_drops
+            else ""
+        )
         return prompt.model_copy(
             update={
                 "title": action + "?",
-                "action": action,
+                "action": action + (". " + unavailable if unavailable else ""),
                 "denied_action": "Model backend unchanged",
                 "detail_lines": details,
                 "consequence": (
                     "Existing threads keep their backend; "
                     "channel overrides still apply to new threads."
+                    + (
+                        "\n" + unavailable + ". Revert any time; nothing is deleted."
+                        if unavailable
+                        else ""
+                    )
                 ),
             }
         )

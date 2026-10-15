@@ -50,6 +50,7 @@ from slack_sdk.webhook.async_client import AsyncWebhookClient
 
 if TYPE_CHECKING:
     from daimon.adapters.slack.runtime import SlackRuntime
+    from daimon.core.turn.admission import Admission
 
 __all__ = ["CONFIRMATION_CUSTOM_ID_PREFIX", "SlackConfirmationCards"]
 
@@ -114,6 +115,7 @@ class SlackConfirmationCards:
         identity: AgentIdentity | None = None,
         record_post: Callable[[str], Awaitable[None]] | None = None,
         runtime: SlackRuntime | None = None,
+        admission: Admission | None = None,
         tenant_id: uuid.UUID | None = None,
         account_id: uuid.UUID | None = None,
         prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
@@ -134,8 +136,39 @@ class SlackConfirmationCards:
                 async def current_admin(clicker: str) -> bool:
                     return await resolve_is_admin(client, user_id=clicker)
 
+                from daimon.core.channel_backend import AgentBackendRefused
+                from daimon.core.scope import ScopeContext
+                from daimon.core.stores.domain import BackendAgent
+                from daimon.core.turn.admission import capture_backend_source
+
+                async def capture(source: BackendAgent) -> BackendAgent:
+                    if (
+                        admission is None
+                        or admission.grant is None
+                        or admission.account_id != account_id
+                    ):
+                        raise AgentBackendRefused("source_unavailable")
+                    return await capture_backend_source(
+                        runtime.turn_deps,
+                        source,
+                        context=ScopeContext(
+                            tenant_id=tenant_id,
+                            account_id=account_id,
+                            platform="slack",
+                            channel_id=admission.origin_channel_id,
+                            thread_id=admission.origin_thread_id,
+                        ),
+                        subject=admission.grant.subject,
+                        place=admission.grant.run_place,
+                        is_dm=admission.grant.is_dm,
+                        slack_turn_context_id=admission.slack_turn_context_id,
+                        private_dm_id=admission.private_dm_id,
+                    )
+
                 prepare_admin, check_admin = backend_switch_callbacks(
-                    make_backend_service(runtime.sessionmaker, runtime.settings.turn),
+                    make_backend_service(
+                        runtime.sessionmaker, runtime.settings.turn, capture_source=capture
+                    ),
                     sessionmaker=runtime.sessionmaker,
                     anthropic=runtime.anthropic,
                     tenant_id=tenant_id,

@@ -94,8 +94,8 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
         make_tenant,
         make_thread_session,
     )
-    from daimon.testing.ma import list_response
-    from daimon.testing.ma_models import ma_agent, ma_session
+    from daimon.testing.ma import MARouter, list_response
+    from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
     from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -148,15 +148,55 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             ],
         }
     ]
-    native = ma_agent(id="agent_owned", tenant_id=str(tenant.id), name="Researcher", tools=tools)
+    # `daimon-mcp` must be both a tool and a matching `mcp_servers` entry (the
+    # real agent carries both together, `AgentSpec._require_mcp_toolset_when_
+    # mcp_servers_set`); otherwise DD3's obligation check sees an unresolvable
+    # resource and hard-refuses rather than declaring the toolset a drop.
+    mcp_servers = [{"name": "daimon-mcp", "type": "url", "url": "https://mcp.invalid"}]
+    native = ma_agent(
+        id="agent_owned",
+        tenant_id=str(tenant.id),
+        name="Researcher",
+        tools=tools,
+        mcp_servers=mcp_servers,
+    )
     payload = native.model_dump(mode="json")
     payload["metadata"]["daimon_name"] = "Researcher"
     frozen = ma_session(
         id="sess_owned",
         agent=native,
-        metadata={"daimon_tenant": str(tenant.id), "daimon_account": str(account.id)},
+        metadata={
+            "daimon_tenant": str(tenant.id),
+            "daimon_account": str(account.id),
+            # DD3's trusted source capture requires positive proof of a public
+            # context (never inferred from an absent field): the stamped
+            # channel/thread must match the verified origin's exactly.
+            "daimon_channel": "channel",
+            "daimon_thread": "thread",
+        },
     ).model_dump(mode="json")
-    trace = ScriptedTransport()
+    # DD3's trusted source capture reads the real target agent and its
+    # deployment environment in a verified host context: a deployment default
+    # naming both (as production's `defaults/config.yaml` does), and a router
+    # fallback serving them, same as the agent/session scripts above.
+    environment = ma_environment(tenant_id=tenant.id)
+    environment.metadata["daimon_name"] = "default"
+    router = MARouter()
+    router.add("GET", r"/v1/agents/agent_owned", lambda *_: httpx.Response(200, json=payload))
+    router.add(
+        "GET",
+        rf"/v1/environments/{environment.id}",
+        lambda *_: httpx.Response(200, json=environment.model_dump(mode="json")),
+    )
+    router.add(
+        "GET", r"/v1/environments", lambda *_: list_response([environment.model_dump(mode="json")])
+    )
+    # The capture callback repeats its own real session-privacy read on every
+    # preview/write (never a cached fact): a plain fallback for the unchanged
+    # session covers that extra read without every `gate()` call site having
+    # to queue twice for the one request they already scripted explicitly.
+    router.add("GET", r"/v1/sessions/sess_owned", lambda *_: httpx.Response(200, json=frozen))
+    trace = ScriptedTransport(router=router)
     async with trace.client() as client:
         settings = Settings(
             database={"url": "postgresql+asyncpg://fixture:fixture@localhost/fixture"},
@@ -164,7 +204,12 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             turn=TurnSettings(path="mux", channel_backends=True),
             mcp=McpSettings(public_url="https://mcp.invalid"),
         )
-        runtime = McpRuntime(sessions, client, settings, DeploymentDefault())
+        runtime = McpRuntime(
+            sessions,
+            client,
+            settings,
+            DeploymentDefault(agent_name="Researcher", environment_name="default"),
+        )
         auth = AuthIdentity(
             tenant_id=tenant.id,
             account_id=account.id,
@@ -215,7 +260,7 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(active_cha
         runtime,
         auth,
         agent_name="Researcher",
-        target_backend="openai",
+        target_backend="anthropic",
         origin_context_id=str(origin.id),
     )
     assert preview.status == "preview" and preview.expected_revision == 0
@@ -227,7 +272,7 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(active_cha
         runtime,
         auth,
         agent_name="Researcher",
-        target_backend="openai",
+        target_backend="anthropic",
         origin_context_id=str(origin.id),
         expected_revision=0,
         preview_digest=preview.preview_digest,
@@ -241,7 +286,7 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(active_cha
             runtime,
             auth,
             agent_name="Researcher",
-            target_backend="openai",
+            target_backend="anthropic",
             origin_context_id=str(origin.id),
             expected_revision=0,
             preview_digest=preview.preview_digest,
@@ -251,7 +296,7 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(active_cha
         runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
     )
     current = await service.current(actual)
-    assert current.local == 1 and current.backend == "openai"
+    assert current.local == 1 and current.backend == "anthropic"
     events = await service.audit(auth.tenant_id, agent_id=actual.agent_id)
     assert len(events) == 1 and events[0].operation == "set"
     assert events[0].account_id == auth.account_id
@@ -361,7 +406,7 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
             runtime,
             auth,
             agent_name="Researcher",
-            target_backend="openai",
+            target_backend="anthropic",
             origin_context_id=str(origin.id),
         )
         assert preview.status == "preview"
@@ -371,7 +416,7 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
                 runtime,
                 auth,
                 agent_name="Researcher",
-                target_backend="openai",
+                target_backend="anthropic",
                 origin_context_id=str(origin.id),
             )
     assert not trace.replies and not trace.violations
