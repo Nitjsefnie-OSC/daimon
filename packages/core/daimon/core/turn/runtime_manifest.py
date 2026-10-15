@@ -20,6 +20,7 @@ from daimon.core.neutral_resources import (
     WorkerSpecRefused,
     resolve_worker_spec,
 )
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
@@ -1002,7 +1003,7 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
             binding.kind == "credential"
             and (
                 binding.credential_ref in credential_refs
-                or ("daimon-mcp" in excluded and binding.id.startswith("caller-mcp:"))
+                or (DAIMON_SERVER_NAME in excluded and binding.id.startswith("caller-mcp:"))
             )
         )
     )

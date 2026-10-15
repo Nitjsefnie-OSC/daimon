@@ -1,5 +1,8 @@
 """Native projection and compilation must preserve the exact permission ceiling."""
 
+import json
+from pathlib import Path
+
 import pytest
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef
@@ -141,3 +144,91 @@ def test_native_readback_canonicalization_never_erases_a_widening(fault):
     elif fault == "implicit":
         observed[0]["default_config"]["enabled"] = True
     assert native_tools_match(expected, observed) is (fault is None)
+
+
+@pytest.mark.parametrize("policy,permission", [("always_allow", "auto"), ("always_ask", "ask")])
+def test_recorded_resolved_defaults_project_unlisted_builtins_exactly(policy, permission):
+    tools = json.loads(
+        (Path(__file__).parent / "fixtures/anthropic_retrieved_builtin_tools.json").read_text()
+    )
+    assert len(tools[0]["configs"]) == 6
+    tools[0]["default_config"]["permission_policy"]["type"] = policy
+    # An explicit disabled tool stays disabled; explicit policy overrides the default.
+    tools[0]["configs"][0]["enabled"] = False
+    native = agent_tools(
+        ExtensionConfig(namespace="anthropic.agent_tools", version=1, value={"tools": tools})
+    )
+    projected = {tool.name: tool.permission for tool in native.intent()}
+    assert projected == {
+        "read": "auto",
+        "edit": "auto",
+        "grep": "auto",
+        "glob": "auto",
+        "write": "auto",
+        "web_fetch": permission,
+        "web_search": permission,
+    }
+    assert not native.has_unrepresented_toolset()
+
+
+@pytest.mark.parametrize(
+    "defaults", [{"enabled": True}, {"permission_policy": {"type": "always_allow"}}, {}]
+)
+def test_unresolved_defaults_do_not_grant_unlisted_builtins(defaults):
+    native = project([], defaults)
+    assert native.intent() == ()
+    assert native.has_unrepresented_toolset()
+
+
+@pytest.mark.parametrize(
+    "identity,represented",
+    [
+        ({"type": "service_account"}, True),
+        ({"type": "aws_role", "role_arn": "arn:aws:iam::000000000000:role/example"}, False),
+        ({"type": "service_account", "scope": "all"}, False),
+        ({"type": "future"}, False),
+        (None, False),
+    ],
+)
+def test_only_resolved_platform_identity_is_nonauthority_readback(identity, represented):
+    from daimon.testing.ma_models import ma_agent
+    from mux.contracts.ids import Scope
+    from mux.drivers.anthropic.resources.agents import UNCLASSIFIED_SOURCE_NAMESPACE, agent_record
+
+    native = ma_agent().model_copy(update={"execution_identity": identity})
+    record = agent_record(
+        native,
+        "org",
+        Scope(
+            tenant_id="tenant", account_id="account", principal_id="host", authorization_id="auth"
+        ),
+    )
+    extensions = {extension.namespace: extension for extension in record.spec.extensions}
+    assert (UNCLASSIFIED_SOURCE_NAMESPACE not in extensions) is represented
+    if not represented:
+        assert extensions[UNCLASSIFIED_SOURCE_NAMESPACE].value == {"fields": ["execution_identity"]}
+
+
+@pytest.mark.parametrize("extra", [None, "execution_identity", "future_policy", "state"])
+def test_environment_readback_metadata_is_excluded_but_unknown_authority_refuses(extra):
+    from daimon.core.mux_compat import source_environment_record
+    from daimon.testing.ma_models import ma_environment
+    from mux.contracts.ids import Scope
+
+    native = ma_environment().model_copy(update={"state": "active"})
+    if extra:
+        native = native.model_copy(update={extra: {"type": "unknown-authority"}})
+    record = source_environment_record(
+        native,
+        Scope(
+            tenant_id="tenant", account_id="account", principal_id="host", authorization_id="auth"
+        ),
+    )
+    assert record.native["state"] == native.model_dump(mode="json")["state"]
+    if extra:
+        assert record.spec.native_config.value["unclassified_fields"] == [extra]
+    else:
+        assert record.spec.native_config is None
+        assert record.spec.execution == "hosted"
+        assert record.spec.network.mode == "unrestricted"
+        assert dict(record.spec.packages) == {"system": (), "python": (), "npm": ()}

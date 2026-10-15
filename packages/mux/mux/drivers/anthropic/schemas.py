@@ -102,10 +102,12 @@ def _toolset_intent(tool: AgentTool) -> tuple[ToolSpec, ...] | None:
     default_enabled = tool.default_config.enabled if tool.default_config else None
     default_policy = tool.default_config.permission_policy if tool.default_config else None
     configs = tool.configs or []
-    if default_enabled is not False and {c.name for c in configs} != set(
-        get_args(_BuiltinToolName.__value__)
-    ):
-        return None
+    missing = set(get_args(_BuiltinToolName.__value__)) - {c.name for c in configs}
+    if missing and default_enabled is not False:
+        if default_enabled is None or default_policy is None:
+            return None
+        # A resolved readback default governs every builtin absent from configs.
+        configs = [*configs, *(BuiltinToolConfig(name=name) for name in sorted(missing))]
     result: dict[str, ToolSpec] = {}
     disabled: set[str] = set()
     for config in configs:
