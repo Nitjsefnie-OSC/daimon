@@ -32,10 +32,10 @@ def _unique_declared_drops(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted(values))
 
 
-_DeclaredDrops = Annotated[
-    tuple[Literal["memory", "sandbox", "skills", "mcp", "tools", "files", "repository"], ...],
-    AfterValidator(_unique_declared_drops),
+DeclaredDrop = Literal[
+    "memory", "sandbox", "skills", "mcp", "tools", "files", "repository", "model_controls"
 ]
+_DeclaredDrops = Annotated[tuple[DeclaredDrop, ...], AfterValidator(_unique_declared_drops)]
 
 
 class ToolSpec(Contract):

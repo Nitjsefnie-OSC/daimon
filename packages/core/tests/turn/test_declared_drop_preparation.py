@@ -62,6 +62,12 @@ async def consent_request(owned, request):
                 "model": ma_model_config("claude-haiku-5-5"),
             }
         )
+    if "model" in params:
+        from anthropic.types.beta import BetaManagedAgentsAgent
+
+        native = BetaManagedAgentsAgent.model_validate(
+            {**native.model_dump(mode="json"), "model": params["model"]}
+        )
     if "environment" in params:
         from anthropic.types.beta import BetaEnvironment
 
@@ -1152,6 +1158,7 @@ _LIVE_ROOT = json.loads(
         {
             "backend": backend,
             **_LIVE_ROOT,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
@@ -1163,7 +1170,14 @@ async def test_live_manifest_switch_preview_confirm_and_prepare_declare_exact_lo
     request, _, source, _, accepted, _, reads, constructions, _, _ = consent_request
     assert len(source.effective_spec.skills) == 11
     assert source.memory_required
-    assert accepted.declared_drops == ("mcp", "memory", "sandbox", "skills", "tools")
+    assert accepted.declared_drops == (
+        "mcp",
+        "memory",
+        "model_controls",
+        "sandbox",
+        "skills",
+        "tools",
+    )
     prepared = await read_preparation_counterpart(request)
     assert prepared.target_spec.declared_drops == accepted.declared_drops
     assert not prepared.target_spec.tools and not prepared.target_spec.mcp_servers
@@ -1205,3 +1219,34 @@ async def test_unlisted_native_defaults_are_declared_through_switch_preparation(
     assert accepted.declared_drops == ("memory", "sandbox", "tools")
     prepared = await read_preparation_counterpart(request)
     assert prepared.target_spec.declared_drops == accepted.declared_drops
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": backend,
+            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+        }
+        for backend in ("openai", "gemini")
+    ],
+    indirect=True,
+)
+async def test_portable_recorded_model_controls_consent_apply_and_prepare(consent_request):
+    request, service, source, actor, accepted, _, _, constructions, _, _ = consent_request
+    assert accepted.declared_drops == ("memory", "model_controls", "sandbox")
+    quote = await service.preview(source, request.admission.backend_revision.backend)
+    with pytest.raises(AgentBackendRefused):
+        await service.set_backend(
+            source,
+            quote.target_backend,
+            accepted.local,
+            actor,
+            accepted_drops=("memory", "sandbox"),
+            expected_preview_digest=quote.digest,
+        )
+    selected = await read_preparation_counterpart(request)
+    assert selected.target_spec.declared_drops == accepted.declared_drops
+    assert "model_controls" in selected.target_spec.system
+    assert not selected.target_spec.extensions
+    assert len(constructions) == 1

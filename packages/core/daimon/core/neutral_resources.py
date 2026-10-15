@@ -65,6 +65,7 @@ from mux.contracts.resources import (
     Agent,
     AgentPatch,
     AgentSpec,
+    DeclaredDrop,
     EnvironmentSpec,
     MCPConnection,
     ResourceBinding,
@@ -1025,9 +1026,7 @@ class ResolvedWorkerSpec:
     source_agent: tuple[ResourceRef, Revision] | None = None
 
     @property
-    def declared_drops(
-        self,
-    ) -> tuple[Literal["memory", "sandbox", "skills", "mcp", "tools", "files", "repository"], ...]:
+    def declared_drops(self) -> tuple[DeclaredDrop, ...]:
         return self.spec.declared_drops
 
 

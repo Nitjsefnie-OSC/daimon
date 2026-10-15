@@ -974,18 +974,21 @@ def compose_source_instructions(
     return required + ("\n\n" + rest if rest else "")
 
 
-def _represented_source_extension(
-    extension: ExtensionConfig, *, native_target: AgentSpec | None = None
-) -> bool:
+def _source_extension_obligation(
+    extension: ExtensionConfig,
+    *,
+    native_target: AgentSpec | None = None,
+    foreign_target: bool = False,
+) -> Literal["model_controls", "source_definition"] | None:
     if extension.version != 1:
-        return False
+        return "source_definition"
     if extension.namespace == "anthropic.model_config":
         from mux.drivers.anthropic.schemas import AgentModelConfig
 
         try:
             AgentModelConfig.model_validate(dict(extension.value))
         except ValueError:
-            return False
+            return "source_definition"
         if native_target is not None and extension in (native_target.extensions or ()):
             profile = get_profile(backend_selection(native_target.model.provider).profile)
             if any(
@@ -993,16 +996,21 @@ def _represented_source_extension(
                 for offered in profile.extensions
             ):
                 # The owning native compiler emits the complete unchanged model object.
-                return True
+                return None
         model = extension.value.get("model")
-        return (
-            isinstance(model, dict) and set(model) <= {"id", "speed"} and model.get("speed") is None
-        )
-    return (
+        if isinstance(model, dict):
+            if set(model) <= {"id", "speed"} and model.get("speed") is None:
+                return None
+            if foreign_target:
+                return "model_controls"
+        return "source_definition"
+    if (
         extension.namespace == "anthropic.multiagent"
         and extension.value == {"clear": True}
         or extension.namespace == "anthropic.agent_create_nulls"
-    )
+    ):
+        return None
+    return "source_definition"
 
 
 def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
@@ -1045,7 +1053,7 @@ def worker_spec_ceiling(spec: AgentSpec) -> tuple[AgentSpec, frozenset[str]]:
             native = agent_tools(extension)
             updates["tools"] = native.intent()
             excluded.update(native.excluded_mcp_servers())
-        elif not _represented_source_extension(extension):
+        elif _source_extension_obligation(extension) is not None:
             retained.append(extension)
     if len(retained) != len(spec.extensions or ()):
         updates["extensions"] = tuple(retained) or None
@@ -1098,13 +1106,17 @@ def classify_source_obligations(
                         source_tools = tuple(target.tools or ())
                     elif native.has_unrepresented_toolset():
                         missing.add("tools")
-        elif not _represented_source_extension(
-            extension,
-            native_target=target
-            if target is not None and target.model.provider == spec.model.provider
-            else None,
-        ):
-            missing.add("source_definition")
+        else:
+            foreign_target = target is not None and target.model.provider != spec.model.provider
+            obligation = _source_extension_obligation(
+                extension,
+                native_target=target if not foreign_target else None,
+                foreign_target=foreign_target,
+            )
+            if obligation is not None and not (
+                obligation == "model_controls" and obligation in drops
+            ):
+                missing.add(obligation)
     profile = get_profile(backend_selection(spec.model.provider).profile)
     tools_required = bool(
         spec.tools or any(item.value.get("tools") for item in spec.extensions or ())

@@ -597,3 +597,76 @@ def test_represented_native_builtin_loss_requires_tools_even_on_the_same_provide
     if provider == "anthropic":
         native_retained = target.model_copy(update={"extensions": (extension,)})
         assert "tools" not in classify_source_obligations(source, native_retained, environment=None)
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+@pytest.mark.parametrize(
+    "controls,required",
+    [
+        ({}, False),
+        ({"speed": None}, False),
+        ({"speed": "standard"}, True),
+        ({"speed": "fast"}, True),
+        ({"effort": None}, True),
+        ({"effort": "low"}, True),
+        ({"effort": {"type": "medium"}, "speed": "standard"}, True),
+    ],
+)
+def test_model_controls_are_offered_only_for_valid_unrepresented_controls(
+    captured, provider, controls, required
+):
+    extension = ExtensionConfig(
+        namespace="anthropic.model_config",
+        version=1,
+        value={"model": {"id": "claude-haiku-5-5", **controls}},
+    )
+    source = captured.model_copy(
+        update={
+            "effective_spec": captured.effective_spec.model_copy(
+                update={"extensions": (extension,)}
+            )
+        }
+    )
+    model = ModelRef(
+        provider=provider, id="gpt-6-luna" if provider == "openai" else "gemini-3.8-flash"
+    )
+    target = preview_source_drops(source, model)
+    assert target.declared_drops == (("model_controls", "sandbox") if required else ("sandbox",))
+    assert classify_source_obligations(source, target, environment=None) == frozenset()
+    if required:
+        omitted = target.model_copy(update={"declared_drops": ("sandbox",)})
+        assert classify_source_obligations(source, omitted, environment=None) == {"model_controls"}
+
+
+@pytest.mark.parametrize(
+    "version,value",
+    [
+        (2, {"model": {"id": "claude-haiku-5-5", "effort": "high"}}),
+        (1, {"model": {"id": "claude-haiku-5-5", "effort": "invalid"}}),
+        (1, {"model": {"id": "claude-haiku-5-5", "speed": "turbo"}}),
+        (1, {"model": {"id": "claude-haiku-5-5", "effort": {"type": "medium", "extra": True}}}),
+        (1, {"model": {"id": "claude-haiku-5-5", "unknown": True}}),
+        (1, {"model": {"id": "claude-haiku-5-5"}, "unknown": True}),
+    ],
+)
+def test_model_control_consent_never_waives_unknown_or_invalid_source(captured, version, value):
+    target = preview_source_drops(captured, ModelRef(provider="openai", id="gpt-6-luna"))
+    target = target.model_copy(update={"declared_drops": ("model_controls", "sandbox")})
+    source = captured.model_copy(
+        update={
+            "effective_spec": captured.effective_spec.model_copy(
+                update={
+                    "extensions": (
+                        ExtensionConfig(
+                            namespace="anthropic.model_config",
+                            version=version,
+                            value=value,
+                        ),
+                    )
+                }
+            )
+        }
+    )
+    assert "source_definition" in classify_source_obligations(source, target, environment=None)
+    with pytest.raises(UnsupportedCapability):
+        preview_source_drops(source, target.model)

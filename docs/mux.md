@@ -3025,7 +3025,13 @@ existing ORM behavior unless the authoritative persisted mode is selected.
 The backend service may receive a trusted complete source-capture callback. Its
 preview derives losses through the existing worker source-preservation rule and
 includes the exact losses, source pin and target digest in the confirmation
-digest. A switch must accept exactly that tuple. Credentials, instructions,
+digest. A switch must accept exactly that tuple. Switching from Anthropic to
+another provider declares `model_controls` when the source's valid effort or
+speed controls cannot be represented. Identical same-provider native model
+controls are preserved. Unknown or invalid controls still refuse as
+`source_definition`, even with `model_controls` consent. DD3 cards, CLI previews
+and MCP results show this loss through the same canonical declared-drop tuple.
+Credentials, instructions,
 unknown obligations and publishing approval cannot be discarded. Missing source
 or publishing context refuses. Clear removes consent; revert rechecks the original
 consent against a fresh capture, and fleet-grant changes carry the current consent.
