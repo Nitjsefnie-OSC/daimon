@@ -32,6 +32,26 @@ def get_profile(profile_id: str) -> Profile:
         raise InvalidConfig(f"unknown profile {profile_id!r}") from None
 
 
+def worker_token_limits_supported(
+    profile: Profile,
+    *,
+    max_input_tokens: int | None,
+    max_output_tokens: int | None,
+    max_turns: int,
+) -> bool:
+    """Profile-specific envelope shape; capability admission stays with the caller."""
+    if profile.profile_id != INLINE_REUSE.profile_id or (
+        max_input_tokens is None and max_output_tokens is None
+    ):
+        return True
+    return (
+        max_input_tokens is not None
+        and max_output_tokens is not None
+        and max_turns == 1
+        and max_output_tokens <= 65_536
+    )
+
+
 def emits_legacy_events_for(provider: Provider) -> bool:
     """Read rendering policy for an event or resource without a profile id.
 
@@ -98,6 +118,7 @@ __all__ = [
     "PERSISTENT_WORKSPACE",
     "PROFILES",
     "get_profile",
+    "worker_token_limits_supported",
     "emits_legacy_events_for",
     "native_agent_tools",
     "neutral_catalog_profile_for",

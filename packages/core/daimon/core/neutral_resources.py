@@ -79,6 +79,7 @@ from mux.profiles import (
     get_profile,
     native_agent_tools,
     neutral_catalog_profile_for,
+    worker_token_limits_supported,
 )
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
@@ -924,6 +925,13 @@ class WorkerLimits(Contract):
             self.provider_limits_usd.get(profile.provider, Decimal(0)) <= 0
         ):
             raise WorkerSpecRefused("provider_limits_usd", "not_subset")
+        if not worker_token_limits_supported(
+            profile,
+            max_input_tokens=self.max_input_tokens,
+            max_output_tokens=self.max_output_tokens,
+            max_turns=self.max_turns,
+        ):
+            raise WorkerSpecRefused("budget", "unsupported")
         capabilities: tuple[tuple[int | None, Capability], ...] = (
             (self.max_model_requests, "model_request_limit"),
             (self.max_input_tokens, "input_token_limit"),

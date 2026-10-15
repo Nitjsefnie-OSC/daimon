@@ -721,8 +721,9 @@ async def retained_budget_root_turn(db_preflight, db_nullpool_engine, request):
 
 
 @pytest.mark.parametrize("retained_budget_root_turn", [None, "recorded_i7"], indirect=True)
+@pytest.mark.parametrize("bounded_gemini", [False, True])
 async def test_heterogeneous_root_reconstructs_before_planned_worker_dispatch(
-    retained_budget_root_turn, record_property
+    retained_budget_root_turn, record_property, bounded_gemini, tmp_path
 ):
     import json
     from decimal import Decimal
@@ -742,6 +743,10 @@ async def test_heterogeneous_root_reconstructs_before_planned_worker_dispatch(
             Path(__file__).resolve().parents[1] / "fixtures/i7_r6_planned_fleet_grant.json"
         ).read_text()
     )
+    if bounded_gemini:
+        for backend, model in plan["grant"]["choices"]:
+            if model["provider"] == "gemini":
+                backend["model"] = model["id"] = "gemini-3.8-flash"
     # Refresh only the host-owned lease; retain every recorded financial limit.
     plan["grant"]["limits"]["deadline"] = current.expires_at.isoformat()
     value = AgentFleetGrant.model_validate_json(json.dumps(plan["grant"]))
@@ -809,12 +814,44 @@ async def test_heterogeneous_root_reconstructs_before_planned_worker_dispatch(
                         budget_usd=Decimal(row["budget_usd"]),
                         deadline=parent.limits.deadline,
                         max_turns=1,
+                        max_input_tokens=262144
+                        if bounded_gemini and model.provider == "gemini"
+                        else None,
+                        max_output_tokens=65536
+                        if bounded_gemini and model.provider == "gemini"
+                        else None,
                     ),
                     captured_source=dispatch_source,
                 )
                 worker_request = await original.for_worker(parent, resolved)
                 selected = await prepare_source(worker_request)
                 assert selected.target_spec == resolved.spec
+                if bounded_gemini and model.provider == "gemini":
+                    from daimon.core.turn.gemini_deployment import GeminiPlan
+                    from mux.contracts.resources import EnvironmentSpec
+
+                    plan_entry = GeminiPlan(
+                        profile="gemini.inline_reuse",
+                        tenant_id=scope.tenant_id,
+                        platform=parent.fleet.root.channel.platform,
+                        channel_id=parent.fleet.root.channel.channel_id,
+                        account_id=scope.account_id,
+                        config_digest=selected.admission.backend_revision.digest,
+                        project="project",
+                        api_key_env="OFFLINE_GEMINI_KEY",
+                        records_path=tmp_path / "records.sqlite",
+                        holds_path=tmp_path / "holds.sqlite",
+                        hold_usd=Decimal(".49"),
+                        cap_usd=Decimal(".49"),
+                        agent_name=resolved.spec.name,
+                        system=resolved.spec.system,
+                        tools=(),
+                        environment=EnvironmentSpec(name="explicit-no-execution"),
+                    )
+                    deployment = plan_entry.deployment(selected)
+                    assert deployment.max_total_tokens is None
+                    assert deployment.max_input_tokens == 262144
+                    assert deployment.max_output_tokens == 65536
                 assert selected.worker.limits.budget_usd == Decimal(row["budget_usd"])
                 record_property(
                     row["role"],

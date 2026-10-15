@@ -1037,3 +1037,9 @@ owner readers are composed. It fabricates no accepted input, terminal, timing,
 financial actual or scenario verdict. Successful capture/verification exits 3
 (PENDING); a refused operation exits 2 with a content-free diagnostic. It cannot
 alone authorize dropping required live evidence before a database downgrade.
+
+Fleet probe admission uses the shared staging binding and existing budget guard,
+including exact role/model/cash terms and durable dispatch claims. The Gemini
+worker term pins `gemini-3.8-flash`; the $0.49 hold and all other cash terms
+remain unchanged. Quote runtime-enforced worker caps with `ModelPrice.reserve`
+and `TokenLimits`; a signed cash hold alone is not a native token envelope.

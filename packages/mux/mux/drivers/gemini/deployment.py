@@ -126,6 +126,10 @@ class _ConfiguredTransport:
                     finally:
                         client.close()
 
+    async def count_input_tokens(self, request: Mapping[str, JsonValue]) -> int:
+        async with self._client() as client:
+            return await SDKTransport(client).count_input_tokens(request)
+
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         async with self._client() as client:
             return await SDKTransport(client).create(request)
