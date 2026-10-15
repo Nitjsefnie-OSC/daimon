@@ -3481,6 +3481,9 @@ async def worker_source_context(
     *,
     original_tools=(),
     granted_tools=(),
+    original_mcp_servers=(),
+    original_skills=(),
+    granted_skills=(),
     environment_config=None,
     warm=False,
     native_budget=None,
@@ -3511,6 +3514,8 @@ async def worker_source_context(
         name="source",
         system="Protected root instruction",
         tools=original_tools,
+        mcp_servers=original_mcp_servers,
+        skills=original_skills,
     )
     environment = ma_environment(tenant_id=str(tenant.id))
     if environment_config is not None:
@@ -3526,6 +3531,7 @@ async def worker_source_context(
             system=root.base_system,
             metadata={"daimon_tenant": str(tenant.id)},
             tools=granted_tools or None,
+            skills=granted_skills or None,
         ),
         fleet=replace(
             root.fleet,

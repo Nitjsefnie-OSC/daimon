@@ -40,15 +40,84 @@ def source_read_only(request):
 
 
 @pytest.fixture
-async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_only):
+async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_only, request):
+    from mux.contracts.ids import SkillRef
+    from mux.contracts.resources import ToolSpec
+
+    resolved_tools = None
+    kwargs = {}
+    live = getattr(request, "param", None) == "live_root_readback"
+    if live or getattr(request, "param", None) == "resolved_readback":
+        # Recorded response-only builtin types, reordered configs and resolved defaults.
+        fixture = (
+            Path(__file__).resolve().parents[3]
+            / "mux/tests/fixtures/anthropic_retrieved_builtin_tools.json"
+        )
+        resolved_tools = json.loads(fixture.read_text())
+        resolved_tools[0]["default_config"]["enabled"] = False
+        for config in resolved_tools[0]["configs"]:
+            config["enabled"] = config["name"] == "read"
+        resolved_tools[0]["configs"].reverse()
+        skills = [
+            {"type": "custom", "skill_id": f"skill-live-{i}", "version": "1"} for i in range(11)
+        ]
+        kwargs = {
+            "original_tools": [
+                *resolved_tools,
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "daimon-mcp",
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": [],
+                },
+            ],
+            "original_mcp_servers": [
+                {"type": "url", "name": "daimon-mcp", "url": "https://mcp.invalid/mcp"}
+            ],
+            "original_skills": skills,
+            "granted_skills": tuple(
+                SkillRef(id=s["skill_id"], source="custom", version="1") for s in skills
+            ),
+            "granted_tools": (ToolSpec(name="read", kind="builtin"),),
+        }
+    capture = None
+    if live:
+        capture = json.loads(
+            (Path(__file__).resolve().parents[1] / "fixtures/anthropic_live_root.json").read_text()
+        )
+        kwargs.update(
+            original_tools=capture["tools"], environment_config=capture["environment"]["config"]
+        )
     sm, tenant, account, source, env, old, captured = await worker_source_context(
-        db_nullpool_engine, warm=True
+        db_nullpool_engine, warm=True, **kwargs
     )
+    if live:
+        from anthropic.types.beta import BetaEnvironment
+        from daimon.core.channel_backend import load_backend_agent
+        from daimon.testing.ma_models import ma_model_config
+
+        source = source.model_copy(
+            update={
+                "execution_identity": capture["execution_identity"],
+                "version": 10,
+                "model": ma_model_config("claude-haiku-5-5"),
+            }
+        )
+        env = BetaEnvironment.model_validate(
+            {**env.model_dump(mode="json"), **capture["environment"]}
+        )
+        async with ScriptedTransport().client() as client:
+            captured = await load_backend_agent(
+                client, sm, tenant_id=tenant, agent_name="source", actual_agent=source
+            )
     root = replace(
         old.permissions,
         fleet=replace(old.permissions.fleet, depth=0),
         agent_id=captured.agent_id,
-        environment=captured.environment.spec,
+        environment=captured.environment.spec if captured.environment is not None else None,
         limits=old.limits.model_copy(
             update={"deadline": datetime.now(UTC) + timedelta(minutes=10)}
         ),
@@ -108,6 +177,45 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
         resource_scope=root.fleet.scope,
         memory_read_only=source_read_only,
     )
+    if live:
+        from daimon.core.authz import build_agent_ref
+        from daimon.core.neutral_resources import AgentFleetGrant, fleet_root_permissions
+
+        admitted = AdmissionGrant(
+            tenant_id=tenant,
+            subject=root.subject,
+            surface=Surface.CHANNEL,
+            turn_place=root.fleet.place,
+            run_place=root.fleet.place,
+            agent=build_agent_ref(source.name, source.metadata or {}),
+            channel_id=root.fleet.root.channel.channel_id,
+            thread_id=root.fleet.root.thread_id,
+            is_dm=False,
+        )
+        root = fleet_root_permissions(
+            captured,
+            admitted,
+            AgentFleetGrant(
+                epoch=1,
+                max_workers=1,
+                choices=tuple(zip(root.backend_grants, root.models, strict=True)),
+                limits=root.limits,
+                max_run_seconds=120,
+                max_worker_seconds=120,
+                max_root_turns=1,
+            ),
+            fleet=root.fleet,
+            policy=POLICY,
+            now=datetime.now(UTC),
+        )
+        assert len(root.spec.tools) == 8
+        assert not root.spec.mcp_servers and not root.spec.extensions
+        assert root.environment.native_config is None
+        assert root.environment.network.mode == "unrestricted"
+        assert len(root.environment.packages["system"]) == 1
+        assert len(root.environment.packages["python"]) == 3
+        assert root.environment.scope == "organization"
+        resolved_tools = [capture["tools"][0]]
     resolved = resolve_worker_spec(
         root,
         root.spec,
@@ -180,12 +288,18 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                     model=payload["model"],
                     system=payload.get("system"),
                     metadata=payload.get("metadata"),
-                    tools=payload.get("tools") or (),
+                    tools=resolved_tools
+                    if resolved_tools is not None
+                    else payload.get("tools") or (),
                     skills=payload.get("skills") or (),
                 )
                 native["agent"] = native["agent"].model_copy(
                     update={"metadata": payload.get("metadata")}
                 )
+                if live:
+                    native["agent"] = native["agent"].model_copy(
+                        update={"execution_identity": capture["execution_identity"]}
+                    )
                 if controls["fault"] == "lost_ack":
                     raise httpx.ReadError("lost native ACK", request=call)
                 return httpx.Response(200, json=native["agent"].model_dump(mode="json"))
@@ -213,6 +327,10 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                 raw["archived_at"] = NOW.isoformat()
             if controls["fault"] == "agent_drift" and agent.id == "new-worker":
                 raw["system"] = "changed instructions"
+            if controls["fault"] == "builtin_widening" and agent.id == "new-worker":
+                for config in raw["tools"][0]["configs"]:
+                    if config["name"] == "bash":
+                        config["enabled"] = True
             return httpx.Response(200, json=raw)
         if "/environments/" in call.url.path:
             return httpx.Response(200, json=env.model_dump(mode="json", exclude_unset=True))

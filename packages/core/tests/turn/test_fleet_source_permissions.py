@@ -1,8 +1,10 @@
 """Admin ceilings meet actual captured source through the resource owner."""
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -26,7 +28,7 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
-from mux.contracts.resources import MCPConnection, ResourceBinding
+from mux.contracts.resources import MCPConnection, ResourceBinding, ToolSpec
 from mux.profiles import backend_selection
 
 from ..test_agent_backend import enable
@@ -45,13 +47,20 @@ async def captured(owned, request):
         principal_id="admitted-caller",
         authorization_id="admitted-root",
     )
+    live = getattr(request, "param", None) in ("haiku55", "haiku55_credentials")
+    capture = json.loads(
+        (Path(__file__).resolve().parents[1] / "fixtures/anthropic_live_root.json").read_text()
+    )
     native = ma_agent(
         id="root-source",
         name="helper",
         tenant_id=identity.tenant_id,
         model="claude-haiku-5-5",
         system="Protected source instruction",
-        tools=[
+        version=10 if live else 1,
+        tools=capture["tools"]
+        if live
+        else [
             {
                 "type": "custom",
                 "name": "helper",
@@ -59,10 +68,25 @@ async def captured(owned, request):
                 "input_schema": {"type": "object", "properties": {}},
             }
         ],
-        mcp_servers=[{"type": "url", "name": "private", "url": "https://private.invalid"}]
+        skills=capture["skills"] if live else (),
+        mcp_servers=capture["mcp_servers"]
+        if live
+        else [{"type": "url", "name": "private", "url": "https://private.invalid"}]
         if getattr(request, "param", None) == "mcp"
         else (),
     )
+    if live:
+        native = native.model_copy(update={"execution_identity": capture["execution_identity"]})
+    environment = ma_environment(tenant_id=identity.tenant_id)
+    if live:
+        from anthropic.types.beta import BetaEnvironment
+
+        environment = BetaEnvironment.model_validate(
+            {
+                **environment.model_dump(mode="json"),
+                **capture["environment"],
+            }
+        )
     trace = ScriptedTransport()
     trace.queue(
         ScriptedReply(
@@ -93,7 +117,7 @@ async def captured(owned, request):
         source = await project_session_resources(
             source,
             agent=actual,
-            environment=ma_environment(tenant_id=identity.tenant_id),
+            environment=environment,
             session_factory=sessions,
             tenant_id=identity.tenant_id,
             agent_uuid=source.agent_id,
@@ -103,7 +127,7 @@ async def captured(owned, request):
             mcp_settings=McpSettings(
                 public_url="https://mcp.invalid/mcp", jwt_secret=SecretStr("offline-placeholder")
             )
-            if getattr(request, "param", None) == "caller_credentials"
+            if getattr(request, "param", None) in ("caller_credentials", "haiku55_credentials")
             else None,
         )
     trace.assert_consumed()
@@ -311,11 +335,20 @@ async def test_unsupported_missing_or_foreign_capture_refuses_before_native_io(c
     elif fault in ("unknown_extension", "native_tools"):
         extension = ExtensionConfig(namespace="anthropic.unrepresented_intent", version=1, value={})
         if fault == "native_tools":
+            # A per-tool name that fails the closed builtin-tool schema: still a
+            # schema failure, distinct from a well-formed toolset with no neutral
+            # form (e.g. a bare `agent_toolset_20260401` or an `mcp_toolset`),
+            # which is excluded from the ceiling rather than refused.
             extension = ExtensionConfig(
                 namespace="anthropic.agent_tools",
                 version=1,
                 value={
-                    "tools": [{"type": "agent_toolset_20260401"}],
+                    "tools": [
+                        {
+                            "type": "agent_toolset_20260401",
+                            "configs": [{"name": "nonexistent_tool", "enabled": True}],
+                        }
+                    ],
                 },
             )
         source = source.model_copy(
@@ -369,3 +402,279 @@ async def test_unsupported_missing_or_foreign_capture_refuses_before_native_io(c
             now=NOW.replace(tzinfo=None) if fault == "naive_clock" else NOW,
         )
     assert len(trace.requests) == 1
+
+
+_HAIKU55_BUILTINS = ("bash", "read", "edit", "grep", "glob", "write", "web_fetch", "web_search")
+
+
+@pytest.mark.parametrize("captured", ("haiku55", "haiku55_credentials"), indirect=True)
+async def test_fleet_root_ceiling_keeps_builtins_and_excludes_the_daimon_mcp_toolset(captured):
+    """Live readback structure, with synthetic skill IDs and no credentials."""
+    permissions = compose(captured)
+    assert {tool.name for tool in permissions.spec.tools} == set(_HAIKU55_BUILTINS)
+    assert all(tool.kind == "builtin" for tool in permissions.spec.tools)
+    assert not any(tool.kind == "mcp_toolset" for tool in permissions.spec.tools)
+    assert not permissions.spec.mcp_servers
+    assert not any(r.kind == "credential" for r in permissions.resources)
+    assert len(permissions.spec.skills) == 11
+    assert len(captured[5].requests) == 1
+
+
+@pytest.mark.parametrize("captured", ("haiku55", "haiku55_credentials"), indirect=True)
+async def test_worker_cannot_inherit_the_excluded_daimon_mcp_toolset(captured):
+    """A worker that asks for the excluded mcp toolset is refused by the
+    existing ceiling-subset attenuation — the exclusion in fleet_root_permissions
+    is enough; no worker can ever request what never entered the ceiling."""
+    permissions = compose(captured)
+    requested = permissions.spec.model_copy(
+        update={"tools": (ToolSpec(name="daimon-mcp", kind="mcp_toolset"),)}
+    )
+    with pytest.raises(WorkerSpecRefused) as refused:
+        resolve_worker_spec(
+            permissions,
+            requested,
+            policy=captured[4],
+            now=NOW,
+            limits=permissions.limits,
+            captured_source=captured[0],
+        )
+    assert refused.value.field == "tools" and refused.value.reason == "not_subset"
+
+
+async def test_fleet_schema_error_refuses_before_freeze(captured, monkeypatch):
+    from daimon.core import neutral_resources
+
+    source = captured[0]
+    invalid = ExtensionConfig(
+        namespace="anthropic.agent_tools", version=1, value={"tools": [{"type": "unknown"}]}
+    )
+    source = source.model_copy(
+        update={
+            "effective_spec": source.effective_spec.model_copy(update={"extensions": (invalid,)})
+        }
+    )
+
+    def freeze(*args, **kwargs):
+        pytest.fail("schema-invalid source reached freeze")
+
+    monkeypatch.setattr(neutral_resources, "freeze_root_permissions", freeze)
+    with pytest.raises(WorkerSpecRefused, match="tools"):
+        fleet_root_permissions(
+            source, captured[1], captured[2], fleet=captured[3], policy=captured[4], now=NOW
+        )
+
+
+@pytest.mark.parametrize("captured", ("haiku55", "haiku55_credentials"), indirect=True)
+async def test_native_clone_inherits_only_the_projected_ceiling(captured):
+    from mux.drivers.anthropic.resources.agents import agent_payload
+
+    permissions = compose(captured)
+    child = resolve_worker_spec(
+        permissions,
+        captured[0].source,
+        policy=captured[4],
+        now=NOW,
+        limits=permissions.limits,
+        resources=permissions.resources,
+        environment=permissions.environment,
+        captured_source=captured[0],
+    )
+    assert child.spec.tools == permissions.spec.tools
+    assert not child.spec.mcp_servers and not child.spec.extensions
+    payload = agent_payload(child.spec)
+    assert all(t["default_config"]["enabled"] is False for t in payload["tools"])
+    assert {c["name"] for t in payload["tools"] for c in t["configs"]} == set(_HAIKU55_BUILTINS)
+
+
+@pytest.mark.parametrize("captured", ("haiku55", "haiku55_credentials"), indirect=True)
+async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captured, owned):
+    from daimon.core.config import McpSettings
+    from daimon.core.mux_compat import sdk_agent
+    from daimon.core.sessions import create_session
+    from daimon.testing.ma import MARouter
+    from daimon.testing.ma_models import ma_session
+    from mux.drivers.anthropic.resources.agents import agent_payload
+    from pydantic import SecretStr
+
+    source, _, _, _, policy, _ = captured
+    permissions = compose(captured)
+    worker = resolve_worker_spec(
+        permissions,
+        permissions.spec,
+        policy=policy,
+        now=NOW,
+        resources=permissions.resources,
+        environment=permissions.environment,
+        limits=permissions.limits,
+        captured_source=source,
+    )
+    source = source.model_copy(update={"resource_scope": worker.permissions.fleet.scope})
+    execution = source.source.model_copy(
+        update={
+            "ref": source.source.ref.model_copy(update={"id": "worker-agent"}),
+            "native": None,
+            "spec": worker.spec,
+        }
+    )
+    executing = sdk_agent(execution)
+    from anthropic.types.beta import BetaEnvironment
+
+    environment = BetaEnvironment.model_validate(dict(source.environment.native))
+    router = MARouter()
+    snapshots = {}
+
+    def native(call, match):
+        if call.method == "POST":
+            payload = json.loads(call.content)
+            session = ma_session(
+                id="worker-session",
+                agent=executing,
+                environment_id=environment.id,
+                metadata=payload["metadata"],
+                resources=payload["resources"],
+            )
+            snapshots["session"] = session.model_dump(mode="json")
+        return httpx.Response(200, json=snapshots["session"])
+
+    router.add("POST", r"/v1/sessions", native)
+    router.add("GET", r"/v1/sessions/worker-session", native)
+    router.add(
+        "GET",
+        r"/v1/environments/.*",
+        lambda call, match: httpx.Response(200, json=dict(source.environment.native)),
+    )
+    trace = ScriptedTransport(router=router)
+
+    async def fence():
+        return None
+
+    settings = (
+        McpSettings(
+            public_url="https://mcp.invalid/mcp", jwt_secret=SecretStr("offline-placeholder")
+        )
+        if source.resource_requirements
+        else None
+    )
+    async with trace.client() as client:
+        from daimon.core.scope import ResolvedConfig
+        from daimon.core.turn.admission import Admission
+        from daimon.core.turn.prepare import DEFAULT_MA_CAPABILITIES, ProviderPreparationRequest
+        from daimon.core.turn.runtime_manifest import prepare_source
+        from daimon.testing.turn_fakes import deps_for
+        from mux.contracts.config import ConfigRevision
+
+        deps = replace(
+            deps_for(client, owned[3]),
+            agent_backends=True,
+            channel_backends=True,
+            mcp=settings or McpSettings(),
+        )
+        request = ProviderPreparationRequest(
+            deps=deps,
+            admission=Admission(
+                account_id=permissions.fleet.account_id,
+                agent=sdk_agent(source.source),
+                environment=environment,
+                config=ResolvedConfig(agent_name="helper", environment_name="test-env"),
+                memory_read_only=True,
+                backend_revision=ConfigRevision.create(
+                    permissions.fleet.root.channel, 1, worker.backend
+                ),
+                backend_revision_origin="agent",
+            ),
+            scope=worker.permissions.fleet.scope,
+            tenant_id=source.tenant_id,
+            platform="discord",
+            external_user_id="member",
+            thread_id="worker-thread",
+            session_account_id=permissions.fleet.account_id,
+            reuse_existing=True,
+            capabilities=DEFAULT_MA_CAPABILITIES,
+            transfer=None,
+            deadline=worker.limits.deadline,
+            now=lambda: NOW,
+            worker=worker,
+            source=source,
+        )
+        prepared = await prepare_source(request)
+        assert prepared.target_spec == worker.spec
+        result = await create_session(
+            client,
+            agent=executing,
+            environment=environment,
+            tenant_id=source.tenant_id,
+            account_id=permissions.fleet.account_id,
+            agent_uuid=source.agent_id,
+            session_factory=owned[3],
+            resource_source=source,
+            worker=worker,
+            before_create=fence,
+            memory_read_only=True,
+            mcp_settings=settings,
+        )
+    assert not result.agent.mcp_servers
+    assert len(result.agent.skills) == 11
+    assert len(result.resources) == 1
+    assert len(executing.tools) == 1
+    assert agent_payload(worker.spec)["tools"][0]["default_config"]["enabled"] is False
+    assert not any("vault" in call.path for call in trace.requests)
+    trace.assert_consumed()
+
+
+@pytest.mark.parametrize("captured", ("haiku55",), indirect=True)
+async def test_same_provider_native_loss_is_declared_unless_projecting_a_worker_ceiling(captured):
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+
+    permissions = compose(captured)
+    missing = classify_source_obligations(
+        captured[0],
+        permissions.spec,
+        environment=permissions.environment,
+        resources=permissions.resources,
+    )
+    assert {"tools", "mcp"} <= missing
+    assert not classify_source_obligations(
+        captured[0],
+        permissions.spec,
+        environment=permissions.environment,
+        resources=permissions.resources,
+        worker_ceiling=True,
+    )
+
+
+async def test_excluded_toolset_removes_its_credential_ref_only(captured):
+    from daimon.core.turn.runtime_manifest import worker_source_ceiling
+
+    source = captured[0]
+    native = ExtensionConfig(
+        namespace="anthropic.agent_tools",
+        version=1,
+        value={"tools": [{"type": "mcp_toolset", "mcp_server_name": "private"}]},
+    )
+    source = source.model_copy(
+        update={
+            "effective_spec": source.effective_spec.model_copy(
+                update={
+                    "extensions": (native,),
+                    "mcp_servers": (
+                        MCPConnection(
+                            name="private",
+                            url="https://private.invalid",
+                            credential_ref="private-key",
+                        ),
+                    ),
+                }
+            ),
+            "resource_requirements": (
+                ResourceBinding(
+                    id="native-credential", kind="credential", credential_ref="private-key"
+                ),
+                ResourceBinding(
+                    id="unrelated-credential", kind="credential", credential_ref="other-key"
+                ),
+            ),
+        }
+    )
+    ceiling = worker_source_ceiling(source)
+    assert not ceiling.effective_spec.mcp_servers
+    assert ceiling.resource_requirements == (source.resource_requirements[1],)

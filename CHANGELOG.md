@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep native-only MCP servers and their credentials out of fleet worker grants,
+  preserve exact builtin permissions, and declare incomplete native toolsets on backend switches.
+
+
 ### Added
 
 - **Fleet roots now run against one retained original reservation.** A fleet root is admitted once against a scoped hold that it keeps for its whole run: pending financial state is settled before any funding check, each original input the root sends is counted against that hold, and a native root carries its explicit budget into the session. A root is an ordinary agent session, so it keeps the agent's personal memory store, which is neither counted nor funded. Off by default: fleet roots run only with `DAIMON_FLEET__ENABLED=true`. No migration.
