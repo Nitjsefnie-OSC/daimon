@@ -1354,6 +1354,30 @@ def worker_spec_ceiling(spec: AgentSpec) -> tuple[AgentSpec, frozenset[str]]:
     return spec.model_copy(update=updates) if updates else spec, frozenset(excluded)
 
 
+def worker_model_spec(ceiling: AgentSpec, target: AgentSpec) -> AgentSpec:
+    """Carry granted native controls exactly, or require their declared loss."""
+    normalized, _ = worker_spec_ceiling(ceiling)
+    controls = tuple(normalized.extensions or ())
+    if len(controls) > 1 or any(
+        _source_extension_obligation(extension, foreign_target=True) != "model_controls"
+        for extension in controls
+    ):
+        raise ValueError("unsupported native worker ceiling")
+    if target.extensions and target.extensions != controls:
+        raise ValueError("worker native controls differ from the ceiling")
+    if not controls:
+        return target
+    extension = controls[0]
+    if target.model.provider == ceiling.model.provider:
+        retained = target.model_copy(update={"extensions": controls})
+        if _source_extension_obligation(extension, native_target=retained) is not None:
+            raise ValueError("native worker model does not represent the granted controls")
+        return retained
+    if "model_controls" not in target.declared_drops:
+        raise ValueError("native model controls require an explicit declared loss")
+    return target.model_copy(update={"extensions": None})
+
+
 def classify_source_obligations(
     source: BackendAgent,
     target: AgentSpec | None,

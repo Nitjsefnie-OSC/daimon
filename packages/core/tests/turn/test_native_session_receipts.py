@@ -46,7 +46,8 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
 
     resolved_tools = None
     kwargs = {}
-    live = getattr(request, "param", None) == "live_root_readback"
+    effort = getattr(request, "param", None) == "live_root_effort"
+    live = effort or getattr(request, "param", None) == "live_root_readback"
     if live or getattr(request, "param", None) == "resolved_readback":
         # Recorded response-only builtin types, reordered configs and resolved defaults.
         fixture = (
@@ -95,7 +96,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
         db_nullpool_engine, warm=True, **kwargs
     )
     if live:
-        from anthropic.types.beta import BetaEnvironment
+        from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsModelConfig
         from daimon.core.channel_backend import load_backend_agent
         from daimon.testing.ma_models import ma_model_config
 
@@ -103,7 +104,11 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             update={
                 "execution_identity": capture["execution_identity"],
                 "version": 10,
-                "model": ma_model_config("claude-haiku-5-5"),
+                "model": BetaManagedAgentsModelConfig.model_validate(
+                    {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
+                )
+                if effort
+                else ma_model_config("claude-haiku-5-5"),
             }
         )
         env = BetaEnvironment.model_validate(
@@ -209,7 +214,8 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             now=datetime.now(UTC),
         )
         assert len(root.spec.tools) == 8
-        assert not root.spec.mcp_servers and not root.spec.extensions
+        assert not root.spec.mcp_servers
+        assert bool(root.spec.extensions) is effort
         assert root.environment.native_config is None
         assert root.environment.network.mode == "unrestricted"
         assert len(root.environment.packages["system"]) == 1

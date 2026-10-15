@@ -382,7 +382,7 @@ async def test_foreign_unproved_session_is_never_archived(native_worker):
 
 
 @pytest.mark.parametrize(
-    "native_worker", ["resolved_readback", "live_root_readback"], indirect=True
+    "native_worker", ["resolved_readback", "live_root_readback", "live_root_effort"], indirect=True
 )
 async def test_recorded_builtin_readback_passes_real_allocation_and_session_checks(native_worker):
     from daimon.core.headless_runner import run_worker
@@ -402,6 +402,12 @@ async def test_recorded_builtin_readback_passes_real_allocation_and_session_chec
         for call in trace.requests
         if call.method == "POST" and call.path == "/v1/agents"
     )
+    if root.spec.extensions:
+        assert allocated["model"] == {
+            "id": "claude-haiku-5-5",
+            "speed": "standard",
+            "effort": {"type": "medium"},
+        }
     tools = allocated["tools"]
     assert tools[0]["default_config"]["enabled"] is False
     assert {config["name"] for config in tools[0]["configs"]} == {

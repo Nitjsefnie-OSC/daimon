@@ -1231,7 +1231,7 @@ def fleet_root_permissions(
         raise WorkerSpecRefused("tools", "unsupported") from None
     # The complete capture remains the input to the existing obligation classifier.
     assert ceiling.effective_spec is not None
-    spec = ceiling.effective_spec.model_copy(update={"extensions": None})
+    spec = ceiling.effective_spec
     resources = ceiling.resource_requirements
     read_only = source.memory_read_only is not False
     if source.memory_store_id is not None:
@@ -1398,6 +1398,7 @@ def resolve_worker_spec(
     from daimon.core.turn.runtime_manifest import (
         classify_source_obligations,
         compose_source_instructions,
+        worker_model_spec,
         worker_spec_ceiling,
     )
 
@@ -1526,8 +1527,10 @@ def resolve_worker_spec(
         raise WorkerSpecRefused("scope", worker_run.reason or "unbound")
     if resolved.model.options:
         raise WorkerSpecRefused("effort", "unsupported")
-    if resolved.extensions:
-        raise WorkerSpecRefused("extensions", "unsupported")
+    try:
+        resolved = worker_model_spec(parent.spec, resolved)
+    except ValueError:
+        raise WorkerSpecRefused("extensions", "unsupported") from None
     choices = tuple(
         grant
         for grant in parent.backend_grants

@@ -241,7 +241,8 @@ def sdk_agent(record: Agent) -> BetaManagedAgentsAgent:
     from mux.drivers.anthropic.resources.agents import agent_payload
 
     payload = agent_payload(spec)
-    payload["model"] = {"id": spec.model.id, **dict(spec.model.options)}
+    if isinstance(payload["model"], str):
+        payload["model"] = {"id": payload["model"]}
     payload.update(
         {
             "id": record.ref.id,
