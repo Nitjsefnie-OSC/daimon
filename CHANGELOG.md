@@ -7,14 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Clarified channel access, GitHub connection, approval, handoff and slash command guidance across Discord and Slack.
-
-
 ### Fixed
 
 - Keep native-only MCP servers and their credentials out of fleet worker grants,
   preserve exact builtin permissions, and declare incomplete native toolsets on backend switches.
-
 
 ### Added
 
@@ -33,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Walls say who can fix them and the one next step: `/here` when Daimon can't see or answer in a channel, GitHub refusals, MCP connection refusals and expired approvals. Each slash command has one description on Discord and Slack, and `/help` lists `/here` first. The setup skill and docs no longer promise members MCP connections on shared agents or describe GitHub access levels removed in #1005.
 - **Thread titles and the thread-participation classifier now run on Claude Haiku 5.5** instead of Claude Haiku 4.5. Haiku 5.5 costs less per token but counts the same text as about 30% more tokens, so these calls' usage rows shift. Haiku 5.5 thinks by default and thinking counts toward the output cap, so naming now turns thinking off. The classifier runs at effort low with a 1,024-token cap, since its old 100-token cap cut off Haiku 5.5's verdict, which then counted as silence. A refused naming call falls back to the title taken from the message, and a refused classifier call stays silent, as other failures already did; both are still metered. `DAIMON_THREAD_PARTICIPATION__CLASSIFIER_MODEL` still picks the classifier's model, which must support the effort parameter (Claude Haiku 4.5 does not).
 - Connect GitHub pages now show clear next steps, keep repo additions and removals pending until Save, and hide repo names the current GitHub account cannot access.
 - **When an agent can't read a private repo, it now posts the Connect GitHub button straight away instead of asking first.** Asked to "connect GitHub", it posts the button rather than granting a repo silently, and it no longer says connecting a repo would replace its working repo (connecting never does). The old token form now refuses agents that use the GitHub App, and clone and CLI errors point to Connect GitHub instead of that form. The GitHub App install link also works on deployments that only set `DAIMON_GITHUB_APP__APP_SLUG`; before, the agent said no install link was configured.
