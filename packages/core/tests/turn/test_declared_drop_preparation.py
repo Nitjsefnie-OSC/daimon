@@ -47,6 +47,7 @@ async def consent_request(owned, request):
         system="Authoritative source instructions",
         tools=params.get("tools", ()),
         mcp_servers=params.get("mcp_servers", ()),
+        skills=params.get("skills", ()),
     )
     environment = ma_environment(tenant_id=identity.tenant_id)
     router, reads, constructions, counterpart_reads = MARouter(), [], [], []
@@ -1120,3 +1121,89 @@ def json_copy(value):
     import json
 
     return json.loads(json.dumps(value))
+
+
+_LIVE_BUILTINS = ("bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search")
+_LIVE_TOOLS = [
+    {
+        "type": "agent_toolset_20260401",
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        "configs": [
+            {"name": n, "enabled": True, "permission_policy": {"type": "always_allow"}}
+            for n in _LIVE_BUILTINS
+        ],
+    },
+    {
+        "type": "mcp_toolset",
+        "mcp_server_name": "daimon-mcp",
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        "configs": [],
+    },
+]
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": backend,
+            "tools": _LIVE_TOOLS,
+            "mcp_servers": [
+                {"type": "url", "name": "daimon-mcp", "url": "https://mcp.invalid/mcp"}
+            ],
+            "skills": [
+                {"type": "custom", "skill_id": f"skill-live-{i}", "version": "1"} for i in range(11)
+            ],
+        }
+        for backend in ("openai", "gemini")
+    ],
+    indirect=True,
+)
+async def test_live_manifest_switch_preview_confirm_and_prepare_declare_exact_losses(
+    consent_request,
+):
+    request, _, source, _, accepted, _, reads, constructions, _, _ = consent_request
+    assert len(source.effective_spec.skills) == 11
+    assert source.memory_required
+    assert accepted.declared_drops == ("mcp", "memory", "sandbox", "skills", "tools")
+    prepared = await read_preparation_counterpart(request)
+    assert prepared.target_spec.declared_drops == accepted.declared_drops
+    assert not prepared.target_spec.tools and not prepared.target_spec.mcp_servers
+    assert len(constructions) == 1 and all(call.method == "GET" for call in reads)
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {
+            "backend": backend,
+            "tools": [
+                {
+                    "type": "agent_toolset_20260401",
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": configs,
+                }
+            ],
+        }
+        for backend in ("openai", "gemini")
+        for configs in (
+            [],
+            [
+                {
+                    "name": "web_search",
+                    "enabled": False,
+                    "permission_policy": {"type": "always_allow"},
+                }
+            ],
+        )
+    ],
+    indirect=True,
+)
+async def test_unlisted_native_defaults_are_declared_through_switch_preparation(consent_request):
+    request, _, _, _, accepted, _, _, _, _, _ = consent_request
+    assert accepted.declared_drops == ("memory", "sandbox", "tools")
+    prepared = await read_preparation_counterpart(request)
+    assert prepared.target_spec.declared_drops == accepted.declared_drops

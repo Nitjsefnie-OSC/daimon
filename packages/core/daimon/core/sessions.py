@@ -733,6 +733,8 @@ async def create_session(
     )
     resource_agent = agent
     if resource_source is not None or worker is not None:
+        from daimon.core.turn.runtime_manifest import worker_source_ceiling
+
         if (
             resource_source is None
             or worker is None
@@ -765,7 +767,7 @@ async def create_session(
         await before_create()
         if (
             resource_source.memory_store_id is None
-            or resource_source.resource_requirements
+            or worker_source_ceiling(resource_source).resource_requirements
             or resource_source.repository_sources
             or extra_resources
         ):
@@ -797,7 +799,7 @@ async def create_session(
         app_mode = await _session_app_mode(
             session_factory, tenant_id=tenant_id, agent_id=agent_uuid
         )
-    caller_vault = _caller_mcp_vault_required(
+    caller_vault = worker is None and _caller_mcp_vault_required(
         app_mode=app_mode,
         mcp_settings=mcp_settings,
         account_id=account_id,

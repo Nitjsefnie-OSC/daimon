@@ -240,7 +240,14 @@ def test_native_agent_tool_projection_uses_the_closed_anthropic_compiler():
                     "tools": [
                         {
                             "type": "agent_toolset_20260401",
-                            "configs": [{"name": "bash", "enabled": True}],
+                            "default_config": {"enabled": False},
+                            "configs": [
+                                {
+                                    "name": "bash",
+                                    "enabled": True,
+                                    "permission_policy": {"type": "always_allow"},
+                                }
+                            ],
                         },
                         {"type": "mcp_toolset", "mcp_server_name": "daimon-mcp"},
                     ]

@@ -24,6 +24,7 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
+from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProviderBinding, ResourceBinding
@@ -972,6 +973,70 @@ def compose_source_instructions(
     return required + ("\n\n" + rest if rest else "")
 
 
+def _represented_source_extension(extension: ExtensionConfig) -> bool:
+    model = extension.value.get("model")
+    return extension.version == 1 and (
+        extension.namespace == "anthropic.model_config"
+        and isinstance(model, dict)
+        and set(model) <= {"id", "speed"}
+        and model.get("speed") is None
+        or extension.namespace == "anthropic.multiagent"
+        and extension.value == {"clear": True}
+        or extension.namespace == "anthropic.agent_create_nulls"
+    )
+
+
+def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
+    """Exclude validated native-only capabilities and their paired resources."""
+    spec = source.effective_spec
+    if spec is None:
+        return source
+    normalized, excluded = worker_spec_ceiling(spec)
+    credential_refs = {
+        server.credential_ref for server in spec.mcp_servers or () if server.name in excluded
+    } - {None}
+    resources = tuple(
+        binding
+        for binding in source.resource_requirements
+        if not (
+            binding.kind == "credential"
+            and (
+                binding.credential_ref in credential_refs
+                or ("daimon-mcp" in excluded and binding.id.startswith("caller-mcp:"))
+            )
+        )
+    )
+    return source.model_copy(
+        update={
+            "effective_spec": normalized,
+            "resource_requirements": resources,
+        }
+    )
+
+
+def worker_spec_ceiling(spec: AgentSpec) -> tuple[AgentSpec, frozenset[str]]:
+    """Normalize native toolsets once for fleet ceilings and native clones."""
+    from mux.drivers.anthropic.schemas import agent_tools
+
+    tools = spec.tools
+    excluded: set[str] = set()
+    retained: list[ExtensionConfig] = []
+    for extension in spec.extensions or ():
+        if extension.namespace == "anthropic.agent_tools":
+            native = agent_tools(extension)
+            tools = native.intent()
+            excluded.update(native.excluded_mcp_servers())
+        elif not _represented_source_extension(extension):
+            retained.append(extension)
+    return spec.model_copy(
+        update={
+            "tools": tools,
+            "extensions": tuple(retained) or None,
+            "mcp_servers": tuple(s for s in spec.mcp_servers or () if s.name not in excluded),
+        }
+    ), frozenset(excluded)
+
+
 def classify_source_obligations(
     source: BackendAgent,
     target: AgentSpec | None,
@@ -979,8 +1044,14 @@ def classify_source_obligations(
     environment: EnvironmentSpec | None,
     resources: tuple[ResourceBinding, ...] = (),
     asks_before_publishing: bool = False,
+    worker_ceiling: bool = False,
 ) -> frozenset[str]:
     """One source-preservation rule for pre-allocation normalization and preparation."""
+    if worker_ceiling:
+        try:
+            source = worker_source_ceiling(source)
+        except ValueError:
+            return frozenset({"source_definition", "tools"})
     spec = source.effective_spec
     if spec is None:
         return frozenset({"source_definition"})
@@ -992,7 +1063,6 @@ def classify_source_obligations(
     from mux.drivers.anthropic.schemas import agent_tools
 
     for extension in spec.extensions or ():
-        model = extension.value.get("model")
         if extension.version != 1:
             missing.add("source_definition")
         elif extension.namespace == "anthropic.agent_tools":
@@ -1003,29 +1073,11 @@ def classify_source_obligations(
             else:
                 if target is not None and "tools" not in drops:
                     source_tools = native.intent()
-                    if (
-                        native.has_unrepresented_toolset()
-                        and target.model.provider != spec.model.provider
+                    if native.has_unrepresented_toolset() and extension not in (
+                        target.extensions or ()
                     ):
-                        # A well-formed toolset without a neutral projection (e.g.
-                        # the daimon-mcp mcp_toolset every chat-enabled agent
-                        # carries) is a declarable tools loss on an actual
-                        # provider switch, not a schema failure. Staying on the
-                        # same provider never loses it — the fleet ceiling
-                        # already excludes it from what a worker can request
-                        # (see fleet_root_permissions), so no separate consent
-                        # is owed here; flagging it anyway would make the
-                        # root's own same-provider self-check refuse itself.
                         missing.add("tools")
-        elif not (
-            extension.namespace == "anthropic.model_config"
-            and isinstance(model, dict)
-            and set(model) <= {"id", "speed"}
-            and model.get("speed") is None
-            or extension.namespace == "anthropic.multiagent"
-            and extension.value == {"clear": True}
-            or extension.namespace == "anthropic.agent_create_nulls"
-        ):
+        elif not _represented_source_extension(extension):
             missing.add("source_definition")
     profile = get_profile(backend_selection(spec.model.provider).profile)
     tools_required = bool(
@@ -1346,6 +1398,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         environment=worker.environment if worker else None,
         resources=worker.resources if worker else (),
         asks_before_publishing=request.admission.asks_before_publishing,
+        worker_ceiling=worker is not None,
     )
     if missing:
         raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)

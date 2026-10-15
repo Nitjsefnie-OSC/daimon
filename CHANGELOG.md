@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep native-only MCP servers and their credentials out of fleet worker grants,
+  preserve exact builtin permissions, and declare incomplete native toolsets on backend switches.
+
+
 ### Added
 
 - **Backend switches for ordinary agents now record declared drops.** When an agent's target backend cannot keep its memory, tools, skills or MCP servers, the switch must carry explicit consent to those losses, stored with the agent's backend revision. A turn refuses to start if that consent is missing, if the agent's setup has drifted since the switch was previewed, or if the agent has a source field or value Daimon does not recognise. Ordinary Gemini agents can run as a plain chat counterpart once memory is dropped. Off by default: this applies only with `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`, and the screens for confirming drops arrive in a later release. Migration `0102_agent_backend_drop_consent` adds two nullable columns.
