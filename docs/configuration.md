@@ -44,6 +44,7 @@ typo is silent — check the spelling here.
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
 - [Fleet](#fleet)
+- [Private Channel Messages](#private-channel-messages)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
@@ -1320,6 +1321,28 @@ Most worker turns one process runs at once, across all tenants.
 Most times in total a worker is started when it keeps being lost before its turn is
 sent. A worker whose turn was sent is reconciled, never resent.
 
+## Private Channel Messages
+
+Read from `daimon.core.config.PrivateChannelMessagesSettings`. Prefix
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__`.
+
+Every message in Teams private and shared channels, through Microsoft Graph.
+
+Teams sends a bot only the posts there that @mention it. Top-level, not under
+`TeamsSettings`, as every feature setting is; only Teams reads it.
+
+### `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED`
+
+`bool` · optional · default `False`
+
+When True, Daimon subscribes to Microsoft Graph change notifications for each Teams
+private or shared channel it is in, where Teams sends the bot only the posts that
+@mention it. Replies in followed threads, replies to Daimon's messages and typed
+@&lt;bot name&gt; mentions then work there too, usually within seconds. Needs
+DAIMON_TEAMS__PUBLIC_URL (Graph posts to &lt;public_url&gt;/api/graph/notifications and
+/api/graph/lifecycle) and the application permission ChannelMessage.Read.All with tenant
+admin consent.
+
 ## Tool Safety
 
 Read from `daimon.core.config.ToolSafetyPolicy`. Prefix `DAIMON_TOOL_SAFETY__`.
@@ -1341,6 +1364,13 @@ in chat waits for the requester to press Approve on a confirmation card, and a w
 a routine or other unattended run is refused unless listed in unattended_writes. Applies
 to sessions created after it is set; a chat thread keeps its current session until that
 is replaced. Off keeps every tool auto-approved.
+
+### `DAIMON_TOOL_SAFETY__AGENT_RULES`
+
+`bool` · optional · default `False`
+
+Apply workspace-admin tool rules for individual agents and third-party MCP tools. Off by
+default; stored rules remain editable but inactive until enabled.
 
 ### `DAIMON_TOOL_SAFETY__EFFECTS`
 

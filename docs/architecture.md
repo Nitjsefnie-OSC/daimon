@@ -484,6 +484,20 @@ name is `recipient.name`) takes the ordinary `_handle` path with the typed
 name stripped, or gets the too-long notice a mention would. Off, nothing
 changes: a Teams thread reply still goes to participation.
 
+Teams private and shared channels deliver only @mentions to the bot. With
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED` on, `channel_subscriptions.py` keeps a
+Graph change-notification subscription per such channel
+(`teams_channel_subscriptions`, renewed by one task that sleeps until the
+earliest expiry). A notification reads the message once, `parse_graph_message`
+builds the same `TeamsInbound` as `parse_inbound`, and `handle_graph_message`
+claims it under the Bot Framework delivery key before the shared dispatch, so
+a message seen by both sources runs once. Graph @mentions are left to Bot
+Framework, and Graph's sender tenant is not used: guests and external
+members are classified by the same roster lookup. The permission is
+tenant-wide and no read tells whether the bot is in a channel, so a channel is
+dropped on the bot's removal event, an app removal (the whole team), or a send
+there refused with 403 `BotNotInConversationRoster` (`_RemovalWatch`).
+
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer
 batch; once the thread goes quiet the shared gates in
@@ -1286,7 +1300,13 @@ turn, `AutoApprove` allows every blocked call, and `PolicyApproval` asks a
 decider per call and sends each answer on the same stream. The decider comes
 from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write
 model in `packages/core/daimon/core/tool_safety.py`. With
-`DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
+`DAIMON_TOOL_SAFETY__AGENT_RULES` on as well, each third-party paused call
+reads its agent's exact tool rule from the database. The lookup uses the
+session's stable agent id, attached server URL and admitted parent channel.
+Agent-wide and matching channel rules combine by the stricter outcome. The
+operator deny list wins; a matching rule then decides before classification.
+A failed lookup asks in chat or refuses unattended. The flag is off by default.
+With `DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
 third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is
 refused unless the operator allowed it there, and a write in chat waits for
@@ -2358,8 +2378,8 @@ registered and expire too, while older jti-less ones keep working.
 
 | Scope | Tools |
 | --- | --- |
-| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_channel_skills`, `list_environments` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill` |
+| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_channel_skills`, `list_agent_tool_rules`, `list_environments` |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill`, `set_agent_tool_rule`, `clear_agent_tool_rule` |
 | `agents:archive` | `archive_channel_copy` |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |

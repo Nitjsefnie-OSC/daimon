@@ -18,7 +18,16 @@ from uuid import UUID
 
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PostgresDsn, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    PostgresDsn,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -1329,6 +1338,28 @@ class ThreadNamingSettings(BaseModel):
     )
 
 
+class PrivateChannelMessagesSettings(BaseModel):
+    """Every message in Teams private and shared channels, through Microsoft Graph.
+
+    Teams sends a bot only the posts there that @mention it. Top-level, not
+    under `TeamsSettings`, as every feature setting is; only Teams reads it.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, Daimon subscribes to Microsoft Graph change notifications "
+            "for each Teams private or shared channel it is in, where Teams sends "
+            "the bot only the posts that @mention it. Replies in followed threads, "
+            "replies to Daimon's messages and typed @<bot name> mentions then "
+            "work there too, usually within seconds. Needs DAIMON_TEAMS__PUBLIC_URL "
+            "(Graph posts to <public_url>/api/graph/notifications and "
+            "/api/graph/lifecycle) and the application permission "
+            "ChannelMessage.Read.All with tenant admin consent."
+        ),
+    )
+
+
 class PrivacySettings(BaseModel):
     delete_enabled: bool = Field(
         default=True,
@@ -1599,6 +1630,9 @@ class Settings(BaseSettings):
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
+    private_channel_messages: PrivateChannelMessagesSettings = Field(
+        default_factory=PrivateChannelMessagesSettings
+    )
     tool_safety: ToolSafetyPolicy = Field(
         default_factory=ToolSafetyPolicy,
         description=(
@@ -1626,6 +1660,15 @@ class Settings(BaseSettings):
             "fields — they invite drift."
         ),
     )
+
+    @model_validator(mode="after")
+    def _private_channel_messages_need_a_public_url(self) -> Settings:
+        teams = self.teams
+        if self.private_channel_messages.enabled and teams is not None and teams.public_url is None:
+            raise ValueError(
+                "DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED needs DAIMON_TEAMS__PUBLIC_URL"
+            )
+        return self
 
     model_config = SettingsConfigDict(
         env_prefix="DAIMON_",

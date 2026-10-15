@@ -20,6 +20,7 @@ from sqlalchemy import (
     Double,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -293,6 +294,69 @@ class TenantAccessPolicyRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class AgentToolRuleRecord(Base):
+    __tablename__ = "agent_tool_rules"
+    __table_args__ = (
+        Index(
+            "uq_agent_tool_rules_global",
+            "tenant_id",
+            "agent_id",
+            "tool_key",
+            unique=True,
+            postgresql_where=text("channel_id IS NULL"),
+        ),
+        Index(
+            "uq_agent_tool_rules_channel",
+            "tenant_id",
+            "agent_id",
+            "tool_key",
+            "channel_id",
+            unique=True,
+            postgresql_where=text("channel_id IS NOT NULL"),
+        ),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        CheckConstraint("rule IS NULL OR rule IN ('allow', 'ask', 'deny')"),
+        CheckConstraint("scope IN ('chat', 'chat_and_routines')"),
+        CheckConstraint("revision > 0"),
+        CheckConstraint("tool_key LIKE '%/%'"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[str] = mapped_column(Text)
+    agent_name: Mapped[str] = mapped_column(Text)
+    tool_key: Mapped[str] = mapped_column(Text)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    server_url: Mapped[str] = mapped_column(Text)
+    rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scope: Mapped[str] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer)
+    set_by: Mapped[str] = mapped_column(Text)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AgentToolRuleHistoryRecord(Base):
+    __tablename__ = "agent_tool_rule_history"
+    __table_args__ = (ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[str] = mapped_column(Text)
+    tool_key: Mapped[str] = mapped_column(Text)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    set_by: Mapped[str] = mapped_column(Text)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    before_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    before_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    before_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    before_server_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_agent_name: Mapped[str] = mapped_column(Text)
+    after_server_url: Mapped[str] = mapped_column(Text)
 
 
 class ChannelConfig(Base):
@@ -1802,6 +1866,48 @@ class TeamsChannelSite(Base):
     site_id: Mapped[str] = mapped_column(Text, nullable=False)
     drive_id: Mapped[str] = mapped_column(Text, nullable=False)
     folder_id: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TeamsChannelSubscription(Base):
+    """A Graph change-notification subscription to one private or shared channel.
+
+    Teams sends the bot only the @mentions there, so the adapter subscribes to
+    the channel's messages instead. `client_state_sha256` is the hash of the
+    secret Graph echoes on every notification; the secret itself is not kept.
+    `last_message_*` is the newest message handled, where a `missed` catch-up
+    starts. The `team_*`, `channel_*`, `bot_name` and `service_url` columns are
+    what the subscribing activity said, which a Graph message does not carry.
+    """
+
+    __tablename__ = "teams_channel_subscriptions"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "channel_id", name="pk_teams_channel_subscriptions"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_teams_channel_subscriptions_tenants",
+        ),
+        UniqueConstraint("subscription_id", name="uq_teams_channel_subscriptions_subscription_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    channel_id: Mapped[str] = mapped_column(Text)
+    team_id: Mapped[str] = mapped_column(Text, nullable=False)
+    group_id: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_type: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    team_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bot_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    service_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subscription_id: Mapped[str] = mapped_column(Text, nullable=False)
+    client_state_sha256: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
