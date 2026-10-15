@@ -1324,6 +1324,17 @@ hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
 (`packages/core/daimon/core/confirmation.py`), Discord, Slack and Teams each draw the
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
 with action-specific copy and a Details control with plain labelled inputs.
+When agent tool rules are enabled, a classification-based third-party write
+card also offers **Always allow**. The adapter captures both rule revisions
+before posting, checks the clicker's current admin rights, then claims the
+single-use pending card before saving a chat-scoped rule by compare-and-set.
+Discord defers the button response before the live check; Slack acknowledges
+the Socket Mode envelope before dispatch; Teams returns an immediate invoke
+response and performs the check in a tracked task. Teams sends any later
+refusal as a message targeted to the clicker.
+A failed compare-and-set leaves the call approved once and tells the clicker
+privately. The decider re-reads the rule after approval so a new explicit
+`deny` refuses the call before it is sent.
 A pause shows one card per blocked call, and the driver sends one
 `user.tool_confirmation` event per call after its answer. An adapter that
 passes no hook gets `no_confirmation_surface`, which

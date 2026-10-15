@@ -160,6 +160,18 @@ def settle_confirmation(
     return None
 
 
+def settle_admin_confirmation(
+    prompt: ConfirmationPrompt,
+    resolve: Callable[[ConfirmationAnswer], bool],
+) -> str | None:
+    """An already-authorized admin click competes with every other answer."""
+    if datetime.now(UTC) >= prompt.expires_at:
+        return EXPIRED_MESSAGE
+    if not resolve("approved"):
+        return NO_LONGER_PENDING_MESSAGE
+    return None
+
+
 class PostedConfirmations[Card: PromptCard]:
     """Token cards share post cleanup, click settlement, expiry and retirement."""
 
@@ -214,6 +226,18 @@ class PostedConfirmations[Card: PromptCard]:
 
         return settle_confirmation(posted.prompt, clicker, answer, resolve)
 
+    def claim_admin(self, token: str) -> str | None:
+        """Only call after a fresh admin check; pop before resolving."""
+        posted = self.cards.get(token)
+        if posted is None:
+            return self.missing_message(token)
+
+        def resolve(value: ConfirmationAnswer) -> bool:
+            self.cards.pop(token, None)
+            return self.pending.resolve(token, value)
+
+        return settle_admin_confirmation(posted.prompt, resolve)
+
 
 def settle_local_confirmation(
     prompt: ConfirmationPrompt,
@@ -230,6 +254,20 @@ def settle_local_confirmation(
         return True
 
     return settle_confirmation(prompt, clicker, answer, resolve)
+
+
+def settle_local_admin_confirmation(
+    prompt: ConfirmationPrompt, future: asyncio.Future[ConfirmationAnswer] | None
+) -> str | None:
+    """Discord's already-authorized admin click uses the same future."""
+
+    def resolve(value: ConfirmationAnswer) -> bool:
+        if future is None or future.done():
+            return False
+        future.set_result(value)
+        return True
+
+    return settle_admin_confirmation(prompt, resolve)
 
 
 async def wait_local_confirmation(

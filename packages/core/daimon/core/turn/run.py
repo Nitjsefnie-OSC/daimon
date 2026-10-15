@@ -27,7 +27,11 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.config import load_turn_settings
-from daimon.core.confirmation import ConfirmationHook, backend_switch_tools_for_turn
+from daimon.core.confirmation import (
+    ConfirmationHook,
+    ToolRuleCardReference,
+    backend_switch_tools_for_turn,
+)
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.errors import TurnError
 from daimon.core.handoff_context import (
@@ -960,6 +964,39 @@ async def run_prepared_turn_impl(
             if getattr(deps.tool_safety, "enabled", False)
             and getattr(deps.tool_safety, "agent_rules", False)
             else None
+        ),
+        rule_card_for=(
+            lambda call: (
+                (
+                    ToolRuleCardReference(
+                        tenant_id=tenant_id,
+                        agent_id=str(prepared.admission.agent.id),
+                        agent_name=prepared.admission.agent.name,
+                        tool_key=call.key,
+                        server_url=url,
+                        channel_id=channel_for_tool_rules(
+                            platform=platform,
+                            channel_id=prepared.admission.origin_channel_id,
+                            private_dm_id=prepared.admission.private_dm_id,
+                        ),
+                    )
+                    if (
+                        url := next(
+                            (
+                                server.url
+                                for server in prepared.admission.agent.mcp_servers
+                                if server.name == call.server_name
+                            ),
+                            None,
+                        )
+                    )
+                    is not None
+                    else None
+                )
+                if getattr(deps.tool_safety, "enabled", False)
+                and getattr(deps.tool_safety, "agent_rules", False)
+                else None
+            )
         ),
     )
 

@@ -22,6 +22,8 @@ from daimon.adapters.teams.card_actions import (
 )
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
+from daimon.core.authz import Subject
+from daimon.core.channel_admins import load_live_subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
@@ -41,6 +43,15 @@ from daimon.core.posted_controls.lifecycle import (
     edit_card_within,
     queue_card_edit,
 )
+from daimon.core.posted_controls.tool_rule_confirmation import (
+    ASK_ADMIN_MESSAGE,
+    ONLY_ADMIN_MESSAGE,
+    SAVE_FAILED_MESSAGE,
+    STALE_RULE_MESSAGE,
+    allowed_rule_scope,
+    save_always_allow,
+    snapshot_tool_rule,
+)
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -57,6 +68,7 @@ from microsoft_teams.cards import (
     TextRun,
     ToggleVisibilityAction,
 )
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     from daimon.adapters.teams.runtime import TeamsRuntime
@@ -90,6 +102,8 @@ def _footer(
         expires = prompt.expires_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         return (f"Only {name} can approve or deny", f"Expires {{{{TIME({expires})}}}}")
     if card.state in {"approved", "denied"}:
+        if prompt.tool_rules_enabled and card.footer is not None:
+            return (card.footer.format(actor=answered_by or card.answered_by_platform_user_id),)
         return (f"by {answered_by or name}",)
     return ()
 
@@ -124,6 +138,9 @@ def confirmation_adaptive_card(
             style="destructive",
             token=card.token,
         )
+        actions = [approve, deny]
+        if card.allow_always:
+            actions.append(button(VERB, "Always allow", "always", token=card.token))
         detail_lines = card.detail_lines or ("No additional details.",)
         body.append(
             Container(
@@ -135,10 +152,9 @@ def confirmation_adaptive_card(
         body.append(
             ActionSet(
                 actions=[
-                    approve,
-                    deny,
+                    *actions,
                     ToggleVisibilityAction(title="Details", target_elements=["approval-details"]),
-                ]
+                ],
             )
         )
     for line in _footer(card, prompt, answered_by):
@@ -159,6 +175,8 @@ class _PostedCard:
     message_id: str
     answered_edit_done: asyncio.Event = field(default_factory=asyncio.Event)
     check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None
+    rule_factory: async_sessionmaker[AsyncSession] | None = None
+    rule_subject: Callable[[str], Awaitable[Subject]] | None = None
 
 
 class TeamsConfirmationCards:
@@ -167,6 +185,7 @@ class TeamsConfirmationCards:
     def __init__(self, sender: TeamsSender) -> None:
         self._sender = sender
         self._controls = PostedConfirmations[_PostedCard]()
+        self._always_tasks: set[asyncio.Task[None]] = set()
 
     def hook(
         self,
@@ -220,11 +239,30 @@ class TeamsConfirmationCards:
                     current_admin=current_admin,
                 )
 
+        rule_factory = runtime.sessionmaker if runtime is not None else None
+
+        async def rule_subject(clicker: str) -> Subject:
+            from daimon.adapters.teams.channel_admin_groups import channel_admin_caller
+
+            if runtime is None or tenant_id is None:
+                return Subject()
+            settings = runtime.settings.teams
+            admin = settings is not None and clicker in settings.admin_user_ids
+            caller = await channel_admin_caller(
+                runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin
+            )
+            async with runtime.sessionmaker() as session:
+                return await load_live_subject(
+                    session, tenant_id=tenant_id, platform="teams", caller=caller
+                )
+
         async def _confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer | ApprovedConfirmation:
             if prompt.admin:
                 if prepare_admin is None or check_admin is None:
                     return "denied"
                 prompt = await prepare_admin(prompt)
+            if prompt.tool_rule is not None and rule_factory is not None:
+                prompt = await snapshot_tool_rule(prompt, rule_factory)
             posted_cards: list[_PostedCard] = []
             if requester_display_name:
                 prompt = prompt.model_copy(
@@ -232,11 +270,19 @@ class TeamsConfirmationCards:
                 )
 
             async def post(token: str) -> _PostedCard:
-                card = build_confirmation_card(prompt, state="pending", token=token)
+                card = build_confirmation_card(
+                    prompt, state="pending", token=token, allow_always=prompt.tool_rule is not None
+                )
                 message = MessageActivityInput().add_card(confirmation_adaptive_card(card, prompt))
                 sent = await self._sender.send(conversation_id, message, service_url=service_url)
                 posted = _PostedCard(
-                    prompt, conversation_id, service_url, sent.id, check_admin=check_admin
+                    prompt,
+                    conversation_id,
+                    service_url,
+                    sent.id,
+                    check_admin=check_admin,
+                    rule_factory=rule_factory,
+                    rule_subject=rule_subject,
                 )
                 posted_cards.append(posted)
                 return posted
@@ -250,6 +296,7 @@ class TeamsConfirmationCards:
                 async def retire_unsent() -> None:
                     # Queued behind the Approved edit on the same card
                     # (`edit_card_within` keeps per-card call order).
+                    await answered_posted.answered_edit_done.wait()
                     await self._edit(answered_posted, "stopped")
 
                 return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
@@ -264,6 +311,16 @@ class TeamsConfirmationCards:
         activity = ctx.activity
         data = submitted_fields(activity.value.action.data)
         token = str(data.get("token") or "")
+        if data.get("op") == "always":
+            posted = self._controls.cards.get(token)
+            if posted is None or posted.prompt.tool_rule is None:
+                return toast(self._controls.missing_message(token))
+            if canonical_uuid(activity.from_.aad_object_id) is None:
+                return toast(ONLY_ADMIN_MESSAGE)
+            task = asyncio.create_task(self._on_always(ctx, token))
+            self._always_tasks.add(task)
+            task.add_done_callback(self._always_tasks.discard)
+            return toast("Checking permission. The card will update if approved.")
         answer = _ANSWERS.get(str(data.get("op") or ""))
         posted = self._controls.cards.get(token)
         if posted is None or answer is None:
@@ -279,7 +336,10 @@ class TeamsConfirmationCards:
                 )
             return toast(refusal)
         card = build_confirmation_card(
-            posted.prompt, state=answer, answered_by_platform_user_id=clicker
+            posted.prompt,
+            state=answer,
+            answered_by_platform_user_id=clicker,
+            how="once" if posted.prompt.tool_rules_enabled else None,
         )
         name = activity.from_.name
         # The answered card goes through the card's edit queue, registered
@@ -294,9 +354,79 @@ class TeamsConfirmationCards:
         posted.answered_edit_done.set()
         return toast(_ANSWER_TOASTS[answer])
 
+    async def _on_always(
+        self, ctx: ActivityContext[AdaptiveCardInvokeActivity], token: str
+    ) -> None:
+        posted = self._controls.cards.get(token)
+        if posted is None:
+            return
+        reference = posted.prompt.tool_rule
+        if reference is None or posted.rule_factory is None or posted.rule_subject is None:
+            return
+        clicker = canonical_uuid(ctx.activity.from_.aad_object_id)
+        if clicker is None:
+            return
+        try:
+            subject = await posted.rule_subject(clicker)
+            scope = allowed_rule_scope(reference, subject)
+        except Exception:
+            subject = Subject()
+            scope = None
+        if scope is None:
+            message = ONLY_ADMIN_MESSAGE
+            if clicker == posted.prompt.requester_platform_user_id:
+                message += "\n" + ASK_ADMIN_MESSAGE
+            await self._notify_clicker(ctx, message)
+            return
+        if refusal := self._controls.claim_admin(token):
+            await self._notify_clicker(ctx, refusal)
+            return
+        how = "once"
+        try:
+            try:
+                result = await save_always_allow(
+                    posted.rule_factory,
+                    reference=reference,
+                    scope=scope,
+                    subject=subject,
+                    clicker=clicker,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                result = "failed"
+            how = ("always" if scope == "agent" else "channel") if result == "saved" else "once"
+        finally:
+            card = build_confirmation_card(
+                posted.prompt,
+                state="approved",
+                answered_by_platform_user_id=clicker,
+                how=how,
+            )
+            queue_card_edit(
+                self._send_card(posted, card, answered_by=ctx.activity.from_.name),
+                card_key=self._card_key(posted),
+                failure_errors=TEAMS_SEND_ERRORS,
+                failed_event="teams.tool_confirmation.edit_failed",
+            )
+            posted.answered_edit_done.set()
+        if result != "saved":
+            await self._notify_clicker(
+                ctx, STALE_RULE_MESSAGE if result == "stale" else SAVE_FAILED_MESSAGE
+            )
+
     @staticmethod
     def _card_key(posted: _PostedCard) -> object:
         return ("teams", posted.conversation_id, posted.message_id)
+
+    async def _notify_clicker(
+        self, ctx: ActivityContext[AdaptiveCardInvokeActivity], message: str
+    ) -> None:
+        recipient = ctx.activity.from_.model_copy(update={"is_targeted": True})
+        try:
+            await ctx.send(MessageActivityInput(text=message, recipient=recipient))
+        except Exception as err:
+            log.warning("teams.tool_confirmation.private_notice_failed", error=str(err))
 
     def _send_card(
         self, posted: _PostedCard, card: ConfirmationCard, *, answered_by: str | None = None
