@@ -207,7 +207,7 @@ async def test_always_action_checks_admin_and_saves_channel_rule(
     save = AsyncMock(return_value="saved")
     monkeypatch.setattr(confirmation_module, "save_always_allow", save)
     response = await cards.on_action(_click(token, "always", OTHER_AAD_OBJECT_ID))
-    assert response.value == "Checking permission. The card will update if approved."
+    assert response.value == "Checking you're an admin..."
     await asyncio.gather(*cards._always_tasks)
     assert future.result() == "approved"
     assert save.await_args.kwargs["scope"] == "channel"
@@ -252,7 +252,7 @@ async def test_always_ack_precedes_live_admin_check() -> None:
     )
     click = _click(token, "always", OTHER_AAD_OBJECT_ID)
     response = await cards.on_action(click)
-    assert response.value == "Checking permission. The card will update if approved."
+    assert response.value == "Checking you're an admin..."
     assert not checked.is_set() and not future.done()
     await checked.wait()
     release.set()
@@ -293,7 +293,7 @@ async def test_always_action_refuses_nonadmin_privately(
     requester = await cards.on_action(requester_click)
     other = await cards.on_action(other_click)
     assert (
-        requester.value == other.value == "Checking permission. The card will update if approved."
+        requester.value == other.value == "Checking you're an admin..."
     )
     await asyncio.gather(*cards._always_tasks)
     assert requester_click.send.await_args.args[0].text == (

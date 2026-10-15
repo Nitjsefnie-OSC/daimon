@@ -320,7 +320,7 @@ class TeamsConfirmationCards:
             task = asyncio.create_task(self._on_always(ctx, token))
             self._always_tasks.add(task)
             task.add_done_callback(self._always_tasks.discard)
-            return toast("Checking permission. The card will update if approved.")
+            return toast("Checking you're an admin...")
         answer = _ANSWERS.get(str(data.get("op") or ""))
         posted = self._controls.cards.get(token)
         if posted is None or answer is None:
