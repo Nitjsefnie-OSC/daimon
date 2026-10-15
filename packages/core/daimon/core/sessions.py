@@ -467,7 +467,7 @@ async def project_session_resources(
         or app_session_unmapped
         or (requester_is_headless and app_mode)
         or origin_seal_ids
-        or agent_github_app is not None
+        or (app_mode and agent_github_app is not None)
     ):
         # Opaque carry resources and private credentials are not absent obligations.
         requirements.append(ResourceBinding(id="caller-resources", kind="native"))

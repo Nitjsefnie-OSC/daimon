@@ -60,6 +60,7 @@ from microsoft_teams.cards import (
 
 if TYPE_CHECKING:
     from daimon.adapters.teams.runtime import TeamsRuntime
+    from daimon.core.turn.admission import Admission
 
 __all__ = ["VERB", "TeamsConfirmationCards", "confirmation_adaptive_card"]
 
@@ -174,6 +175,7 @@ class TeamsConfirmationCards:
         service_url: str | None,
         requester_display_name: str | None = None,
         runtime: TeamsRuntime | None = None,
+        admission: Admission | None = None,
         tenant_id: uuid.UUID | None = None,
         account_id: uuid.UUID | None = None,
         prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
@@ -194,8 +196,23 @@ class TeamsConfirmationCards:
                     settings = runtime.settings.teams
                     return settings is not None and clicker in settings.admin_user_ids
 
+                from functools import partial
+
+                from daimon.core.turn.admission import capture_admitted_backend_source
+
+                capture = partial(
+                    capture_admitted_backend_source,
+                    runtime.turn_deps,
+                    admission=admission,
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    platform="teams",
+                )
+
                 prepare_admin, check_admin = backend_switch_callbacks(
-                    make_backend_service(runtime.sessionmaker, runtime.settings.turn),
+                    make_backend_service(
+                        runtime.sessionmaker, runtime.settings.turn, capture_source=capture
+                    ),
                     sessionmaker=runtime.sessionmaker,
                     anthropic=runtime.anthropic,
                     tenant_id=tenant_id,
