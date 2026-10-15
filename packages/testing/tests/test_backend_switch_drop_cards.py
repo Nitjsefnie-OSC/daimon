@@ -117,10 +117,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_nullpool_engine)
     platform: str = request.param
     requester = REQUESTER[platform]
     sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
-    try:
-        require_owned_sessionmaker(sessions)
-    except ValueError:
-        pytest.skip("Backend control proofs require an owned DB or isolated CI")
+    require_owned_sessionmaker(sessions)
     async with sessions.begin() as session:
         tenant = await make_tenant(session, platform=platform)  # pyright: ignore[reportArgumentType]
         account = await make_account(session, tenant=tenant)
@@ -260,6 +257,49 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_nullpool_engine)
         yield Chat(platform, runtime, auth, origin, service, payload, turn_deps, admission)
         assert not trace.violations
         assert all(r.method == "GET" for r in trace.requests), "nothing is written to MA"
+
+
+@pytest.mark.parametrize("binding", ["main", "routed"])
+async def test_chat_fixture_refuses_unowned_binds_without_skipping_or_connecting(
+    db_preflight,
+    db_nullpool_engine,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    binding: str,
+):
+    from daimon.core._models import Account
+    from sqlalchemy import event
+    from sqlalchemy.ext import asyncio as sa_asyncio
+
+    foreign = sa_asyncio.create_async_engine("postgresql+asyncpg://localhost/operator_test")
+    factory = sa_asyncio.async_sessionmaker
+    attempts = []
+
+    def refuse_connection(*args, **kwargs):
+        attempts.append(True)
+        raise AssertionError("fixture ownership validation must precede connection")
+
+    for engine in (db_nullpool_engine, foreign):
+        event.listen(engine.sync_engine, "do_connect", refuse_connection)
+
+    def injected_factory(engine, **kwargs):
+        if binding == "main":
+            return factory(foreign, **kwargs)
+        return factory(engine, binds={Account: foreign}, **kwargs)
+
+    monkeypatch.setattr(sa_asyncio, "async_sessionmaker", injected_factory)
+    # Invoke the actual fixture body so converting refusal to pytest.skip fails this control.
+    fixture = chat.__wrapped__(SimpleNamespace(param="discord"), db_preflight, db_nullpool_engine)
+    try:
+        with pytest.raises(ValueError, match="owned local"):
+            await anext(fixture)
+        assert not attempts
+    except pytest.skip.Exception:
+        pytest.fail("an unowned fixture bind must raise ValueError, never skip")
+    finally:
+        await fixture.aclose()
+        for engine in (db_nullpool_engine, foreign):
+            event.remove(engine.sync_engine, "do_connect", refuse_connection)
+        await foreign.dispose()
 
 
 class Card:

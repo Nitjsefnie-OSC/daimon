@@ -503,7 +503,7 @@ async def test_a_private_session_context_refuses_the_preview(active_chat):
     its channel stamp entirely (as an un-public or pre-DD3 session would be).
     """
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
-    # A tool-bearing source refuses on its own terms (xfail'd elsewhere in this
+    # A tool-bearing source refuses on its own terms (asserted elsewhere in this
     # file); strip it so the only possible refusal here is the context gate.
     _without_own_tools(payload)
     del frozen["metadata"]["daimon_channel"]
