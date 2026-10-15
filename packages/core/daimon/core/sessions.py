@@ -101,7 +101,6 @@ from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import (
     hash_mcp_servers,
     hash_skills,
-    hash_tools,
     session_mcp_servers,
     session_skills,
     session_tools,
@@ -734,6 +733,7 @@ async def create_session(
     resource_agent = agent
     if resource_source is not None or worker is not None:
         from daimon.core.turn.runtime_manifest import worker_source_ceiling
+        from mux.drivers.anthropic.resources.agents import native_tools_match
 
         if (
             resource_source is None
@@ -1345,7 +1345,16 @@ async def create_session(
                         )
                         if (
                             any(getattr(actual, key) != getattr(wanted, key) for key in scalars)
-                            or hash_tools(actual.tools) != hash_tools(wanted.tools)
+                            or not native_tools_match(
+                                [
+                                    tool.model_dump(mode="json", exclude_none=True)
+                                    for tool in wanted.tools
+                                ],
+                                [
+                                    tool.model_dump(mode="json", exclude_none=True)
+                                    for tool in actual.tools
+                                ],
+                            )
                             or hash_mcp_servers(actual.mcp_servers)
                             != hash_mcp_servers(wanted.mcp_servers)
                             or hash_skills(actual.skills) != hash_skills(wanted.skills)

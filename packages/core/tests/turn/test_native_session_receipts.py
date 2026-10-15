@@ -40,9 +40,50 @@ def source_read_only(request):
 
 
 @pytest.fixture
-async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_only):
+async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_only, request):
+    from mux.contracts.ids import SkillRef
+    from mux.contracts.resources import ToolSpec
+
+    resolved_tools = None
+    kwargs = {}
+    if getattr(request, "param", None) == "resolved_readback":
+        # Recorded response-only builtin types, reordered configs and resolved defaults.
+        fixture = (
+            Path(__file__).resolve().parents[3]
+            / "mux/tests/fixtures/anthropic_retrieved_builtin_tools.json"
+        )
+        resolved_tools = json.loads(fixture.read_text())
+        resolved_tools[0]["default_config"]["enabled"] = False
+        for config in resolved_tools[0]["configs"]:
+            config["enabled"] = config["name"] == "read"
+        resolved_tools[0]["configs"].reverse()
+        skills = [
+            {"type": "custom", "skill_id": f"skill-live-{i}", "version": "1"} for i in range(11)
+        ]
+        kwargs = {
+            "original_tools": [
+                *resolved_tools,
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "daimon-mcp",
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": [],
+                },
+            ],
+            "original_mcp_servers": [
+                {"type": "url", "name": "daimon-mcp", "url": "https://mcp.invalid/mcp"}
+            ],
+            "original_skills": skills,
+            "granted_skills": tuple(
+                SkillRef(id=s["skill_id"], source="custom", version="1") for s in skills
+            ),
+            "granted_tools": (ToolSpec(name="read", kind="builtin"),),
+        }
     sm, tenant, account, source, env, old, captured = await worker_source_context(
-        db_nullpool_engine, warm=True
+        db_nullpool_engine, warm=True, **kwargs
     )
     root = replace(
         old.permissions,
@@ -180,7 +221,9 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                     model=payload["model"],
                     system=payload.get("system"),
                     metadata=payload.get("metadata"),
-                    tools=payload.get("tools") or (),
+                    tools=resolved_tools
+                    if resolved_tools is not None
+                    else payload.get("tools") or (),
                     skills=payload.get("skills") or (),
                 )
                 native["agent"] = native["agent"].model_copy(
@@ -213,6 +256,10 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                 raw["archived_at"] = NOW.isoformat()
             if controls["fault"] == "agent_drift" and agent.id == "new-worker":
                 raw["system"] = "changed instructions"
+            if controls["fault"] == "builtin_widening" and agent.id == "new-worker":
+                for config in raw["tools"][0]["configs"]:
+                    if config["name"] == "bash":
+                        config["enabled"] = True
             return httpx.Response(200, json=raw)
         if "/environments/" in call.url.path:
             return httpx.Response(200, json=env.model_dump(mode="json", exclude_unset=True))

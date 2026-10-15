@@ -1576,8 +1576,8 @@ def resolve_worker_spec(
                 + (ToolSpec(name=profile.execution_tool, kind="builtin"),)
             }
         )
-    # Native confirmation capability does not imply that the neutral tool
-    # compiler maps this per-tool field. Unproven ask controls refuse.
+    # Worker dispatch has no proved neutral confirmation loop. Ask controls
+    # remain intact in the compiler, but cannot authorize unattended dispatch.
     if any(tool.permission != "auto" for tool in resolved.tools or ()):
         raise WorkerSpecRefused("tools", "unsupported")
     _worker_tools(resolved, parent.spec)

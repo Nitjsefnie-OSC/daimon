@@ -27,6 +27,7 @@ from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.schemas import (
     AgentCreateNulls,
     AgentModelConfig,
+    AgentToolsConfig,
     ClearMultiagent,
     agent_tools,
     multiagent,
@@ -174,6 +175,18 @@ def tool_payload(tool: object) -> dict[str, object]:
             }
         ],
     }
+
+
+def native_tools_match(expected: object, observed: object) -> bool:
+    """Compare exact grants, accepting only closed, fully represented readback."""
+    try:
+        wanted = AgentToolsConfig.model_validate({"tools": expected}).intent(exact=True)
+        actual = AgentToolsConfig.model_validate({"tools": observed}).intent(exact=True)
+    except ValueError:
+        return False
+    return sorted(wanted, key=lambda tool: (tool.kind, tool.name)) == sorted(
+        actual, key=lambda tool: (tool.kind, tool.name)
+    )
 
 
 def agent_record(item: BetaManagedAgentsAgent, account_scope_id: str, scope: Scope) -> Agent:

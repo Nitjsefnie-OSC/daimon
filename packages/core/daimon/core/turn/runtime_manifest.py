@@ -1073,9 +1073,11 @@ def classify_source_obligations(
             else:
                 if target is not None and "tools" not in drops:
                     source_tools = native.intent()
-                    if native.has_unrepresented_toolset() and extension not in (
-                        target.extensions or ()
-                    ):
+                    if extension in (target.extensions or ()):
+                        # The native compiler preserves this exact tool payload,
+                        # overriding the target's neutral tools.
+                        source_tools = tuple(target.tools or ())
+                    elif native.has_unrepresented_toolset():
                         missing.add("tools")
         elif not _represented_source_extension(extension):
             missing.add("source_definition")

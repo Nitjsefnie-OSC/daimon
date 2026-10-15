@@ -553,3 +553,47 @@ def test_daimon_haiku55_shape_declares_its_exact_loss_set_on_switch(captured, pr
     ):
         omitted = target.model_copy(update={"declared_drops": retained})
         assert classify_source_obligations(source, omitted, environment=None) == expected
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+def test_represented_native_builtin_loss_requires_tools_even_on_the_same_provider(
+    captured, provider
+):
+    extension = ExtensionConfig(
+        namespace="anthropic.agent_tools",
+        version=1,
+        value={
+            "tools": [
+                {
+                    "type": "agent_toolset_20260401",
+                    "default_config": {
+                        "enabled": False,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": [
+                        {
+                            "name": "read",
+                            "enabled": True,
+                            "permission_policy": {"type": "always_allow"},
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    source = captured.model_copy(
+        update={
+            "effective_spec": captured.effective_spec.model_copy(
+                update={"extensions": (extension,)}
+            )
+        }
+    )
+    target = source.effective_spec.model_copy(
+        update={"model": ModelRef(provider=provider, id="target"), "extensions": None, "tools": ()}
+    )
+    assert "tools" in classify_source_obligations(source, target, environment=None)
+    retained = target.model_copy(update={"tools": (ToolSpec(name="read", kind="builtin"),)})
+    assert "tools" not in classify_source_obligations(source, retained, environment=None)
+    if provider == "anthropic":
+        native_retained = target.model_copy(update={"extensions": (extension,)})
+        assert "tools" not in classify_source_obligations(source, native_retained, environment=None)
