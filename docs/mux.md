@@ -2435,7 +2435,9 @@ bound. Resume rechecks current permissions and keeps the original budget, turn
 and deadline ceilings; it cannot reopen a terminal worker or reset a hold.
 
 Cross-review attaches the target's verified journal event through the same spawn
-path. The host pins a closed review contract: JSON containing `verdict`
+path, with a backend different from the primary's. Admission refuses a same-backend
+reviewer, and collection rechecks retained review rows before reporting. The host
+pins a closed review contract: JSON containing `verdict`
 (`approved` or `refused`) and the exact `reviewed_digest`. A primary's stored
 result contract declares a required review with `review_required: true`; omitted
 or false does not require one, and any non-boolean value refuses. Reviewers use

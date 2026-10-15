@@ -636,7 +636,9 @@ async def test_actual_review_barrier_controls_the_existing_summary_delivery(verd
 
     output = result("worker-result", "Verified primary result")
     digest = result_digest(dict(output.payload))
-    review = result("review-result", json.dumps({"verdict": verdict, "reviewed_digest": digest}))
+    review = result(
+        "review-result", json.dumps({"verdict": verdict, "reviewed_digest": digest})
+    ).model_copy(update={"native": NativeProvenance(provider="openai", api_revision="1")})
     primary = worker(
         status="succeeded",
         result_contract={"review_required": True},
@@ -645,6 +647,9 @@ async def test_actual_review_barrier_controls_the_existing_summary_delivery(verd
     reviewer = worker(
         ordinal=2,
         status="succeeded",
+        backend="openai",
+        profile=backend_selection("openai").profile,
+        model=backend_selection("openai").model,
         reviewer_of=primary.id,
         result_contract={"format": "review", "reviewed_digest": digest},
         result=ResultPointer(
