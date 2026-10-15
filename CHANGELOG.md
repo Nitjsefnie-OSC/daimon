@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require fleet reviewers to use a different backend from the primary, including retained reviews checked before summary delivery.
+
 - Allow fresh Gemini preparation for a new mention thread while preserving an existing session when replacement is unsupported.
 
 - Accept omitted empty Gemini catalog tool and source lists on readback while continuing to refuse capability drift.

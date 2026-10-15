@@ -63,6 +63,17 @@ def _review_required(contract: Mapping[str, JsonValue] | None) -> bool:
     return required
 
 
+def _review_target(
+    workers: tuple[FleetWorker, ...], reviewer_of: uuid.UUID, reviewer_backend: str
+) -> FleetWorker:
+    target = next((worker for worker in workers if worker.id == reviewer_of), None)
+    if target is None or target.reviewer_of is not None:
+        raise FleetRefused("review_target_required")
+    if target.backend == reviewer_backend:
+        raise FleetRefused("review_backend_must_differ")
+    return target
+
+
 def _result_format(contract: Mapping[str, JsonValue] | None) -> Literal["text", "json"]:
     contract = contract or {}
     format_ = contract.get("format", "text")
@@ -333,9 +344,7 @@ class FleetOrchestrator:
         reviewed: Event | None = None
         if reviewer_of is not None:
             run, workers = await self.read_snapshot(parent, policy, selected_run)
-            target = next((worker for worker in workers if worker.id == reviewer_of), None)
-            if target is None or target.reviewer_of is not None:
-                raise FleetRefused("review_target_required")
+            target = _review_target(workers, reviewer_of, resolved.backend.backend)
             reviewed = await self._result(parent, policy, run, target)
             result_contract = {
                 "format": "review",
@@ -602,8 +611,8 @@ class FleetOrchestrator:
         for worker in workers:
             if worker.reviewer_of is None:
                 continue
-            target = next((row for row in workers if row.id == worker.reviewer_of), None)
-            if target is None or target.reviewer_of is not None or target.result is None:
+            target = _review_target(workers, worker.reviewer_of, worker.backend)
+            if target.result is None:
                 raise FleetRefused("review_target_required")
             contract = worker.result_contract
             if contract != {"format": "review", "reviewed_digest": target.result.digest}:

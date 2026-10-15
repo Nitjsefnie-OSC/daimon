@@ -1,12 +1,10 @@
 """Concrete fleet result/contract reads over real SDK worker journals."""
 
 import asyncio
-import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import httpx
 import pytest
 from daimon.core._models import FleetWorker as WorkerRow
 from daimon.core._models import PlatformPrincipal
@@ -16,17 +14,13 @@ from daimon.core.headless_runner import run_worker
 from daimon.core.neutral_resources import resolve_worker_spec
 from daimon.core.stores import access_policy, fleet
 from daimon.core.turn.runtime_manifest import capture_preparation_source
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance, TextPart
 from mux.contracts.resources import AgentPatch, AgentSpec
-from mux.drivers.openai import deployment as native_transport
-from mux.drivers.openai.transport import SDKTransport
 from sqlalchemy import update
 
 from ..test_fleet_budget import POLICY, setup, tariffs
 from ..test_fleet_budget import sm as sm
-from . import test_openai_host as native_host
 from .test_openai_worker_plan import application as application
 from .test_openai_worker_plan import claimed_openai_worker as claimed_openai_worker
 from .test_openai_worker_plan import db_preflight as db_preflight
@@ -257,9 +251,8 @@ async def test_unsupported_contract_refuses_spawn_before_funding(sm, contract):
     assert workers == () and retained.reserved_usd == 0
 
 
-@pytest.mark.parametrize("verdict", ("approved", "wrong_digest", "refused", "wrong_contract"))
-async def test_required_review_gate_uses_real_spawn_dispatch_and_full_journal(
-    claimed_openai_worker, monkeypatch, verdict
+async def test_same_backend_review_preserves_real_primary_journal_without_admission(
+    claimed_openai_worker,
 ):
     request, root, worker, prices, owned, calls, primary_wire = claimed_openai_worker
     async with request.deps.sessionmaker.begin() as db:
@@ -325,99 +318,22 @@ async def test_required_review_gate_uses_real_spawn_dispatch_and_full_journal(
         cancel=asyncio.Event(),
     )
     assert primary.status == "succeeded" and primary.result is not None
-    primary_text = primary_wire.items[-1]["content"][0]["text"]
-    review_text = json.dumps(
-        {
-            "verdict": "refused" if verdict == "refused" else "approved",
-            "reviewed_digest": "wrong" if verdict == "wrong_digest" else primary.result.digest,
-        }
-    )
-    # A second native session and agent, supplied by transport only. Both workers
-    # use real financial admission, pool claims, preparation and result publication.
-    monkeypatch.setattr(native_host, "SESSION_ID", "native-review-session")
-    wire = native_host.Wire()
-    wire.expected_spend_limit = None
-    agents = {owned.retained.agent.ref.id: owned.wire.agent}
-    session = wire.session
-    monkeypatch.setattr(
-        wire,
-        "session",
-        lambda: {**session(), "agent": {**session()["agent"], "id": "review-agent"}},
-    )
 
-    def native(call):
-        calls.append(call)
-        path = call.url.path
-        if path == "/v1/agents" and call.method == "POST":
-            agents["review-agent"] = {
-                **json.loads(call.content),
-                "id": "review-agent",
-                "created_at": 1791792000,
-            }
-            return httpx.Response(200, json=agents["review-agent"])
-        if path in {"/v1/agents/" + key for key in agents}:
-            return httpx.Response(200, json=agents[path.rsplit("/", 1)[1]])
-        if path == "/v1/agents/environments/templates/owned-environment":
-            return httpx.Response(
-                200,
-                json={
-                    **owned.wire.environment,
-                    "network": {"access": "enabled"},
-                    "packages": {"system": [], "python": [], "npm": []},
-                },
-            )
-        if path == "/v1/agents/sessions" and call.method == "POST":
-            assert json.loads(call.content)["agent_id"] == "review-agent"
-            return httpx.Response(200, json=wire.session())
-        response = wire.handle(call)
-        for turn in wire.turns:
-            turn["agent_id"] = "review-agent"
-        if call.method == "POST" and path.endswith("/events"):
-            wire.items[-1]["content"][0]["text"] = review_text
-        return response
-
-    dispatched = []
-
-    async def dispatch(parent, committed, resolved, reviewed):
-        assert reviewed is not None and reviewed.session_id == primary.result.session_id
-        assert reviewed.payload["content"][0]["text"] == primary_text
-        assert result_digest(dict(reviewed.payload)) == primary.result.digest
-        assert committed.result_contract == {
-            "format": "review",
-            "reviewed_digest": primary.result.digest,
-        }
-        claimed = await fleet.claim_worker(
-            request.deps.sessionmaker, tenant_id=committed.tenant_id, run_id=committed.run_id, cap=2
-        )
-        assert claimed is not None and claimed.id == committed.id
-        selected = replace(request, worker=resolved, scope=resolved.permissions.fleet.scope)
-        result = await run_worker(
-            selected,
-            parent=parent,
-            worker=claimed,
-            trigger_message="Review this full result: " + json.dumps(dict(reviewed.payload)),
-            prices=prices,
-            cancel=asyncio.Event(),
-        )
-        assert result.status == "succeeded" and result.result is not None
-        assert result.result.session_id != primary.result.session_id
-        dispatched.append(result)
+    async def forbidden(*args):
+        pytest.fail("same-backend review reached native dispatch")
 
     ports = HostFleetPorts(
-        request.deps.sessionmaker, prices=prices, markup=Decimal("0.25"), dispatch=dispatch
+        request.deps.sessionmaker, prices=prices, markup=Decimal("0.25"), dispatch=forbidden
     )
     orchestrator = FleetOrchestrator(ports)
     async with request.deps.sessionmaker() as db:
         policy = await access_policy.load_access_policy(db, tenant_id=request.tenant_id)
-    async with build_async_openai(
-        transport=httpx.MockTransport(native),
-        api_key="offline",
-        base_url="https://openai.invalid/v1",
-    ) as sdk:
-        monkeypatch.setattr(
-            native_transport, "configured_transport", lambda **kwargs: SDKTransport(sdk)
-        )
-        reply = await orchestrator.spawn(
+    before = await fleet.run_status(
+        request.deps.sessionmaker, tenant_id=primary.tenant_id, run_id=primary.run_id
+    )
+    calls_before = len(calls)
+    with pytest.raises(FleetRefused, match="review_backend_must_differ"):
+        await orchestrator.spawn(
             root,
             policy,
             now=request.now(),
@@ -433,31 +349,16 @@ async def test_required_review_gate_uses_real_spawn_dispatch_and_full_journal(
             reviewer_of=primary.id,
             captured_source=source,
         )
-    assert len(dispatched) == 1 and reply["worker_id"] == str(dispatched[0].id)
-    if verdict == "wrong_contract":
-        # Persisted contract tampering must not certify the actual review journal.
-        async with request.deps.sessionmaker.begin() as db:
-            await db.execute(
-                update(WorkerRow)
-                .where(WorkerRow.id == dispatched[0].id)
-                .values(result_contract={"format": "review", "reviewed_digest": "wrong"})
-            )
-        with pytest.raises(FleetRefused, match="review_digest_mismatch"):
-            await orchestrator.collect(root, policy, run_id=primary.run_id)
-    else:
-        result = await orchestrator.collect(root, policy, run_id=primary.run_id)
-        if verdict == "approved":
-            assert result == {
-                "run_id": str(primary.run_id),
-                "status": "ready",
-                "results": [{"worker_id": str(primary.id), "result": primary_text}],
-            }
-        else:
-            assert result == {
-                "run_id": str(primary.run_id),
-                "status": "blocked",
-                "reason": "review_refused",
-            }
+    after = await fleet.run_status(
+        request.deps.sessionmaker, tenant_id=primary.tenant_id, run_id=primary.run_id
+    )
+    assert after == before
+    assert len(calls) == calls_before
+    assert await orchestrator.collect(root, policy, run_id=primary.run_id) == {
+        "run_id": str(primary.run_id),
+        "status": "blocked",
+        "reason": "review_required",
+    }
 
 
 @pytest.mark.parametrize("rollback", (False, True))
