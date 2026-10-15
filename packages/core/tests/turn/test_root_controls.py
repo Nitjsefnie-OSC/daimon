@@ -122,7 +122,10 @@ async def test_caller_guard_identity_is_composed_and_refuses_before_native_alloc
             ),
         )
     assert callback_calls == [caller]
-    assert not any(r.method != "GET" for r in transport.requests[before:])
+    # A root is an ordinary agent session: it keeps main's personal memory store. That store is
+    # provisioned before the guard refuses, and it is neither a counted input nor funded.
+    non_get = [(r.method, r.path) for r in transport.requests[before:] if r.method != "GET"]
+    assert non_get == [("POST", "/v1/memory_stores")]
     root = await root_record(root_turn)
     assert root.result["root_finance"]["input_keys"] == []
     assert root.result["root_finance"]["exposure_usd"] == "0.06"
@@ -216,6 +219,7 @@ async def test_revoked_grant_refuses_at_claim_but_drain_bypasses_it(root_turn, k
 
 async def test_real_root_allocation_carries_native_budget_and_replays_ack(root_turn):
     from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
+    from daimon.testing.ma import make_fake_memory_store_handler
     from daimon.testing.ma_models import ma_session
     from daimon.testing.ma_transport import ScriptedReply
 
@@ -245,6 +249,9 @@ async def test_real_root_allocation_carries_native_budget_and_replays_ack(root_t
         r"/v1/sessions/fresh-controlled-root",
         lambda request, match: httpx.Response(200, json=native),
     )
+    # The root keeps main's personal memory store; answer its provisioning like other session tests.
+    memory = make_fake_memory_store_handler()
+    transport.router.add("POST", r"/v1/memory_stores", lambda request, match: memory(request))
     before = len(transport.requests)
 
     async def create():
@@ -256,8 +263,11 @@ async def test_real_root_allocation_carries_native_budget_and_replays_ack(root_t
     second = await run_controlled_preparation(request, create())
     assert first == second
     posts = [r for r in transport.requests[before:] if r.method == "POST"]
-    assert len(posts) == 1 and posts[0].path == "/v1/sessions"
-    assert posts[0].json()["budget"] == native["budget"]
+    # The personal memory store is provisioned once (ordinary agent session); only the session
+    # carries the native budget, and the store is neither a counted input nor funded.
+    assert [r.path for r in posts] == ["/v1/memory_stores", "/v1/sessions"]
+    assert "budget" not in posts[0].json()
+    assert posts[1].json()["budget"] == native["budget"]
     assert callback_calls and all(c is caller for c in callback_calls)
     root = await root_record(root_turn)
     assert root.result["root_finance"]["input_keys"] == []
