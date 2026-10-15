@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Let a chat admin complete an OpenAI or Gemini agent backend switch from a Discord, Slack or Teams confirmation card that lists the declared losses and requires exactly those accepted drops; DMs and private conversations refuse.
 - Refuse unclassified native agent, tool and environment fields or unsupported discriminator/context values before cross-backend drop consent or counterpart preparation, including caller-hidden MCP toolsets.
 - Refuse unclassified native agent and environment fields before cross-backend drop consent or counterpart preparation.
 - Preview agent backend losses from the CLI, require exact explicit acceptance, and support dry-run and revision-checked revert without provisioning or reading credential values.

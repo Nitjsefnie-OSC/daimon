@@ -250,21 +250,72 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
         )
 
 
-async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(active_chat):
+def _without_own_tools(payload):
+    """The switched agent as MA serves it from now on: no tools of its own.
+
+    A cross-profile preview of a tool-bearing source refuses (native tool
+    controls have no neutral projection yet), so the cross-backend proofs
+    switch a tool-less agent. The chat session's frozen agent keeps the gated
+    toolset the card gate reads, and replies already queued keep theirs.
+    """
+    payload["tools"] = []
+    payload["mcp_servers"] = []
+
+
+#: A Daimon agent carrying its own `daimon-mcp` toolset cannot yet preview a
+#: cross-profile switch: `classify_source_obligations` reports
+#: `source_definition` for native tool controls instead of declaring drops.
+_TOOL_BEARING_SOURCE_REFUSES = pytest.mark.xfail(
+    strict=True,
+    raises=ToolError,
+    reason="tool-bearing sources hard-refuse source_unavailable until the "
+    "runtime_manifest.classify_source_obligations fix declares their drops",
+)
+
+
+@pytest.mark.parametrize(
+    "own_tools", [False, pytest.param(True, marks=_TOOL_BEARING_SOURCE_REFUSES)]
+)
+@pytest.mark.parametrize("target", ["openai", "gemini"])
+async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
+    active_chat, target, own_tools
+):
     from daimon.core.channel_backend import load_backend_agent
 
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    if not own_tools:
+        _without_own_tools(payload)
     gate()
     agent()
     preview = await _request_agent_backend_switch_impl(
         runtime,
         auth,
         agent_name="Researcher",
-        target_backend="anthropic",
+        target_backend=target,
         origin_context_id=str(origin.id),
     )
     assert preview.status == "preview" and preview.expected_revision == 0
     assert "unknown" in preview.cost_line.lower()
+    drops = preview.declared_drops
+    assert {"memory", "sandbox"} <= set(drops)
+    assert own_tools or drops == ("memory", "sandbox")
+    extra = next(item for item in ("files", "repository", "skills") if item not in drops)
+    # The confirmed call must name exactly the previewed losses.
+    for accepted in (None, (), drops[:1], (*drops, extra)):
+        gate()
+        agent()
+        agent()
+        with pytest.raises(ToolError, match="Preview again"):
+            await _request_agent_backend_switch_impl(
+                runtime,
+                auth,
+                agent_name="Researcher",
+                target_backend=target,
+                origin_context_id=str(origin.id),
+                expected_revision=0,
+                preview_digest=preview.preview_digest,
+                accepted_drops=accepted,
+            )
     gate()
     agent()
     agent()
@@ -272,12 +323,13 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(active_cha
         runtime,
         auth,
         agent_name="Researcher",
-        target_backend="anthropic",
+        target_backend=target,
         origin_context_id=str(origin.id),
         expected_revision=0,
         preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
     )
-    assert changed.status == "changed"
+    assert changed.status == "changed" and changed.declared_drops == preview.declared_drops
     gate()
     agent()
     agent()
@@ -286,17 +338,19 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(active_cha
             runtime,
             auth,
             agent_name="Researcher",
-            target_backend="anthropic",
+            target_backend=target,
             origin_context_id=str(origin.id),
             expected_revision=0,
             preview_digest=preview.preview_digest,
+            accepted_drops=preview.declared_drops,
         )
     agent()
     actual = await load_backend_agent(
         runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
     )
     current = await service.current(actual)
-    assert current.local == 1 and current.backend == "anthropic"
+    assert current.local == 1 and current.backend == target
+    assert current.declared_drops == preview.declared_drops
     events = await service.audit(auth.tenant_id, agent_id=actual.agent_id)
     assert len(events) == 1 and events[0].operation == "set"
     assert events[0].account_id == auth.account_id
@@ -358,9 +412,10 @@ async def test_registration_uses_only_the_existing_backend_flags(path, channel_b
     assert len(names) == len(set(names))
 
 
+@pytest.mark.parametrize("target", ["openai", "gemini"])
 @pytest.mark.parametrize("recorded_gate", [False, True])
 async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
-    active_chat, recorded_gate
+    active_chat, recorded_gate, target
 ):
     import httpx
     from anthropic.types.beta import BetaManagedAgentsAgent
@@ -399,14 +454,23 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
             mutable_fingerprint=fingerprint_mutable(snapshot),
         )
     gate()
-    trace.queue(ScriptedReply("GET", "/v1/agents/agent_owned", httpx.Response(200, json=payload)))
+    # The card gate reads the live agent's toolset (once here, and once more in
+    # the preview's own source capture): both reads see the gated toolset, while
+    # the source the preview captures afterwards is the tool-less agent.
+    gated = [
+        ScriptedReply("GET", "/v1/agents/agent_owned", httpx.Response(200, json=payload))
+        for _ in range(2)
+    ]
+    trace.queue(gated[0])
+    _without_own_tools(payload)
     if recorded_gate:
         agent()
+        trace.queue(gated[1])
         preview = await _request_agent_backend_switch_impl(
             runtime,
             auth,
             agent_name="Researcher",
-            target_backend="anthropic",
+            target_backend=target,
             origin_context_id=str(origin.id),
         )
         assert preview.status == "preview"
@@ -416,7 +480,7 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
                 runtime,
                 auth,
                 agent_name="Researcher",
-                target_backend="anthropic",
+                target_backend=target,
                 origin_context_id=str(origin.id),
             )
     assert not trace.replies and not trace.violations

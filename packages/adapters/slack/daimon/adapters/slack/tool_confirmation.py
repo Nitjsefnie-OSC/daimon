@@ -136,34 +136,18 @@ class SlackConfirmationCards:
                 async def current_admin(clicker: str) -> bool:
                     return await resolve_is_admin(client, user_id=clicker)
 
-                from daimon.core.channel_backend import AgentBackendRefused
-                from daimon.core.scope import ScopeContext
-                from daimon.core.stores.domain import BackendAgent
-                from daimon.core.turn.admission import capture_backend_source
+                from functools import partial
 
-                async def capture(source: BackendAgent) -> BackendAgent:
-                    if (
-                        admission is None
-                        or admission.grant is None
-                        or admission.account_id != account_id
-                    ):
-                        raise AgentBackendRefused("source_unavailable")
-                    return await capture_backend_source(
-                        runtime.turn_deps,
-                        source,
-                        context=ScopeContext(
-                            tenant_id=tenant_id,
-                            account_id=account_id,
-                            platform="slack",
-                            channel_id=admission.origin_channel_id,
-                            thread_id=admission.origin_thread_id,
-                        ),
-                        subject=admission.grant.subject,
-                        place=admission.grant.run_place,
-                        is_dm=admission.grant.is_dm,
-                        slack_turn_context_id=admission.slack_turn_context_id,
-                        private_dm_id=admission.private_dm_id,
-                    )
+                from daimon.core.turn.admission import capture_admitted_backend_source
+
+                capture = partial(
+                    capture_admitted_backend_source,
+                    runtime.turn_deps,
+                    admission=admission,
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    platform="slack",
+                )
 
                 prepare_admin, check_admin = backend_switch_callbacks(
                     make_backend_service(

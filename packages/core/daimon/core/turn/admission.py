@@ -1357,3 +1357,45 @@ async def capture_backend_source(
             return captured
     except (APIError, TimeoutError, ScopeViolation) as error:
         raise channel_backend.AgentBackendRefused("source_unavailable") from error
+
+
+async def capture_admitted_backend_source(
+    deps: TurnDeps,
+    source: BackendAgent,
+    *,
+    admission: Admission | None,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+) -> BackendAgent:
+    """A chat confirmation card's source capture: only its own turn's public admission."""
+    from daimon.core.session_seal import is_private_conversation
+
+    if admission is None or admission.grant is None or admission.account_id != account_id:
+        raise channel_backend.AgentBackendRefused("source_unavailable")
+    # Like the MCP caller's public-context gate: never a DM or private conversation.
+    if (
+        admission.grant.is_dm
+        or admission.private_dm_id is not None
+        or admission.slack_turn_context_id is not None
+        or admission.origin_channel_id is None
+        or is_private_conversation(admission.origin_channel_id)
+        or is_private_conversation(admission.origin_thread_id or "")
+    ):
+        raise channel_backend.AgentBackendRefused("source_context_unavailable")
+    return await capture_backend_source(
+        deps,
+        source,
+        context=ScopeContext(
+            tenant_id=tenant_id,
+            account_id=account_id,
+            platform=platform,
+            channel_id=admission.origin_channel_id,
+            thread_id=admission.origin_thread_id,
+        ),
+        subject=admission.grant.subject,
+        place=admission.grant.run_place,
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
+    )
