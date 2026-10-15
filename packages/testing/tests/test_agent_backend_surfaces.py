@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import httpx
 import pytest
 from daimon.adapters.cli.commands import agents as cli
 from daimon.adapters.cli.tenant import TenantSelector
@@ -39,9 +40,10 @@ from daimon.adapters.teams.card_actions import Actor
 from daimon.core import channel_backend as cb
 from daimon.core.agent_details import AgentDetails
 from daimon.core.authz import Subject
-from daimon.core.config import TurnSettings
+from daimon.core.config import Settings, TurnSettings
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import security_audit
 from daimon.core.stores.domain import Role
@@ -52,8 +54,8 @@ from daimon.testing.factories import (
     make_platform_principal,
     make_tenant,
 )
-from daimon.testing.ma import list_response
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -81,6 +83,14 @@ class Preview(BaseModel):
     cost_line: str = "List price: unknown. Worst-case per turn: unknown."
     allowed: bool = True
     digest: str = "d" * 64
+    # Mirrors `_BackendConsentFacts` on the real `CompatibilityPreview`: no
+    # drops are declared in these stubs, so the CLI's drop-consent gate reads
+    # the same "nothing to accept" shape it reads from the real preview.
+    drop_consent: object | None = None
+
+    @property
+    def declared_drops(self) -> tuple[str, ...]:
+        return () if self.drop_consent is None else self.drop_consent.declared_drops
 
 
 @dataclass(frozen=True)
@@ -114,9 +124,13 @@ class Factory:
 def seam(monkeypatch):
     calls = []
     factory = Factory()
-    settings = SimpleNamespace(
-        turn=TurnSettings(path="mux", channel_backends=True),
-        cli=SimpleNamespace(local_user="operator"),
+    settings = Settings.model_validate(
+        {
+            "database": {"url": "postgresql://daimon:daimon@localhost:5432/daimon_test_stub"},
+            "anthropic": {"api_key": "offline-owned"},
+            "cli": {"local_user": "operator"},
+            "turn": {"path": "mux", "channel_backends": True},
+        }
     )
     agent = SimpleNamespace(
         tenant_id=TENANT,
@@ -166,7 +180,7 @@ def seam(monkeypatch):
     monkeypatch.setattr(
         cli,
         "get_or_create_cli_principal",
-        AsyncMock(return_value=SimpleNamespace(account_id=ACCOUNT)),
+        AsyncMock(return_value=SimpleNamespace(account_id=ACCOUNT, os_user="operator")),
     )
     monkeypatch.setattr(
         sa,
@@ -189,6 +203,7 @@ def seam(monkeypatch):
         anthropic=object(),
         client=object(),
         deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
     )
     return SimpleNamespace(
         calls=calls,
@@ -556,9 +571,13 @@ async def persisted(
         await make_platform_principal(
             session, tenant=tenant, account=account, platform="discord", external_id="42"
         )
-    settings = SimpleNamespace(
-        turn=TurnSettings(path="mux", channel_backends=True),
-        cli=SimpleNamespace(local_user="operator"),
+    settings = Settings.model_validate(
+        {
+            "database": {"url": str(db_nullpool_engine.url)},
+            "anthropic": {"api_key": "offline-owned"},
+            "cli": {"local_user": "operator"},
+            "turn": {"path": "mux", "channel_backends": True},
+        }
     )
     service = cb.make_backend_service(sessions, settings.turn)
     actor = cb.BackendActor(tenant.id, account.id, Subject(is_admin=True))
@@ -570,6 +589,23 @@ async def persisted(
         id="actual-owned-agent", tenant_id=str(tenant.id), name="analyst", model="claude-opus-5-5"
     ).model_dump(mode="json")
     native["metadata"]["daimon_name"] = "analyst"
+    # Trusted source capture (DD3) additionally reads the real target agent and
+    # its deployment environment, as production does: `defaults/config.yaml`
+    # ships a non-empty `environment_name`, so the fixture's deployment
+    # default carries one too, with a matching environment resource for
+    # `find_environment_by_daimon_tag` to find.
+    environment = ma_environment(tenant_id=tenant.id)
+    environment.metadata["daimon_name"] = "default"
+    router = MARouter()
+    router.add("GET", rf"/v1/agents/{native['id']}", lambda *_: httpx.Response(200, json=native))
+    router.add(
+        "GET",
+        rf"/v1/environments/{environment.id}",
+        lambda *_: httpx.Response(200, json=environment.model_dump(mode="json")),
+    )
+    router.add(
+        "GET", r"/v1/environments", lambda *_: list_response([environment.model_dump(mode="json")])
+    )
     return SimpleNamespace(
         sessions=sessions,
         tenant=tenant,
@@ -577,6 +613,8 @@ async def persisted(
         settings=settings,
         service=service,
         native=native,
+        environment=environment,
+        router=router,
     )
 
 
@@ -592,17 +630,61 @@ def runtime(persisted, client):
         session_factory=persisted.sessions,
         anthropic=client,
         client=client,
-        deployment_default=DeploymentDefault(),
+        deployment_default=DeploymentDefault(agent_name="analyst", environment_name="default"),
+        resolver_cache=new_resolver_cache(),
     )
+
+
+#: DD3's trusted source capture (`capture_backend_source`) runs the same
+#: obligation check the workers use: this fixture agent has no explicit
+#: tools, skills or MCPs, so the only capabilities every real Managed Agent
+#: implicitly carries -- memory and its sandbox/environment -- are what a
+#: cross-profile switch (anthropic -> openai/gemini) must declare dropped.
+#: Anthropic keeps full fidelity (same profile), so it declares nothing.
+_CROSS_PROFILE_DROPS = ("memory", "sandbox")
 
 
 @pytest.mark.parametrize("surface", ["cli", "mcp"])
 @pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini"])
 async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, surface, backend):
-    trace = ScriptedTransport()
+    drops = () if backend == "anthropic" else _CROSS_PROFILE_DROPS
+    trace = ScriptedTransport(router=persisted.router)
     replies(trace, persisted.native, 4)
     async with trace.client() as client:
         rt = runtime(persisted, client)
+        auth = AuthIdentity(
+            tenant_id=persisted.tenant.id,
+            account_id=persisted.account.id,
+            role=Role.ADMIN,
+            is_admin=True,
+        )
+        if surface == "mcp" and drops:
+            # The headless `set_agent_backend` MCP tool has no human to ask for
+            # consent (that is exactly what `request_agent_backend_switch`'s
+            # chat Confirm card is for), so a target that needs declared drops
+            # always refuses here -- never a silent drop, never a guessed
+            # accept.
+            with pytest.raises(ToolError, match="drops required"):
+                await mcp_agents._set_agent_backend_impl(
+                    rt, auth, "analyst", backend=backend, expected_revision=0
+                )
+            async with persisted.sessions() as session:
+                rows = await security_audit.list_events(session, tenant_id=persisted.tenant.id)
+            assert [row.operation for row in rows] == ["allowlist"]
+            assert [(r.method, r.path) for r in trace.requests] == [
+                ("GET", "/v1/agents"),
+                ("GET", "/v1/agents/actual-owned-agent"),
+                ("GET", "/v1/environments"),
+                ("GET", "/v1/agents/actual-owned-agent"),
+                ("GET", "/v1/environments/env_test"),
+                ("GET", "/v1/agents"),
+                ("GET", "/v1/agents/actual-owned-agent"),
+                ("GET", "/v1/environments"),
+                ("GET", "/v1/agents/actual-owned-agent"),
+                ("GET", "/v1/environments/env_test"),
+            ]
+            assert not trace.violations
+            return
         if surface == "cli":
             for target in (backend, None):
                 console = Console(file=StringIO(), force_terminal=False, highlight=False)
@@ -614,15 +696,10 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
                     yes=True,
                     as_json=True,
                     selector=TenantSelector(tenant_id=str(persisted.tenant.id)),
+                    accept_drops=",".join(drops) if target is not None and drops else None,
                 )
                 assert json.loads(console.file.getvalue())["backend"] == target
         else:
-            auth = AuthIdentity(
-                tenant_id=persisted.tenant.id,
-                account_id=persisted.account.id,
-                role=Role.ADMIN,
-                is_admin=True,
-            )
             for local, target in enumerate((backend, None)):
                 result = await mcp_agents._set_agent_backend_impl(
                     rt, auth, "analyst", backend=target, expected_revision=local
@@ -646,15 +723,61 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
     assert current.local == 2 and current.backend is None and current.previous_local == 1
     previous = await persisted.service.revision(agent, 1)
     assert previous.backend == backend
-    assert [(r.method, r.path) for r in trace.requests] == [("GET", "/v1/agents")] * 4
+    # DD3's trusted source capture reads the real target agent and its
+    # deployment environment on every "set" preview (never on "clear"): once
+    # from the top-level `service.preview`, once more from `_change`'s own
+    # re-preview just before the write. Both are plain read-only GETs; "clear"
+    # makes none.
+    capture = [
+        ("GET", "/v1/agents/actual-owned-agent"),
+        ("GET", "/v1/environments"),
+        ("GET", "/v1/agents/actual-owned-agent"),
+        ("GET", "/v1/environments/env_test"),
+    ]
+    assert [(r.method, r.path) for r in trace.requests] == [
+        ("GET", "/v1/agents"),
+        *capture,
+        ("GET", "/v1/agents"),
+        *capture,
+        ("GET", "/v1/agents"),
+        ("GET", "/v1/agents"),
+    ]
     assert not trace.replies and not trace.violations
 
 
 async def test_changed_actual_sdk_agent_refuses_direct_write_without_audit(persisted):
-    trace = ScriptedTransport()
-    replies(trace, persisted.native, 1)
+    # DD3's trusted source capture re-reads the real target agent by id on
+    # every preview (not the list response `load_backend_agent` used before
+    # DD3), so the race this test proves is now visible there: the first
+    # capture (inside the initial `service.preview`) sees the original
+    # agent; the second capture (inside `_change`, just before the write)
+    # sees it changed, which must still land as a digest mismatch refusal.
     changed = {**persisted.native, "description": "Changed after the preview"}
-    replies(trace, changed, 1)
+    calls = {"agent": 0}
+
+    def get_agent(*_):
+        # Each capture reads the agent by id twice (once directly, once more
+        # inside `capture_preparation_source`'s own fresh read): keep the
+        # first capture entirely on the original agent and only flip to the
+        # changed one once the first capture has fully completed, so the
+        # mutation lands cleanly between the two captures, not inside one.
+        calls["agent"] += 1
+        return httpx.Response(200, json=persisted.native if calls["agent"] <= 2 else changed)
+
+    router = MARouter()
+    router.add("GET", rf"/v1/agents/{persisted.native['id']}", get_agent)
+    router.add(
+        "GET",
+        rf"/v1/environments/{persisted.environment.id}",
+        lambda *_: httpx.Response(200, json=persisted.environment.model_dump(mode="json")),
+    )
+    router.add(
+        "GET",
+        r"/v1/environments",
+        lambda *_: list_response([persisted.environment.model_dump(mode="json")]),
+    )
+    trace = ScriptedTransport(router=router)
+    replies(trace, persisted.native, 2)
     async with trace.client() as client:
         auth = AuthIdentity(
             tenant_id=persisted.tenant.id,
@@ -662,9 +785,12 @@ async def test_changed_actual_sdk_agent_refuses_direct_write_without_audit(persi
             role=Role.ADMIN,
             is_admin=True,
         )
+        # Anthropic (same profile as the source): no drops are declared, so
+        # this exercises the digest-staleness refusal alone, independent of
+        # the drop-consent gate exercised elsewhere.
         with pytest.raises(ToolError, match="stale preview"):
             await mcp_agents._set_agent_backend_impl(
-                runtime(persisted, client), auth, "analyst", backend="openai"
+                runtime(persisted, client), auth, "analyst", backend="anthropic"
             )
     async with persisted.sessions() as session:
         rows = await security_audit.list_events(session, tenant_id=persisted.tenant.id)

@@ -12,6 +12,7 @@ import datetime
 import time
 import uuid
 from collections.abc import Mapping
+from functools import partial
 from typing import Any, Final, Literal, cast
 
 import anthropic
@@ -93,12 +94,12 @@ from daimon.core.specs import (
     SkillRepo,
     merge_default_agent_toolset,
 )
-from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.domain import BackendAgent, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import Provider
-from pydantic import BaseModel, JsonValue, SecretStr, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, JsonValue, SecretStr, TypeAdapter, ValidationError
 
 log = structlog.get_logger()
 
@@ -1049,6 +1050,57 @@ async def _archive_agent_impl(
     )
 
 
+async def _capture_backend_source(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow | None,
+    source: BackendAgent,
+) -> BackendAgent:
+    from daimon.adapters.mcp.tools._session_gate import session_card_gap
+    from daimon.core.authz import Place
+    from daimon.core.ma_resolver import new_resolver_cache
+    from daimon.core.scope import ScopeContext
+    from daimon.core.turn.admission import capture_backend_source
+    from daimon.core.turn.deps import build_turn_deps
+
+    if (
+        origin is not None
+        and await session_card_gap(
+            runtime,
+            auth,
+            origin,
+            tool_name="request_agent_backend_switch",
+            require_public_context=True,
+        )
+        is not None
+    ):
+        raise channel_backend.AgentBackendRefused("source_unavailable")
+    deps = build_turn_deps(
+        runtime.settings,
+        runtime.client,
+        runtime.session_factory,
+        deployment_default=runtime.deployment_default,
+        resolver_cache=new_resolver_cache(),
+        billing_config=None,
+    )
+    return await capture_backend_source(
+        deps,
+        source,
+        context=ScopeContext(
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=auth.platform,
+            channel_id=origin.parent_channel_id if origin is not None else None,
+            thread_id=origin.thread_id if origin is not None else None,
+        ),
+        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        place=turn_origin_place(origin) if origin is not None else Place(),
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
+    )
+
+
 async def _set_agent_backend_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1069,7 +1121,11 @@ async def _set_agent_backend_impl(
         ) from exc
     if not channel_backend.backend_selection_enabled(runtime.settings.turn):
         raise ToolError("Model backend selection is disabled on this deployment.")
-    service = channel_backend.make_backend_service(runtime.session_factory, runtime.settings.turn)
+    service = channel_backend.make_backend_service(
+        runtime.session_factory,
+        runtime.settings.turn,
+        capture_source=partial(_capture_backend_source, runtime, auth, None),
+    )
     actor = channel_backend.BackendActor(
         tenant_id=auth.tenant_id,
         account_id=auth.account_id,
@@ -1134,6 +1190,7 @@ class AgentBackendSwitchInfo(BaseModel):
     shared_thread_limits: tuple[str, ...]
     cost_line: str
     summary: str
+    declared_drops: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
 
 
 async def _request_agent_backend_switch_impl(
@@ -1145,6 +1202,7 @@ async def _request_agent_backend_switch_impl(
     expected_revision: int | None = None,
     preview_digest: str | None = None,
     origin_context_id: str | None = None,
+    accepted_drops: tuple[str, ...] | None = None,
 ) -> AgentBackendSwitchInfo:
     _require_admin(auth)
     if auth.agent_id is not None or auth.platform_user_id is None:
@@ -1163,7 +1221,11 @@ async def _request_agent_backend_switch_impl(
     from pydantic import ValidationError
 
     try:
-        service = make_backend_service(runtime.session_factory, runtime.settings.turn)
+        service = make_backend_service(
+            runtime.session_factory,
+            runtime.settings.turn,
+            capture_source=partial(_capture_backend_source, runtime, auth, origin),
+        )
         if not service.enabled:
             raise ToolError("Model backend selection is disabled. Nothing changed.")
         gap = await session_card_gap(
@@ -1197,6 +1259,7 @@ async def _request_agent_backend_switch_impl(
                     "target_backend": target_backend,
                     "expected_revision": expected_revision,
                     "preview_digest": preview_digest,
+                    "accepted_drops": accepted_drops,
                 }
             )
             # The card check awaited provider I/O; reread configuration at the write edge.
@@ -1217,6 +1280,11 @@ async def _request_agent_backend_switch_impl(
                 reference.expected_revision,
                 actor,
                 expected_preview_digest=reference.preview_digest,
+                **(
+                    {"accepted_drops": reference.accepted_drops}
+                    if reference.accepted_drops is not None
+                    else {}
+                ),
             )
             status = "changed"
             summary = (
@@ -1235,6 +1303,7 @@ async def _request_agent_backend_switch_impl(
             shared_thread_limits=preview.shared_thread_limits,
             cost_line=preview.cost_line,
             summary=summary,
+            declared_drops=preview.declared_drops,
         )
     except (DaimonError, ValidationError) as exc:
         raise ToolError(
@@ -1480,13 +1549,15 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             expected_revision: int | None = None,
             preview_digest: str | None = None,
             origin_context_id: str | None = None,
+            accepted_drops: tuple[str, ...] | None = None,
         ) -> AgentBackendSwitchInfo:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
             Use when an admin asks to switch an agent to Anthropic, OpenAI or Gemini.
             First call without preview_digest and show the returned compatibility,
             shared-thread limits and cost line. Call again with that preview's
-            expected_revision and preview_digest: the requesting admin must Confirm
+            expected_revision, preview_digest and exact declared_drops as accepted_drops:
+            the requesting admin must Confirm
             on the card before anything is changed. A stale preview or expired card
             changes nothing; preview again. Pass this active turn's origin_context_id.
             """
@@ -1498,4 +1569,5 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 expected_revision=expected_revision,
                 preview_digest=preview_digest,
                 origin_context_id=origin_context_id,
+                accepted_drops=accepted_drops,
             )

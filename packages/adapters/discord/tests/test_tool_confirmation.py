@@ -448,3 +448,22 @@ async def test_runtime_hook_reuses_live_guild_admin_lookup(monkeypatch: pytest.M
     member.guild_permissions = discord.Permissions.none()
     assert await check("111") is False
     assert channel.guild.fetch_member.await_count == 2
+
+
+@pytest.mark.parametrize("state", ["pending", "approved", "denied", "expired", "stopped"])
+async def test_complete_backend_loss_list_survives_native_card_rendering(state):
+    losses = "Won't be available on openai: files, mcp, memory, repository, sandbox, skills, tools"
+    prompt = _prompt().model_copy(
+        update={
+            "admin": True,
+            "action": "Switch Research. " + losses,
+            "denied_action": "Model backend unchanged",
+            "consequence": losses,
+            "detail_lines": ("Optional skill: " + "x" * 1000,),
+        }
+    )
+    card = build_confirmation_card(
+        prompt, state=state, token="abcdefgh" if state == "pending" else None
+    )
+    rendered = "\n".join(_texts(build_confirmation_view(card, prompt)))
+    assert (losses in rendered) == (state in {"pending", "approved"})
