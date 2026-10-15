@@ -533,3 +533,26 @@ def test_conflicting_registered_tariffs_refuse_before_runtime_construction(regis
     )
     with pytest.raises(UnsupportedCapability, match="conflicting_runtime_price"):
         registry.channel_runtime_prices()
+
+
+def test_conversation_registration_preserves_explicit_openai_tariff_owner(registry, monkeypatch):
+    from datetime import date
+    from decimal import Decimal
+
+    from daimon.core.pricing import ProviderPrice
+    from daimon.core.turn.openai_deployment import register_runtime
+
+    monkeypatch.setattr(registry, "entry_points", lambda **kwargs: EntryPoints(()))
+    price = ProviderPrice(
+        "openai", "gpt-6-luna", date(2026, 10, 11), Decimal("1"), Decimal("2"), Decimal("0.5")
+    )
+
+    def explicit(*args):
+        raise AssertionError("tariff lookup constructed a runtime")
+
+    source = {("openai", "gpt-6-luna"): price}
+    registry.register_channel_runtime(PROFILE, explicit, tariffs=lambda: source)
+    register_runtime()
+    assert registry._RUNTIME_FACTORIES[PROFILE].factory is explicit
+    assert "openai.conversation_only" in registry._RUNTIME_FACTORIES
+    assert dict(registry.channel_runtime_prices()) == source

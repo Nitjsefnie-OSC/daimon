@@ -503,6 +503,6 @@ def register_runtime() -> None:
             authorizations=lambda tenant_id, selected=profile: tuple(
                 row for row in authorized_deployments(tenant_id) if row.profile == selected
             ),
-            tariffs=partial(provider_prices, profile),
+            tariffs=partial(provider_prices, PROFILE) if profile == PROFILE else None,
             fallback=True,
         )
