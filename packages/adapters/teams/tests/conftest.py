@@ -23,6 +23,7 @@ from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_ht
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.config import (
+    PrivateChannelMessagesSettings,
     SupportSettings,
     TeamsSettings,
     ThreadParticipationSettings,
@@ -99,7 +100,10 @@ MAX_ACTIVITY_BYTES = 26_000  # a margin under Teams' 28 KB
 
 
 def teams_settings(
-    *, enabled: bool = True, admins: tuple[str, ...] = (), public_url: str | None = None
+    *,
+    enabled: bool = True,
+    admins: tuple[str, ...] = (),
+    public_url: str | None = None,
 ) -> TeamsSettings:
     return TeamsSettings.model_validate(
         {
@@ -419,6 +423,7 @@ def build_teams_runtime(
     teams: TeamsSettings | None = None,
     http_client: httpx.AsyncClient | None = None,
     deployment_default: DeploymentDefault | None = None,
+    private_channel_messages: bool = False,
 ) -> TeamsRuntime:
     """A runtime over the test DB and a fake MA transport, with real turn deps.
 
@@ -436,6 +441,9 @@ def build_teams_runtime(
     settings.tool_safety = OPEN_TOOL_SAFETY
     settings.thread_participation = ThreadParticipationSettings()
     settings.support = SupportSettings()  # Escalation off unless a test turns it on.
+    settings.private_channel_messages = PrivateChannelMessagesSettings(
+        enabled=private_channel_messages
+    )
     client = anthropic or build_fake_anthropic(make_agent_env_echo_handler())
     deployment_default = deployment_default or DeploymentDefault(
         agent_name="daimon", environment_name="default"
