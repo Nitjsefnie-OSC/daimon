@@ -11,16 +11,20 @@ def test_seeded_guidance_describes_one_working_repo_and_token_repos() -> None:
     prompt = (ROOT / "defaults/agents/daimon.yaml").read_text()
     setup = (ROOT / "defaults/skills/workspace-setup/SKILL.md").read_text()
     cli_auth = (ROOT / "defaults/skills/cli-auth/SKILL.md").read_text()
-    for body in (prompt, setup, CREDENTIAL_GUIDANCE_BLOCK):
+    # The seeded prompt points at the guidance block reconcile prepends to it,
+    # so the GitHub rules live in one place for every agent.
+    for body in (setup, CREDENTIAL_GUIDANCE_BLOCK):
         assert "one working repo" in body
         assert "/workspace/<owner>/<repo>" in body
         assert "by token" in body
+    assert 'GitHub rules are under "Your credentials & capabilities" above' in prompt
+    assert "Your credentials & capabilities" in CREDENTIAL_GUIDANCE_BLOCK
     assert "set_working_repo" in setup
     assert "remove_repo" in setup
     assert "A clear ask to add, remove or set the working repo is enough" in prompt
-    assert "The Connect GitHub page shows all of this agent's repos:" in prompt
+    assert "The Connect GitHub page shows" in CREDENTIAL_GUIDANCE_BLOCK
     assert "The Connect GitHub page shows all of this agent's repos:" in setup
-    assert "then select Save" in prompt
+    assert "then select Save" in CREDENTIAL_GUIDANCE_BLOCK
     assert "In chat, make one change on a clear ask" in CREDENTIAL_GUIDANCE_BLOCK
     assert "none" in setup
     assert "gh repo clone owner/repo" in cli_auth
