@@ -923,6 +923,13 @@ class WorkerLimits(Contract):
             self.provider_limits_usd.get(profile.provider, Decimal(0)) <= 0
         ):
             raise WorkerSpecRefused("provider_limits_usd", "not_subset")
+        if profile.profile_id == "gemini.inline_reuse" and (
+            self.max_input_tokens is not None or self.max_output_tokens is not None
+        ):
+            if self.max_input_tokens is None or self.max_output_tokens is None:
+                raise WorkerSpecRefused("budget", "unbound")
+            if self.max_turns != 1 or self.max_output_tokens > 65_536:
+                raise WorkerSpecRefused("budget", "unsupported")
         capabilities: tuple[tuple[int | None, Capability], ...] = (
             (self.max_model_requests, "model_request_limit"),
             (self.max_input_tokens, "input_token_limit"),

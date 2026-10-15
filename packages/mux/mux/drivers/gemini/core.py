@@ -109,7 +109,13 @@ class Base:
         native_agent: Agent | None = None,
         max_total_tokens: int | None = None,
         max_output_tokens: int | None = None,
+        max_input_tokens: int | None = None,
     ) -> None:
+        self._max_input_tokens = max_input_tokens
+        if max_input_tokens is not None and (
+            type(max_input_tokens) is not int or max_input_tokens <= 0 or max_output_tokens is None
+        ):
+            refuse("worker_token_envelope")
         self._max_output_tokens = max_output_tokens
         self._max_total_tokens = max_total_tokens
         self._native_agent = native_agent
@@ -137,7 +143,11 @@ class Base:
             max_output_tokens=self._max_output_tokens,
         )
         if self._max_output_tokens is not None:
-            if self._native_agent is not None or spec.environment is not None or spec.resources:
+            if (
+                (self._native_agent is not None and self._max_input_tokens is None)
+                or spec.environment is not None
+                or spec.resources
+            ):
                 refuse("model_interaction_resources")
             return request
         if self._native_agent is not None:
@@ -621,7 +631,8 @@ class GeminiSessions(Base):
                 state="idle",
             )
             records.sessions[id_] = SessionRecord(
-                owner(scope), session, spec, agent.spec.model, request
+                owner(scope), session, spec, agent.spec.model, request,
+                max_input_tokens=self._max_input_tokens,
             )
             records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
             return session
@@ -718,6 +729,7 @@ class GeminiEvents(Base):
         native_agent: Agent | None = None,
         max_total_tokens: int | None = None,
         max_output_tokens: int | None = None,
+        max_input_tokens: int | None = None,
     ) -> None:
         super().__init__(
             transport,
@@ -727,6 +739,7 @@ class GeminiEvents(Base):
             native_agent=native_agent,
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
+            max_input_tokens=max_input_tokens,
         )
         self._state_store = state_store
         self._model_for_interaction = model_for_interaction
@@ -838,7 +851,9 @@ class GeminiEvents(Base):
                 not isinstance(event, UserMessage) for event in events
             ):
                 refuse("model_interaction_resources")
-            if self._max_total_tokens is not None and (
+            if record.max_input_tokens != self._max_input_tokens:
+                refuse("changed_worker_token_envelope")
+            if (self._max_total_tokens is not None or self._max_input_tokens is not None) and (
                 record.current is not None
                 or len(events) != 1
                 or not isinstance(events[0], UserMessage)
@@ -902,6 +917,14 @@ class GeminiEvents(Base):
             if record.current is not None and authenticated:
                 # Admission/authentication precedes this native history read.
                 await self._get(record, record.current)
+            if self._max_input_tokens is not None:
+                from mux.drivers.gemini.transport import TokenCountingTransport
+
+                if not isinstance(self._transport, TokenCountingTransport):
+                    refuse("worker_input_token_count")
+                count = await self._transport.count_input_tokens(request)
+                if type(count) is not int or count < 0 or count > self._max_input_tokens:
+                    refuse("worker_input_token_limit")
             root = record.root if is_result else str(uuid4())
             if root is None:
                 refuse("unknown_function_action")

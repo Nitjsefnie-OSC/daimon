@@ -47,6 +47,7 @@ class SessionRecord:
     native_updated: dict[str, datetime] = field(default_factory=lambda: {})
     observation_history: dict[tuple[str, int], UsageObservation] = field(default_factory=lambda: {})
     unknown_delivery: bool = False
+    max_input_tokens: int | None = None
 
 
 @dataclass

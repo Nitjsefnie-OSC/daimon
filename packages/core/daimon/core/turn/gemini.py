@@ -81,6 +81,7 @@ class GeminiDeployment:
     native_agent: Agent | None = None
     max_total_tokens: int | None = None
     max_output_tokens: int | None = None
+    max_input_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -109,7 +110,7 @@ def _runtime_model(runtime: TurnRuntime | None) -> str:
     return (
         deployment.agent.model.id
         if deployment is not None
-        and deployment.max_total_tokens is not None
+        and (deployment.max_total_tokens is not None or deployment.max_input_tokens is not None)
         and deployment.agent.model.id in (FLASH_PRIMARY, WORKER_MODEL)
         else FLASH_PRIMARY
     )
@@ -172,15 +173,23 @@ def gemini_backend(
     ):
         raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
     if deployment.max_output_tokens is not None:
-        if deployment.native_agent is not None or deployment.max_total_tokens is not None:
+        if (
+            (deployment.native_agent is not None and deployment.max_input_tokens is None)
+            or deployment.max_total_tokens is not None
+        ):
             raise UnsupportedCapability(("model_interaction_resources",), PROFILE)
         compile_agent(deployment.agent, max_output_tokens=deployment.max_output_tokens)
-        compile_environment(deployment.environment, model_only=True)
+        if deployment.max_input_tokens is None:
+            compile_environment(deployment.environment, model_only=True)
+        else:
+            compile_environment(deployment.environment)
     supplied = runtime.transport_factory(config, scope)
     if not isinstance(supplied, GeminiTransportRuntime):
         raise UnsupportedCapability(("gemini_private_transport",), PROFILE)
     transport = FlashTransport(
-        supplied.transport, runtime.usage_store.accounting, native_agent=deployment.native_agent
+        supplied.transport, runtime.usage_store.accounting,
+        native_agent=deployment.native_agent if deployment.max_input_tokens is None else None,
+        bounded_worker=deployment.max_input_tokens is not None,
     )
     return GeminiManagedAgents(
         transport,
@@ -193,6 +202,7 @@ def gemini_backend(
         native_agent=deployment.native_agent,
         max_total_tokens=deployment.max_total_tokens,
         max_output_tokens=deployment.max_output_tokens,
+        max_input_tokens=deployment.max_input_tokens,
     )
 
 

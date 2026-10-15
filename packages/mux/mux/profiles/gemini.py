@@ -29,6 +29,8 @@ INLINE_REUSE = Profile(
     catalog_readback="verify",
     support={
         "neutral_catalog": "emulated",
+        "input_token_limit": "emulated",
+        "output_token_limit": "native",
         "agent_delete": "unsupported",
         "thread_workspace_persistence": "unsupported",
         "turn_lifecycle": "native",
