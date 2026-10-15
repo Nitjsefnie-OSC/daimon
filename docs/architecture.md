@@ -425,6 +425,20 @@ name is `recipient.name`) takes the ordinary `_handle` path with the typed
 name stripped, or gets the too-long notice a mention would. Off, nothing
 changes: a Teams thread reply still goes to participation.
 
+Teams private and shared channels deliver only @mentions to the bot. With
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED` on, `channel_subscriptions.py` keeps a
+Graph change-notification subscription per such channel
+(`teams_channel_subscriptions`, renewed by one task that sleeps until the
+earliest expiry). A notification reads the message once, `parse_graph_message`
+builds the same `TeamsInbound` as `parse_inbound`, and `handle_graph_message`
+claims it under the Bot Framework delivery key before the shared dispatch, so
+a message seen by both sources runs once. Graph @mentions are left to Bot
+Framework, and Graph's sender tenant is not used: guests and external
+members are classified by the same roster lookup. The permission is
+tenant-wide and no read tells whether the bot is in a channel, so a channel is
+dropped on the bot's removal event, an app removal (the whole team), or a send
+there refused with 403 `BotNotInConversationRoster` (`_RemovalWatch`).
+
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer
 batch; once the thread goes quiet the shared gates in

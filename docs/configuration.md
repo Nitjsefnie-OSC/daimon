@@ -42,6 +42,7 @@ typo is silent — check the spelling here.
 - [Support](#support)
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
+- [Private Channel Messages](#private-channel-messages)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
@@ -1199,6 +1200,28 @@ refused with the plain capacity notice.
 
 Seconds a queued turn may wait for a slot. A safeguard only: the turn then leaves the
 queue and its card ends with the ordinary error.
+
+## Private Channel Messages
+
+Read from `daimon.core.config.PrivateChannelMessagesSettings`. Prefix
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__`.
+
+Every message in Teams private and shared channels, through Microsoft Graph.
+
+Teams sends a bot only the posts there that @mention it. Top-level, not under
+`TeamsSettings`, as every feature setting is; only Teams reads it.
+
+### `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED`
+
+`bool` · optional · default `False`
+
+When True, Daimon subscribes to Microsoft Graph change notifications for each Teams
+private or shared channel it is in, where Teams sends the bot only the posts that
+@mention it. Replies in followed threads, replies to Daimon's messages and typed
+@&lt;bot name&gt; mentions then work there too, usually within seconds. Needs
+DAIMON_TEAMS__PUBLIC_URL (Graph posts to &lt;public_url&gt;/api/graph/notifications and
+/api/graph/lifecycle) and the application permission ChannelMessage.Read.All with tenant
+admin consent.
 
 ## Tool Safety
 

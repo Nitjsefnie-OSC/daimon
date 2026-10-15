@@ -6,6 +6,10 @@ one turn per author. A per-tenant cap sheds load, and no turn starts until the
 boot sweep has retired the previous process's turns. A wake poller opens chats
 with due handoffs and timers. Unmentioned thread replies go to organic thread
 participation (`participation.py`), whose turns run here, silently on failure.
+In private and shared channels, where Teams delivers only @mentions, the
+other messages arrive from Graph (`channel_subscriptions.py`) and are routed
+the same way (`handle_graph_message`). Every message claims one admission
+row (`admissions.py`), whichever source brings it first.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ import functools
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -39,6 +43,7 @@ from daimon.adapters.teams.card import CANCELLED_NOTICE, enable_files_card
 from daimon.adapters.teams.card_actions import stored_external, toast
 from daimon.adapters.teams.channel_admin_groups import owned_team_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
+from daimon.adapters.teams.channel_subscriptions import ChannelSubscriptions, SeenChannel
 from daimon.adapters.teams.commands import (
     ANSWERED_IN_CHAT,
     CHANNEL_POINTER,
@@ -61,6 +66,7 @@ from daimon.adapters.teams.identity import (
     TeamsInbound,
     canonical_uuid,
     live_tenant_id,
+    parse_graph_message,
     parse_inbound,
     strip_typed_name,
 )
@@ -108,7 +114,12 @@ from daimon.core.participation_gates import ParticipationGates
 from daimon.core.permissions import home_of
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.domain import Role, TaskContinuationRow, TurnCardIntentRow
+from daimon.core.stores.domain import (
+    Role,
+    TaskContinuationRow,
+    TeamsChannelSubscriptionRow,
+    TurnCardIntentRow,
+)
 from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.stores.tenants import get_plain_text_mentions, get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
@@ -122,7 +133,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_message,
     retire_turn_card_intent,
 )
-from daimon.core.teams_graph import GraphUnavailable
+from daimon.core.teams_graph import GraphMessage, GraphUnavailable
 from daimon.core.teams_sharepoint import ENABLE_FILES_TOOL
 from daimon.core.teams_threads import conversation_of
 from daimon.core.thread_participation import ParticipationMode
@@ -299,6 +310,7 @@ class TeamsApp:
         direct: DirectChats | None = None,
         routine_poster: RoutinePoster | None = None,
         ask_human: bool = False,
+        subscriptions: ChannelSubscriptions | None = None,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -307,7 +319,9 @@ class TeamsApp:
         self._teams = teams
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
-        self._sender = TimedSender(sender)
+        # With Graph subscriptions, a channel send refused as not in the roster drops the
+        # channel: a lost removal event would otherwise keep its subscription alive.
+        self._sender = TimedSender(subscriptions.watch(sender) if subscriptions else sender)
         self._commands = commands
         self._bot_token = bot_token
         # Channel history and media through Graph; None replays nothing.
@@ -322,6 +336,9 @@ class TeamsApp:
         self._routine_poster = routine_poster
         # Support is on: answers carry an Ask a human button.
         self._ask_human = ask_human
+        # Graph subscriptions to private and shared channels; None leaves them mention-only.
+        self._subscriptions = subscriptions
+        self._renewals: asyncio.Task[None] | None = None
         self.outputs = TeamsOutputDelivery(
             runtime=runtime, sender=self._sender, spawn=self.spawn, files=channel_files
         )
@@ -406,6 +423,10 @@ class TeamsApp:
                     )
                     self._delivery_poller = asyncio.create_task(
                         deliveries, name="teams.routine-delivery"
+                    )
+                if self._subscriptions is not None:
+                    self._renewals = asyncio.create_task(
+                        self._subscriptions.run(), name="teams.channel-subscriptions"
                     )
         return self._recovery
 
@@ -586,8 +607,11 @@ class TeamsApp:
         parsed = parse_inbound(
             activity, configured_tenant=self._teams.tenant_id, service_url=service_url
         )
-        if isinstance(parsed, Refusal):
-            return
+        if not isinstance(parsed, Refusal):
+            await self._hold_inbound(parsed)
+
+    async def _hold_inbound(self, parsed: TeamsInbound) -> None:
+        """Admit and hold a message parsed while draining, if it would start a turn."""
         if parsed.by_name:
             if not await self._plain_text_mentions_on():
                 return
@@ -671,7 +695,8 @@ class TeamsApp:
         self.draining = True
         if self._participation is not None:
             self._participation.cancel_all()
-        for poller in (self._wake_poller, self._delivery_poller, self._reclaimer):
+        pollers = (self._wake_poller, self._delivery_poller, self._reclaimer, self._renewals)
+        for poller in pollers:
             if poller is not None:
                 # Wake dispatches drain with the turns; due rows wait for the next boot, and
                 # a delivery cut short settles as interrupted, never posted twice.
@@ -748,39 +773,103 @@ class TeamsApp:
             service_url=ctx.conversation_ref.service_url,
         )
         if isinstance(parsed, Refusal):
-            # Type and reason only, never the text: these drops are otherwise invisible.
-            conversation_type = activity.conversation.conversation_type
-            if parsed.text is None:
-                # Debug: with channel-message consent Teams delivers every channel post.
-                log.debug(
-                    "teams.message.ignored",
-                    conversation_type=conversation_type,
-                    reason="not_mentioned",
-                )
-                return
-            if parsed.by_name and not await self._plain_text_mentions_on():
-                return  # a typed name with the switch off asked nothing
-            conversation_id = activity.conversation.id
-            if not await self._may_post(conversation_id.split(";", 1)[0], conversation_id):
-                return
-            try:
-                fresh = await self._admissions.claim_receipt(
-                    conversation_id, activity.id, now=datetime.now(UTC)
-                )
-            except _DB_ERRORS as exc:
-                # Unrecorded, another process could send it too: stay silent.
-                log.warning("teams.admission.claim_failed", error_type=type(exc).__name__)
-                fresh = False
-            if fresh:
-                try:
-                    await asyncio.wait_for(ctx.reply(parsed.text), SEND_TIMEOUT_S)
-                except TEAMS_SEND_ERRORS as exc:
-                    log.warning(
-                        "teams.refusal.send_failed",
-                        conversation_type=conversation_type,
-                        reason=type(exc).__name__,
-                    )
+            await self._refuse(
+                parsed,
+                activity.conversation.id,
+                activity.id,
+                activity.conversation.conversation_type,
+                ctx.reply,
+            )
             return
+        if parsed.kind == "channel" and parsed.team_id and self._subscriptions is not None:
+            self._subscriptions.notice(
+                SeenChannel(
+                    team_id=parsed.team_id,
+                    team_group_id=parsed.team_group_id,
+                    channel_id=parsed.channel_id,
+                    channel_type=parsed.channel_type,
+                    channel_name=parsed.channel_name,
+                    team_name=parsed.team_name,
+                    bot_name=parsed.bot_name,
+                    service_url=parsed.service_url,
+                )
+            )
+        self._dispatch_inbound(parsed)
+
+    async def handle_graph_message(
+        self, message: GraphMessage, channel: TeamsChannelSubscriptionRow
+    ) -> None:
+        """A message Graph reported from a subscribed channel, admitted as a Bot Framework one.
+
+        Its admission row is keyed like the activity's (`admission_channel`), so a
+        message seen both ways runs once, across restarts too. The parse drops
+        @mentions first: Bot Framework delivers those. While draining it is held
+        as an activity would be: Graph never resends a notice answered 202, and
+        the caller moves its watermark past it, so the next boot's reclaim runs it.
+        """
+        parsed = parse_graph_message(
+            message,
+            channel,
+            configured_tenant=self._teams.tenant_id,
+            bot_app_id=self._teams.client_id,
+        )
+        if self.draining:
+            if not isinstance(parsed, Refusal):
+                await self._hold_inbound(parsed)
+        elif not isinstance(parsed, Refusal):
+            self._dispatch_inbound(parsed)
+        elif parsed.text is not None:
+            thread = f"{channel.channel_id};messageid={message.reply_to_id or message.id}"
+
+            async def reply(text: str) -> object:
+                return await self._sender.send(
+                    thread, MessageActivityInput(text=text), service_url=channel.service_url
+                )
+
+            await self._refuse(parsed, thread, message.id, "channel", reply)
+
+    async def _refuse(
+        self,
+        refusal: Refusal,
+        conversation_id: str,
+        message_id: str,
+        conversation_type: str | None,
+        reply: Callable[[str], Awaitable[object]],
+    ) -> None:
+        """Answer a refused message where it was posted, once, or drop it silently."""
+        # Type and reason only, never the text: these drops are otherwise invisible.
+        if refusal.text is None:
+            # Debug: with channel-message consent Teams delivers every channel post.
+            log.debug(
+                "teams.message.ignored",
+                conversation_type=conversation_type,
+                reason="not_mentioned",
+            )
+            return
+        if refusal.by_name and not await self._plain_text_mentions_on():
+            return  # a typed name with the switch off asked nothing
+        if not await self._may_post(conversation_id.split(";", 1)[0], conversation_id):
+            return
+        try:
+            fresh = await self._admissions.claim_receipt(
+                conversation_id, message_id, now=datetime.now(UTC)
+            )
+        except _DB_ERRORS as exc:
+            # Unrecorded, another process could send it too: stay silent.
+            log.warning("teams.admission.claim_failed", error_type=type(exc).__name__)
+            return
+        if fresh:
+            try:
+                await asyncio.wait_for(reply(refusal.text), SEND_TIMEOUT_S)
+            except TEAMS_SEND_ERRORS as exc:
+                log.warning(
+                    "teams.refusal.send_failed",
+                    conversation_type=conversation_type,
+                    reason=type(exc).__name__,
+                )
+
+    def _dispatch_inbound(self, parsed: TeamsInbound) -> None:
+        """Admit a verified message for the mention, typed-name or participation path."""
         participation = self.runtime.settings.thread_participation.mode
         if parsed.unprompted and not parsed.by_name and participation is ParticipationMode.DISABLED:
             log.debug("teams.message.ignored", conversation_type="channel", reason="disabled")
