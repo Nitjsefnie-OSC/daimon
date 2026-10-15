@@ -149,7 +149,9 @@ def test_private_exception_class_is_redacted_and_the_original_chain_is_preserved
     ("config", "stage", "cause_type"),
     [
         (
-            BackendConfig(backend="openai", profile="openai.conversation_only", model="gpt-6-luna"),
+            BackendConfig(
+                backend="openai", profile="openai.conversation_only", model="unsupported-model"
+            ),
             "backend_runnable",
             None,
         ),
