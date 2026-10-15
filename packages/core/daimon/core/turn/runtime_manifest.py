@@ -1259,10 +1259,25 @@ def classify_source_obligations(
         elif extension.namespace == "anthropic.agent_tools":
             try:
                 native = agent_tools(extension)
-                if target is not None and "tools" not in drops:
-                    source_tools = native.intent()
             except ValueError:
                 missing.update(("source_definition", "tools"))
+            else:
+                if target is not None and "tools" not in drops:
+                    source_tools = native.intent()
+                    if (
+                        native.has_unrepresented_toolset()
+                        and target.model.provider != spec.model.provider
+                    ):
+                        # A well-formed toolset without a neutral projection (e.g.
+                        # the daimon-mcp mcp_toolset every chat-enabled agent
+                        # carries) is a declarable tools loss on an actual
+                        # provider switch, not a schema failure. Staying on the
+                        # same provider never loses it — the fleet ceiling
+                        # already excludes it from what a worker can request
+                        # (see fleet_root_permissions), so no separate consent
+                        # is owed here; flagging it anyway would make the
+                        # root's own same-provider self-check refuse itself.
+                        missing.add("tools")
         elif not (
             extension.namespace == "anthropic.model_config"
             and isinstance(model, dict)
@@ -1292,9 +1307,11 @@ def classify_source_obligations(
     if (
         spec.mcp_servers
         and "mcp" not in drops
-        and "tools" not in drops
         and (target is None or target.mcp_servers != spec.mcp_servers)
     ):
+        # `mcp` is its own obligation: declaring `tools` alone must never
+        # silently discharge it — an excluded mcp toolset requires an
+        # explicit `mcp` (and/or `tools`) declaration, never implied.
         missing.add("mcp")
     if source.repository_sources and "repository" not in drops:
         missing.add("repository")
