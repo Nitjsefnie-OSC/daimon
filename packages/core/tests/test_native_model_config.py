@@ -12,11 +12,12 @@ from daimon.core.authz import Subject
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.mux_compat import agent_spec
 from daimon.core.sessions import create_session, project_session_resources
-from daimon.core.turn.runtime_manifest import preview_source_drops
+from daimon.core.turn.runtime_manifest import classify_source_obligations, preview_source_drops
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import ModelRef, Scope
+from mux.contracts.resources import AgentSpec
 from mux.drivers.anthropic.resources.agents import agent_payload
 
 
@@ -37,11 +38,12 @@ def native_root(recorded_root, model, tenant):
 
 
 @pytest.mark.parametrize("effort", ["low", {"type": "medium"}, "high", "xhigh", "max"])
+@pytest.mark.parametrize("speed", [None, "standard", "fast"])
 async def test_real_root_model_survives_session_source_projection(
-    db_session_factory, recorded_root, effort
+    db_session_factory, recorded_root, effort, speed
 ):
     tenant, account = uuid.uuid4(), uuid.uuid4()
-    model = {"id": "claude-haiku-5-5", "speed": "standard", "effort": effort}
+    model = {"id": "claude-haiku-5-5", "speed": speed, "effort": effort}
     agent = native_root(recorded_root, model, tenant)
     environment = BetaEnvironment.model_validate(
         {**ma_environment(tenant_id=tenant).model_dump(mode="json"), **recorded_root["environment"]}
@@ -74,6 +76,61 @@ async def test_real_root_model_survives_session_source_projection(
     assert payload["tools"] == recorded_root["tools"]
     assert payload["skills"] == recorded_root["skills"]
     assert payload["mcp_servers"] == recorded_root["mcp_servers"]
+    assert "source_definition" not in classify_source_obligations(
+        projected, target, environment=projected.environment.spec
+    )
+
+    for provider, model_id in (("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")):
+        foreign = AgentSpec(
+            name=target.name,
+            model=ModelRef(provider=provider, id=model_id),
+            system=target.system,
+            tools=(),
+            skills=(),
+            mcp_servers=(),
+            declared_drops=("memory", "sandbox", "mcp", "skills", "tools"),
+        )
+        # Model effort and inference speed have no declared-loss tag: keep the refusal.
+        assert classify_source_obligations(projected, foreign, environment=None) == frozenset(
+            {"source_definition"}
+        )
+        assert "source_definition" in classify_source_obligations(
+            projected,
+            foreign.model_copy(update={"extensions": target.extensions}),
+            environment=None,
+        )
+
+    extensions = tuple(
+        item for item in target.extensions or () if item.namespace != "anthropic.model_config"
+    )
+    assert "source_definition" in classify_source_obligations(
+        projected, target.model_copy(update={"extensions": extensions}), environment=None
+    )
+    for change in (
+        {"effort": "high" if effort != "high" else "low"},
+        {"speed": "fast" if speed != "fast" else "standard"},
+    ):
+        changed = tuple(
+            item.model_copy(update={"value": {"model": {**model, **change}}})
+            if item.namespace == "anthropic.model_config"
+            else item
+            for item in target.extensions or ()
+        )
+        assert "source_definition" in classify_source_obligations(
+            projected, target.model_copy(update={"extensions": changed}), environment=None
+        )
+    for invalid in ({"id": model["id"], "unknown": True}, {**model, "effort": "invalid"}):
+        changed = tuple(
+            item.model_copy(update={"value": {"model": invalid}})
+            if item.namespace == "anthropic.model_config"
+            else item
+            for item in target.extensions or ()
+        )
+        malformed = target.model_copy(update={"extensions": changed})
+        malformed_source = projected.model_copy(update={"effective_spec": malformed})
+        assert "source_definition" in classify_source_obligations(
+            malformed_source, malformed, environment=None
+        )
 
 
 async def test_ordinary_native_session_references_root_without_recompiling_its_model(recorded_root):

@@ -54,6 +54,7 @@ def _refs(*names: str) -> tuple[ExtensionRef, ...]:
 
 ANTHROPIC_EXTENSIONS = _refs(
     "anthropic.agent_tools",
+    "anthropic.model_config",
     "anthropic.memory_stores",
     "anthropic.vaults",
     "anthropic.session_resources",
