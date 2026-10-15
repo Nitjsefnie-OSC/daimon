@@ -42,7 +42,7 @@ from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from microsoft_teams.api import MessageActivity
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -287,8 +287,11 @@ async def _outcomes(db_factory: async_sessionmaker[AsyncSession]) -> list[Outcom
 
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_over_the_tenant_cap_a_new_thread_waits_for_a_slot(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_engine: AsyncEngine,
 ) -> None:
+    # Concurrent conversations need independent connections; the rollback fixture
+    # pins every session to one connection and cannot support overlapping queries.
+    db_session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     sender = FakeSender()
     teams = _app(db_session_factory, sender, cap=1)
     started, release = asyncio.Event(), asyncio.Event()
