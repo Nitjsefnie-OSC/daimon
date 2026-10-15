@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from daimon.core.session_snapshot import SessionSnapshot
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
