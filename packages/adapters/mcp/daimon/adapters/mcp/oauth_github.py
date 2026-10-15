@@ -206,21 +206,23 @@ def _already_connected_page(
 ) -> Response:
     status = (
         f"{_repo_count(count)} connected to {html.escape(agent_name)}."
-        if agent_name and count is not None else "GitHub repos are connected."
+        if agent_name and count is not None
+        else "GitHub repos are connected."
     )
     action = (
         "Return to Discord to use the agent."
         if "discord.com/channels/" in back and agent_name
         else "In Slack, run /github to use the agent."
-        if back and agent_name else "You can close this tab."
+        if back and agent_name
+        else "You can close this tab."
     )
     return github_page(
-        title="Already connected", heading_icon=True,
+        title="Already connected",
+        heading_icon=True,
         body_html=f'<div class="gh-status-icon">{icon("circle-check")}</div>'
         + f'<p class="gh-status-line">{status}</p><p class="gh-action-line">{action}</p>'
         + (f'<div class="gh-actions">{back}</div>' if back else ""),
     )
-
 
 
 def _done_page(
@@ -381,9 +383,11 @@ def _snapshot_signature(state: str, invitation_hash: str, snapshot: str, secret:
 
 def _saved_agent_page(name: str, grants: list[github_access.AgentRepo]) -> Response:
     body = (
-        '<div class="gh-status-icon">' + icon("circle-check") + "</div>"
+        '<div class="gh-status-icon">'
+        + icon("circle-check")
+        + "</div>"
         + f'<p class="gh-status-line">{html.escape(name)} can use '
-        + f'{_repo_count(len(grants))}.</p>'
+        + f"{_repo_count(len(grants))}.</p>"
         + '<p class="gh-action-line">You can close this tab.</p>'
     )
     return github_page(title="Repos saved", body_html=body, heading_icon=True)
@@ -715,11 +719,7 @@ def _agent_editor_page(
         ),
         None,
     )
-    repairable = [
-        repo
-        for repo in grants
-        if repo.repo_id in usable and repo.repo_id in needed
-    ]
+    repairable = [repo for repo in grants if repo.repo_id in usable and repo.repo_id in needed]
     working = next((repo for repo in grants if repo.is_working_repo), None)
     may_change_working = working is None or working.repo_id in usable
     place = _place_label(platform)
@@ -1445,9 +1445,7 @@ def build_oauth_github_routes(
                 else []
             )
         if invitation.agent_id is not None:
-            return _saved_agent_page(
-                invitation.agent_name or "Agent", agent_grants
-            )
+            return _saved_agent_page(invitation.agent_name or "Agent", agent_grants)
         back = _back_to_chat(requester.platform, requester.external_id) if requester else ""
         return _already_connected_page(
             invitation.connected_repo_count,
@@ -1476,7 +1474,7 @@ def build_oauth_github_routes(
                         invitation.connected_repo_count,
                         back,
                         agent_name=invitation.agent_name,
-                                )
+                    )
                 if status == "requester_left":
                     return _error(
                         "This link was made by someone who's no longer an admin here. "
@@ -2188,9 +2186,7 @@ def build_oauth_github_routes(
                 )
             await revoke_user_token(token)
             async with sessionmaker() as session:
-                await github_connect.successful_confirmation(
-                    session, state=state, cookie=cookie
-                )
+                await github_connect.successful_confirmation(session, state=state, cookie=cookie)
             response = _done_page(
                 count=len(repos),
                 platform=requester.platform,

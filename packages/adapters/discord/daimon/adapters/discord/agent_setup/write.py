@@ -96,7 +96,6 @@ async def create_blank_agent(
     return outcome
 
 
-
 async def store_inline_pat(
     runtime: DiscordRuntime,
     *,

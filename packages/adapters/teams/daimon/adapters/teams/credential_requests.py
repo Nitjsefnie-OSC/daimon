@@ -800,9 +800,7 @@ class TeamsCredentialRequests:
                     kind="pat", at=datetime.now(UTC), account_id=consumed.account_id
                 )
                 async with self._runtime.sessionmaker.begin() as session:
-                    await write_repo_submit(
-                        session, row=consumed, ma_secret_ref=ref, proof=proof
-                    )
+                    await write_repo_submit(session, row=consumed, ma_secret_ref=ref, proof=proof)
                     await store.set_credential_request_outcome(
                         session, token=row.token, outcome="applied"
                     )

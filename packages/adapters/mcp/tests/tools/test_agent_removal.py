@@ -1208,7 +1208,7 @@ async def _assert_remove_then_add_refused(
             session,
             tenant_id=tenant_id,
             agent_id=agent_uuid,
-            key="GITHUB_TOKEN",
+            key="GITLAB_TOKEN",
             content="the-value-in-use",
             set_by_account_id=None,
         )
@@ -1218,14 +1218,14 @@ async def _assert_remove_then_add_refused(
     )
 
     with pytest.raises(ToolError, match="needs a workspace or server admin"):
-        await _remove_agent_key_impl(runtime, auth, agent_name=agent_name, key="GITHUB_TOKEN")
+        await _remove_agent_key_impl(runtime, auth, agent_name=agent_name, key="GITLAB_TOKEN")
     async with db_session_factory() as session:
         row = await get_agent_file(
-            session, tenant_id=tenant_id, agent_id=agent_uuid, key="GITHUB_TOKEN"
+            session, tenant_id=tenant_id, agent_id=agent_uuid, key="GITLAB_TOKEN"
         )
     assert row is not None and row.content == "the-value-in-use", "nothing was removed"
     with pytest.raises(ToolError, match="needs (an|a server or workspace) admin"):
-        await _require_key_replacement_allowed(runtime, auth, ma_agent=agent, key="GITHUB_TOKEN")
+        await _require_key_replacement_allowed(runtime, auth, ma_agent=agent, key="GITLAB_TOKEN")
 
 
 async def test_remove_agent_key_refused_when_the_agent_is_another_accounts_personal_default(

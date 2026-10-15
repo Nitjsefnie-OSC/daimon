@@ -557,7 +557,6 @@ async def test_confirmed_connection_applies_one_admin_decision(db_session: Async
     )
     assert len(grants) == 1
     assert grants[0].baseline_access == "write"
-    assert not grants[0].staged
     assert await get_continuation(db_session, idempotency_key=request.id) is None
     grant_wake = await get_continuation(
         db_session, idempotency_key=uuid.uuid5(request.id, "agent-grant")

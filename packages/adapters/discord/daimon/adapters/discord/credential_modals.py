@@ -1485,7 +1485,6 @@ class RepoBindModal(discord.ui.Modal):
                         row=consumed_row,
                         ma_secret_ref=ma_secret_ref,
                         proof=proof,
-
                     )
             except DaimonError:
                 # Only fixed copy: domain errors can carry upstream details.

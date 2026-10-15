@@ -19,7 +19,7 @@ from daimon.adapters.mcp.tools.self_edit import (
     _self_list_files_impl,  # pyright: ignore[reportPrivateUsage]
     _self_read_file_impl,  # pyright: ignore[reportPrivateUsage]
     _self_write_file_impl,  # pyright: ignore[reportPrivateUsage]
-    )
+)
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError

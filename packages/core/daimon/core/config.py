@@ -838,6 +838,7 @@ class GithubSettings(BaseModel):
         ),
     )
 
+
 class GithubAppSettings(BaseModel):
     """Credentials for agent-scoped GitHub App access."""
 

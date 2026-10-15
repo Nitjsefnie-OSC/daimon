@@ -11,7 +11,6 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
-from daimon.core._models import UserSkill
 from daimon.core.config import GithubAppSettings, GithubSettings
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.github_rate_limit import GitHubRateLimitError
@@ -20,7 +19,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_sync.orchestrator import sync_agent_skills
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.github_access import active_grant_for_repo
-from sqlalchemy import select
+from daimon.core.stores.user_skills import list_repo_skill_sources
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -69,20 +68,7 @@ async def resync_bound_repo(
     if github_app is None or github_app.app_id is None or github_app.private_key is None:
         return ResyncReport(failed_bindings=0)
     async with sessionmaker() as session:
-        sources = (
-            await session.execute(
-                select(
-                    UserSkill.tenant_id,
-                    UserSkill.principal_id,
-                    UserSkill.agent_name,
-                    UserSkill.source_repo_url,
-                    UserSkill.source_repo_branch,
-                    UserSkill.source_path,
-                )
-                .where(UserSkill.source == "repo")
-                .distinct()
-            )
-        ).all()
+        sources = await list_repo_skill_sources(session)
     failed = retryable = 0
 
     async def run(client: httpx.AsyncClient) -> None:

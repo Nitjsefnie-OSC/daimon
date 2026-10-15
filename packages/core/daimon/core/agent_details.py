@@ -278,9 +278,7 @@ async def load_agent_details(
             default=deployment_default,
         )
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
-    grants = await list_live_grant_repositories(
-        session, tenant_id=tenant_id, agent_id=agent_uuid
-    )
+    grants = await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_uuid)
     working = next((repo for grant, repo in grants if grant.is_working_repo), None)
     repo = (
         RepoBinding(
@@ -288,7 +286,8 @@ async def load_agent_details(
             default_branch="default",
             access=RepoAccess(kind="connected", credential="github_app"),
         )
-        if working is not None else None
+        if working is not None
+        else None
     )
     files = await agent_files.list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     skill_titles, skills_truncated = await resolve_custom_skill_titles(

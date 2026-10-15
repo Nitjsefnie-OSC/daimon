@@ -290,7 +290,7 @@ def test_snapshot_from_created_session_captures_every_resource_handle() -> None:
                 mount_path="/mnt/session/repo",
                 type="github_repository",
                 updated_at=_NOW,
-                url="https://github.com/pymc-labs/example",
+                url="https://github.com/example/widgets",
                 checkout=BetaManagedAgentsBranchCheckout(name="feat/thing", type="branch"),
             ),
             BetaManagedAgentsMemoryStoreResource(
@@ -323,11 +323,9 @@ def test_snapshot_from_created_session_captures_every_resource_handle() -> None:
     assert snapshot.repo_resource_id == "res_repo", (
         "the repo resource id is the token-rotation handle"
     )
-    assert snapshot.repo_url == "https://github.com/pymc-labs/example", (
-        "repo url comes off the resource"
-    )
-    assert snapshot.repo_urls == (), "legacy snapshots keep the predeploy repo-set default"
-    assert snapshot.repo_branch == "feat/thing", "a branch checkout must be read off the resource"
+    assert snapshot.repo_url is None, "App sessions record repositories as a set"
+    assert snapshot.repo_urls == ("https://github.com/example/widgets",)
+    assert snapshot.repo_branch is None, "App sessions do not pin a legacy branch"
     assert snapshot.repo_mount_path == "/mnt/session/repo", "the repo mount path must be recorded"
     assert snapshot.memory_store_id == "memstore_7", "the mounted memory store must be recorded"
     assert snapshot.vault_id == "vault_9", "an unspecified vault falls back to the session's own"
@@ -342,7 +340,7 @@ def test_snapshot_survives_a_json_round_trip() -> None:
         hidden_mcp_server_names=frozenset(),
         environment_id="env_science",
         env_sha256="env-hash",
-        repo_url="https://github.com/pymc-labs/example",
+        repo_url="https://github.com/example/widgets",
         repo_branch="main",
         memory_store_id="memstore_7",
         vault_id="vault_9",
@@ -366,7 +364,7 @@ def test_identity_fingerprint_ignores_handles_and_diagnostics() -> None:
         hidden_mcp_server_names=frozenset(),
         environment_id="env_science",
         env_sha256="env-hash",
-        repo_url="https://github.com/pymc-labs/example",
+        repo_url="https://github.com/example/widgets",
         repo_branch="main",
         memory_store_id="memstore_7",
         vault_id="vault_9",

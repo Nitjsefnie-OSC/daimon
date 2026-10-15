@@ -12,10 +12,8 @@ def test_delete_preview_uses_plain_rows_without_routine_id() -> None:
     values.update(
         routines=PurgePreviewRow(count=2, example="routine-uuid"),
         user_configs=PurgePreviewRow(count=1, example=None),
-        github_credentials=PurgePreviewRow(count=1, example="octocat"),
     )
     rows = _will_happen(PurgePreview(**values))
     assert "⏰ Cancel **2** routines" in rows
     assert "⚙ Remove your saved settings" in rows
-    assert "🔑 Delete **1** saved GitHub key, for example the one for octocat" in rows
     assert "routine-uuid" not in "\n".join(rows)

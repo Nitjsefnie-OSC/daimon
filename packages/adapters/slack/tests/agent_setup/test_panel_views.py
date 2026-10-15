@@ -58,18 +58,22 @@ from daimon.adapters.slack.modal_limits import (
     MAX_TITLE_CHARS,
 )
 from daimon.core.access_policy import ChannelRule
-from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, build_agent_details
+from daimon.core.agent_details import (
+    AgentDetails,
+    GitHubDeploymentFacts,
+    RepoBinding,
+    build_agent_details,
+)
 from daimon.core.answering_map import AnsweringMap, build_answering_map
 from daimon.core.channel_rules import ChannelRuleStatus
 from daimon.core.config import TurnSettings
-from daimon.core.github_repo_auth import RepoAccessKind
+from daimon.core.github_repo_auth import RepoAccess, RepoAccessKind
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
 from daimon.core.routing_facts import PRECEDENCE_LINE, UNROUTED_LINE
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
 from daimon.core.stores.domain import (
     AgentFileRow,
-    AgentRepoBindingRow,
     ChannelAdminsRow,
     ChannelSkillRow,
     McpTokenRow,
@@ -131,21 +135,12 @@ def _agent_file(key: str) -> AgentFileRow:
     )
 
 
-def _binding(**overrides: Any) -> AgentRepoBindingRow:
-    kwargs: dict[str, Any] = {
-        "tenant_id": _TENANT_ID,
-        "agent_id": uuid.uuid4(),
-        "repo_url": "https://github.com/pymc-labs/churn-models",
-        "default_branch": "main",
-        "ma_secret_ref": "inline-pat:abc",
-        "proof_kind": "pat",
-        "proof_at": _MOMENT,
-        "proof_account_id": _MAKER,
-        "created_at": _MOMENT,
-        "updated_at": _MOMENT,
-    }
-    kwargs.update(overrides)
-    return AgentRepoBindingRow(**kwargs)
+def _binding(*, access: RepoAccess | None = None) -> RepoBinding:
+    return RepoBinding(
+        repo_url="https://github.com/example/widgets",
+        default_branch="main",
+        access=access or RepoAccess(kind="connected", credential="github_app", checked_at=_MOMENT),
+    )
 
 
 def _details(
@@ -154,7 +149,7 @@ def _details(
     channels: list[ChannelConfigRow] | None = None,
     tenant: TenantConfigRow | None = None,
     files: list[AgentFileRow] | None = None,
-    binding: AgentRepoBindingRow | None = None,
+    binding: RepoBinding | None = None,
     skills: list[dict[str, Any]] | None = None,
     skills_truncated: bool = False,
     mcp_servers: list[dict[str, Any]] | None = None,
@@ -182,11 +177,11 @@ def _details(
         channels=resolved_channels,
         default=default or DeploymentDefault(),
         resolved_here=ResolvedConfig(agent_name=name, agent_name_tier="channel"),
-        binding=binding,
+        repo=binding,
         files=files or [],
         skill_titles={},
         skills_truncated=skills_truncated,
-        github=github or GitHubDeploymentFacts(has_fallback_pat=True, app_configured=True),
+        github=github or GitHubDeploymentFacts(app_configured=True),
         public_mcp_url="https://mcp.example.com/mcp",
         is_admin=is_admin,
         channel_label=f"<#{_CHANNEL_ID}>",
@@ -860,47 +855,36 @@ def test_details_view_when_coding_tools_unconfigured_renders_note_not_button() -
 
 
 @pytest.mark.parametrize(
-    ("binding", "github", "expected_kind", "expected_phrase"),
+    ("access", "expected_kind", "expected_phrase"),
     [
         (
-            _binding(),
-            GitHubDeploymentFacts(has_fallback_pat=True, app_configured=True),
+            RepoAccess(kind="connected", credential="github_app", checked_at=_MOMENT),
             "connected",
-            "via token",
+            "via the GitHub App",
         ),
         (
-            _binding(proof_at=None, proof_account_id=None, proof_kind=None),
-            GitHubDeploymentFacts(has_fallback_pat=True, app_configured=True),
+            RepoAccess(kind="not_checked", credential="none"),
             "not_checked",
             "Not checked yet",
         ),
         (
-            _binding(ma_secret_ref="none", proof_kind="public"),
-            GitHubDeploymentFacts(has_fallback_pat=True, app_configured=False),
-            "connected",
-            "public repo",
-        ),
-        (
-            _binding(ma_secret_ref="none", proof_kind="pat"),
-            GitHubDeploymentFacts(has_fallback_pat=False, app_configured=True),
+            RepoAccess(kind="checked", credential="github_app", checked_at=_MOMENT),
             "checked",
             "via the GitHub App",
         ),
         (
-            _binding(ma_secret_ref="none", proof_kind="pat"),
-            GitHubDeploymentFacts(has_fallback_pat=False, app_configured=False),
+            RepoAccess(kind="needs_attention", credential="none"),
             "needs_attention",
             "⚠️ needs attention:",
         ),
     ],
 )
 def test_details_view_renders_each_repo_access_kind(
-    binding: AgentRepoBindingRow,
-    github: GitHubDeploymentFacts,
+    access: RepoAccess,
     expected_kind: RepoAccessKind,
     expected_phrase: str,
 ) -> None:
-    details = _details(binding=binding, github=github)
+    details = _details(binding=_binding(access=access))
     assert details.repo is not None, "the fixture binds a repo"
     assert details.repo.access.kind == expected_kind, (
         "the fixture must produce the access kind under test"
@@ -914,11 +898,11 @@ def test_details_view_renders_each_repo_access_kind(
         attribution=None,
     )
     rendered = _joined(view)
-    assert "<https://github.com/pymc-labs/churn-models|pymc-labs/churn-models>" in rendered, (
+    assert "<https://github.com/example/widgets|example/widgets>" in rendered, (
         "the repo is a link to itself, labelled owner/repo"
     )
     assert expected_phrase in rendered, f"{expected_kind} must read as {expected_phrase!r}"
-    if expected_kind in {"connected", "checked"} and binding.proof_at is not None:
+    if expected_kind in {"connected", "checked"} and access.checked_at is not None:
         assert "Last checked" in rendered, "a recorded check is dated"
     assert "connected" not in rendered, (
         "the panel describes what was recorded; it never claims a live connection"

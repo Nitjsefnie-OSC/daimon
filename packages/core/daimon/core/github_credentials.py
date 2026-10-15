@@ -1,6 +1,4 @@
-"""Shared Fernet helpers for encrypted connections.
-
-"""
+"""Shared Fernet helpers for encrypted connections."""
 
 from __future__ import annotations
 

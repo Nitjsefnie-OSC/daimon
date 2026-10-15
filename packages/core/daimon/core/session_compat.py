@@ -109,10 +109,7 @@ class ReplaceEnvFile:
 
 
 type UpdateOp = (
-    ReplaceToolsAndMcpServers
-    | RemirrorVaultCredentials
-    | RotateAppTokens
-    | ReplaceEnvFile
+    ReplaceToolsAndMcpServers | RemirrorVaultCredentials | RotateAppTokens | ReplaceEnvFile
 )
 
 

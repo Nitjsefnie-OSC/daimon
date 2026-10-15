@@ -536,7 +536,6 @@ async def mark_headless_app_session_closed(session: AsyncSession, *, session_id:
         await session.flush()
 
 
-
 async def recheck_token_revoke_due(
     session: AsyncSession, *, token_id: uuid.UUID, now: datetime
 ) -> tuple[IssuedToken, bool] | None:
@@ -557,12 +556,8 @@ async def recheck_token_revoke_due(
     )
     if not (hard_stale or due or abandoned):
         return None
-    naturally_expired = (
-        not hard_stale
-        and (
-            abandoned
-            or (due and row.revoke_after is not None and row.revoke_after >= row.expires_at)
-        )
+    naturally_expired = not hard_stale and (
+        abandoned or (due and row.revoke_after is not None and row.revoke_after >= row.expires_at)
     )
     return IssuedToken.model_validate(row), naturally_expired
 

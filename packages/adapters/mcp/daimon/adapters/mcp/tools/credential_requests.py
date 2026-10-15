@@ -121,7 +121,6 @@ def _caller_is_admin(auth: AuthIdentity) -> bool:
     return auth.is_admin and auth.agent_id is None
 
 
-
 _PENDING_TASK_DESCRIPTION = (
     "The work that should run once the value is saved, in the person's words "
     "— a script, a file, a question. Omit it when they only asked to save "

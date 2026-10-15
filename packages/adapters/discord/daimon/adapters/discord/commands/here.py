@@ -115,7 +115,7 @@ class HereCog(commands.Cog):
                     category_id=str(channel.category_id) if channel.category_id else None,
                     default=runtime.deployment_default,
                     github=GitHubDeploymentFacts(
-                            app_configured=runtime.settings.github_app.app_id is not None
+                        app_configured=runtime.settings.github_app.app_id is not None
                         and runtime.settings.github_app.private_key is not None,
                     ),
                     public_mcp_url=str(runtime.settings.mcp.public_url)

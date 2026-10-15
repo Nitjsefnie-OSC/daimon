@@ -689,8 +689,6 @@ class TurnCardIntent(Base):
     )
 
 
-
-
 class UserSkill(Base):
     """User-managed skill row.
 
@@ -784,7 +782,6 @@ class SeededSkill(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
-
 
 
 class AgentGoogleBinding(Base):
@@ -1402,8 +1399,6 @@ class PrivacySessionDelete(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-
-
 
 
 class AgentMemoryStore(Base):
@@ -3011,7 +3006,6 @@ class GitHubAccessRequestDelivery(Base):
     message_id: Mapped[str | None] = mapped_column(Text)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
 
 
 class GitHubUserLink(Base):

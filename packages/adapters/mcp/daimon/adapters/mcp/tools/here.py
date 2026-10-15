@@ -132,7 +132,7 @@ async def _where_am_i_impl(
             category_id=category_id,
             default=runtime.deployment_default,
             github=GitHubDeploymentFacts(
-                        app_configured=runtime.settings.github_app.app_id is not None
+                app_configured=runtime.settings.github_app.app_id is not None
                 and runtime.settings.github_app.private_key is not None,
             ),
             public_mcp_url=str(runtime.settings.mcp.public_url)

@@ -86,8 +86,11 @@ async def load_grants_panel(
     if pinned:
         authorized = [row for row in authorized if row.scope_agent_id == agent_id]
     working_repo = next(
-        (row.repo_full_name for row in authorized
-         if row.repo_id in grants and grants[row.repo_id].is_working_repo),
+        (
+            row.repo_full_name
+            for row in authorized
+            if row.repo_id in grants and grants[row.repo_id].is_working_repo
+        ),
         None,
     )
     repos = tuple(
@@ -115,8 +118,7 @@ async def load_grants_panel(
                 if row.repo_id in drafts
                 else (grants[row.repo_id].ceiling_access if row.repo_id in grants else None),
             ),
-            staged=row.repo_id in drafts
-            ,
+            staged=row.repo_id in drafts,
             working=(
                 drafts[row.repo_id].is_working_repo
                 if drafts[row.repo_id].operation == "upsert"
@@ -124,16 +126,8 @@ async def load_grants_panel(
             )
             if row.repo_id in drafts
             else (grants[row.repo_id].is_working_repo if row.repo_id in grants else False),
-            live_baseline=(
-                grants[row.repo_id].baseline_access
-                if row.repo_id in grants
-                else None
-            ),
-            live_ceiling=(
-                grants[row.repo_id].ceiling_access
-                if row.repo_id in grants
-                else None
-            ),
+            live_baseline=(grants[row.repo_id].baseline_access if row.repo_id in grants else None),
+            live_ceiling=(grants[row.repo_id].ceiling_access if row.repo_id in grants else None),
         )
         for row in authorized
         if row.status == "active"

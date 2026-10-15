@@ -63,7 +63,7 @@ async def _load(context: CommandContext) -> HereCard:
             thread_id=thread_id,
             default=runtime.deployment_default,
             github=GitHubDeploymentFacts(
-                        app_configured=runtime.settings.github_app.app_id is not None
+                app_configured=runtime.settings.github_app.app_id is not None
                 and runtime.settings.github_app.private_key is not None,
             ),
             public_mcp_url=str(public_url) if public_url is not None else None,

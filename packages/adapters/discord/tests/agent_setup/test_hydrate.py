@@ -555,26 +555,15 @@ async def test_channel_blocks_are_withheld(
 
 
 @pytest.mark.parametrize(
-    ("github", "expected_pat", "expected_app"),
+    ("github_app", "expected_app"),
     [
-        ({}, False, False),
-        ({"fallback_pat": "ghp_x"}, True, False),
-        ({"app_id": "1234"}, False, False),
-        ({"app_id": "1234", "app_private_key": "-----BEGIN KEY-----"}, False, True),
-        (
-            {
-                "fallback_pat": "ghp_x",
-                "app_id": "1234",
-                "app_private_key": "-----BEGIN KEY-----",
-            },
-            True,
-            True,
-        ),
+        ({}, False),
+        ({"app_id": "1234"}, False),
+        ({"app_id": "1234", "private_key": "-----BEGIN KEY-----"}, True),
     ],
 )
 def test_github_facts_report_the_app_configured_only_with_both_halves(
-    github: dict[str, str],
-    expected_pat: bool,
+    github_app: dict[str, str],
     expected_app: bool,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -582,17 +571,11 @@ def test_github_facts_report_the_app_configured_only_with_both_halves(
         sessionmaker=db_session_factory,
         anthropic=MagicMock(),
         default=DeploymentDefault(),
-        settings_overrides={"github": github},
+        settings_overrides={"github_app": github_app},
     )
 
     facts = github_facts(runtime)
-
-    assert facts.has_fallback_pat is expected_pat, (
-        "the fallback PAT is configured exactly when it is set"
-    )
-    assert facts.app_configured is expected_app, (
-        "an app id with no private key mints nothing and must not read as configured"
-    )
+    assert facts.app_configured is expected_app
 
 
 # ---------------------------------------------------------------------------

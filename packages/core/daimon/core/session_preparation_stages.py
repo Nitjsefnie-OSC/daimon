@@ -327,9 +327,13 @@ async def desired_snapshot_for(
         )
 
     app_urls = await effective_repo_url_sets(
-        sessionmaker, tenant_id=tenant_id, agent_id=agent_uuid,
-        account_id=account_id, is_external=is_external,
-        config=github_app or GithubAppSettings(), fernet=fernet,
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=agent_uuid,
+        account_id=account_id,
+        is_external=is_external,
+        config=github_app or GithubAppSettings(),
+        fernet=fernet,
     )
     return desired_snapshot(
         agent,

@@ -488,9 +488,7 @@ async def _describe_agent_impl(
         grants = await list_live_grant_repositories(
             session, tenant_id=auth.tenant_id, agent_id=auth.agent_id
         )
-    repo_url = next(
-        (repo.repo_full_name for grant, repo in grants if grant.is_working_repo), None
-    )
+    repo_url = next((repo.repo_full_name for grant, repo in grants if grant.is_working_repo), None)
     skill_names = [sk.skill_id for sk in ma_agent.skills]
     role_summary = (ma_agent.system or "")[:200]
     return AgentDescription(
@@ -633,7 +631,8 @@ async def _start_turn_impl(
         github_app_id: str | None = runtime.settings.github_app.app_id
         github_app_private_key: str | None = (
             runtime.settings.github_app.private_key.get_secret_value()
-            if runtime.settings.github_app.private_key is not None else None
+            if runtime.settings.github_app.private_key is not None
+            else None
         )
 
         if recheck is not None:

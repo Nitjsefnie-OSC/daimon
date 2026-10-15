@@ -614,68 +614,6 @@
         'type': 'object',
       }),
     }),
-    'bind_public_repo': dict({
-      'description': '''
-        Have an agent work in a public GitHub repo: "work in
-        github.com/owner/project", "point it at our open-source repository".
-        <blank line>
-        Only for a repository that needs no token to clone; this checks, and
-        refuses otherwise. For a private repo, use ``github_connect`` (the
-        Connect GitHub link); never suggest a token.
-        <blank line>
-        The agent checks it out and works in it from your next message here, and
-        anyone who talks to it works in it too. Files already open in this
-        conversation are carried across or left behind according to the answer
-        you get. Binding an agent that answers a channel or the whole workspace
-        needs an admin.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'agent_name': dict({
-            'type': 'string',
-          }),
-          'branch': dict({
-            'default': 'main',
-            'description': "Branch to check out; 'main' unless the person named one.",
-            'type': 'string',
-          }),
-          'expected_ma_agent_id': dict({
-            'type': 'string',
-          }),
-          'origin_context_id': dict({
-            'type': 'string',
-          }),
-          'repo_url': dict({
-            'description': 'Public repository URL, e.g. https://github.com/owner/repo.',
-            'type': 'string',
-          }),
-          'unsaved_work': dict({
-            'anyOf': list([
-              dict({
-                'enum': list([
-                  'copy',
-                  'leave',
-                ]),
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-            'description': 'Only after the person answers the uncommitted-work question.',
-          }),
-        }),
-        'required': list([
-          'agent_name',
-          'repo_url',
-          'origin_context_id',
-          'expected_ma_agent_id',
-        ]),
-        'type': 'object',
-      }),
-    }),
     'cancel_timer': dict({
       'description': 'Cancel a pending timer by id (from `create_timer` or `list_timers`). A cancelled timer never fires.',
       'parameters': dict({
@@ -853,19 +791,6 @@
             'default': False,
             'type': 'boolean',
           }),
-        }),
-        'type': 'object',
-      }),
-    }),
-    'clear_repo_binding': dict({
-      'description': '''
-        Remove the repo binding for your agent.
-        <blank line>
-        Idempotent — succeeds whether or not a binding existed.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
         }),
         'type': 'object',
       }),
@@ -2770,16 +2695,13 @@
         Fails with a ``ToolError`` when the calling agent has no credential
         bound for that service — see the ``cli-auth`` skill for the
         per-agent binding flow. On success, returns the token as plaintext
-        (e.g. for ``export GH_TOKEN=$(...)``).
+        for the Google CLI.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'service': dict({
-            'enum': list([
-              'github',
-              'gcloud',
-            ]),
+            'const': 'gcloud',
             'type': 'string',
           }),
         }),
@@ -2869,15 +2791,6 @@
         a server or workspace admin). Read the returned ``note`` back to the
         user.
       ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-        }),
-        'type': 'object',
-      }),
-    }),
-    'get_repo_binding': dict({
-      'description': 'Return the current repo binding for your agent, or null if unbound.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -4702,147 +4615,6 @@
         'type': 'object',
       }),
     }),
-    'request_repo_binding': dict({
-      'description': '''
-        Legacy: save a GitHub token for an agent that already uses one.
-        <blank line>
-        Never offer, suggest or mention this, or any GitHub token, to people.
-        For any GitHub access, private repo or setup, use ``github_connect``
-        (the Connect GitHub link). Call this only if the person themselves
-        brings a token for an agent already on a saved token.
-        For a private skill repo use ``request_skill_repo_token``. If the user has
-        no working token, ``post_github_app_install_link`` offers a GitHub App install;
-        installing alone does not bind the repo or verify this tenant's access.
-        <blank line>
-        Posts a requester-only card naming the agent and the repo, expiring in 30
-        minutes. Only the requester can open its private form, which collects a GitHub
-        token only when needed; values never appear in chat. Saving binds the working
-        repository on `branch` for future sessions. Existing working tokens remain in
-        use. Pass the waiting task as `pending_task` so it resumes after the value is
-        saved.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'agent_name': dict({
-            'type': 'string',
-          }),
-          'branch': dict({
-            'default': 'main',
-            'description': 'Branch the agent checks out, e.g. main.',
-            'type': 'string',
-          }),
-          'channel_id': dict({
-            'description': 'Compatibility field; origin controls the posting destination.',
-            'type': 'string',
-          }),
-          'expected_ma_agent_id': dict({
-            'type': 'string',
-          }),
-          'origin_context_id': dict({
-            'type': 'string',
-          }),
-          'pending_task': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-            'description': "The work that should run once the value is saved, in the person's words — a script, a file, a question. Omit it when they only asked to save or replace the key; the request itself is never a task.",
-          }),
-          'purpose': dict({
-            'type': 'string',
-          }),
-          'repo_url': dict({
-            'description': 'GitHub repo or repository URL, e.g. https://github.com/owner/repo.',
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'agent_name',
-          'repo_url',
-          'purpose',
-          'channel_id',
-          'origin_context_id',
-          'expected_ma_agent_id',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'request_skill_repo_token': dict({
-      'description': '''
-        The skills repo is private: collect a GitHub token to import its skills.
-        <blank line>
-        After ``sync_skills`` cannot read a private skill repository, use this form.
-        The skill repo is separate from the working repo; for that one use
-        ``set_working_repo`` and ``github_connect``.
-        <blank line>
-        Posts a requester-only card naming the agent and the repo, expiring in 30
-        minutes. Its private form retries import and attachment; tokens never appear
-        in chat. Anyone talking to the agent can use the imported skills. Pass the
-        same repo URL, branch and path, and the waiting task as `pending_task` so it
-        resumes after the value is saved.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'agent_name': dict({
-            'type': 'string',
-          }),
-          'branch': dict({
-            'default': 'main',
-            'description': 'Branch the skills are read from, e.g. main.',
-            'type': 'string',
-          }),
-          'channel_id': dict({
-            'description': 'Compatibility field; origin controls the posting destination.',
-            'type': 'string',
-          }),
-          'expected_ma_agent_id': dict({
-            'type': 'string',
-          }),
-          'origin_context_id': dict({
-            'type': 'string',
-          }),
-          'path': dict({
-            'default': '',
-            'type': 'string',
-          }),
-          'pending_task': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-            'description': "The work that should run once the value is saved, in the person's words — a script, a file, a question. Omit it when they only asked to save or replace the key; the request itself is never a task.",
-          }),
-          'purpose': dict({
-            'type': 'string',
-          }),
-          'repo_url': dict({
-            'description': 'GitHub repo or repository URL, e.g. https://github.com/owner/repo.',
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'agent_name',
-          'repo_url',
-          'purpose',
-          'channel_id',
-          'origin_context_id',
-          'expected_ma_agent_id',
-        ]),
-        'type': 'object',
-      }),
-    }),
     'revoke_promo_code': dict({
       'description': '''
         Stop a promo code from being redeemed again. Operator-only.
@@ -5664,35 +5436,6 @@
         'type': 'object',
       }),
     }),
-    'set_repo_binding': dict({
-      'description': '''
-        Bind your agent to a git repo.
-        <blank line>
-        Mints a credential, stores it in your MA Vault, and records the binding.
-        Replaces any existing binding for your agent.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'default_branch': dict({
-            'type': 'string',
-          }),
-          'repo_url': dict({
-            'type': 'string',
-          }),
-          'service': dict({
-            'const': 'github',
-            'default': 'github',
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'repo_url',
-          'default_branch',
-        ]),
-        'type': 'object',
-      }),
-    }),
     'set_setup_target': dict({
       'description': '''
         Switch this setup conversation to an explicitly selected MA agent identity.
@@ -5905,8 +5648,8 @@
         Install skills from a GitHub repo into the workspace's shared skill library.
         <blank line>
         First use ``list_skills`` and prefer existing skills; import only a repository
-        the user requested. If the skills repo is private, use ``request_skill_repo_token``;
-        ``request_repo_binding`` provides working-repo access. Never accept tokens in chat.
+        the user requested. For a private repository, pass ``agent_name`` and
+        ``origin_context_id`` so a missing App grant posts Connect GitHub.
         <blank line>
         Discovers SKILL.md files and imports or updates skills. Pass ``agent_name`` to
         also attach them, preserving existing skills; omit it only to stock the library.
@@ -5933,6 +5676,17 @@
             'type': 'string',
           }),
           'expected_ma_agent_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
             'anyOf': list([
               dict({
                 'type': 'string',

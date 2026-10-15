@@ -55,7 +55,6 @@ async def test_connect_returns_ephemeral_url_button(monkeypatch: pytest.MonkeyPa
         "list_agents_by_tenant",
         AsyncMock(return_value=[SimpleNamespace(name="ResearchBot", id="ma-agent")]),
     )
-    monkeypatch.setattr(github_command, "pending_update_for_agent", AsyncMock(return_value=None))
     monkeypatch.setattr(github_command, "require_app_eligible_agent", AsyncMock())
     monkeypatch.setattr(
         github_command,

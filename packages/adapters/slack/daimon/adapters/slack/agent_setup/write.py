@@ -61,7 +61,6 @@ def owner_repo_from_url(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-
 async def delete_agent(runtime: SlackRuntime, *, tenant_id: uuid.UUID, name: str) -> None:
     """Archive the MA agent matching ``name`` under the given tenant.
 

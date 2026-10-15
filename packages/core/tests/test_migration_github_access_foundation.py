@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from daimon.core._models import AgentGitHubGrant, TenantGitHubRepo
+from daimon.core._models import TenantGitHubRepo
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -36,6 +36,18 @@ async def test_github_access_migration_round_trips(db_session: AsyncSession) -> 
     agent_repos_migration = _load_migration("0079_github_agent_repos")
     authorized_permission_migration = _load_migration("0094_github_authorized_perm")
     conn = await db_session.connection()
+    # 0105 removed these legacy columns and tables after 0048. Reconstruct
+    # their empty 0048 shape so this migration's downgrade can run on head.
+    await db_session.execute(
+        text("ALTER TABLE agent_github_grants ADD COLUMN staged boolean NOT NULL DEFAULT true")
+    )
+    await db_session.execute(
+        text(
+            "CREATE TABLE agent_github_mode (tenant_id uuid NOT NULL REFERENCES tenants(id) "
+            "ON DELETE CASCADE, agent_id uuid NOT NULL, mode text NOT NULL DEFAULT 'legacy', "
+            "PRIMARY KEY (tenant_id, agent_id), CHECK (mode IN ('legacy', 'app')))"
+        )
+    )
 
     def run(migration_module: object, step: str) -> Callable[[Connection], None]:
         def inner(sync_conn: Connection) -> None:
@@ -96,16 +108,11 @@ async def test_github_access_migration_round_trips(db_session: AsyncSession) -> 
     )
     with pytest.raises(IntegrityError):
         async with db_session.begin_nested():
-            db_session.add(
-                AgentGitHubGrant(
-                    tenant_id=tenant.id,
-                    agent_id=uuid.uuid4(),
-                    repo_id=101,
-                    baseline_access="write",
-                    ceiling_access="read",
-                    staged=True,
-                    is_working_repo=False,
-                    version=1,
-                )
+            await db_session.execute(
+                text(
+                    "INSERT INTO agent_github_grants "
+                    "(tenant_id, agent_id, repo_id, baseline_access, ceiling_access, staged) "
+                    "VALUES (:tenant_id, :agent_id, 101, 'write', 'read', true)"
+                ),
+                {"tenant_id": tenant.id, "agent_id": uuid.uuid4()},
             )
-            await db_session.flush()

@@ -1697,7 +1697,6 @@ async def run_repo_bind_credential_submission(
                     row=consumed,
                     ma_secret_ref=ma_secret_ref,
                     proof=proof,
-
                 )
         except DaimonError as err:
             log.warning("credential_request.repo_write_failed", err_type=type(err).__name__)

@@ -135,7 +135,6 @@ async def walk_vault_credentials(
         yield construct_type_unchecked(value=item.native, type_=BetaManagedAgentsCredential)
 
 
-
 async def walk_skill_versions(
     client: AsyncAnthropic, skill_id: str, *, scope: Scope
 ) -> AsyncIterator[Mapping[str, object]]:

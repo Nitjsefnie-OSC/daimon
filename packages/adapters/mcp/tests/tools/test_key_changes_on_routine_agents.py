@@ -67,7 +67,7 @@ def _runtime(db: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> tupl
 async def _setup(
     db: async_sessionmaker[AsyncSession], *, user: str = "routine", by: str = "U_OTHER"
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
-    """A tenant whose agent holds GITHUB_TOKEN and is used only by `user`."""
+    """A tenant whose agent holds GITLAB_TOKEN and is used only by `user`."""
     async with db() as session, session.begin():
         tenant = await make_tenant(session, platform="discord")
         me = await make_account(session, tenant=tenant)
@@ -86,7 +86,7 @@ async def _setup(
             session,
             tenant_id=tenant.id,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_MA_ID),
-            key="GITHUB_TOKEN",
+            key="GITLAB_TOKEN",
             content="the-value-in-use",
             set_by_account_id=None,
         )
@@ -112,7 +112,7 @@ async def _value(
 ) -> str | None:
     async with db() as session:
         row = await get_agent_file(
-            session, tenant_id=tenant_id, agent_id=agent_id, key="GITHUB_TOKEN"
+            session, tenant_id=tenant_id, agent_id=agent_id, key="GITLAB_TOKEN"
         )
     return None if row is None else row.content
 
@@ -125,9 +125,9 @@ async def test_self_delete_then_add_is_refused(
     runtime, _agent_obj = _runtime(db_session_factory, tenant_id)
     auth = _member(tenant_id, me, agent_id)
     with pytest.raises(ToolError, match="needs a workspace or server admin"):
-        await _self_delete_file_impl(runtime, auth, key="GITHUB_TOKEN")
-    with pytest.raises(ToolError, match="would replace GITHUB_TOKEN"):
-        await _self_write_file_impl(runtime, auth, key="GH_TOKEN", content="attacker")
+        await _self_delete_file_impl(runtime, auth, key="GITLAB_TOKEN")
+    with pytest.raises(ToolError, match="would replace GITLAB_TOKEN"):
+        await _self_write_file_impl(runtime, auth, key="GLAB_TOKEN", content="attacker")
     assert await _value(db_session_factory, tenant_id, agent_id) == "the-value-in-use"
 
 
@@ -142,7 +142,7 @@ async def test_remove_agent_key_is_refused(
             runtime,
             _member(tenant_id, me, None),
             agent_name=_NAME,
-            key="GITHUB_TOKEN",
+            key="GITLAB_TOKEN",
             expected_ma_agent_id=_MA_ID,
         )
     assert await _value(db_session_factory, tenant_id, agent_id) == "the-value-in-use"
@@ -156,7 +156,7 @@ async def test_direct_form_replacement_is_refused(
     runtime, agent = _runtime(db_session_factory, tenant_id)
     with pytest.raises(ToolError, match="needs (an|a server or workspace) admin"):
         await _require_key_replacement_allowed(
-            runtime, _member(tenant_id, me, None), ma_agent=agent, key="GITHUB_TOKEN"
+            runtime, _member(tenant_id, me, None), ma_agent=agent, key="GITLAB_TOKEN"
         )
 
 
@@ -169,14 +169,14 @@ async def test_an_agent_nobody_else_uses_still_requires_ownership(
     runtime, agent = _runtime(db_session_factory, tenant_id)
     with pytest.raises(ToolError, match="admin"):
         await _require_key_replacement_allowed(
-            runtime, _member(tenant_id, me, None), ma_agent=agent, key="GITHUB_TOKEN"
+            runtime, _member(tenant_id, me, None), ma_agent=agent, key="GITLAB_TOKEN"
         )
     with pytest.raises(ToolError, match="admin"):
         await _remove_agent_key_impl(
             runtime,
             _member(tenant_id, me, None),
             agent_name=_NAME,
-            key="GITHUB_TOKEN",
+            key="GITLAB_TOKEN",
             expected_ma_agent_id=_MA_ID,
         )
     assert await _value(db_session_factory, tenant_id, agent_id) == "the-value-in-use"
