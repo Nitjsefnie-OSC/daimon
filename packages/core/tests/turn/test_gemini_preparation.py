@@ -42,7 +42,7 @@ from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.transport import Object
-from mux.errors import ScopeViolation
+from mux.errors import ContinuityLost, ScopeViolation
 from mux.state.lease import Slot
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -141,7 +141,9 @@ async def host(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIte
         yield Host(deps, admission, transport, journal, ancillary)
 
 
-async def prepare(host: Host, admission: Admission | None = None) -> PreparedTurn:
+async def prepare(
+    host: Host, admission: Admission | None = None, *, reuse_existing: bool = True
+) -> PreparedTurn:
     return await bind_session_impl(
         host.deps,
         admission or host.admission,
@@ -150,7 +152,7 @@ async def prepare(host: Host, admission: Admission | None = None) -> PreparedTur
         external_user_id="user",
         thread_id="thread",
         session_account_id=ACCOUNT,
-        reuse_existing=True,
+        reuse_existing=reuse_existing,
     )
 
 
@@ -169,6 +171,27 @@ async def test_explicit_registered_preparation_reuses_authorized_persisted_bindi
     )
     assert binding is not None and binding.native_refs["session"] == first.ma_session_id
     assert binding.profile == PROFILE and binding.legacy_account_id == str(ACCOUNT)
+    assert not host.transport.requests and not host.ancillary.requests
+
+
+async def test_fresh_preparation_creates_empty_slot_but_cannot_replace_binding(host: Host) -> None:
+    first = await prepare(host, reuse_existing=False)
+    assert not first.reused
+    assert first.backend is not None and first.session_ref is not None
+    slot = Slot(thread=ThreadRef(channel=CHANNEL, thread_id="thread"), account_id=str(ACCOUNT))
+    retained = await host.journal.state_store.get_binding(slot)
+    assert retained is not None
+
+    def forbidden(config: ConfigRevision, scope: Scope) -> object:
+        raise AssertionError("fresh request for existing binding allocated a transport")
+
+    runtime = host.deps.turn_runtimes[PROFILE]
+    host.deps = replace(
+        host.deps, turn_runtimes={PROFILE: replace(runtime, transport_factory=forbidden)}
+    )
+    with pytest.raises(ContinuityLost):
+        await prepare(host, reuse_existing=False)
+    assert await host.journal.state_store.get_binding(slot) == retained
     assert not host.transport.requests and not host.ancillary.requests
 
 

@@ -25,7 +25,7 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ResourceRef, ThreadRef
 from mux.contracts.resources import SessionSpec
 from mux.contracts.usage import UsageObservation
-from mux.errors import BindingConflict, ScopeViolation, UnsupportedCapability
+from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
 
 
@@ -63,7 +63,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or admission.asks_before_publishing
         or (admission.channel_skills and (target is None or "skills" not in target.declared_drops))
         or request.transfer is not None
-        or not request.reuse_existing
     ):
         raise UnsupportedCapability(("gemini_host_deployment_policy",), PROFILE)
     if not isinstance(runtime.journal, GeminiJournal) or not isinstance(
@@ -116,6 +115,11 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     slot = Slot(thread=thread, account_id=request.scope.account_id)
     store = journal.state_store
     prior = await store.get_binding(slot)
+    if prior is not None and not request.reuse_existing:
+        raise ContinuityLost(
+            prior.id,
+            ("bound Gemini session cannot be replaced by fresh preparation",),
+        )
     binding_id = str(uuid5(NAMESPACE_URL, f"gemini.host:{slot.model_dump_json()}"))
     if prior is not None and (
         prior.id != binding_id
