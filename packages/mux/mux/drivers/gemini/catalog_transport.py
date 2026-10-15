@@ -40,4 +40,5 @@ class SDKAgentCatalogTransport:
         response = await provider_call(
             self._agents.get(id=id_, extra_headers={"Api-Revision": API_REVISION})
         )
-        return object_value(cast(JsonValue, response.model_dump(mode="json", exclude_none=True)))
+        # Keep explicit nulls as evidence; absent SDK defaults are not readback.
+        return object_value(cast(JsonValue, response.model_dump(mode="json", exclude_unset=True)))

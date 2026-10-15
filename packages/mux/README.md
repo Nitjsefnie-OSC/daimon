@@ -774,7 +774,9 @@ separate from this offline API. See the [column admission contract](../testing/d
 Gemini resource administration can explicitly select
 `resource_catalog_enabled=True` with an owned `AgentCatalogTransport`. The
 native catalog adapter compiles concrete bundle pins, fences creation before
-POST and verifies independent SDK GET readback. Local PostgreSQL CAS retains old
+POST and verifies independent SDK GET readback. Omitted tool and environment source
+lists are equivalent only to compiled empty lists; explicit nulls, non-empty
+capability changes and unknown environment fields still refuse. Local PostgreSQL CAS retains old
 native IDs and authored revisions; Gemini provider versions are never invented.
 The default is false and existing inline ports remain selected. The host also
 requires its explicit default-false capability and the same enabled agent
