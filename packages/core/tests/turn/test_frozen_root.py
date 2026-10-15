@@ -1911,6 +1911,7 @@ async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesi
     from mux.drivers.openai import deployment
     from mux.state.lease import Slot
 
+    from . import test_openai_host
     from .test_gemini_codec import interaction
     from .test_gemini_runtime_transport import clients_for
     from .test_openai_deployment import manifest
@@ -2025,6 +2026,7 @@ async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesi
 
     async with transport.client() as client:
         if provider == "openai":
+            monkeypatch.setattr(test_openai_host, "SESSION_ID", f"fresh-openai-{tenant_id}")
             monkeypatch.setattr(
                 deployment, "_http_transport", lambda: httpx.MockTransport(openai_request)
             )
