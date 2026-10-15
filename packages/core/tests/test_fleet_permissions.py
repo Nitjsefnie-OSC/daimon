@@ -1238,6 +1238,21 @@ def test_empty_declared_drops_preserve_existing_json_and_worker_behavior():
     assert result.environment == root.environment and result.permissions.memory_read_only
 
 
+@pytest.mark.parametrize("connections", [None, ()])
+@pytest.mark.parametrize("extensions", [None, ()])
+def test_native_ceiling_normalization_preserves_neutral_field_presence(connections, extensions):
+    from daimon.core.turn.runtime_manifest import worker_spec_ceiling
+
+    spec = parent().spec.model_copy(update={"mcp_servers": connections, "extensions": extensions})
+    normalized, excluded = worker_spec_ceiling(spec)
+    assert normalized == spec
+    assert normalized.model_fields_set == spec.model_fields_set
+    assert normalized.model_dump(mode="json", exclude_unset=True) == spec.model_dump(
+        mode="json", exclude_unset=True
+    )
+    assert not excluded
+
+
 @pytest.mark.parametrize("drop", ("skills", "mcp", "tools"))
 def test_declared_tools_skills_and_mcp_are_removed_before_unsupported_target_checks(drop):
     root = parent("gemini")
