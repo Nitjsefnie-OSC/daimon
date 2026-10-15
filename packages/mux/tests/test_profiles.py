@@ -262,3 +262,25 @@ def test_native_agent_tool_projection_uses_the_closed_anthropic_compiler():
         agent_tools(
             extension.model_copy(update={"value": {"tools": [{"type": "unknown_toolset"}]}})
         )
+
+
+def test_conversation_worker_is_explicit_without_changing_openai_selection():
+    from mux.profiles import (
+        CONVERSATION_ONLY,
+        RUNNABLE_PROFILES,
+        backend_selection,
+        runnable_selection,
+    )
+
+    selected = backend_selection("openai")
+    assert selected.profile == PERSISTENT_WORKSPACE.profile_id
+    conversation = selected.model_copy(update={"profile": CONVERSATION_ONLY.profile_id})
+    assert conversation.profile in RUNNABLE_PROFILES and runnable_selection(conversation)
+    assert not runnable_selection(conversation.model_copy(update={"model": "unapproved-model"}))
+    assert not runnable_selection(conversation.model_copy(update={"thread_mode": "shared"}))
+    assert neutral_catalog_profile_for("openai") is PERSISTENT_WORKSPACE
+    assert (
+        neutral_catalog_profile_for("openai", profile_id=CONVERSATION_ONLY.profile_id)
+        is CONVERSATION_ONLY
+    )
+    assert neutral_catalog_profile_for("gemini", profile_id=CONVERSATION_ONLY.profile_id) is None

@@ -20,7 +20,7 @@ from typing import Protocol
 from mux.contracts.config import ResolvedBackend
 from mux.contracts.ids import ModelRef
 from mux.contracts.usage import UsageObservation
-from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE, get_profile
+from mux.profiles import CONVERSATION_ONLY, INLINE_REUSE, PERSISTENT_WORKSPACE, get_profile
 
 
 class LegacyUsage(Protocol):
@@ -595,6 +595,8 @@ def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
     rates, not a whole-bill proof, native request limit or authority grant.
     """
     on = datetime.now(UTC).date()
+    if profile == CONVERSATION_ONLY.profile_id:
+        profile = PERSISTENT_WORKSPACE.profile_id
     return MappingProxyType(
         {
             (price.provider, price.model): price

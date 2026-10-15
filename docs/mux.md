@@ -72,7 +72,7 @@ when it supports all nine.
 | --- | --- | --- |
 | `anthropic.managed_agents` | yes | Every capability native. |
 | `openai.persistent_workspace` | yes | `reconcile` is emulated from saved items; missed events cannot be replayed. |
-| `openai.conversation_only` | no | No workspace. Admitted only when the channel names it. |
+| `openai.conversation_only` | no | No workspace. Runnable for explicitly granted conversation-only fleet workers. |
 | `gemini.inline_reuse` | no | The inline environment expires after inactivity, so workspace persistence is not guaranteed. Its usage reporting is undeclared, so admission refuses it until a driver shows usage observations. |
 
 `admit(config, profile)` is pure and runs before any provider call:
@@ -2478,7 +2478,7 @@ A sandbox declaration removes its environment and execution builtins and prevent
 
 The existing provider preparation request can carry the canonical resolved worker beside its actual source and scoped counterpart. The worker is hidden from representation and absent by default. Carrying a resolved spec alone is not an execution grant: the shared source proof and registered native plan must independently verify and consume the same restrictions before a worker can run.
 
-OpenAI hosted worker plans require an explicit persistent-memory drop, an authorized Bash grant, known hosted network/package policy, explicit empty template inputs and no inherited resource mounts. Readback compares the exact resolved agent and environment, including protected instructions, attachments and metadata stamps. Residual template files, opaque environment configuration and unbound MCP credentials refuse. A no-tools or no-sandbox declaration cannot silently retain hosted Bash. Conversation-only worker execution remains refused until session creation can consume the real first input with a durable acknowledgment that prevents a second send. Ordinary channel plans and unsupported seal, read-only and publishing restrictions retain their behavior.
+OpenAI hosted worker plans require an explicit persistent-memory drop, an authorized Bash grant, known hosted network/package policy, explicit empty template inputs and no inherited resource mounts. Readback compares the exact resolved agent and environment, including protected instructions, attachments and metadata stamps. Residual template files, opaque environment configuration and unbound MCP credentials refuse. A no-tools or no-sandbox declaration cannot silently retain hosted Bash. An explicitly selected `openai.conversation_only` worker instead requires all five losses (`sandbox`, `tools`, `mcp`, `memory`, `skills`) and no remaining tools, skills, connections, environments or resource mounts. Its deployment must omit `environment_id` and skill identities. Creation includes the task's initial input under the same fenced worker input claim used by turn sends. Acknowledged creation is replayed without another input; an uncertain create retains its reservation and requires reconciliation. Read-only memory posture remains recorded and can execute only because the worker has no memory mounts. Ordinary persistent-workspace channel plans and their seal, read-only and publishing restrictions retain their behavior.
 
 Gemini's deployment owner checks the exact resolved worker instructions, tools,
 skill pins and native catalog readback before its preparer consumes the checked

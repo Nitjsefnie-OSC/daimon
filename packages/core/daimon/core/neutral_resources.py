@@ -188,7 +188,9 @@ class NeutralResourceHost:
         self.operation_key = operation_key
         self.resolve_pin = resolve_pin
         capabilities = backend.capabilities()
-        profile = neutral_catalog_profile_for(capabilities.provider)
+        profile = neutral_catalog_profile_for(
+            capabilities.provider, profile_id=capabilities.profile_id
+        )
         if profile is None:
             raise UnsupportedCapability(
                 ("neutral_resource_host_provider",), capabilities.profile_id

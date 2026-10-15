@@ -23,7 +23,7 @@ from anthropic.types.beta.sessions import (
 from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
 from daimon.core.turn.io import TurnConnectionLost, TurnEvent, TurnStream
-from daimon.core.turn.openai_codec import PROFILE, display_batch
+from daimon.core.turn.openai_codec import PROFILE, PROFILES, display_batch
 from daimon.core.turn.openai_state import journal_source
 from daimon.core.turn.persistence import UncertainSend
 from mux.contracts.actions import InputEvent, UserMessage, UserToolConfirmation
@@ -198,9 +198,10 @@ class OpenAITurnIO:
             [ResourceRef, tuple[str, ...]], Awaitable[tuple[tuple[str, ...], bool]]
         ]
         | None = None,
+        initial_input_loader: Callable[[ResourceRef, UserMessage], Awaitable[bool]] | None = None,
     ) -> None:
         if (
-            backend.capabilities().profile_id != PROFILE
+            backend.capabilities().profile_id not in PROFILES
             or session.provider != "openai"
             or session.kind != "session"
             or session.tenant_id != scope.tenant_id
@@ -212,6 +213,7 @@ class OpenAITurnIO:
         self._backend, self._scope, self._session = backend, scope, session
         self._persistence = persistence
         self._baseline_loader = baseline_loader
+        self._initial_input_loader = initial_input_loader
         self._resuming = False
         self._root = root_turn_id
         self._prior_roots: set[str] | None = None
@@ -360,6 +362,13 @@ class OpenAITurnIO:
                 json.dumps(sorted(actions), separators=(",", ":")).encode()
             ).hexdigest()[:32]
         )
+
+        if new_turn and self._initial_input_loader is not None:
+            message = next(item for item in inputs if isinstance(item, UserMessage))
+            if await self._initial_input_loader(self._session, message):
+                if len(inputs) != 1:
+                    raise UnsupportedCapability(("host_initial_input_batch",), PROFILE)
+                return
 
         async def deliver(key: str) -> SendReceipt:
             return await self._backend.events.send(self._scope, self._session, inputs, key=key)
