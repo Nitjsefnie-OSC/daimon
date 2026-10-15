@@ -91,7 +91,36 @@ VerdictReason = Literal[
     "publish_needs_confirmation",
     #: Publishing from a session that asks first, in a run nobody is watching.
     "unattended_publish",
+    "agent_rule_allow",
+    "agent_rule_ask",
+    "agent_rule_deny",
 ]
+
+
+class ResolvedAgentToolRule(BaseModel):
+    """A stored rule after tenant, agent and endpoint binding have matched."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rule: Literal["allow", "ask", "deny"]
+    scope: Literal["chat", "chat_and_routines"] = "chat"
+
+
+def stricter_agent_tool_rule(
+    first: ResolvedAgentToolRule | None, second: ResolvedAgentToolRule | None
+) -> ResolvedAgentToolRule | None:
+    """Combine matching agent-wide and channel rules, keeping the stricter one."""
+    if first is None:
+        return second
+    if second is None:
+        return first
+    rank = {"allow": 0, "ask": 1, "deny": 2}
+    if rank[first.rule] != rank[second.rule]:
+        return first if rank[first.rule] > rank[second.rule] else second
+    if first.scope == "chat" or second.scope == "chat":
+        return first.model_copy(update={"scope": "chat"})
+    return first
+
 
 #: Name of the deployment's own MCP server entry on every agent. Same value as
 #: `daimon.core.defaults.mcp_merge.DAIMON_MCP_SERVER_NAME`; repeated here so
@@ -271,6 +300,14 @@ class ToolSafetyPolicy(BaseModel):
             "unattended_writes. Applies to sessions created after it is set; a chat thread "
             "keeps its current session until that is replaced. Off keeps every tool "
             "auto-approved."
+        ),
+    )
+    agent_rules: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        description=(
+            "Apply workspace-admin tool rules for individual agents and third-party MCP tools. "
+            "Off by default; stored rules remain editable but inactive until enabled."
         ),
     )
     effects: dict[str, ToolEffect] = Field(
@@ -479,6 +516,7 @@ def decide_tool_call(
     trusted_servers: frozenset[str] = frozenset(),
     annotations: ToolAnnotations | None = None,
     confirmed_tools: frozenset[str] = frozenset(),
+    agent_rule: ResolvedAgentToolRule | None = None,
 ) -> ToolVerdict:
     """Decide one blocked call.
 
@@ -519,6 +557,15 @@ def decide_tool_call(
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
     if _listed(policy.denied, server_name=call.server_name, tool_name=call.tool_name):
         return ToolVerdict(outcome="deny", effect=effect, reason="denied_by_operator")
+    if policy.agent_rules and _gated(call.server_name, trusted_servers) and agent_rule is not None:
+        if agent_rule.rule == "deny":
+            return ToolVerdict(outcome="deny", effect=effect, reason="agent_rule_deny")
+        if agent_rule.rule == "ask":
+            return ToolVerdict(
+                outcome="ask" if attended else "deny", effect=effect, reason="agent_rule_ask"
+            )
+        if attended or agent_rule.scope == "chat_and_routines":
+            return ToolVerdict(outcome="allow", effect=effect, reason="agent_rule_allow")
     if effect == "read":
         return ToolVerdict(outcome="allow", effect=effect, reason="read")
     if attended:
