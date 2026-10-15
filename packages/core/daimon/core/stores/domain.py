@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from daimon.core.session_snapshot import SessionSnapshot
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
@@ -158,6 +158,7 @@ class TenantRow(BaseModel):
     provision_status: str  # "ready" | "pending" | "failed"
     funding_mode: FundingMode = "prepaid"
     turn_cap: int | None = None
+    plain_text_mentions: bool = False
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
     registered_at: datetime
@@ -420,6 +421,41 @@ class TeamsChannelSiteRow(BaseModel):
     site_id: str
     drive_id: str
     folder_id: str
+
+
+class TeamsChannelSubscriptionRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    channel_id: str
+    team_id: str
+    group_id: str
+    channel_type: str
+    channel_name: str | None
+    team_name: str | None
+    bot_name: str | None
+    service_url: str | None
+    subscription_id: str
+    client_state_sha256: bytes
+    expires_at: datetime
+    last_message_id: str | None
+    last_message_at: datetime | None
+
+
+class TeamsMessageAdmissionRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    channel_id: str
+    message_id: str
+    conversation_id: str
+    user_id: str | None
+    owner_key: int
+    handled: bool
+    message: dict[str, JsonValue] | None
+    notice_sent: bool
+    sent_at: datetime
+    created_at: datetime
 
 
 class SlackUserTokenRow(BaseModel):

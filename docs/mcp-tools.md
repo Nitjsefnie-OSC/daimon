@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 120 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 122 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -210,7 +210,7 @@ Private, agent-bound GitHub setup from an active conversation.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `github_connect` | Discord callers, Slack callers | Give this agent token access to more repos, such as a private GitHub repo. |
+| `github_connect` | Discord callers, Slack callers, Teams callers | Give this agent token access to more repos, such as a private GitHub repo. |
 
 ## `github_remove_repo`
 
@@ -218,7 +218,7 @@ Remove one repository from one agent after confirmation in chat.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `remove_repo` | Discord callers, Slack callers | Remove owner/repo from this agent only. |
+| `remove_repo` | Discord callers, Slack callers, Teams callers | Remove owner/repo from this agent only. |
 
 ## `github_requests`
 
@@ -234,7 +234,7 @@ Conversational selection of an agent's one filesystem repository.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_working_repo` | Discord callers, Slack callers | Choose the one repo in this agent's filesystem, or pass 'none' to clear it. |
+| `set_working_repo` | Discord callers, Slack callers, Teams callers | Choose the one repo in this agent's filesystem, or pass 'none' to clear it. |
 
 ## `here`
 
@@ -263,6 +263,15 @@ Notebook MCP tools.
 | `create_notebook_upload_url` | all callers | Mint a one-time upload URL for a marimo notebook. |
 | `delete_notebook` | all callers | Un-publish a notebook or blog you published (deletes it from the host). |
 | `list_notebooks` | all callers | List what you've published — scratch notebooks and permanent blogs alike. |
+
+## `plain_text_mentions`
+
+Plain-text mention tools: let a typed "@<bot name>" start a turn, workspace-wide.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_plain_text_mentions` | all callers | Report whether a typed "@<your name>" in a channel or thread starts a reply here. |
+| `set_plain_text_mentions` | admin only | Let a typed "@<your name>" in a channel or thread start a reply. |
 
 ## `promo_codes`
 

@@ -18,7 +18,10 @@ Microsoft SDK owns `POST /api/messages` and validates the Bot Framework JWT
 before Daimon code runs; tokens from any other issuer (such as Entra ID) are
 refused with 401 first. The same listener serves `/healthz` and `/readyz`,
 and, with `DAIMON_TEAMS__PUBLIC_URL` set, `GET /oauth/teams/files/callback`
-(below); a reverse proxy in front must pass that path too.
+(below); a reverse proxy in front must pass that path too. With
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED=true` it also serves
+`POST /api/graph/notifications` and `/api/graph/lifecycle` for Microsoft Graph
+(see [Private and shared channels](#private-and-shared-channels-optional)).
 `DAIMON_TEAMS__ENABLED=false` makes `/api/messages` answer 503, and bodies over
 64 KiB are refused before parsing. The `teams` compose service (opt-in `teams`
 profile) publishes the port; the messaging endpoint must reach it.
@@ -43,13 +46,21 @@ is supported; government and China clouds use other Bot Framework hosts.
   post is its own thread and session; replies that address it continue that
   thread. A bare @mention asks about the thread; if the thread cannot be
   read, the bot says so instead of starting a turn. A followed thread also
-  gets unprompted replies (below).
+  gets unprompted replies (below). When an admin turned on plain-text
+  mentions (`set_plain_text_mentions`), a person's post or reply that types
+  `@` and the bot's name without picking it from the list counts as a
+  mention too, the name dropped from the text as an @mention is. A name
+  followed by "(" or by a dot and a letter is ignored ("@Daimon (urgent)",
+  "@Daimon.Thanks"), as are names inside a reply quote.
 - **Private and shared channels** work like standard ones once the app is in
-  them, except that Teams sends the bot only the private channel posts that
-  @mention it: there a Reply on a bot message needs a mention too, and a
-  followed thread gets no unprompted replies. The package declares `supportsChannelFeatures: tier1` (manifest
-  1.25), but adding the app to a team does not add it to these channels: each
-  one's owner adds it from the channel.
+  them, except that Teams sends the bot only the posts that @mention it. Out
+  of the box a Reply on a bot message needs a mention too, a typed name is
+  not seen, and a followed thread gets no unprompted replies; an operator can
+  turn all three on (see
+  [Private and shared channels](#private-and-shared-channels-optional)). The
+  package declares `supportsChannelFeatures: tier1` (manifest 1.25), but
+  adding the app to a team does not add it to these channels: each one's
+  owner adds it from the channel.
 - **Group chats** get a short refusal.
 - **Channels with `writers: none`** (ids look like `19:…@thread.tacv2`) and
   their threads get no reply, notice or tool post. One thread is named by
@@ -62,9 +73,8 @@ then a card follows with the summary line (agent, time, cost, money left; see
 [billing.md](billing.md)) and the controls below. Messages sent while a turn
 runs are queued and run as one follow-up per author. Work an agent hands off
 (`hand_off_task`) runs right after the turn that queued it; if admission
-refuses that work, it is dropped without a notice, as on Slack. Retried
-deliveries are deduplicated in memory only, so a retry that lands after a
-restart runs again.
+refuses that work, it is dropped without a notice, as on Slack. A retried
+delivery runs once, across restarts too (see Restart behaviour).
 
 ### Feedback and Ask a human
 
@@ -222,6 +232,7 @@ Anyone in a channel can follow its threads; a whole channel or the
 organisation needs a listed admin. The deployment default is
 `DAIMON_THREAD_PARTICIPATION__MODE`; `disabled` turns it off for Teams and
 Discord alike.
+In private and shared channels this needs the Graph notifications below.
 
 A burst of replies is judged once, after the thread has been quiet for
 `QUIET_SECONDS`, over the thread read through Graph, and capped per thread
@@ -233,6 +244,65 @@ Slack and Discord: what the person must hear rides on the answer, and only
 cards (forms, file offers) are sent besides it. Root posts are never judged, the bot's own and other bots' messages
 are ignored, and channels with `writers: none` are skipped. Without Graph history (the
 consent above) a followed thread stays mention-only.
+
+### Private and shared channels (optional)
+
+Teams sends a bot only the private or shared channel posts that @mention it,
+whatever the app's resource-specific consent says, and that consent cannot
+subscribe to those channels' messages. With
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED=true` Daimon subscribes to Microsoft
+Graph change notifications for each private or shared channel it is in, so
+replies in followed threads, Replies quoting the bot and typed `@<bot name>`
+mentions (when plain-text mentions are on) work there as in a standard
+channel. Graph's notification carries no content: Daimon reads the new
+message once and routes it exactly as a Bot Framework message, guests and
+external members classified by the same roster lookup. @mentions still
+arrive through Bot Framework and are ignored here. Expect a few seconds
+of extra latency.
+
+Setup:
+
+1. Entra → App registrations → the bot's app → API permissions → Add a
+   permission → Microsoft Graph → Application permissions →
+   `ChannelMessage.Read.All` → Grant admin consent. The permission is
+   tenant-wide, so Graph would serve any channel; Daimon subscribes only to
+   channels it is added to or sees a message in.
+2. Set `DAIMON_TEAMS__PUBLIC_URL` and
+   `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED=true`, and let the reverse proxy
+   pass `/api/graph/notifications` and `/api/graph/lifecycle`.
+3. Restart the service. A channel is subscribed when the bot is added to it
+   or first sees a message there; in a channel that already had the bot, one
+   @mention is enough.
+
+Subscriptions live about three days and are renewed half a day before they
+expire; one Graph removed and could not recreate is retried after ten
+minutes. Removing the bot or the app, or deleting the channel, deletes its
+subscription (an app removal, all of the team's). No read tells whether the
+bot is still in a channel, so if that removal event is lost the subscription
+lives on until a post there is refused with 403
+`BotNotInConversationRoster`; another 403 or a 404 keeps it. A typed
+`@<bot name>` posts its card before any model call, so it stops there. An
+unprompted reply posts nothing before its answer: until one answer is
+refused, replies in followed threads still reach the metered classifier,
+and that one turn is spent. Each
+notification must carry the channel's secret, compared in constant time; one
+that does not is ignored, and a request with no valid entry and a wrong
+secret gets 401, and an entry whose subscription id is not a GUID is
+ignored. A batch naming more than 100 new messages reads each channel's
+newest page once instead of each message; older messages beyond that page
+are dropped with a `catch_up_truncated` warning. Graph does not resend a batch it
+saw accepted, so a Reply quoting the bot or a typed name read while the
+service shuts down is held like a Bot Framework message and runs on the next
+instance (see Restart behaviour); a followed-thread reply or a refusal read
+then is dropped, as on Bot Framework. Each boot also reads every subscribed
+channel once for messages after the last one handled, at most 10 minutes
+back, and so does a notice that Graph missed notifications; a notified
+message older than that is skipped too. Edits never start
+a turn, and a message seen through both Bot Framework and Graph, notified
+twice or read again after a restart runs once: both routes write the same
+database receipt (see Restart behaviour). A shared
+channel hosted by another organisation cannot be subscribed. With the
+setting off the routes answer 404 and nothing is subscribed.
 
 ### Files
 
@@ -260,6 +330,13 @@ consent above) a followed thread stays mention-only.
   workspace. The turn context tells the agent which case applies
   (`files="available"` or `"unavailable"`), learned per channel from the last
   folder lookup or upload and rechecked every 10 minutes while unavailable.
+- **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as
+  Teams renders a base64 image attachment: downscaled to fit 1024x1024 and
+  re-encoded under 512 KiB (PNG, else JPEG). In a 1:1 chat each image comes
+  just before its consent card; in a channel up to four, in delivery order,
+  follow the links in one message (not after an unprompted answer, nor in a
+  channel without file access). Animated GIFs get no preview, and a preview
+  Teams refuses is only logged (`teams.output_preview.send_failed`).
   Where they are unavailable, `files_hint` tells the agent, asked for a file or
   to turn files on, to call `enable_channel_files` first rather than offer an
   artifact, report or notebook; the bot posts the Enable files card (below)
@@ -364,6 +441,12 @@ registration:
   (`delete_thread`, `archive_thread`) is not on Teams.
 - **`send_direct_message`** opens a 1:1 chat with someone who shares a team
   with the caller and Daimon, named by Entra object ID.
+- **GitHub setup.** `github_connect` sends the Connect GitHub card to the
+  requester's 1:1 chat, never the channel, since its link is single-use and
+  private; if that chat cannot be opened, the link is withdrawn and the agent
+  says so. Work that waited on the repo resumes once it is connected.
+  `set_working_repo` and `remove_repo` work as on Discord and Slack. Access
+  requests to admins (`request_github_access`) are not on Teams yet.
 - **`post_wizard`** posts its form as an Adaptive Card that only the asker can
   fill in (no step images); Submit starts their turn.
 - Task handoff and fresh starts, timers (`create_timer`, `list_timers`,
@@ -409,6 +492,21 @@ cancels them. The next boot edits every card a restart cut off to an
 interrupted notice before admitting new turns. A channel card whose send never
 returned an id is found by reading its thread through Graph; one in a 1:1 chat,
 which cannot be read back, is left as is.
+
+Every incoming message is admitted once, by Teams activity id, in a database
+receipt shared by every adapter process, so a redelivery, a second process or
+a restart never runs it twice. A message whose turn had not started when the
+restart began (queued behind a running turn, or arriving during the 15
+seconds) is kept: its chat gets one "I'm restarting for an update. I'll pick
+this up as soon as I'm back." note, and the next process runs it once, in
+order, through the usual admission checks. One more than 10 minutes old by
+then gets "I restarted for an update and couldn't get to this in time. Please
+send it again." instead. A turn that had started is never rerun: its card is
+marked interrupted as above. Nothing is said about a message until its receipt
+is written: while the database is unreachable the chat hears nothing, and a
+message whose start could not be recorded is tried again every 30 seconds. A message's
+text is stored only until its turn starts or it is answered, and the
+content-free receipt is deleted after 24 hours.
 
 Handoffs, work waiting on a private input and timers are durable wake-queue
 rows, and a wake poller opens every chat with due work. They survive a

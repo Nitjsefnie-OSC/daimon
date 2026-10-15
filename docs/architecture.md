@@ -208,9 +208,9 @@ A Slack `app_mention` runs a turn only when its text contains the bot's own
 event fires only on a direct mention, but installs have reported it arriving
 for thread replies that never mentioned the bot, so `_handle_app_mention`
 checks the text itself, as Discord checks `message.mentions`. The bot's user
-id comes from `auth.test`, cached per workspace. The check runs after dedup and
-the token read and before the Slack Connect rejection, so an external sender
-who never addressed the bot gets no notice. A dropped event is logged as
+id comes from `auth.test`, cached per workspace. The check runs after the
+token read and before dedup and the Slack Connect rejection, so an external
+sender who never addressed the bot gets no notice. A dropped event is logged as
 `slack.event_dropped.no_explicit_mention`; a failed `auth.test` drops the event
 without an error reply.
 
@@ -309,6 +309,16 @@ Channels whose ledger predates the replay window scan that whole window using
 per-message dedupe. Legacy-only channels retain their stored answer boundary
 during the first rollout.
 
+Teams admits every message through `teams_message_admissions`, keyed by
+tenant, channel (a thread's conversation id without `;messageid=`) and
+activity id, which is also the Graph message id, so a Graph notification of
+the same message collides. The row keeps the message only until its turn
+starts or it is answered (the finish fence); the owner is a per-process
+advisory lock, as for Discord. Boot, and a 30-second pass after it, replay
+unfinished rows whose owner exited, oldest first per chat, through the normal
+intake; rows older than 10 minutes are closed first and then told to resend.
+That pass also reruns this process's messages whose fence hit a database error.
+
 Rollout and rollback procedure: on the first deployment of this ledger, set
 `DAIMON_DISCORD__STARTUP_REPLAY_MINUTES=0`. Keep that setting for at least the
 intended replay window while the new image records live admissions, then
@@ -393,6 +403,41 @@ it still carries that turn's pending button. Answered cards without that button
 stay intact. An isolated transient API failure and shutdown cancellation keep
 the intent active for another recovery attempt. An unprompted turn likewise retains its
 intent when its card delete fails, including an unknown-webhook error.
+
+Plain-text mentions are a per-tenant switch (`tenants.plain_text_mentions`,
+off by default, set with the admin-only `set_plain_text_mentions`). Each
+adapter first runs the pure matcher in `daimon.core.name_mentions` on a
+person's channel or thread message: "@" plus a bot name, case-insensitive,
+any whitespace between its words, not after a word character, "@" or "/"
+and not running on into a word character, hyphen, dotted domain or "(";
+"Name (Suffix)" also matches "@Name". The price is that "@Name (urgent)" and
+"@Name.Thanks" are ignored. A following word does not stop it, so bots whose
+names share a prefix all answer the longer one. Bots, webhooks, DMs, messages
+that already carry a real mention, Slack `<...>` links and `>` quote lines,
+and Teams reply quotes never match. Only a match pays one read of the switch,
+and a failed read counts as off. With it on, Discord continues down the
+mention path (configured name, account name and server nickname), Slack runs
+the `app_mention` handler for the `message` event with the switch, read
+first, in place of the mention check; both events claim the dedup slot only
+after the mention check, so a message with a real mention runs once, through
+its own `app_mention`. Teams (`parse_inbound` marks the message `by_name`; the
+name is `recipient.name`) takes the ordinary `_handle` path with the typed
+name stripped, or gets the too-long notice a mention would. Off, nothing
+changes: a Teams thread reply still goes to participation.
+
+Teams private and shared channels deliver only @mentions to the bot. With
+`DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED` on, `channel_subscriptions.py` keeps a
+Graph change-notification subscription per such channel
+(`teams_channel_subscriptions`, renewed by one task that sleeps until the
+earliest expiry). A notification reads the message once, `parse_graph_message`
+builds the same `TeamsInbound` as `parse_inbound`, and `handle_graph_message`
+claims it under the Bot Framework delivery key before the shared dispatch, so
+a message seen by both sources runs once. Graph @mentions are left to Bot
+Framework, and Graph's sender tenant is not used: guests and external
+members are classified by the same roster lookup. The permission is
+tenant-wide and no read tells whether the bot is in a channel, so a channel is
+dropped on the bot's removal event, an app removal (the whole team), or a send
+there refused with 403 `BotNotInConversationRoster` (`_RemovalWatch`).
 
 An unmentioned reply in a Discord or Teams thread costs one cascade read of
 `thread_participation_scopes`. In a followed thread it joins a quiet-timer

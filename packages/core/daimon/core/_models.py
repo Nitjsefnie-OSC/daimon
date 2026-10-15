@@ -99,6 +99,11 @@ class Tenant(Base):
         Text, nullable=False, server_default=text("'prepaid'")
     )
     turn_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # A plain-text "@<bot name>" in a channel or thread starts a turn like a
+    # real mention (daimon.core.name_mentions). Off until an admin opts in.
+    plain_text_mentions: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     registered_at: Mapped[datetime] = mapped_column(
@@ -1788,6 +1793,92 @@ class TeamsChannelSite(Base):
     drive_id: Mapped[str] = mapped_column(Text, nullable=False)
     folder_id: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TeamsChannelSubscription(Base):
+    """A Graph change-notification subscription to one private or shared channel.
+
+    Teams sends the bot only the @mentions there, so the adapter subscribes to
+    the channel's messages instead. `client_state_sha256` is the hash of the
+    secret Graph echoes on every notification; the secret itself is not kept.
+    `last_message_*` is the newest message handled, where a `missed` catch-up
+    starts. The `team_*`, `channel_*`, `bot_name` and `service_url` columns are
+    what the subscribing activity said, which a Graph message does not carry.
+    """
+
+    __tablename__ = "teams_channel_subscriptions"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "channel_id", name="pk_teams_channel_subscriptions"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_teams_channel_subscriptions_tenants",
+        ),
+        UniqueConstraint("subscription_id", name="uq_teams_channel_subscriptions_subscription_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    channel_id: Mapped[str] = mapped_column(Text)
+    team_id: Mapped[str] = mapped_column(Text, nullable=False)
+    group_id: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_type: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    team_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bot_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    service_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subscription_id: Mapped[str] = mapped_column(Text, nullable=False)
+    client_state_sha256: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TeamsMessageAdmission(Base):
+    """One Teams message, admitted at most once across deliveries and processes.
+
+    Keyed by the channel (or chat) id and the message id, which Bot Framework's
+    activity id and Graph's chatMessage id share. `owner_key` is the claiming
+    process's advisory lock (`worker_ownership`); `handled` is set before the
+    turn starts or the message is otherwise answered. `message` (the parsed
+    inbound) is kept only while unhandled, so a restart can replay it; a dead
+    owner's unhandled row is reclaimed at the next boot. `notice_sent` records
+    the restart notice, so no drain repeats it. A privacy purge deletes a
+    person's rows by (tenant, user); a tenant's deletion cascades to them.
+    """
+
+    __tablename__ = "teams_message_admissions"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "channel_id", "message_id", name="pk_teams_message_admissions"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_teams_message_admissions_tenants",
+        ),
+        Index("ix_teams_message_admissions_created", "tenant_id", "created_at"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    channel_id: Mapped[str] = mapped_column(Text)
+    message_id: Mapped[str] = mapped_column(Text)
+    #: Where a notice about it goes: the thread or chat.
+    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The sender's Entra object id, the privacy purge's key; None when unverified.
+    user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    handled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    message: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    notice_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
