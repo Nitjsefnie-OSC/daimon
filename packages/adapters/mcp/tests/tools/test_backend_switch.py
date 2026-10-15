@@ -262,20 +262,7 @@ def _without_own_tools(payload):
     payload["mcp_servers"] = []
 
 
-#: A Daimon agent carrying its own `daimon-mcp` toolset cannot yet preview a
-#: cross-profile switch: `classify_source_obligations` reports
-#: `source_definition` for native tool controls instead of declaring drops.
-_TOOL_BEARING_SOURCE_REFUSES = pytest.mark.xfail(
-    strict=True,
-    raises=ToolError,
-    reason="tool-bearing sources hard-refuse source_unavailable until the "
-    "runtime_manifest.classify_source_obligations fix declares their drops",
-)
-
-
-@pytest.mark.parametrize(
-    "own_tools", [False, pytest.param(True, marks=_TOOL_BEARING_SOURCE_REFUSES)]
-)
+@pytest.mark.parametrize("own_tools", [False, True])
 @pytest.mark.parametrize("target", ["openai", "gemini"])
 async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
     active_chat, target, own_tools
