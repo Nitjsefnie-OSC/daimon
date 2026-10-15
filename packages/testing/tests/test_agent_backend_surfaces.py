@@ -958,8 +958,14 @@ def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path,
         (Path(__file__).parent / "data/agent_backend_cli_legacy_help.json").read_text()
     )
     assert actual["exit"] == actual["root_exit"] == 0
-    assert actual["groups"] == ["rule"]
-    assert actual["help"] == reference["stdout"]
+    assert actual["groups"] == ["rule", "tool-rules"]
+    # This checks that enabling the backend feature does not alter the
+    # pre-existing CLI surface. The tool-rules command is independently added.
+    tool_rule_lines = [
+        line for line in actual["help"].splitlines(keepends=True) if "│ tool-rules " in line
+    ]
+    assert len(tool_rule_lines) == 1
+    assert actual["help"].replace(tool_rule_lines[0], "") == reference["stdout"]
     assert actual["backend_exit"] == 2
     assert [
         line.strip("│ ")
@@ -973,7 +979,7 @@ def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path,
 def test_enabled_cli_registers_backend_set_clear_once(tmp_path):
     actual = cli_registration_probe(tmp_path, path="mux", enabled="true")
     assert actual["exit"] == actual["root_exit"] == actual["backend_exit"] == 0
-    assert actual["groups"] == ["rule", "backend"]
+    assert actual["groups"] == ["rule", "backend", "tool-rules"]
     assert "backend" in actual["help"] and "backend" in actual["root_help"]
     assert "set" in actual["backend_help"] and "clear" in actual["backend_help"]
 

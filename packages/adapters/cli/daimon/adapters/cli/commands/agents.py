@@ -56,6 +56,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
 from daimon.core.specs import load_agent_spec, merge_default_agent_toolset
+from daimon.core.stores import agent_tool_rules as tool_rules_store
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import list_tenants_by_platform
@@ -88,6 +89,152 @@ agents_app = typer.Typer(
 agents_app.add_typer(agent_rule_app, name="rule")
 backend_app = typer.Typer(help="Set or clear an agent's model backend.")
 agents_app.add_typer(backend_app, name="backend")
+tool_rules_app = typer.Typer(help="List, set or clear an agent's MCP tool rules.")
+agents_app.add_typer(tool_rules_app, name="tool-rules")
+
+
+async def _tool_rule_target(
+    rt: CliRuntime, selector: TenantSelector | None, name: str, tool_key: str | None = None
+):  # type: ignore[no-untyped-def]
+    async with rt.sessionmaker() as session, session.begin():
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        principal = await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    if agent is None:
+        raise StoreError(f"no agent named {name!r} in this workspace")
+    url = None
+    if tool_key is not None:
+        server, sep, tool = tool_key.partition("/")
+        if not sep or not server or not tool or "/" in tool:
+            raise StoreError("tool_key must be exactly server/tool")
+        url = next((s.url for s in agent.mcp_servers if s.name == server), None)
+        if url is None:
+            raise StoreError(f"agent has no MCP server named {server!r}")
+    return tenant_id, agent, url, str(principal.id)
+
+
+@tool_rules_app.command("list")
+def tool_rules_list_command(
+    ctx: typer.Context,
+    agent_name: str,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+    channel: Annotated[str | None, typer.Option("--channel", help="Parent channel id.")] = None,
+) -> None:
+    """List one agent's MCP tool rules."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            tenant_id, agent, _, _ = await _tool_rule_target(rt, ctx.obj, agent_name)
+            async with rt.sessionmaker() as session:
+                rows = await tool_rules_store.list_rules(
+                    session, tenant_id=tenant_id, agent_id=agent.id, channel_id=channel
+                )
+            emit_rows(
+                console,
+                rows,
+                columns=("tool_key", "channel_id", "rule", "scope", "server_url", "revision"),
+                as_json=as_json,
+            )
+            if not rt.settings.tool_safety.agent_rules:
+                console.print(
+                    "Agent tool rules are inactive until "
+                    "DAIMON_TOOL_SAFETY__AGENT_RULES is enabled."
+                )
+
+    run_cli(_run(), console=console)
+
+
+@tool_rules_app.command("set")
+def tool_rules_set_command(
+    ctx: typer.Context,
+    agent_name: str,
+    tool_key: str,
+    rule: tool_rules_store.Rule,
+    scope: tool_rules_store.Scope = "chat",
+    channel: Annotated[str | None, typer.Option("--channel", help="Parent channel id.")] = None,
+) -> None:
+    """Set one agent's rule for exactly server/tool."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            tenant_id, agent, url, actor = await _tool_rule_target(
+                rt, ctx.obj, agent_name, tool_key
+            )
+            assert url is not None
+            async with rt.sessionmaker.begin() as session:
+                row = await tool_rules_store.set_rule(
+                    session,
+                    tenant_id=tenant_id,
+                    agent_id=agent.id,
+                    agent_name=agent.name,
+                    tool_key=tool_key,
+                    channel_id=channel,
+                    server_url=url,
+                    rule=rule,
+                    scope=scope,
+                    set_by=actor,
+                    actor=Subject(is_admin=True),
+                )
+            console.print(
+                f"{agent_name} {tool_key} channel={channel or 'all'}: "
+                f"{row.rule} ({row.scope}), revision {row.revision}"
+            )
+            if not rt.settings.tool_safety.agent_rules:
+                console.print("Inactive until DAIMON_TOOL_SAFETY__AGENT_RULES is enabled.")
+
+    run_cli(_run(), console=console)
+
+
+@tool_rules_app.command("clear")
+def tool_rules_clear_command(
+    ctx: typer.Context,
+    agent_name: str,
+    tool_key: str,
+    channel: Annotated[str | None, typer.Option("--channel", help="Parent channel id.")] = None,
+) -> None:
+    """Clear one agent's rule while preserving its revision history."""
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(load_settings()) as rt:
+            tenant_id, agent, url, actor = await _tool_rule_target(rt, ctx.obj, agent_name)
+            async with rt.sessionmaker.begin() as session:
+                existing = await tool_rules_store.get_rule(
+                    session,
+                    tenant_id=tenant_id,
+                    agent_id=agent.id,
+                    tool_key=tool_key,
+                    channel_id=channel,
+                )
+                if existing is not None:
+                    url = existing.server_url
+                else:
+                    server, _, _ = tool_key.partition("/")
+                    url = next((s.url for s in agent.mcp_servers if s.name == server), None)
+                if url is None:
+                    raise StoreError("no stored rule or attached MCP server for that tool")
+                row = await tool_rules_store.clear_rule(
+                    session,
+                    tenant_id=tenant_id,
+                    agent_id=agent.id,
+                    agent_name=agent.name,
+                    tool_key=tool_key,
+                    channel_id=channel,
+                    server_url=url,
+                    set_by=actor,
+                    actor=Subject(is_admin=True),
+                )
+            console.print(
+                f"{agent_name} {tool_key} channel={channel or 'all'}: cleared, "
+                f"revision {row.revision}"
+            )
+
+    run_cli(_run(), console=console)
 
 
 @agents_app.callback()
