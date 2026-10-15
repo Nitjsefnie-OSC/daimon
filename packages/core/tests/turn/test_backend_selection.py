@@ -43,6 +43,7 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.errors import ScopeViolation
 from mux.state.lease import Slot
 from mux.state.memory import MemoryStateStore
+from structlog.testing import capture_logs
 
 from .test_openai_host import SESSION_ID, Wire
 from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, admission, deps_for
@@ -324,8 +325,10 @@ async def test_removed_provider_allowlist_refuses_an_existing_native_binding(sel
     async with host.sessions.begin() as db:
         await set_access_policy(db, tenant_id=TENANT, policy=TenantAccessPolicy())
     before = (len(host.wire.requests), len(host.calls))
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+    with capture_logs() as logs, pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await host.prepare("thread")
+    assert any(row.get("stage") == "workspace_policy" for row in logs)
+    assert any(row.get("stage") == "channel_policy" for row in logs)
     assert (len(host.wire.requests), len(host.calls)) == before
     assert await host.store.get_binding(host.slot) == binding
 
@@ -418,8 +421,12 @@ async def test_invalid_default_pin_refuses_before_selecting_a_new_provider(
 
         monkeypatch.setattr(host.store, "get_binding", corrupted)
     before = (len(host.wire.requests), len(host.calls))
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+    with capture_logs() as logs, pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await host.prepare("thread")
+    expected = (
+        "retained_default_policy" if defect == "registration" else "retained_default_mismatch"
+    )
+    assert any(row.get("stage") == expected for row in logs)
     assert (len(host.wire.requests), len(host.calls)) == before
 
 
@@ -539,8 +546,10 @@ async def test_missing_or_mismatched_retained_revision_refuses_before_provider_e
         return None if defect == "missing" else retained
 
     monkeypatch.setattr(mux_state, "get_config_revision", read)
-    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+    with capture_logs() as logs, pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await host.prepare("thread")
+    expected = "retained_revision_lookup" if defect == "missing" else "retained_binding_mismatch"
+    assert any(row.get("stage") == expected for row in logs)
     assert (len(host.wire.requests), len(host.calls)) == before
     assert host.created == []
 
