@@ -43,6 +43,34 @@ class SkillBundlePublisher(Protocol):
         ...
 
 
+class RetainedSkillDeployments:
+    """Use explicitly provisioned immutable directories; never upload or discover credentials.
+
+    The provisioning owner must supply independently read-back receipts. This
+    adapter lets the existing skill owner consume them with the same complete
+    scope/version/file checks as a publisher that performed the upload itself.
+    """
+
+    def __init__(self, deployments: tuple[GCSBundleDeployment, ...]) -> None:
+        self._deployments = {
+            (item.tenant_id, item.account_id, item.account_scope_id, item.version): item
+            for item in deployments
+        }
+        if len(self._deployments) != len(deployments):
+            raise ValueError("duplicate skill deployment receipt")
+
+    async def publish(
+        self, scope: Scope, *, account_scope_id: str, version: str, bundle: SkillUpload
+    ) -> GCSBundleDeployment:
+        deployment = self._deployments.get(
+            (scope.tenant_id, scope.account_id, account_scope_id, version)
+        )
+        if deployment is None:
+            raise ScopeViolation(version, "no authorized retained skill deployment")
+        validate_deployment(deployment, scope, account_scope_id, version, bundle)
+        return deployment
+
+
 def validate_deployment(
     deployment: GCSBundleDeployment, scope: Scope, account: str, version: str, bundle: SkillUpload
 ) -> None:
