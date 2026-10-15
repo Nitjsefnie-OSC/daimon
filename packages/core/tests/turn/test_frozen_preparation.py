@@ -59,6 +59,93 @@ async def test_exact_request_reconstructed_from_retained_facts(root_turn):
     assert all(item.method == "GET" for item in transport.requests[before:])
 
 
+@pytest.mark.parametrize("retained_budget_root_turn", ["recorded_i7"], indirect=True)
+@pytest.mark.parametrize("association_fault", [None, "missing", "foreign", "channel"])
+async def test_recorded_agent_origin_root_retains_preparation_association(
+    retained_budget_root_turn, association_fault
+):
+    from daimon.core._models import ChannelConfigRevision
+    from daimon.core.stores import mux_state
+    from mux.contracts.config import ConfigRevision
+    from mux.errors import ScopeViolation
+    from mux.profiles import backend_selection
+    from sqlalchemy import update
+
+    value = retained_budget_root_turn
+    deps, prepared, _, intent, _, scope, binding, _ = value
+    source = prepared._source
+    actor = BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True))
+
+    async def capture(_source):
+        return source
+
+    service = AgentBackendService(deps.sessionmaker, enabled=True, capture_source=capture)
+    preview = await service.preview(source, "anthropic")
+    current = await service.current(source)
+    accepted = await service.set_backend(
+        source,
+        "anthropic",
+        current.local,
+        actor,
+        accepted_drops=preview.declared_drops,
+        expected_preview_digest=preview.digest,
+    )
+    revision = ConfigRevision.create(binding.thread.channel, 1, backend_selection("anthropic"))
+    async with deps.sessionmaker.begin() as db:
+        await mux_state.put_config_revision(db, revision, origin="agent", agent_revision=accepted)
+    binding = binding.model_copy(
+        update={"config_revision": revision.local, "generation": binding.generation + 1}
+    )
+    await deps.state_store.put_binding(binding, expected_generation=binding.generation - 1)
+    admission = replace(
+        prepared.admission,
+        backend_revision=revision,
+        backend_revision_origin="agent",
+        backend_agent_revision=accepted,
+    )
+    prepared = replace(
+        prepared,
+        admission=admission,
+        _preparation=replace(prepared._preparation, admission=admission),
+    )
+    value = (deps, prepared, *value[2:6], binding, value[7])
+    await freeze(value)
+    await service.clear_backend(source, accepted.local, actor)
+    parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    if association_fault:
+        change = (
+            {"origin": "channel"}
+            if association_fault == "channel"
+            else {"agent_backend_ref": None}
+            if association_fault == "missing"
+            else {"agent_backend_ref": [str(UUID(int=7)), accepted.local]}
+        )
+        async with deps.sessionmaker.begin() as db:
+            await db.execute(
+                update(ChannelConfigRevision)
+                .where(
+                    ChannelConfigRevision.tenant_id == source.tenant_id,
+                    ChannelConfigRevision.local == revision.local,
+                    ChannelConfigRevision.platform == revision.channel.platform,
+                    ChannelConfigRevision.channel_id == revision.channel.channel_id,
+                )
+                .values(**change)
+            )
+        before = len(value[7].requests)
+        with pytest.raises((WorkerSpecRefused, ScopeViolation)):
+            await read_frozen_preparation(
+                deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+            )
+        assert len(value[7].requests) == before
+        return
+    request = await read_frozen_preparation(
+        deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+    )
+    assert request.admission.backend_revision == revision
+    assert request.admission.backend_revision_origin == "agent"
+    assert request.admission.backend_agent_revision == accepted
+
+
 @pytest.mark.parametrize("fault", ["scope", "subject", "run"])
 async def test_foreign_preparation_parent_refuses_before_sdk_read(root_turn, fault):
     deps, _, _, _, _, _, _, transport = root_turn

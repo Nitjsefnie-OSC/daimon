@@ -1018,6 +1018,26 @@ async def read_frozen_preparation(
             )
         except (ValidationError, KeyError):
             raise WorkerSpecRefused("origin", "unbound") from None
+        if admission.backend_revision_origin == "agent" and admission.backend_revision is not None:
+            from daimon.core.ma_identity import derive_agent_uuid
+            from daimon.core.stores import mux_state
+
+            # Reuse the original immutable consent association, never the latest preference.
+            async with deps.sessionmaker() as db:
+                association = await mux_state.get_config_agent_revision(
+                    db,
+                    admission.backend_revision,
+                    agent_id=derive_agent_uuid(
+                        tenant_id=UUID(parent.fleet.scope.tenant_id),
+                        ma_agent_id=retained_source.ref.id,
+                    ),
+                )
+            if association is None:
+                raise WorkerSpecRefused("origin", "unbound")
+            request = replace(
+                request,
+                admission=replace(admission, backend_agent_revision=association),
+            )
         request = await request.capture_root(parent, deadline=bound)
         if (
             request.source is None
