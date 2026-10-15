@@ -368,9 +368,9 @@ async def _require_mcp_replacement_allowed(
     )
     if decision.refused:
         raise ToolError(
-            f"{mcp_permission_message(ma_agent.name)} Nothing changed and "
-            f"no card was posted. Tell them an admin can ask Daimon to connect '{server_name}' on "
-            f"'{ma_agent.name}'. Do not retry under another name."
+            f"{mcp_permission_message(ma_agent.name)} Nothing changed and no card was posted. "
+            f"Tell the person in one line that an admin can say: connect {server_name} "
+            f"to {ma_agent.name}. Do not retry under another name."
         )
 
 

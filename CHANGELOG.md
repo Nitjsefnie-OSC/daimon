@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Clarified channel access, GitHub connection, approval, handoff and slash command guidance across Discord and Slack.
+
+
 ### Fixed
 
 - Keep native-only MCP servers and their credentials out of fleet worker grants,

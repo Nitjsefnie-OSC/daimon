@@ -264,7 +264,10 @@ def refusal_message(call: ToolCall, verdict: ToolVerdict) -> str:
 
 def _answer_message(call: ToolCall, answer: str) -> str:
     if answer == "expired":
-        return f"Nobody approved {call.key} in time, so it did not run. Do not retry it."
+        return (
+            f"Nobody approved {call.key} in time, so it did not run. Do not retry it. "
+            "Tell the person in one line: ask again and approve the card when it appears."
+        )
     return (
         f"The user denied {call.key}; it did not run. Do not retry it. Ask them what "
         "they want instead."
