@@ -27,14 +27,15 @@ BotInteraction = Interaction[commands.Bot]
 
 def _body(bot_display_name: str) -> str:
     return """\
+/here            Who answers here and what it can use
 /agent-setup     Your agents and where they answer
 /github connect  Connect GitHub repos
-/github home     Your connected repos and GitHub account
+/github home     Your repos, GitHub account and waiting requests
 /memory          What the agent remembers
 /routines        Scheduled jobs
+/dm              Continue privately (an admin turns it on)
 /billing         Your usage and credit
 /privacy         See, export or delete your data
-/here            Who answers here and what they can access
 /help            This list\
 """
 
@@ -71,9 +72,7 @@ class HelpCog(commands.Cog):
         super().__init__()
         self.bot: commands.Bot = bot
 
-    @app_commands.command(
-        name="help", description="List commands and the @bot conversational entrypoint"
-    )
+    @app_commands.command(name="help", description="List commands")
     @require_registered_guild
     async def help(self, interaction: BotInteraction) -> None:
         runtime = _get_runtime(interaction)

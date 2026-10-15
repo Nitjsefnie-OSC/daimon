@@ -27,14 +27,14 @@ log = structlog.get_logger()
 # Static text constants ported from discord/commands/help.py (_BODY / _CONVERSATIONAL).
 # Slack mrkdwn: *bold* instead of **bold**; -# (Discord small text) replaced by plain text.
 _BODY = """\
+/here         Who answers here and what it can use
 /agent-setup  Your agents and where they answer
-/github       Connect repos and choose which agents use them
+/github       Connect GitHub repos
 /memory       What the agent remembers
 /routines     Scheduled jobs
-/dm           Carry on in private after an admin enables it
+/dm           Continue privately (an admin turns it on)
 /billing      Your usage and credit
 /privacy      See, export or delete your data
-/here         Who answers here and what they can access
 /help         This list\
 """
 

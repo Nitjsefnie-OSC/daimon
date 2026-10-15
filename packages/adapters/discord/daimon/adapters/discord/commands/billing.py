@@ -45,7 +45,7 @@ class BillingCog(commands.Cog):
 
     @app_commands.command(
         name="billing",
-        description="Show your billing usage (admins see per-member breakdown)",
+        description="Your usage and credit",
     )
     @require_registered_guild
     async def billing(self, interaction: BotInteraction) -> None:

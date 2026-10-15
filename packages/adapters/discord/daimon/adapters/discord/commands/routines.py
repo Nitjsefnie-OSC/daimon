@@ -44,7 +44,7 @@ class RoutinesCog(commands.Cog):
 
     @app_commands.command(
         name="routines",
-        description="Show scheduled routines for this guild",
+        description="Scheduled jobs",
     )
     @require_registered_guild
     @require_manage_guild

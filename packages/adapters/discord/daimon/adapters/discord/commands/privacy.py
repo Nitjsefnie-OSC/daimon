@@ -60,7 +60,7 @@ class PrivacyCog(commands.Cog):
 
     @app_commands.command(
         name="privacy",
-        description="See, export, or delete what daimon stores about you",
+        description="See, export or delete your data",
     )
     # discord.py 2.4+ replaces dm_permission with allowed_contexts; explicitly
     # enable guilds + DMs + private channels so /privacy is invocable from both

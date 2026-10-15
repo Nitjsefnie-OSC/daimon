@@ -48,7 +48,7 @@ class HereCog(commands.Cog):
         super().__init__()
         self.bot = bot
 
-    @app_commands.command(name="here", description="Who answers here and what they can do")
+    @app_commands.command(name="here", description="Who answers here and what it can use")
     @require_registered_guild
     async def here(self, interaction: BotInteraction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)

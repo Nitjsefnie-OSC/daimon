@@ -29,31 +29,31 @@ features:
     always_online: true
   slash_commands:
     - command: /dm
-      description: Continue this channel privately (admin enable or disable)
+      description: Continue privately (an admin turns it on)
       should_escape: false
     - command: /help
-      description: List commands and the @mention entrypoint
+      description: List commands
       should_escape: false
     - command: /here
-      description: Who answers here, what it can read and holds
+      description: Who answers here and what it can use
       should_escape: false
     - command: /agent-setup
-      description: See your agents, who answers where, and make changes
+      description: Your agents and where they answer
       should_escape: false
     - command: /github
-      description: Manage GitHub repos for agents
+      description: Connect GitHub repos
       should_escape: false
     - command: /routines
-      description: Show scheduled routines for this workspace
+      description: Scheduled jobs
       should_escape: false
     - command: /memory
-      description: Read what daimon remembers for an agent
+      description: What the agent remembers
       should_escape: false
     - command: /billing
-      description: Show your billing usage (admins see per-member breakdown)
+      description: Your usage and credit
       should_escape: false
     - command: /privacy
-      description: See, export, or delete what daimon stores about you
+      description: See, export or delete your data
       should_escape: false
 
 oauth_config:
