@@ -500,3 +500,51 @@ async def test_an_activated_falsy_check_still_refuses_the_claim(
     assert seen == ["refuse:k"]  # the activated check ran; the default did not
     assert await _status(store, scope, "k") == "pending"  # not claimed
     assert await _status(store, scope, "refuse:k:1") == "pending"  # evidence committed
+
+
+@pytest.mark.parametrize("previous_allows", [True, False])
+async def test_composed_claim_check_keeps_the_constructor_authority(factory, previous_allows):
+    seen = []
+    store = PostgresStateStore(
+        factory, trust_caller_clock=True, before_claim=_evidence("original", previous_allows, seen)
+    )
+    scope, lease = await _claimable(store, "a1", "composed")
+    with store.checking_claims(_evidence("root", True, seen), compose=True):
+        if previous_allows:
+            await store.claim_send(scope, "composed", now=NOW, fence=lease)
+        else:
+            with pytest.raises(ScopeViolation):
+                await store.claim_send(scope, "composed", now=NOW, fence=lease)
+    assert seen == (
+        ["original:composed", "root:composed"] if previous_allows else ["original:composed"]
+    )
+    assert await _status(store, scope, "composed") == ("sent" if previous_allows else "pending")
+    assert await _status(store, scope, "original:composed:1") == "pending"
+    assert await _status(store, scope, "root:composed:1") == (
+        "pending" if previous_allows else None
+    )
+
+
+async def test_nested_composed_claim_checks_restore_the_original_scope(factory):
+    seen = []
+    store = PostgresStateStore(
+        factory, trust_caller_clock=True, before_claim=_evidence("original", True, seen)
+    )
+    scope, lease = await _claimable(store, "a1", "inner")
+    for key in ("outer", "after"):
+        await store.begin_operation(
+            scope, key=key, request_digest="d", operation_id=key, now=NOW, slot=lease.slot
+        )
+    with store.checking_claims(_evidence("outer", True, seen), compose=True):
+        with store.checking_claims(_evidence("inner", True, seen), compose=True):
+            await store.claim_send(scope, "inner", now=NOW, fence=lease)
+        await store.claim_send(scope, "outer", now=NOW, fence=lease)
+    await store.claim_send(scope, "after", now=NOW, fence=lease)
+    assert seen == [
+        "original:inner",
+        "outer:inner",
+        "inner:inner",
+        "original:outer",
+        "outer:outer",
+        "original:after",
+    ]

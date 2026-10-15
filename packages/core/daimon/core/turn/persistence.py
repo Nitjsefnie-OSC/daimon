@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 from anthropic import APIStatusError
+from daimon.core.stores.mux_state import BeforeClaim, PostgresStateStore
 from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, OperationStatus
@@ -78,6 +79,7 @@ class TurnPersistence:
             or not 0 < renew_interval_s < ttl.total_seconds()
         ):
             raise ValueError("send timeout and renewal interval must be below the lease TTL")
+        self.root_claim: Callable[[ResourceRef | None, bool], BeforeClaim] | None = None
         self.store = store
         self._binding = binding
         self._slot = slot
@@ -243,7 +245,18 @@ class TurnPersistence:
             if guard is not None:
                 await guard()
             try:
-                await self.store.claim_send(self.scope, key, now=self._now(), fence=self._fence())
+                store = self.store
+                check = self.root_claim
+                context = contextlib.nullcontext()
+                if check is not None and kind not in {"cancel", "archive", "recovery-interrupt"}:
+                    if not isinstance(store, PostgresStateStore):
+                        raise ScopeViolation("root-budget", "transactional root store required")
+                    inputs = request.get("events") if isinstance(request, dict) else request
+                    if kind == "send" and (not isinstance(inputs, list) or len(inputs) != 1):
+                        raise ScopeViolation("root-budget", "one counted input required")
+                    context = store.checking_claims(check(session, kind == "send"), compose=True)
+                with context:
+                    await store.claim_send(self.scope, key, now=self._now(), fence=self._fence())
             except SendClaimed as error:
                 raise UncertainSend(f"{kind} was claimed by another sender") from error
             break

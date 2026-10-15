@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import replace
 from datetime import datetime
 from functools import partial
@@ -26,7 +26,7 @@ from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef, Scope
+from mux.contracts.ids import ModelRef, ResourceRef, Scope
 from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProviderBinding, ResourceBinding
 from mux.errors import UnsupportedCapability
@@ -47,10 +47,13 @@ if TYPE_CHECKING:
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
     from daimon.core.stores.domain import BackendAgent, TaskContinuationRow
+    from daimon.core.stores.mux_state import BeforeClaim
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.turn.deps import TurnDeps
     from daimon.core.turn.persistence import TurnPersistence
     from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
+    from mux.state.lease import Lease
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
@@ -89,6 +92,10 @@ class _FrozenRoot(BaseModel):
     permissions: WorkerPermissions
     grant_epoch: int | None = Field(default=None, exclude_if=lambda value: value is None)
     grant_digest: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    root_controls: dict[str, JsonValue] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    root_finance: JsonValue = Field(default=None, exclude=True)
     preparation: dict[str, JsonValue] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -281,6 +288,237 @@ async def _root_context(
     return policy
 
 
+async def prepare_controlled_root(
+    request: ProviderPreparationRequest, intent_id: UUID | None
+) -> ProviderPreparationRequest:
+    """Select and reserve finite grant controls before the native compiler runs."""
+    from daimon.core.channel_budget import require_root_funding
+    from daimon.core.config import load_turn_settings
+    from daimon.core.stores import mux_state
+    from daimon.core.stores.turn_origins import get_active_origin
+    from daimon.core.turn.prepare import _admitted_profile  # pyright: ignore[reportPrivateUsage]
+    from daimon.core.turn_origin import current_origin_id
+    from mux.contracts.ids import ChannelRef, ThreadRef
+    from mux.state.lease import Slot
+    from mux.state.operations import request_digest
+
+    value = (
+        await read_agent_fleet_grant(request.deps, request.admission, now=request.now())
+        if request.worker is None and request.deps.fleet_enabled
+        else None
+    )
+    if value is None or value.native_root_budget_usd is None:
+        return request
+    revision, grant = request.admission.backend_revision, request.admission.grant
+    # Reuse `_admitted_profile`'s own fallback rather than re-stating the
+    # default-backend literal here -- a second site would grow the provider
+    # literal count outside the profile/driver seam (`test_provider_literal_ratchet`).
+    profile = _admitted_profile(request.admission)
+    model = revision.model if revision else request.admission.agent.model.id
+    origin_id = current_origin_id.get()
+    if (
+        (request.deps.turn_path or load_turn_settings().path) != "mux"
+        or grant is None
+        or request.admission.shared_owner is not None
+        or request.session_account_id != request.admission.account_id
+        or get_profile(profile).support.get("session_spend_control") != "native"
+        or not any(
+            backend.profile == profile and selected.id == model
+            for backend, selected in value.choices
+        )
+    ):
+        raise WorkerSpecRefused("native_budget_usd", "unsupported")
+    slot = Slot(
+        thread=ThreadRef(
+            channel=ChannelRef(
+                tenant_id=request.scope.tenant_id,
+                platform=request.platform,
+                channel_id=grant.channel_id,
+            ),
+            thread_id=request.thread_id,
+        ),
+        account_id=request.scope.account_id,
+    )
+    store = request.deps.state_store or mux_state.PostgresStateStore(request.deps.sessionmaker)
+    if not isinstance(store, mux_state.PostgresStateStore):
+        raise WorkerSpecRefused("native_budget_usd", "unsupported")
+    binding = await store.get_binding(slot)
+    if binding is not None and intent_id is None:
+        return replace(request, native_budget_usd=value.native_root_budget_usd)
+    if binding is not None or origin_id is None or intent_id is None:
+        raise WorkerSpecRefused("origin", "unbound")
+    deadline = min(request.deadline, value.expires_at)
+    remaining_s(deadline, now=request.now(), refuse_expired=True)
+    controls: dict[str, JsonValue] = {
+        "origin_id": str(origin_id),
+        "grant_digest": request_digest(value.model_dump(mode="json")),
+        "deadline": deadline.isoformat(),
+        "max_inputs": min(3, value.max_root_turns),
+        "native_budget_usd": str(value.native_root_budget_usd),
+        "cash_budget_usd": str(value.root_cash_budget_usd),
+        "profile": profile,
+        "model": model,
+    }
+    async with request.deps.sessionmaker.begin() as db:
+        await require_root_funding(
+            db,
+            request.scope,
+            slot,
+            origin_id=origin_id,
+            intent_id=intent_id,
+            controls=controls,
+            markup=request.deps.markup,
+        )
+        origin = await get_active_origin(
+            db,
+            origin_id=origin_id,
+            tenant_id=request.tenant_id,
+            account_id=request.admission.account_id,
+            platform=request.platform,
+            now=await mux_state.database_clock(db),
+            for_update=True,
+        )
+        if (
+            origin is None
+            or origin.is_setup
+            or origin.is_external
+            or (origin.responder_ma_agent_id, origin.parent_channel_id, origin.thread_id)
+            != (request.admission.agent.id, grant.channel_id, request.thread_id)
+        ):
+            raise WorkerSpecRefused("origin", "unbound")
+
+    caller_guard = request.before_native
+
+    async def guard() -> None:
+        if caller_guard is not None:
+            await caller_guard()
+        remaining_s(deadline, now=request.now(), refuse_expired=True)
+        current = await read_agent_fleet_grant(request.deps, request.admission, now=request.now())
+        if (
+            current is None
+            or request_digest(current.model_dump(mode="json")) != controls["grant_digest"]
+        ):
+            raise WorkerSpecRefused("origin", "stale")
+
+    return replace(
+        request,
+        deps=replace(request.deps, state_store=store),
+        deadline=deadline,
+        root_controls=controls,
+        native_budget_usd=value.native_root_budget_usd,
+        before_native=guard,
+    )
+
+
+async def run_controlled_preparation(
+    request: ProviderPreparationRequest, preparing: Awaitable[PreparedTurn]
+) -> PreparedTurn:
+    from daimon.core.turn.persistence import TurnPersistence
+    from mux.contracts.ids import ChannelRef, ThreadRef
+    from mux.state.lease import Slot
+
+    if request.root_controls is None:
+        return await preparing
+    assert request.admission.grant is not None and request.deps.state_store is not None
+    controls = request.root_controls
+    origin = UUID(str(controls["origin_id"]))
+    slot = Slot(
+        thread=ThreadRef(
+            channel=ChannelRef(
+                tenant_id=request.scope.tenant_id,
+                platform=request.platform,
+                channel_id=request.admission.grant.channel_id,
+            ),
+            thread_id=request.thread_id,
+        ),
+        account_id=request.scope.account_id,
+    )
+    persistence = TurnPersistence(
+        request.deps.state_store,
+        None,
+        request.scope,
+        slot=slot,
+        operation_key=f"fleet_root:{origin}",
+        now=request.now,
+    )
+    assert request.before_native is not None
+    persistence.root_claim = partial(
+        root_claim_check, request.deps, origin, controls, request.before_native
+    )
+
+    async def pump() -> PreparedTurn:
+        with persistence.activate():
+            return await preparing
+
+    try:
+        return await persistence.run(pump)
+    finally:
+        if isinstance(preparing, Coroutine):
+            preparing.close()
+
+
+def root_claim_check(
+    deps: TurnDeps,
+    origin_id: UUID,
+    controls: dict[str, JsonValue],
+    guard: Callable[[], Awaitable[object]],
+    target: ResourceRef | None,
+    count: bool,
+) -> BeforeClaim:
+    """Keep the original hold and distinct input association in the send transaction."""
+    from daimon.core.channel_budget import require_root_funding
+    from daimon.core.stores import mux_state
+    from daimon.core.usage_delegation import root_usage_outcome_id
+
+    async def check(db: AsyncSession, scope: Scope, key: str, fence: Lease | None) -> bool:
+        if fence is None:
+            raise WorkerSpecRefused("origin", "unbound")
+        root = await require_root_funding(
+            db, scope, fence.slot, origin_id=origin_id, controls=controls, markup=deps.markup
+        )
+        await guard()
+        if datetime.fromisoformat(str(controls["deadline"])) <= await mux_state.database_clock(db):
+            raise WorkerSpecRefused("origin", "stale")
+        if count:
+            finance = root.result["root_finance"]
+            if target is None or not isinstance(finance, dict):
+                raise WorkerSpecRefused("origin", "unbound")
+            prior, outcomes, limit = (
+                finance.get("input_keys"),
+                finance.get("input_outcomes"),
+                controls.get("max_inputs"),
+            )
+            if (
+                not isinstance(prior, list)
+                or not all(isinstance(k, str) for k in prior)
+                or not isinstance(outcomes, dict)
+                or set(prior) != set(outcomes)
+                or len(set(prior)) != len(prior)
+                or type(limit) is not int
+                or not 0 < limit <= 3
+            ):
+                raise WorkerSpecRefused("max_turns", "unbound")
+            fresh = key not in prior
+            if fresh and len(prior) >= limit:
+                raise WorkerSpecRefused("max_turns", "unsupported")
+            previous = UUID(str(outcomes[key])) if not fresh and outcomes[key] is not None else None
+            outcome = root_usage_outcome_id(scope, target, previous=previous, fresh=fresh)
+            if fresh:
+                await mux_state.update_fleet_root_finance(
+                    db,
+                    scope,
+                    origin_id=origin_id,
+                    root_finance={
+                        **finance,
+                        "input_keys": [*prior, key],
+                        "input_outcomes": {**outcomes, key: str(outcome) if outcome else None},
+                    },
+                )
+        return True
+
+    return check
+
+
 async def _reserve_root(
     deps: TurnDeps,
     persistence: TurnPersistence,
@@ -292,6 +530,11 @@ async def _reserve_root(
     from daimon.core.stores import mux_state
 
     async with deps.sessionmaker.begin() as db:
+        original = await mux_state.get_fleet_root_operation(
+            db, persistence.scope, origin_id=origin_id
+        )
+        if original is not None and "root_controls" in original.result:
+            return original
         record = await mux_state.get_fleet_root_operation(
             db,
             persistence.scope,
@@ -384,6 +627,7 @@ async def freeze_prepared_root(
         origin_id=origin_id,
         binding=binding,
         permissions=permissions,
+        root_controls=request.root_controls,
         grant_epoch=value.epoch,
         grant_digest=request_digest(value.model_dump(mode="json")),
         preparation={
@@ -402,6 +646,11 @@ async def freeze_prepared_root(
     )
 
     async def validate() -> None:
+        if (
+            root.root_controls is not None
+            and root.root_controls.get("grant_digest") != root.grant_digest
+        ):
+            raise WorkerSpecRefused("origin", "stale")
         await _root_context(deps, root, now=now())
 
     async def retain(_key: str) -> _FrozenRoot:
@@ -429,6 +678,10 @@ async def freeze_prepared_root(
         )
 
     await validate()
+    if root.root_controls is not None:
+        persistence.root_claim = partial(
+            root_claim_check, deps, root.origin_id, root.root_controls, validate
+        )
     await persistence.mutate(
         prepared.session_ref,
         "root",
@@ -526,6 +779,14 @@ async def resume_prepared_root(
         return locator
 
     await validate()
+    if root.root_controls is not None:
+        persistence.root_claim = partial(
+            root_claim_check,
+            deps,
+            root.origin_id,
+            root.root_controls,
+            lambda: _root_context(deps, root, now=now(), resumed=locator, execution_origin=True),
+        )
     await persistence.mutate(
         prepared.session_ref,
         "root",

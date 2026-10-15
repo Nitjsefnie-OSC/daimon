@@ -763,8 +763,9 @@ async def lock_budget(
     *,
     tenant_id: uuid.UUID,
     actor_id: uuid.UUID,
-    run_id: uuid.UUID,
+    run_id: uuid.UUID | None,
     financial: bool = True,
+    persisted: bool = False,
 ) -> tuple[BudgetGraph, Mapping[uuid.UUID, datetime | None]]:
     """Join the caller's financial transaction before any fleet row transition.
 
@@ -792,29 +793,35 @@ async def lock_budget(
     )
     if tenant is None or actor is None:
         raise FleetConflict("financial admission requires a live tenant actor")
-    runs = tuple(
-        await session.scalars(
-            select(FleetRunRow)
-            .where(
-                FleetRunRow.tenant_id == tenant_id,
-                (FleetRunRow.id == run_id)
-                | FleetRunRow.status.in_(RUN_TRANSITIONS)
-                | (FleetRunRow.reserved_usd > FleetRunRow.observed_usd),
-            )
-            .order_by(FleetRunRow.id)
-            .with_for_update()
+    run_query = (
+        select(FleetRunRow)
+        .where(
+            FleetRunRow.tenant_id == tenant_id,
+            (FleetRunRow.id == run_id)
+            | FleetRunRow.status.in_(RUN_TRANSITIONS)
+            | (FleetRunRow.reserved_usd > FleetRunRow.observed_usd),
         )
+        .order_by(FleetRunRow.id)
+        .with_for_update()
     )
-    workers = tuple(
-        await session.scalars(
-            select(FleetWorkerRow)
-            .where(
-                FleetWorkerRow.tenant_id == tenant_id,
-                FleetWorkerRow.run_id.in_(run.id for run in runs),
-            )
-            .order_by(FleetWorkerRow.id)
-            .with_for_update()
+    runs = (
+        (await read_persisted_columns(session, run_query, reject_new=True)).all()
+        if persisted
+        else tuple(await session.scalars(run_query))
+    )
+    worker_query = (
+        select(FleetWorkerRow)
+        .where(
+            FleetWorkerRow.tenant_id == tenant_id,
+            FleetWorkerRow.run_id.in_(run.id for run in runs),
         )
+        .order_by(FleetWorkerRow.id)
+        .with_for_update()
+    )
+    workers = (
+        (await read_persisted_columns(session, worker_query, reject_new=True)).all()
+        if persisted
+        else tuple(await session.scalars(worker_query))
     )
     return (
         tuple(

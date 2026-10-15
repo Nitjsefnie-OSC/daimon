@@ -190,7 +190,7 @@ async def _create(
     spec: SessionSpec,
     runtime: OpenAIHostRuntime,
 ) -> Session:
-    if request.worker is not None:
+    if request.worker is not None or request.native_budget_usd is not None:
         active = current_persistence.get()
         if (
             active is None

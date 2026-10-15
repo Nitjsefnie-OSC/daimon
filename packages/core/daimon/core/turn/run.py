@@ -597,6 +597,10 @@ async def _replace_dead_session_locked(
     recovery finds the first one's replacement live and adopts it, and a bind
     sees either the old row or the replacement, never neither.
     """
+    if prepared._preparation is not None and prepared._preparation.native_budget_usd is not None:  # pyright: ignore[reportPrivateUsage]
+        from daimon.core.neutral_resources import WorkerSpecRefused
+
+        raise WorkerSpecRefused("native_budget_usd", "unsupported")
     # A recovery can run long after admission: decide the turn again on the
     # current policy before its successor is created or adopted, and stamp any
     # seal added since (`reauthorize`).

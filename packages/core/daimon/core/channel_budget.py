@@ -21,6 +21,7 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
+from functools import partial
 from typing import get_args
 
 import structlog
@@ -45,6 +46,7 @@ from mux.contracts.ids import Scope
 from mux.contracts.resources import ProviderBinding
 from mux.profiles import get_profile
 from mux.state.lease import Slot
+from mux.state.operations import OperationRecord, request_digest
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -193,10 +195,11 @@ def describe_budget(status: ChannelBudgetStatus) -> str:
 
 
 async def load_budget_status(
-    session: AsyncSession, budget: ChannelBudgetRow, *, now: datetime
+    session: AsyncSession, budget: ChannelBudgetRow, *, now: datetime, persisted: bool = False
 ) -> ChannelBudgetStatus:
     period = budget_period(budget, now=now)
-    spent = await get_channel_spend(
+    reader = partial(get_channel_spend, persisted=True) if persisted else get_channel_spend
+    spent = await reader(
         session,
         tenant_id=budget.tenant_id,
         channel_id=budget.channel_id,
@@ -244,14 +247,15 @@ async def get_channel_budget_status(
     platform: str,
     channel_id: str,
     now: datetime,
+    persisted: bool = False,
 ) -> ChannelBudgetStatus | None:
     """The channel's budget with its spend so far, or None when it has no budget."""
-    budget = await get_channel_budget(
-        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
-    )
+    reader = partial(get_channel_budget, persisted=True) if persisted else get_channel_budget
+    budget = await reader(session, tenant_id=tenant_id, platform=platform, channel_id=channel_id)
     if budget is None:
         return None
-    return await load_budget_status(session, budget, now=now)
+    loader = partial(load_budget_status, persisted=True) if persisted else load_budget_status
+    return await loader(session, budget, now=now)
 
 
 async def is_over_channel_budget(
@@ -381,6 +385,170 @@ async def _fleet_worker_money(
         return max(floor, debit), debit, bool(usage.unpriced_observations), False
 
 
+def _root_money(record: OperationRecord) -> tuple[Decimal, Decimal]:
+    finance, slot = record.result.get("root_finance"), record.slot
+    if (
+        slot is None
+        or (slot.tenant_id, slot.account_id) != (record.tenant_id, record.account_id)
+        or not isinstance(finance, dict)
+    ):
+        raise FleetConflict("root financial identity is unavailable")
+    try:
+        exposure, debit = (Decimal(str(finance[name])) for name in ("exposure_usd", "debit_usd"))
+        if (
+            any(not amount.is_finite() or amount < 0 for amount in (exposure, debit))
+            or debit > exposure
+        ):
+            raise ValueError
+    except (KeyError, InvalidOperation, ValueError):
+        raise FleetConflict("root financial evidence is incomplete") from None
+    return exposure, debit
+
+
+async def _financial_room(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    graph: fleet_store.BudgetGraph,
+    roots: tuple[OperationRecord, ...],
+) -> tuple[Decimal | None, Decimal | None]:
+    """One locked inventory of original root/worker exposure and ledger debits."""
+    with localcontext() as arithmetic:
+        arithmetic.prec = 80
+        held = [(r.platform, r.channel_id, r.reserved_usd - r.observed_usd) for r, _ in graph]
+        for root in roots:
+            exposure, debit = _root_money(root)
+            assert root.slot is not None
+            channel = root.slot.thread.channel
+            held.append((channel.platform, channel.channel_id, exposure - debit))
+        balance = await tenant_ledger.get_prepaid_balance(
+            session, tenant_id=tenant_id, persisted=True
+        )
+        available = (
+            None
+            if balance is None
+            else balance - sum((amount for _, _, amount in held), Decimal(0))
+        )
+        budget = await get_channel_budget_status(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            now=datetime.now(UTC),
+            persisted=True,
+        )
+        channel_available = (
+            None
+            if budget is None or not budget.is_active
+            else budget.remaining_usd
+            - sum((amount for p, c, amount in held if (p, c) == (platform, channel_id)), Decimal(0))
+        )
+        return available, channel_available
+
+
+async def require_root_funding(
+    session: AsyncSession,
+    scope: Scope,
+    slot: Slot,
+    *,
+    origin_id: uuid.UUID,
+    controls: Mapping[str, JsonValue],
+    markup: Decimal,
+    intent_id: uuid.UUID | None = None,
+) -> OperationRecord:
+    """Reserve or recheck the original root under the tenant financial fence.
+
+    Origin/intent validation follows this call in the SAME caller transaction.
+    Unknown allocation retains its original hold; replay never reserves a second one.
+    """
+    if (
+        scope.is_platform
+        or scope.is_legacy_host_authorized
+        or slot.account_id != scope.account_id
+        or slot.tenant_id != scope.tenant_id
+    ):
+        raise FleetConflict("root funding requires a private admitted actor")
+    cash, native = (
+        _parse_usd(str(controls.get("cash_budget_usd"))),
+        _parse_usd(str(controls.get("native_budget_usd"))),
+    )
+    with localcontext() as arithmetic:
+        arithmetic.prec = 80
+        if not markup.is_finite() or markup <= 0 or native <= 0 or cash < native * markup:
+            raise FleetConflict("root cash must cover its native budget and markup")
+    with session.no_autoflush:
+        graph, _ = await fleet_store.lock_budget(
+            session,
+            tenant_id=uuid.UUID(scope.tenant_id),
+            actor_id=uuid.UUID(scope.account_id),
+            run_id=None,
+            persisted=True,
+        )
+        record = await mux_state.get_fleet_root_operation(
+            session, scope, origin_id=origin_id, for_update=True
+        )
+        if record is not None:
+            finance = record.result.get("root_finance")
+            if (
+                record.slot != slot
+                or record.result.get("root_controls") != dict(controls)
+                or not isinstance(finance, dict)
+            ):
+                raise FleetConflict("original root reservation is unavailable")
+        elif intent_id is None:
+            raise FleetConflict("original root reservation is unavailable")
+        roots = await mux_state.list_fleet_root_finances(
+            session, tenant_id=uuid.UUID(scope.tenant_id)
+        )
+        if record is not None and (_root_money(record)[0] < cash or record not in roots):
+            raise FleetConflict("original root reservation is unavailable")
+        available, channel_available = await _financial_room(
+            session,
+            tenant_id=uuid.UUID(scope.tenant_id),
+            platform=slot.thread.channel.platform,
+            channel_id=slot.thread.channel.channel_id,
+            graph=graph,
+            roots=roots,
+        )
+        delta = cash if record is None else Decimal(0)
+        if (
+            available is None
+            or available < delta
+            or (channel_available is not None and channel_available < delta)
+        ):
+            raise FleetConflict("root funding is unavailable")
+        if record is None:
+            initial_finance: dict[str, JsonValue] = {
+                "exposure_usd": str(cash),
+                "debit_usd": "0",
+                "input_keys": [],
+                "input_outcomes": {},
+            }
+            record = await mux_state.get_fleet_root_operation(
+                session,
+                scope,
+                intent_id=intent_id,
+                origin_id=origin_id,
+                slot=slot,
+                root_controls=controls,
+                root_finance=initial_finance,
+                request_digest=request_digest(
+                    {
+                        "session": None,
+                        "kind": "root",
+                        "request": {
+                            "root_controls": dict(controls),
+                            "initial_finance": initial_finance,
+                        },
+                    }
+                ),
+            )
+        assert record is not None
+        return record
+
+
 async def _produce_fleet_budget(
     session: AsyncSession,
     *,
@@ -405,231 +573,234 @@ async def _produce_fleet_budget(
     if facts.scope.is_platform or facts.scope.is_legacy_host_authorized:
         raise FleetConflict("fleet budget requires tenant authority")
     tenant_id = uuid.UUID(facts.scope.tenant_id)
-    graph, started_at = await fleet_store.lock_budget(
-        session,
-        tenant_id=tenant_id,
-        actor_id=facts.account_id,
-        run_id=facts.run_id,
-        financial=financial,
-    )
-    pair = next((pair for pair in graph if pair[0].id == facts.run_id), None)
-    if pair is None:
-        raise FleetConflict("fleet run is unavailable")
-    run, workers = pair
-    if (worker_id is not None and not any(w.id == worker_id for w in workers)) or (
-        run.orchestrator_account_id != facts.account_id
-        or facts.scope.account_id != str(run.orchestrator_account_id)
-        or (run.platform, run.channel_id, run.thread_id)
-        != (facts.root.channel.platform, facts.root.channel.channel_id, facts.root.thread_id)
-    ):
-        raise FleetConflict("fleet budget belongs to another root")
-    actor = await accounts.get_account(session, facts.account_id)
-    if actor is None or actor.tenant_id != tenant_id:
-        raise FleetConflict("financial admission requires a live tenant actor")
-    if facts.root.channel.tenant_id != str(tenant_id):
-        raise FleetConflict("root channel differs from tenant authority")
-    root_binding = await mux_state.get_binding(
-        session, Slot(thread=facts.root, account_id=str(facts.account_id))
-    )
-    if root_binding is None:
-        root_binding = await mux_state.get_binding(
-            session, Slot(thread=facts.root, account_id=None)
+    with session.no_autoflush:
+        graph, started_at = await fleet_store.lock_budget(
+            session,
+            tenant_id=tenant_id,
+            actor_id=facts.account_id,
+            run_id=facts.run_id,
+            financial=financial,
+            persisted=True,
         )
-    if root_binding is None or (
-        root_binding.id != run.orchestrator_binding_id
-        or root_binding.native_refs.get("session") != run.orchestrator_session_id
-    ):
-        raise FleetConflict("financial admission requires the current root binding")
-    if run.total_budget_usd > parent.limits.budget_usd:
-        raise FleetConflict("fleet cap exceeds the authenticated parent budget")
-    parent.limits.require_profile(get_profile(root_binding.profile))
-    provider_limits = (
-        None
-        if parent.limits.provider_limits_usd is None
-        else {
-            str(provider): amount for provider, amount in parent.limits.provider_limits_usd.items()
-        }
-    )
-    if provider_limits is not None:
+        roots = await mux_state.list_fleet_root_finances(session, tenant_id=tenant_id)
+        await _financial_room(
+            session,
+            tenant_id=tenant_id,
+            platform=facts.root.channel.platform,
+            channel_id=facts.root.channel.channel_id,
+            graph=graph,
+            roots=roots,
+        )
+        pair = next((pair for pair in graph if pair[0].id == facts.run_id), None)
+        if pair is None:
+            raise FleetConflict("fleet run is unavailable")
+        run, workers = pair
+        if (worker_id is not None and not any(w.id == worker_id for w in workers)) or (
+            run.orchestrator_account_id != facts.account_id
+            or facts.scope.account_id != str(run.orchestrator_account_id)
+            or (run.platform, run.channel_id, run.thread_id)
+            != (facts.root.channel.platform, facts.root.channel.channel_id, facts.root.thread_id)
+        ):
+            raise FleetConflict("fleet budget belongs to another root")
+        actor = await accounts.get_account(session, facts.account_id)
+        if actor is None or actor.tenant_id != tenant_id:
+            raise FleetConflict("financial admission requires a live tenant actor")
+        if facts.root.channel.tenant_id != str(tenant_id):
+            raise FleetConflict("root channel differs from tenant authority")
+        root_binding = await mux_state.get_binding(
+            session, Slot(thread=facts.root, account_id=str(facts.account_id))
+        )
+        if root_binding is None:
+            root_binding = await mux_state.get_binding(
+                session, Slot(thread=facts.root, account_id=None)
+            )
+        if root_binding is None or (
+            root_binding.id != run.orchestrator_binding_id
+            or root_binding.native_refs.get("session") != run.orchestrator_session_id
+        ):
+            raise FleetConflict("financial admission requires the current root binding")
+        if run.total_budget_usd > parent.limits.budget_usd:
+            raise FleetConflict("fleet cap exceeds the authenticated parent budget")
+        parent.limits.require_profile(get_profile(root_binding.profile))
+        provider_limits = (
+            None
+            if parent.limits.provider_limits_usd is None
+            else {
+                str(provider): amount
+                for provider, amount in parent.limits.provider_limits_usd.items()
+            }
+        )
+        if provider_limits is not None:
+            with localcontext() as arithmetic:
+                arithmetic.prec = 80
+                if sum(provider_limits.values(), Decimal(0)) > run.total_budget_usd:
+                    raise FleetConflict("provider limits exceed the retained run budget")
+
+        # The shared tariff gate covers each selected worker before reservation,
+        # dispatch or passive refresh, even without a native binding yet.
+        pricing_unavailable: dict[uuid.UUID, bool] = {}
+        for member in workers:
+            price = prices.get((member.backend, member.model))
+            unavailable = price is None or (
+                isinstance(price, ProviderPrice)
+                and (
+                    not price.current_on(datetime.now(UTC).date())
+                    or (price.provider, price.model) != (member.backend, member.model)
+                )
+            )
+            if isinstance(price, ModelRates):
+                for variant in (price, *((price.long_context,) if price.long_context else ())):
+                    for value in (
+                        variant.input,
+                        variant.output,
+                        variant.cache_read,
+                        variant.cache_write,
+                    ):
+                        rate = Decimal(str(value))
+                        unavailable = unavailable or not rate.is_finite() or rate < 0
+            pricing_unavailable[member.id] = unavailable
+        floors: dict[uuid.UUID, Decimal] = {}
+        exposures: dict[uuid.UUID, Decimal] = {}
+        debits: dict[uuid.UUID, Decimal] = {}
+        zero_spend: set[uuid.UUID] = set()
+        unpriced_usage = False
         with localcontext() as arithmetic:
             arithmetic.prec = 80
-            if sum(provider_limits.values(), Decimal(0)) > run.total_budget_usd:
-                raise FleetConflict("provider limits exceed the retained run budget")
-
-    # The shared tariff gate covers each selected worker before reservation,
-    # dispatch or passive refresh, even without a native binding yet.
-    pricing_unavailable: dict[uuid.UUID, bool] = {}
-    for member in workers:
-        price = prices.get((member.backend, member.model))
-        unavailable = price is None or (
-            isinstance(price, ProviderPrice)
-            and (
-                not price.current_on(datetime.now(UTC).date())
-                or (price.provider, price.model) != (member.backend, member.model)
+            for other_run, members in graph:
+                debit_total = Decimal(0)
+                for member in members:
+                    floor, debit, unpriced, no_native_evidence = await _fleet_worker_money(
+                        session,
+                        other_run,
+                        member,
+                        scope=facts.scope,
+                        prices=prices,
+                        markup=markup,
+                        price_floor=other_run.id == run.id,
+                    )
+                    unpriced_usage = unpriced_usage or unpriced
+                    floors[member.id] = floor
+                    # An unbound starting/claimed worker is ambiguous. The retained
+                    # claim stamp and attempt inventory must also prove no allocation.
+                    if (
+                        member.status == "cancelled"
+                        and started_at[member.id] is None
+                        and member.binding_id is None
+                        and member.attempts == member.turns_used == 0
+                        and no_native_evidence
+                    ):
+                        zero_spend.add(member.id)
+                        exposures[member.id] = debit
+                    else:
+                        exposures[member.id] = max(member.reserved_usd, floor)
+                    debit_total += debit
+                debits[other_run.id] = debit_total
+            graph = await fleet_store.save_budget(
+                session,
+                tenant_id=tenant_id,
+                graph=graph,
+                exposures=exposures,
+                debits=debits,
+                zero_spend=frozenset(zero_spend),
             )
-        )
-        if isinstance(price, ModelRates):
-            for variant in (price, *((price.long_context,) if price.long_context else ())):
-                for value in (
-                    variant.input,
-                    variant.output,
-                    variant.cache_read,
-                    variant.cache_write,
-                ):
-                    rate = Decimal(str(value))
-                    unavailable = unavailable or not rate.is_finite() or rate < 0
-        pricing_unavailable[member.id] = unavailable
-    floors: dict[uuid.UUID, Decimal] = {}
-    exposures: dict[uuid.UUID, Decimal] = {}
-    debits: dict[uuid.UUID, Decimal] = {}
-    zero_spend: set[uuid.UUID] = set()
-    unpriced_usage = False
-    with localcontext() as arithmetic:
-        arithmetic.prec = 80
-        for other_run, members in graph:
-            debit_total = Decimal(0)
-            for member in members:
-                floor, debit, unpriced, no_native_evidence = await _fleet_worker_money(
-                    session,
-                    other_run,
-                    member,
-                    scope=facts.scope,
-                    prices=prices,
-                    markup=markup,
-                    price_floor=other_run.id == run.id,
+            run, workers = next(pair for pair in graph if pair[0].id == run.id)
+            available, channel_available = await _financial_room(
+                session,
+                tenant_id=tenant_id,
+                platform=run.platform,
+                channel_id=run.channel_id,
+                graph=graph,
+                roots=roots,
+            )
+            result: dict[uuid.UUID, FleetBudgetUsage] = {}
+            selected = (
+                workers if worker_id is None else tuple(w for w in workers if w.id == worker_id)
+            )
+            worker_overrun = any(w.reserved_usd > w.budget_usd for w in workers)
+            provider_exposures: dict[str, Decimal] = {}
+            for member in workers:
+                provider_exposures[member.backend] = (
+                    provider_exposures.get(member.backend, Decimal(0)) + member.reserved_usd
                 )
-                unpriced_usage = unpriced_usage or unpriced
-                floors[member.id] = floor
-                # An unbound starting/claimed worker is ambiguous. The retained
-                # claim stamp and attempt inventory must also prove no allocation.
-                if (
-                    member.status == "cancelled"
-                    and started_at[member.id] is None
-                    and member.binding_id is None
-                    and member.attempts == member.turns_used == 0
-                    and no_native_evidence
+            for worker in selected:
+                reason = None
+                if run.status != "running" or worker.status not in (
+                    "pending",
+                    "starting",
+                    "running",
                 ):
-                    zero_spend.add(member.id)
-                    exposures[member.id] = debit
-                else:
-                    exposures[member.id] = max(member.reserved_usd, floor)
-                debit_total += debit
-            debits[other_run.id] = debit_total
-        graph = await fleet_store.save_budget(
-            session,
-            tenant_id=tenant_id,
-            graph=graph,
-            exposures=exposures,
-            debits=debits,
-            zero_spend=frozenset(zero_spend),
-        )
-        run, workers = next(pair for pair in graph if pair[0].id == run.id)
-        residual = sum((r.reserved_usd - r.observed_usd for r, _ in graph), Decimal(0))
-        # Read original debits before balance: concurrent new debits can only
-        # conservatively reduce passive room. Financial admission fences writers.
-        balance = await tenant_ledger.get_prepaid_balance(session, tenant_id=tenant_id)
-        available = None if balance is None else balance - residual
-        channel = await get_channel_budget_status(
-            session,
-            tenant_id=tenant_id,
-            platform=run.platform,
-            channel_id=run.channel_id,
-            now=datetime.now(UTC),
-        )
-        channel_available: Decimal | None = None
-        if channel is not None and channel.is_active:
-            held = sum(
-                (
-                    r.reserved_usd - r.observed_usd
-                    for r, _ in graph
-                    if (r.platform, r.channel_id) == (run.platform, run.channel_id)
-                ),
-                Decimal(0),
-            )
-            channel_available = channel.remaining_usd - held
-        result: dict[uuid.UUID, FleetBudgetUsage] = {}
-        selected = workers if worker_id is None else tuple(w for w in workers if w.id == worker_id)
-        worker_overrun = any(w.reserved_usd > w.budget_usd for w in workers)
-        provider_exposures: dict[str, Decimal] = {}
-        for member in workers:
-            provider_exposures[member.backend] = (
-                provider_exposures.get(member.backend, Decimal(0)) + member.reserved_usd
-            )
-        for worker in selected:
-            reason = None
-            if run.status != "running" or worker.status not in ("pending", "starting", "running"):
-                reason = "terminal"
-            elif worker.error_code == "stop_requested":
-                reason = "worker_stop_requested"
-            elif balance is None:
-                reason = "funding_unavailable"
-            elif available is not None and (
-                available < 0 or (reserve and run.total_budget_usd > available + run.reserved_usd)
-            ):
-                reason = "tenant_budget_exceeded"
-            elif channel_available is not None and (
-                channel_available < 0
-                or (reserve and run.total_budget_usd > channel_available + run.reserved_usd)
-            ):
-                reason = "channel_budget_exceeded"
-            elif run.reserved_usd > run.total_budget_usd:
-                reason = "run_budget_exceeded"
-            elif provider_limits is not None and any(
-                amount > provider_limits.get(provider, Decimal(0))
-                for provider, amount in provider_exposures.items()
-            ):
-                reason = "provider_budget_exceeded"
-            elif worker_overrun or floors[worker.id] >= worker.budget_usd:
-                reason = "worker_budget_exceeded"
-            elif pricing_unavailable[worker.id] or unpriced_usage:
-                reason = "pricing_unavailable"
-            # The accepted initial input is counted by the worker store, not
-            # by guard recapture. Its funded running binding stays monitored.
-            elif worker.attempts or (
-                worker.turns_used
-                and (
-                    worker.turns_used != 1
-                    or worker.turns_used > worker.max_turns
-                    or worker.status != "running"
-                    or worker.binding_id is None
-                )
-            ):
-                reason = "accepted_attempt_inventory_unavailable"
-            if reserve and reason is None and worker.reserved_usd < worker.budget_usd:
-                delta = worker.budget_usd - worker.reserved_usd
-                if worker.budget_usd <= 0:
-                    reason = "worker_budget_exceeded"
-                elif run.reserved_usd + delta > run.total_budget_usd:
+                    reason = "terminal"
+                elif worker.error_code == "stop_requested":
+                    reason = "worker_stop_requested"
+                elif available is None:
+                    reason = "funding_unavailable"
+                elif available < 0 or (
+                    reserve and run.total_budget_usd > available + run.reserved_usd
+                ):
+                    reason = "tenant_budget_exceeded"
+                elif channel_available is not None and (
+                    channel_available < 0
+                    or (reserve and run.total_budget_usd > channel_available + run.reserved_usd)
+                ):
+                    reason = "channel_budget_exceeded"
+                elif run.reserved_usd > run.total_budget_usd:
                     reason = "run_budget_exceeded"
-                elif provider_limits is not None and (
-                    provider_exposures.get(worker.backend, Decimal(0)) + delta
-                    > provider_limits.get(worker.backend, Decimal(0))
+                elif provider_limits is not None and any(
+                    amount > provider_limits.get(provider, Decimal(0))
+                    for provider, amount in provider_exposures.items()
                 ):
                     reason = "provider_budget_exceeded"
-                elif available is None or delta > available:
-                    reason = "tenant_budget_exceeded"
-                elif channel_available is not None and delta > channel_available:
-                    reason = "channel_budget_exceeded"
-                else:
-                    exposures[worker.id] = worker.budget_usd
-                    graph = await fleet_store.save_budget(
-                        session,
-                        tenant_id=tenant_id,
-                        graph=graph,
-                        exposures=exposures,
-                        debits=debits,
-                        zero_spend=frozenset(zero_spend),
+                elif worker_overrun or floors[worker.id] >= worker.budget_usd:
+                    reason = "worker_budget_exceeded"
+                elif pricing_unavailable[worker.id] or unpriced_usage:
+                    reason = "pricing_unavailable"
+                # The accepted initial input is counted by the worker store, not
+                # by guard recapture. Its funded running binding stays monitored.
+                elif worker.attempts or (
+                    worker.turns_used
+                    and (
+                        worker.turns_used != 1
+                        or worker.turns_used > worker.max_turns
+                        or worker.status != "running"
+                        or worker.binding_id is None
                     )
-                    run, workers = next(pair for pair in graph if pair[0].id == run.id)
-                    worker = next(w for w in workers if w.id == worker_id)
-                    available -= delta
-                    if channel_available is not None:
-                        channel_available -= delta
-            admitted = reason is None and worker.reserved_usd >= worker.budget_usd > 0
-            result[worker.id] = FleetBudgetUsage(
-                run, worker, floors[worker.id], available, channel_available, admitted, reason
-            )
-    return result
+                ):
+                    reason = "accepted_attempt_inventory_unavailable"
+                if reserve and reason is None and worker.reserved_usd < worker.budget_usd:
+                    delta = worker.budget_usd - worker.reserved_usd
+                    if worker.budget_usd <= 0:
+                        reason = "worker_budget_exceeded"
+                    elif run.reserved_usd + delta > run.total_budget_usd:
+                        reason = "run_budget_exceeded"
+                    elif provider_limits is not None and (
+                        provider_exposures.get(worker.backend, Decimal(0)) + delta
+                        > provider_limits.get(worker.backend, Decimal(0))
+                    ):
+                        reason = "provider_budget_exceeded"
+                    elif available is None or delta > available:
+                        reason = "tenant_budget_exceeded"
+                    elif channel_available is not None and delta > channel_available:
+                        reason = "channel_budget_exceeded"
+                    else:
+                        exposures[worker.id] = worker.budget_usd
+                        graph = await fleet_store.save_budget(
+                            session,
+                            tenant_id=tenant_id,
+                            graph=graph,
+                            exposures=exposures,
+                            debits=debits,
+                            zero_spend=frozenset(zero_spend),
+                        )
+                        run, workers = next(pair for pair in graph if pair[0].id == run.id)
+                        worker = next(w for w in workers if w.id == worker_id)
+                        available -= delta
+                        if channel_available is not None:
+                            channel_available -= delta
+                admitted = reason is None and worker.reserved_usd >= worker.budget_usd > 0
+                result[worker.id] = FleetBudgetUsage(
+                    run, worker, floors[worker.id], available, channel_available, admitted, reason
+                )
+        return result
 
 
 async def produce_fleet_budget(
@@ -684,49 +855,54 @@ async def _reserve_fleet_worker(
     )
     if not decision:
         raise FleetConflict("reservation requires current root authorization")
-    graph, _ = await fleet_store.lock_budget(
-        session,
-        tenant_id=uuid.UUID(parent.fleet.scope.tenant_id),
-        actor_id=parent.fleet.account_id,
-        run_id=parent.fleet.run_id,
-    )
-    pair = next((p for p in graph if p[0].id == parent.fleet.run_id), None)
-    if pair is None:
-        raise FleetConflict("fleet run is unavailable")
-    worker = next((w for w in pair[1] if w.id == worker_id), None)
-    if worker is None:
-        raise FleetConflict("worker is unavailable")
-    if worker.reserved_usd == 0 and worker.version != expected_version:
-        raise FleetConflict("worker changed before reservation")
-    if worker.status not in ("pending", "starting") or worker.binding_id is not None:
-        raise FleetConflict("a new reservation requires an unallocated worker")
-    # Spec attenuation is the resolver/driver's responsibility. Financial
-    # admission repeats the shared root authorization, not its spec compiler.
-    if worker.budget_usd > parent.limits.budget_usd:
-        raise FleetConflict("worker reservation exceeds parent authority")
-    snapshot = (
-        await _produce_fleet_budget(
+    with session.no_autoflush:
+        graph, _ = await fleet_store.lock_budget(
             session,
-            parent=parent,
-            worker_id=worker_id,
-            prices=prices,
-            markup=markup,
-            reserve=True,
-            financial=True,
+            tenant_id=uuid.UUID(parent.fleet.scope.tenant_id),
+            actor_id=parent.fleet.account_id,
+            run_id=parent.fleet.run_id,
+            persisted=True,
         )
-    )[worker_id]
-    if snapshot.admitted and worker.reserved_usd == 0:
-        audit = await audit_worker_action(
-            session,
-            parent,
-            worker_id=worker_id,
-            operation="spawn",
-            outcome="allowed",
-            reason="authorized",
+        await mux_state.list_fleet_root_finances(
+            session, tenant_id=uuid.UUID(parent.fleet.scope.tenant_id)
         )
-        if audit is None:
-            raise FleetConflict("reservation requires a retained actor audit")
-    return snapshot
+        pair = next((p for p in graph if p[0].id == parent.fleet.run_id), None)
+        if pair is None:
+            raise FleetConflict("fleet run is unavailable")
+        worker = next((w for w in pair[1] if w.id == worker_id), None)
+        if worker is None:
+            raise FleetConflict("worker is unavailable")
+        if worker.reserved_usd == 0 and worker.version != expected_version:
+            raise FleetConflict("worker changed before reservation")
+        if worker.status not in ("pending", "starting") or worker.binding_id is not None:
+            raise FleetConflict("a new reservation requires an unallocated worker")
+        # Spec attenuation is the resolver/driver's responsibility. Financial
+        # admission repeats the shared root authorization, not its spec compiler.
+        if worker.budget_usd > parent.limits.budget_usd:
+            raise FleetConflict("worker reservation exceeds parent authority")
+        snapshot = (
+            await _produce_fleet_budget(
+                session,
+                parent=parent,
+                worker_id=worker_id,
+                prices=prices,
+                markup=markup,
+                reserve=True,
+                financial=True,
+            )
+        )[worker_id]
+        if snapshot.admitted and worker.reserved_usd == 0:
+            audit = await audit_worker_action(
+                session,
+                parent,
+                worker_id=worker_id,
+                operation="spawn",
+                outcome="allowed",
+                reason="authorized",
+            )
+            if audit is None:
+                raise FleetConflict("reservation requires a retained actor audit")
+        return snapshot
 
 
 async def watch_fleet_budget(
@@ -891,43 +1067,57 @@ async def admit_fleet_worker(
     ):
         raise FleetConflict("resolved worker belongs to another root")
     tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
-    await fleet_store.lock_budget(
-        session, tenant_id=tenant_id, actor_id=parent.fleet.account_id, run_id=parent.fleet.run_id
-    )
-    worker = await fleet_store.add_worker(
-        session,
-        tenant_id=tenant_id,
-        run_id=parent.fleet.run_id,
-        ordinal=ordinal,
-        role=role,
-        spec=resolved.spec.model_dump(mode="json"),
-        spec_digest=resolved.digest,
-        backend=resolved.backend.backend,
-        profile=resolved.backend.profile,
-        model=resolved.spec.model.id,
-        budget_usd=resolved.limits.budget_usd,
-        deadline_at=resolved.limits.deadline,
-        max_turns=resolved.limits.max_turns,
-        reviewer_of=reviewer_of,
-        result_contract=result_contract,
-    )
-    usage = await _reserve_fleet_worker(
-        session,
-        parent=parent,
-        policy=policy,
-        worker_id=worker.id,
-        expected_version=worker.version,
-        prices=prices,
-        markup=markup,
-    )
-    if not usage.admitted and usage.worker.status == "pending":
-        ended = await fleet_store.finish(
+    with session.no_autoflush:
+        graph, _ = await fleet_store.lock_budget(
             session,
             tenant_id=tenant_id,
-            worker_id=worker.id,
-            expected_version=usage.worker.version,
-            status="cancelled",
-            error_code=usage.reason or "not_admitted",
+            actor_id=parent.fleet.account_id,
+            run_id=parent.fleet.run_id,
+            persisted=True,
         )
-        usage = replace(usage, worker=ended)
-    return usage
+        roots = await mux_state.list_fleet_root_finances(session, tenant_id=tenant_id)
+        await _financial_room(
+            session,
+            tenant_id=tenant_id,
+            platform=parent.fleet.root.channel.platform,
+            channel_id=parent.fleet.root.channel.channel_id,
+            graph=graph,
+            roots=roots,
+        )
+        worker = await fleet_store.add_worker(
+            session,
+            tenant_id=tenant_id,
+            run_id=parent.fleet.run_id,
+            ordinal=ordinal,
+            role=role,
+            spec=resolved.spec.model_dump(mode="json"),
+            spec_digest=resolved.digest,
+            backend=resolved.backend.backend,
+            profile=resolved.backend.profile,
+            model=resolved.spec.model.id,
+            budget_usd=resolved.limits.budget_usd,
+            deadline_at=resolved.limits.deadline,
+            max_turns=resolved.limits.max_turns,
+            reviewer_of=reviewer_of,
+            result_contract=result_contract,
+        )
+        usage = await _reserve_fleet_worker(
+            session,
+            parent=parent,
+            policy=policy,
+            worker_id=worker.id,
+            expected_version=worker.version,
+            prices=prices,
+            markup=markup,
+        )
+        if not usage.admitted and usage.worker.status == "pending":
+            ended = await fleet_store.finish(
+                session,
+                tenant_id=tenant_id,
+                worker_id=worker.id,
+                expected_version=usage.worker.version,
+                status="cancelled",
+                error_code=usage.reason or "not_admitted",
+            )
+            usage = replace(usage, worker=ended)
+        return usage

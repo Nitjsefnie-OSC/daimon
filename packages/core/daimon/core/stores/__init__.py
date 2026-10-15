@@ -40,7 +40,9 @@ class UnflushedReadState(StoreError):
     """A persisted read would hide effective changes to a guarded source."""
 
 
-async def read_persisted_columns(session: AsyncSession, statement: Select[Any]) -> Result[Any]:
+async def read_persisted_columns(
+    session: AsyncSession, statement: Select[Any], *, reject_new: bool = False
+) -> Result[Any]:
     """Read database columns without flushing or reusing cached ORM entities.
 
     Caller owns scope, ordering and transaction. Pending new objects remain
@@ -54,9 +56,11 @@ async def read_persisted_columns(session: AsyncSession, statement: Select[Any]) 
         )
         if (name := getattr(table, "name", None)) is not None
     }
-    for instance in (*session.deleted, *session.dirty):
+    for instance in (*session.deleted, *session.dirty, *(session.new if reject_new else ())):
         state = inspect(instance)
         table = getattr(state.mapper.persist_selectable, "name", None)
+        if state.pending and table in guarded:
+            raise UnflushedReadState(f"unflushed insert on {table} before a persisted read")
         if state.persistent and table in guarded:
             operation = (
                 "delete"

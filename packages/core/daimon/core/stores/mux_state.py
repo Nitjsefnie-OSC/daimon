@@ -551,18 +551,32 @@ async def get_fleet_root_operation(
     request_digest: str | None = None,
     slot: Slot | None = None,
     check_intent_owner: bool = False,
+    root_controls: Mapping[str, JsonValue] | None = None,
+    root_finance: Mapping[str, JsonValue] | None = None,
+    for_update: bool = False,
 ) -> OperationRecord | None:
     """Read or durably reserve the exact root association before run creation."""
     if check_intent_owner and (
         intent_id is None or (origin_id, run_id, request_digest) != (None, None, None)
     ):
         raise ValueError("intent-only root read required")
+    if request_digest is None and (root_controls is not None or root_finance is not None):
+        raise ValueError("control initialization requires a reservation")
+    if for_update and (
+        origin_id is None
+        or intent_id is not None
+        or run_id is not None
+        or request_digest is not None
+    ):
+        raise ValueError("locked read requires the original origin selector")
     query = select(MuxOperation).where(
         MuxOperation.tenant_id == _tenant(scope.tenant_id),
         MuxOperation.key.startswith("fleet_root:"),
         MuxOperation.record["result"]["intent_id"].astext == str(intent_id),
     )
     if request_digest is not None:
+        if root_finance is not None and root_controls is None:
+            raise ValueError("root finance requires immutable controls")
         if intent_id is None or origin_id is None or slot is None or run_id is not None:
             raise ValueError("complete root reservation required")
         intent = await session.scalar(
@@ -577,7 +591,7 @@ async def get_fleet_root_operation(
         if intent is None:
             raise ScopeViolation(str(intent_id), "root intent is unavailable")
         key = f"fleet_root:{origin_id}:root:0"
-        previous = (await session.scalars(query)).one_or_none()
+        previous = (await read_persisted_columns(session, query)).one_or_none()
         if previous is not None and (previous.account_id, previous.key) != (scope.account_id, key):
             raise OperationConflict(key)
         begun = await begin_operation(
@@ -590,10 +604,22 @@ async def get_fleet_root_operation(
             now=await database_clock(session),
         )
         record = begun.record
+        if (
+            not begun.fresh
+            and root_controls is not None
+            and record.result.get("root_controls") != dict(root_controls)
+        ):
+            raise OperationConflict(key)
         if begun.fresh:
-            record = record.model_copy(
-                update={"result": {"intent_id": str(intent_id), "origin_id": str(origin_id)}}
-            )
+            result: dict[str, JsonValue] = {
+                "intent_id": str(intent_id),
+                "origin_id": str(origin_id),
+            }
+            if root_controls is not None:
+                result.update(
+                    root_controls=dict(root_controls), root_finance=dict(root_finance or {})
+                )
+            record = record.model_copy(update={"result": result})
             await _save_operation(session, scope, record)
         return record
     if run_id is not None:
@@ -612,15 +638,67 @@ async def get_fleet_root_operation(
     if (intent_id is None) == (origin_id is None):
         raise ValueError("exactly one root selector required")
     if origin_id is not None:
-        return await get_operation(session, scope, f"fleet_root:{origin_id}:root:0")
+        key = f"fleet_root:{origin_id}:root:0"
+        original = select(MuxOperation.record).where(*_op_where(scope, key))
+        body = (
+            await read_persisted_columns(
+                session, original.with_for_update() if for_update else original
+            )
+        ).scalar_one_or_none()
+        record = OperationRecord.model_validate(body) if body is not None else None
+        if record is not None:
+            operations.check_owner(record, scope)
+        return record
     if not check_intent_owner:
         query = query.where(MuxOperation.account_id == scope.account_id)
-    body = (await session.scalars(query)).one_or_none()
+    body = (await read_persisted_columns(session, query)).one_or_none()
     if body is None:
         return None
     record = OperationRecord.model_validate(body.record)
     operations.check_owner(record, scope)
     return record
+
+
+async def update_fleet_root_finance(
+    session: AsyncSession,
+    scope: Scope,
+    *,
+    origin_id: uuid.UUID,
+    root_finance: Mapping[str, JsonValue],
+) -> OperationRecord:
+    """Update only mutable finance; caller holds fleet.lock_budget for the tenant first."""
+    record = await _owned(session, scope, f"fleet_root:{origin_id}:root:0")
+    if "root_controls" not in record.result:
+        raise OperationConflict(record.operation.key)
+    updated = record.model_copy(
+        update={"result": {**record.result, "root_finance": dict(root_finance)}}
+    )
+    await _save_operation(session, scope, updated)
+    return updated
+
+
+async def list_fleet_root_finances(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> tuple[OperationRecord, ...]:
+    """Retained financial roots, including unknown pre-allocation holds across actors.
+
+    Caller takes the tenant financial fence first. Column reads avoid stale ORM JSON.
+    """
+    statement = (
+        select(MuxOperation.record)
+        .where(
+            MuxOperation.tenant_id == tenant_id,
+            MuxOperation.key.startswith("fleet_root:", autoescape=True),
+            MuxOperation.record["result"]["root_finance"].is_not(None),
+        )
+        .order_by(MuxOperation.key)
+        .with_for_update()
+    )
+    bodies = await read_persisted_columns(session, statement, reject_new=True)
+    records = tuple(OperationRecord.model_validate(row.record) for row in bodies)
+    if any(record.tenant_id != str(tenant_id) for record in records):
+        raise ScopeViolation("root-budget", "financial root belongs to another tenant")
+    return records
 
 
 async def fleet_root_context_deadline(
@@ -697,6 +775,11 @@ async def advance_operation(
 ) -> OperationRecord:
     record = await _owned(session, scope, key)
     await _check_fence(session, record.slot, fence, clock)
+    if result is not None and "root_finance" in record.result:
+        result = {
+            **result,
+            **{name: record.result[name] for name in ("root_controls", "root_finance")},
+        }
     advanced = operations.advance(record, status, now=now, resource=resource, result=result)
     await _save_operation(session, scope, advanced)
     return OperationRecord.model_validate(_json(advanced))
@@ -960,14 +1043,28 @@ class PostgresStateStore:
         )
 
     @contextmanager
-    def checking_claims(self, check: BeforeClaim) -> Iterator[None]:
+    def checking_claims(self, check: BeforeClaim, *, compose: bool = False) -> Iterator[None]:
         """Run `check` before this store's send claims, in this task only.
 
         For the block's duration, claims made in the current task (and in tasks
         it starts) run `check` instead of the constructor's. Other tasks sharing
         this same store keep theirs, so concurrent workers never see each other's.
         """
-        token = self._active_check.set(check)
+        previous = self._active_check.get()
+        previous = previous if previous is not None else self._before_claim
+        if compose and previous is not None:
+
+            async def combined(
+                session: AsyncSession, scope: Scope, key: str, fence: Lease | None
+            ) -> bool:
+                return await previous(session, scope, key, fence) and await check(
+                    session, scope, key, fence
+                )
+
+            selected = combined
+        else:
+            selected = check
+        token = self._active_check.set(selected)
         try:
             yield
         finally:
