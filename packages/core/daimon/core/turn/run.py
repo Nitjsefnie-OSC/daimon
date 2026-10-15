@@ -957,7 +957,8 @@ async def run_prepared_turn_impl(
                     private_dm_id=prepared.admission.private_dm_id,
                 ),
             )
-            if deps.tool_safety.enabled and deps.tool_safety.agent_rules
+            if getattr(deps.tool_safety, "enabled", False)
+            and getattr(deps.tool_safety, "agent_rules", False)
             else None
         ),
     )

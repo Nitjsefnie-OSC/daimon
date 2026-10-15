@@ -304,6 +304,7 @@ class ToolSafetyPolicy(BaseModel):
     )
     agent_rules: bool = Field(
         default=False,
+        exclude_if=lambda value: not value,
         description=(
             "Apply workspace-admin tool rules for individual agents and third-party MCP tools. "
             "Off by default; stored rules remain editable but inactive until enabled."
