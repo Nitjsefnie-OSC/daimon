@@ -753,6 +753,36 @@
         'type': 'object',
       }),
     }),
+    'clear_agent_tool_rule': dict({
+      'description': "Clear one agent's tool rule. Channel admins may act in their channels.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'type': 'string',
+          }),
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'tool_key': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_name',
+          'tool_key',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'clear_channel_admins': dict({
       'description': '''
         Remove every channel admin from one channel, leaving it to the server admins.
@@ -3224,6 +3254,32 @@
         'type': 'object',
       }),
     }),
+    'list_agent_tool_rules': dict({
+      'description': "List an agent's rules. Channel admins pass their channel id.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'type': 'string',
+          }),
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'agent_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'list_agents': dict({
       'description': '''
         List agents visible here, including their attached ``mcp_servers`` and ``skills``.
@@ -5233,6 +5289,53 @@
         'required': list([
           'agent_name',
           'runs_in',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_agent_tool_rule': dict({
+      'description': "Set one agent's tool rule. Channel admins may act in their channels.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'agent_name': dict({
+            'type': 'string',
+          }),
+          'channel_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'rule': dict({
+            'enum': list([
+              'allow',
+              'ask',
+              'deny',
+            ]),
+            'type': 'string',
+          }),
+          'scope': dict({
+            'default': 'chat',
+            'enum': list([
+              'chat',
+              'chat_and_routines',
+            ]),
+            'type': 'string',
+          }),
+          'tool_key': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'agent_name',
+          'tool_key',
+          'rule',
         ]),
         'type': 'object',
       }),

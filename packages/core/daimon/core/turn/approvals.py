@@ -20,7 +20,8 @@ that talks to a platform, and a hook that raises counts as a refusal."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+import uuid
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -32,7 +33,9 @@ from daimon.core.confirmation import (
     no_confirmation_surface,
     prompt_for_tool_call,
 )
+from daimon.core.stores import agent_tool_rules
 from daimon.core.tool_safety import (
+    ResolvedAgentToolRule,
     ToolCall,
     ToolSafetyPolicy,
     ToolVerdict,
@@ -48,8 +51,78 @@ from daimon.core.turn.posture import (
     ToolConfirmationResult,
 )
 from daimon.core.turn.state import ToolUseBlock, TurnState
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
+RuleLookup = Callable[[ToolCall], Awaitable[ResolvedAgentToolRule | None]]
+
+
+def channel_for_tool_rules(
+    *, platform: str, channel_id: str | None, private_dm_id: str | None
+) -> str | None:
+    """Use the admitted parent channel; a DM never inherits its source's rule."""
+    if private_dm_id is not None or channel_id is None:
+        return None
+    return channel_id.partition(":")[0] if platform == "slack" else channel_id
+
+
+def agent_rule_lookup(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str,
+    server_urls: Mapping[str, str],
+    channel_id: str | None = None,
+) -> RuleLookup:
+    """Capture a session's agent and endpoint bindings; read the row per call."""
+
+    async def _lookup(call: ToolCall) -> ResolvedAgentToolRule | None:
+        url = server_urls.get(call.server_name or "")
+        if url is None:
+            return None
+        async with factory() as session:
+            return await agent_tool_rules.get_for_call(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                tool_key=call.key,
+                server_url=url,
+                channel_id=channel_id,
+            )
+
+    return _lookup
+
+
+async def _rule_for(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    trusted_servers: frozenset[str],
+    rules_for: RuleLookup | None,
+) -> tuple[ResolvedAgentToolRule | None, bool]:
+    if (
+        not policy.enabled
+        or not policy.agent_rules
+        or rules_for is None
+        or call.server_name is None
+        or call.server_name in trusted_servers
+    ):
+        return None, False
+    try:
+        return await rules_for(call), False
+    except Exception as err:
+        log.warning("tool_safety.rule_read_failed", tool=call.key, error=str(err))
+        return None, True
+
+
+def _read_error_verdict(verdict: ToolVerdict, *, attended: bool) -> ToolVerdict:
+    if verdict.reason == "denied_by_operator":
+        return verdict
+    return ToolVerdict(
+        outcome="ask" if attended else "deny",
+        effect="write",
+        reason="write_needs_confirmation" if attended else "unattended_write",
+    )
+
 
 #: Stand-in for a blocked id whose `tool_use` event never reached the folded
 #: state (a replay window that missed it). Nobody has seen its server, tool
@@ -168,6 +241,13 @@ def refusal_message(call: ToolCall, verdict: ToolVerdict) -> str:
     """What the model is told when `call` is refused without a person."""
     if verdict.reason == "denied_by_operator":
         return f"Refused: the operator does not allow {call.key}. Do not retry it."
+    if verdict.reason == "agent_rule_deny":
+        return f"Refused: this agent's tool rule denies {call.key}. Do not retry it."
+    if verdict.reason == "agent_rule_ask":
+        return (
+            f"Refused: this agent's tool rule requires approval for {call.key}, "
+            "and nobody is here to approve. Do not retry it."
+        )
     if verdict.reason == "unattended_publish":
         return (
             f"Refused: {call.tool_name} publishes, which this agent does only after the "
@@ -194,6 +274,7 @@ def unattended_decider(
     *,
     trusted_servers: frozenset[str] = frozenset(),
     confirmed_tools: frozenset[str] = frozenset(),
+    rules_for: RuleLookup | None = None,
 ) -> ToolCallDecider:
     """Decider for runs nobody is watching: reads run, writes are refused
     unless the operator allowed them there."""
@@ -201,19 +282,24 @@ def unattended_decider(
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
         if _is_unseen(call):
             return _unseen_refusal(call)
+        rule, read_error = await _rule_for(policy, call, trusted_servers, rules_for)
         verdict = decide_tool_call(
             policy,
             call,
             attended=False,
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
+            agent_rule=rule,
         )
+        if read_error:
+            verdict = _read_error_verdict(verdict, attended=False)
         log.info(
             "tool_safety.decided",
             tool=call.key,
             outcome=verdict.outcome,
             reason=verdict.reason,
             attended=False,
+            **({"rule": rule.rule} if verdict.reason.startswith("agent_rule_") and rule else {}),
         )
         if verdict.outcome == "allow":
             return ToolConfirmationResult(allow=True)
@@ -230,6 +316,7 @@ def interactive_decider(
     trusted_servers: frozenset[str] = frozenset(),
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     confirmed_tools: frozenset[str] = frozenset(),
+    rules_for: RuleLookup | None = None,
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
 
@@ -241,19 +328,24 @@ def interactive_decider(
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
         if _is_unseen(call):
             return _unseen_refusal(call)
+        rule, read_error = await _rule_for(policy, call, trusted_servers, rules_for)
         verdict = decide_tool_call(
             policy,
             call,
             attended=True,
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
+            agent_rule=rule,
         )
+        if read_error:
+            verdict = _read_error_verdict(verdict, attended=True)
         log.info(
             "tool_safety.decided",
             tool=call.key,
             outcome=verdict.outcome,
             reason=verdict.reason,
             attended=True,
+            **({"rule": rule.rule} if verdict.reason.startswith("agent_rule_") and rule else {}),
         )
         if verdict.outcome == "allow":
             return ToolConfirmationResult(allow=True)
@@ -287,7 +379,10 @@ def interactive_decider(
 
 
 def headless_tool_confirmation(
-    policy: ToolSafetyPolicy, *, trusted_servers: frozenset[str] = frozenset()
+    policy: ToolSafetyPolicy,
+    *,
+    trusted_servers: frozenset[str] = frozenset(),
+    rules_for: RuleLookup | None = None,
 ) -> ToolConfirmation:
     """Posture for a run nobody is watching (routines, smoke, transfers).
 
@@ -295,7 +390,9 @@ def headless_tool_confirmation(
     """
     if not policy.enabled:
         return AutoApprove()
-    return PolicyApproval(decide=unattended_decider(policy, trusted_servers=trusted_servers))
+    return PolicyApproval(
+        decide=unattended_decider(policy, trusted_servers=trusted_servers, rules_for=rules_for)
+    )
 
 
 def chat_tool_confirmation(
@@ -307,6 +404,7 @@ def chat_tool_confirmation(
     trusted_servers: frozenset[str] = frozenset(),
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    rules_for: RuleLookup | None = None,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -324,10 +422,14 @@ def chat_tool_confirmation(
             confirm=confirm if confirm is not None else no_confirmation_surface,
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
+            rules_for=rules_for,
         )
         if attended
         else unattended_decider(
-            policy, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+            policy,
+            trusted_servers=trusted_servers,
+            confirmed_tools=confirmed_tools,
+            rules_for=rules_for,
         )
     )
     if not policy.enabled:
