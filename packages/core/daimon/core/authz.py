@@ -234,6 +234,10 @@ class Action(StrEnum):
     SET_CHANNEL_BUDGET = "set_channel_budget"
     # Add or remove the extra skills one channel's turns run with (`Place.channel_id`).
     SET_CHANNEL_SKILLS = "set_channel_skills"
+    # Set or clear an agent's third-party MCP tool rule: current human admins only.
+    SET_AGENT_TOOL_RULE = "set_agent_tool_rule"
+    # Set or clear one agent's tool rule for an administered parent channel.
+    SET_CHANNEL_AGENT_TOOL_RULE = "set_channel_agent_tool_rule"
     # Hand a thread's conversation to another agent (`Place` is the thread).
     # Writers and the invoker allowlist as START_TURN, then RUN_AGENT on the
     # handoff surface, then who may bring that agent here: anyone when it is
@@ -845,6 +849,21 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if subject.is_admin and not subject.via_agent_key:
             return ALLOW
         return _deny("admin_required")
+
+    if req.action is Action.SET_AGENT_TOOL_RULE:
+        return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
+
+    if req.action is Action.SET_CHANNEL_AGENT_TOOL_RULE:
+        if subject.via_agent_key:
+            return _deny("admin_required")
+        if subject.is_admin:
+            return ALLOW
+        channel = place.parent_channel_id or place.channel_id
+        return (
+            ALLOW
+            if channel is not None and channel in subject.administered_channel_ids
+            else _deny("admin_required")
+        )
 
     if req.action in (Action.SET_CHANNEL_BUDGET, Action.SET_CHANNEL_SKILLS):
         # Money, and what a shared agent may do, stay with server admins; an

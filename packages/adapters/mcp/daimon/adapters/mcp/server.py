@@ -57,6 +57,7 @@ from daimon.adapters.mcp.tools import (
     vault,
 )
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
+from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
 from daimon.adapters.mcp.tools.channel_admins import register_channel_admin_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channel_copies import register_channel_copy_tools
@@ -566,6 +567,7 @@ def create_mcp_app(
     register_plain_text_mentions_tools(mcp, runtime)  # typed "@<name>" starts a turn
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
+    register_agent_tool_rule_tools(mcp, runtime)
     register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read
     register_promo_issuing_tools(mcp, runtime)  # operator-token promo issuing
 

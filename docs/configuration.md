@@ -1365,6 +1365,13 @@ a routine or other unattended run is refused unless listed in unattended_writes.
 to sessions created after it is set; a chat thread keeps its current session until that
 is replaced. Off keeps every tool auto-approved.
 
+### `DAIMON_TOOL_SAFETY__AGENT_RULES`
+
+`bool` · optional · default `False`
+
+Apply workspace-admin tool rules for individual agents and third-party MCP tools. Off by
+default; stored rules remain editable but inactive until enabled.
+
 ### `DAIMON_TOOL_SAFETY__EFFECTS`
 
 `dict[str, 'read' | 'write']` · optional · default `{}`

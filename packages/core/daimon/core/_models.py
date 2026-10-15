@@ -20,6 +20,7 @@ from sqlalchemy import (
     Double,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -293,6 +294,69 @@ class TenantAccessPolicyRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class AgentToolRuleRecord(Base):
+    __tablename__ = "agent_tool_rules"
+    __table_args__ = (
+        Index(
+            "uq_agent_tool_rules_global",
+            "tenant_id",
+            "agent_id",
+            "tool_key",
+            unique=True,
+            postgresql_where=text("channel_id IS NULL"),
+        ),
+        Index(
+            "uq_agent_tool_rules_channel",
+            "tenant_id",
+            "agent_id",
+            "tool_key",
+            "channel_id",
+            unique=True,
+            postgresql_where=text("channel_id IS NOT NULL"),
+        ),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        CheckConstraint("rule IS NULL OR rule IN ('allow', 'ask', 'deny')"),
+        CheckConstraint("scope IN ('chat', 'chat_and_routines')"),
+        CheckConstraint("revision > 0"),
+        CheckConstraint("tool_key LIKE '%/%'"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[str] = mapped_column(Text)
+    agent_name: Mapped[str] = mapped_column(Text)
+    tool_key: Mapped[str] = mapped_column(Text)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    server_url: Mapped[str] = mapped_column(Text)
+    rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scope: Mapped[str] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer)
+    set_by: Mapped[str] = mapped_column(Text)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AgentToolRuleHistoryRecord(Base):
+    __tablename__ = "agent_tool_rule_history"
+    __table_args__ = (ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[str] = mapped_column(Text)
+    tool_key: Mapped[str] = mapped_column(Text)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    set_by: Mapped[str] = mapped_column(Text)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    before_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    before_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    before_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    before_server_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_agent_name: Mapped[str] = mapped_column(Text)
+    after_server_url: Mapped[str] = mapped_column(Text)
 
 
 class ChannelConfig(Base):

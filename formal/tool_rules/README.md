@@ -42,5 +42,13 @@ confirmations, so call A can be allowed by a rule, a clear can commit while call
 waits, and A's allow is still sent. Also not modelled: explicit `deny` and `ask` rules and
 server/tool precedence (pure, for unit tests), expiry timing, batching itself (see
 `approvals/`), persistence failure and restart. Checked within these bounds, not proved for
-production numbers. Replay: none yet; each unsafe config becomes a unit test in the
-implementation PR.
+production numbers.
+
+Replay (phase 1, rules without the card button): `ToolRulesSnapshot` is
+`test_live_lookup_sees_clear_on_next_call`; `ToolRulesBlindUpsert` is
+`test_store_binding_history_and_clear_cas` (a stale compare-and-set after a clear fails);
+`RuleByAdmin` is `test_only_human_admin_may_edit` and
+`test_agent_credentials_cannot_set_or_clear_even_with_admin_signal`. They are in
+`packages/core/tests/test_agent_tool_rules.py` and
+`packages/adapters/mcp/tests/test_agent_tool_rule_tools.py`. `ToolRulesAnyClicker` and
+`ToolRulesSaveIfLost` need the card button and are replayed in phase 2. No staging trace yet.

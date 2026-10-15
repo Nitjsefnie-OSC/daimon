@@ -1,5 +1,26 @@
 # Permissions
 
+## Agent tool rules
+
+A current human workspace admin can set `allow`, `ask` or `deny` for one
+third-party MCP tool on one agent with `daimon agents tool-rules` or the
+`set_agent_tool_rule` MCP tool. A channel admin can set and clear such rules
+for any agent in a channel they administer, using `--channel` or `channel_id`;
+they cannot set an agent-wide rule or one for another channel. An agent-wide
+rule applies where the agent runs; a channel rule applies in its parent
+channel and threads under it. When both match, `deny` wins over `ask`, which
+wins over `allow`. The key is exactly `server/tool`. A rule is
+bound to the agent's stable id and the server URL attached under that name;
+changing either makes the rule stop matching. `chat` is the default scope.
+An `allow` rule reaches unattended routines only with `chat_and_routines`.
+An `ask` rule asks in chat even for a read and refuses unattended; `deny`
+always refuses. The operator's deny list takes precedence. Clearing leaves
+an audit row and a revision marker. Every edit records who changed it, when,
+and the before and after values. Only a person can edit these rules: an agent
+key, or an agent acting in a conversation on an admin's behalf, is refused. They
+are inactive until both `DAIMON_TOOL_SAFETY__ENABLED` and
+`DAIMON_TOOL_SAFETY__AGENT_RULES` are true.
+
 Two rules say what reaches whom. A **channel rule** says whose turns may read
 a channel and who may write in it. An **agent rule** says where an agent may
 run. Every limit below follows from these two.

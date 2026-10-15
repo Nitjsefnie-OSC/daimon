@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 122 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 125 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -65,6 +65,16 @@ Agent removal tools: detach_mcp_server, remove_skill, remove_agent_key, list_age
 | `list_agent_keys` | all callers | What keys does an agent have? List its stored API key names, never values. |
 | `remove_agent_key` | all callers | Remove an old API key or token, such as a Toggl key, from an agent's stored keys. |
 | `remove_skill` | all callers | Stop an agent using an attached skill, such as eda. |
+
+## `agent_tool_rules`
+
+Admin tools for one agent's third-party MCP tool rules.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `clear_agent_tool_rule` | admin only, channel admins too, operator tokens with channels:write | Clear one agent's tool rule. |
+| `list_agent_tool_rules` | admin only, channel admins too, operator tokens with tenant:read | List an agent's rules. |
+| `set_agent_tool_rule` | admin only, channel admins too, operator tokens with channels:write | Set one agent's tool rule. |
 
 ## `agents`
 
