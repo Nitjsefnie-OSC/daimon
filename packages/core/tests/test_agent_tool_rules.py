@@ -9,7 +9,11 @@ import pytest
 from daimon.core._models import AgentToolRuleHistoryRecord, AgentToolRuleRecord, Tenant
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
-from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+from daimon.core.confirmation import (
+    ConfirmationAnswer,
+    ConfirmationPrompt,
+    ToolRuleCardReference,
+)
 from daimon.core.stores import agent_tool_rules as store
 from daimon.core.tool_safety import (
     ResolvedAgentToolRule,
@@ -183,6 +187,97 @@ async def test_lookup_error_asks_in_chat_and_refuses_unattended() -> None:
     assert not (await chat(_call("list_items"))).allow
     assert len(asked) == 1
     assert not (await routine(_call("list_items"))).allow
+
+
+async def test_deny_set_while_card_waits_refuses_approved_call() -> None:
+    """An explicit deny committed during the card wait wins before release."""
+    current: ResolvedAgentToolRule | None = None
+    reads = 0
+
+    async def lookup(_call: ToolCall) -> ResolvedAgentToolRule | None:
+        nonlocal reads
+        reads += 1
+        return current
+
+    async def confirm(_prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        nonlocal current
+        current = ResolvedAgentToolRule(rule="deny")
+        return "approved"
+
+    decide = interactive_decider(
+        ToolSafetyPolicy(enabled=True, agent_rules=True),
+        requester_platform_user_id="human",
+        rules_for=lookup,
+        confirm=confirm,
+    )
+    result = await decide(_call())
+    assert not result.allow and "denies remote/append_note" in (result.deny_message or "")
+    assert reads == 2
+
+
+async def test_always_button_only_for_classification_asks() -> None:
+    prompts: list[ConfirmationPrompt] = []
+    reference = ToolRuleCardReference(
+        tenant_id=uuid.uuid4(),
+        agent_id="ma-1",
+        agent_name="Helper",
+        tool_key="remote/append_note",
+        server_url="https://example.test/mcp",
+    )
+
+    async def confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "denied"
+
+    async def rule(_call: ToolCall) -> ResolvedAgentToolRule | None:
+        return ResolvedAgentToolRule(rule="ask")
+
+    def card_for(_tool: ToolCall) -> ToolRuleCardReference:
+        return reference
+
+    await interactive_decider(
+        ToolSafetyPolicy(enabled=True, agent_rules=True),
+        requester_platform_user_id="human",
+        confirm=confirm,
+        rule_card_for=card_for,
+        rules_for=rule,
+    )(_call("list_items"))
+    assert prompts[-1].tool_rule is None and prompts[-1].tool_rules_enabled
+
+    async def failed_rule(_tool: ToolCall) -> ResolvedAgentToolRule | None:
+        raise RuntimeError("database unavailable")
+
+    await interactive_decider(
+        ToolSafetyPolicy(enabled=True, agent_rules=True),
+        requester_platform_user_id="human",
+        confirm=confirm,
+        rule_card_for=card_for,
+        rules_for=failed_rule,
+    )(_call("list_items"))
+    assert prompts[-1].tool_rule is None
+    await interactive_decider(
+        ToolSafetyPolicy(enabled=True, agent_rules=True),
+        requester_platform_user_id="human",
+        confirm=confirm,
+        rule_card_for=card_for,
+    )(_call())
+    assert prompts[-1].tool_rule == reference
+    await interactive_decider(
+        ToolSafetyPolicy(enabled=True),
+        requester_platform_user_id="human",
+        confirm=confirm,
+        rule_card_for=card_for,
+    )(_call())
+    assert prompts[-1].tool_rule is None and not prompts[-1].tool_rules_enabled
+    await interactive_decider(
+        ToolSafetyPolicy(enabled=True, agent_rules=True),
+        trusted_servers=frozenset({"daimon-mcp"}),
+        confirmed_tools=frozenset({"add_skill"}),
+        requester_platform_user_id="human",
+        confirm=confirm,
+        rule_card_for=card_for,
+    )(_call("add_skill", "daimon-mcp"))
+    assert prompts[-1].tool_rule is None
 
 
 def test_only_human_admin_may_edit() -> None:

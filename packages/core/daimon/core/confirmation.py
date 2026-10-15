@@ -49,6 +49,7 @@ __all__ = [
     "ConfirmationHook",
     "ConfirmationPrompt",
     "BackendSwitchReference",
+    "ToolRuleCardReference",
     "PendingConfirmations",
     "no_confirmation_surface",
     "prompt_for_tool_call",
@@ -85,6 +86,21 @@ class BackendSwitchReference(BaseModel):
         ).validate_python(value)
 
 
+class ToolRuleCardReference(BaseModel):
+    """The endpoint and rule-key revisions a posted approval card captured."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_id: str
+    agent_name: str
+    tool_key: str
+    server_url: str
+    channel_id: str | None = None
+    agent_revision: int = Field(default=0, ge=0)
+    channel_revision: int = Field(default=0, ge=0)
+
+
 class ConfirmationPrompt(BaseModel):
     """What a confirmation card shows, platform-neutral.
 
@@ -107,6 +123,10 @@ class ConfirmationPrompt(BaseModel):
     backend_switch: BackendSwitchReference | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    tool_rule: ToolRuleCardReference | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    tool_rules_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def _aware_expiry(self) -> ConfirmationPrompt:

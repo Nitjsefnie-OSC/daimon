@@ -21,6 +21,18 @@ key, or an agent acting in a conversation on an admin's behalf, is refused. They
 are inactive until both `DAIMON_TOOL_SAFETY__ENABLED` and
 `DAIMON_TOOL_SAFETY__AGENT_RULES` are true.
 
+With both settings on, a card for a third-party MCP write classified as needing
+approval also has **Always allow**. A current workspace admin can press it to
+save an agent-wide `allow` rule for chat. A channel admin can press it in a
+channel they administer to save a rule for that parent channel and its threads.
+The admin may be someone other than the requester. The click approves the
+pending call and saves the rule for that agent, tool and attached server URL.
+The admin's permission is checked when they click. A non-admin's click leaves
+the card pending; Approve and Deny still belong to the requester. If another
+edit changed the rule while the card waited, the click approves this call but
+does not save the rule. An explicit `deny` set while a card waits refuses the
+call before release, even if the card was approved.
+
 Two rules say what reaches whom. A **channel rule** says whose turns may read
 a channel and who may write in it. An **agent rule** says where an agent may
 run. Every limit below follows from these two.
