@@ -3100,3 +3100,43 @@ worker lifetime; subsequent turns refuse, including after restart. This mode
 has no fallback to another model. Worker limits remain monotonic under the
 existing permission resolver. Other profiles and uncapped Gemini turns retain
 their existing behavior.
+
+### Explicit source capability representations for Gemini
+
+An agent-origin Gemini plan may supply `source_capabilities` in the existing
+provider runtime manifest. This is separate from accepting portable losses:
+preview and preparation read the original immutable skill versions and compare
+**every retained file byte**, then map supported automatic filesystem operations
+to the profile execution tool. No skills, tools or MCP loss can be accepted in
+this mode. Unknown native controls, publishing approval, foreign credentials,
+non-automatic tools and incomplete source inventories still refuse. Memory and
+the original sandbox remain explicit losses; no existing workspace is copied.
+
+`source_capabilities` contains the complete `source_pin`, target `model`,
+`mcp_tools` allowlist and one `skills` entry per source skill. Each entry provides
+concrete `source` and `target` SkillRefs plus an absolute retained ZIP `archive`.
+The target version and digest name the canonical full-byte SkillUpload. Provider
+archive names retain their original spelling, including older underscore names.
+Derived representation evidence is excluded from the source pin, so existing
+consent pins and deployments without this configuration keep their meaning.
+
+The plan also supplies `skill_ids`, `skill_deployments` and an absolute
+`mcp_credential_file`. Provision target skills through the existing Skills port
+using `RetainedSkillDeployments`; each receipt pins tenant, account, project,
+version, credential-free immutable GCS directory and the entire path/SHA-256
+manifest. The provisioner must upload and independently read back every object
+before supplying a receipt. The adapter performs no GCS upload or credential
+discovery. Missing or changed deployment/file receipts refuse.
+
+Publish the counterpart through the existing NeutralResourceHost and record its
+native ACK/readback before invoking the credential owner. Persistent native
+agent definitions contain the MCP URL and allowlist, never bearer headers.
+`mcp_credential_file` must be an owned regular 0600 file with a short-lived
+registered caller token for the original canonical agent. The runtime checks
+signature, exact claims, account/tenant/agent, registry expiry and revocation
+before each provider exposure, after independent native counterpart verification.
+It does not mint or store a bearer in a catalog or runtime manifest.
+
+This mode requires agent-origin preparation and all existing source/catalog/
+configuration pins; channel plans and workers cannot activate it. Unconfigured
+turns remain cold and the explicit Gemini worker token envelope is unchanged.

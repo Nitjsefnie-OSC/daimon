@@ -1043,3 +1043,11 @@ including exact role/model/cash terms and durable dispatch claims. The Gemini
 worker term pins `gemini-3.8-flash`; the $0.49 hold and all other cash terms
 remain unchanged. Quote runtime-enforced worker caps with `ModelPrice.reserve`
 and `TokenLimits`; a signed cash hold alone is not a native token envelope.
+
+The after-ACK `AgentMCPBinding` owner also accepts `AgentMCPAuthority` for other
+providers. The selected caller must verify actual native ACK/readback and its
+association to the original canonical source. Foreign native ids never become
+Daimon agent ids. The owner reuses the existing registered token mint, private
+pending-intent receipt, readback and exact-JTI revocation lifecycle. Its legacy
+Anthropic LiveContext input retains the same ACK gate and behavior. This is a
+provisioning callback, not authorization to allocate sessions or send prompts.

@@ -84,7 +84,12 @@ class GeminiManagedAgents:
                     ("gemini_resource_catalog_transport",), PROFILE.profile_id
                 )
             self.catalog_adapter = GeminiCatalogAdapter(
-                transport, storage, account_scope_id, resource_catalog_transport, enabled=True
+                transport,
+                storage,
+                account_scope_id,
+                resource_catalog_transport,
+                enabled=True,
+                mcp_secrets=mcp_secrets,
             )
         self.agents = self.catalog_adapter or GeminiAgents(
             transport, storage, account_scope_id, mcp_secrets=mcp_secrets

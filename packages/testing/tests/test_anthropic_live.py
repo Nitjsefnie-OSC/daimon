@@ -2759,8 +2759,9 @@ async def test_agent_mcp_binding_refuses_unacknowledged_or_foreign_agent(
     read.assert_not_called()
 
 
+@pytest.mark.parametrize("provider", ["anthropic", "gemini", "openai"])
 async def test_agent_mcp_binding_commits_scoped_owner_token_and_revokes(
-    db_preflight, db_engine, db_clean, tmp_path, monkeypatch
+    db_preflight, db_engine, db_clean, tmp_path, monkeypatch, provider
 ):
     from types import SimpleNamespace
 
@@ -2795,14 +2796,36 @@ async def test_agent_mcp_binding_commits_scoped_owner_token_and_revokes(
         redaction_secrets=(),
     )
     monkeypatch.setattr(owner, "create_async_engine", lambda *a, **kw: db_engine)
-    credential = owner.AgentMCPBinding(context)
+    canonical = agent
+    if provider == "anthropic":
+        credential = owner.AgentMCPBinding(context)
+    else:
+        agent = agent.model_copy(update={"provider": provider, "id": "foreign-native-id"})
+        credential = owner.AgentMCPBinding(
+            authority=owner.AgentMCPAuthority(
+                provider=provider,
+                scope=scope,
+                account_scope_id=agent.account_scope_id,
+                output=args.output,
+                deadline_s=args.deadline_s,
+                database_url=args.binding.database_url,
+                mcp_signing_secret_file=signer,
+                acknowledged=lambda actual: actual == agent,
+                redact=lambda values: setattr(
+                    context, "redaction_secrets", context.redaction_secrets + values
+                ),
+                canonical_source=canonical,
+            )
+        )
     token = await credential.bind(agent)
     assert token in context.redaction_secrets
     async with sm() as db:
         row = await get_mcp_token(db, jti=token_jti(token))
     assert row is not None and row.revoked_at is None and not row.scopes
     assert row.kind == "agent" and row.account_id == account.id
-    assert row.agent_id == str(derive_agent_uuid(tenant_id=account.tenant_id, ma_agent_id=agent.id))
+    assert row.agent_id == str(
+        derive_agent_uuid(tenant_id=account.tenant_id, ma_agent_id=canonical.id)
+    )
     assert (row.expires_at - row.created_at).total_seconds() <= 900
     with pytest.raises(live.LiveRefused, match="replayed"):
         await credential.bind(agent)

@@ -1,14 +1,14 @@
-"""Pure JWT minting for daimon-mcp tokens.
+"""JWT minting and registry checks for daimon-mcp caller credentials.
 
 Shared primitive between `daimon.core.mcp_vault.ensure_mcp_vault` and the
 CLI's `daimon mcp mint-token` command — both need to sign, neither should
 cross the core/adapter boundary to reach the FastMCP verifier.
 
-No I/O, no globals. `now` is injected per guideline:architecture so tests
-are deterministic and the function stays pure.
+`now` is injected. Registered tokens use the supplied database session;
+short-lived remote credentials are read back before provider exposure.
 
 Server-side verification lives in `daimon.adapters.mcp.auth.verifier`
-(FastMCP's `JWTVerifier`, which is authlib-backed). We don't verify here.
+(FastMCP's `JWTVerifier`, which is authlib-backed). It owns tool authorization.
 
 `mint_internal_mcp_token` is a v1.1 seam used by the headless routine runner
 and the `/mcp-token mint` command. A future variant may
@@ -37,7 +37,8 @@ from daimon.core.authz import (
 )
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
-from sqlalchemy.ext.asyncio import AsyncSession
+from mux.contracts.ids import Scope
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def mint_jwt(
@@ -185,6 +186,73 @@ async def mint_agent_mcp_token(
         secret,
         algorithm="HS256",
     )
+
+
+async def validate_agent_mcp_token(
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    token: str,
+    secret: bytes,
+    scope: Scope,
+    agent_id: uuid.UUID,
+    now: dt.datetime,
+) -> None:
+    """Check a minted caller-bound token before exposing it to a remote provider.
+
+    This checks the mint owner's own claims and registry facts; the MCP server
+    still owns tool authorization. No provider id is substituted for the
+    canonical Daimon agent identity, and a bearer never becomes a stored fact.
+    """
+    from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+
+    try:
+        claims = pyjwt.decode(
+            token,
+            secret,
+            algorithms=["HS256"],
+            options={
+                "verify_exp": False,
+                "verify_iat": False,
+                "verify_nbf": False,
+                "require": ["sub", "agent_id", "jti", "exp"],
+            },
+        )
+        expiry = claims.get("exp")
+        if (
+            scope.is_platform
+            or scope.is_legacy_host_authorized
+            or set(claims) != {"sub", "agent_id", "jti", "exp"}
+            or claims["sub"] != scope.account_id
+            or claims["agent_id"] != str(agent_id)
+            or type(expiry) is not int
+            or not now.timestamp() < expiry <= now.timestamp() + 900
+        ):
+            raise ValueError("invalid scoped agent token")
+        jti = uuid.UUID(claims["jti"])
+        async with sessions() as db:
+            identity = await get_account_with_tenant(db, account_id=uuid.UUID(scope.account_id))
+            row = await get_mcp_token(db, jti=jti)
+        if (
+            identity is None
+            or str(identity.tenant_id) != scope.tenant_id
+            or identity.role.value != "user"
+            or identity.is_external
+            or row is None
+            or row.kind != "agent"
+            or row.scopes
+            or str(row.account_id) != scope.account_id
+            or str(row.tenant_id) != scope.tenant_id
+            or row.agent_id != str(agent_id)
+            or row.revoked_at is not None
+            or row.expires_at is None
+            or row.expires_at <= now
+            or row.created_at > now
+            or int(row.expires_at.timestamp()) != expiry
+        ):
+            raise ValueError("invalid scoped agent token")
+    except (pyjwt.InvalidTokenError, KeyError, TypeError, ValueError):
+        raise ValueError("invalid scoped agent token") from None
 
 
 async def mint_operator_mcp_token(
