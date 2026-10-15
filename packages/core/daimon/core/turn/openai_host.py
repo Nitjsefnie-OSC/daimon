@@ -338,9 +338,19 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         or request.scope.account_id != str(request.session_account_id)
     ):
         raise ScopeViolation("preparation", "OpenAI thread differs from admitted scope")
+    if revision.profile == CONVERSATION_PROFILE and request.worker is None:
+        raise AdmissionDenied(reason="backend_unsupported")
     current = await reauthorize(request.deps, request.admission)
     if (
-        current.memory_read_only
+        (
+            current.memory_read_only
+            and not (
+                revision.profile == CONVERSATION_PROFILE
+                and request.worker is not None
+                and "memory" in request.worker.declared_drops
+                and not request.worker.resources
+            )
+        )
         or current.origin_seal_ids
         or current.source_sealed
         or current.asks_before_publishing

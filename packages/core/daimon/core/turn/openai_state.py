@@ -104,7 +104,7 @@ async def initial_input_consumed(session: ResourceRef, initial: UserMessage | No
     if allocation is None or active.operation_key != f"turn:{session.id}:{allocation}":
         return False
     key = refs.get("initial_input_operation")
-    if key != allocation + ":send:0":
+    if key is None or key != allocation + ":send:0":
         raise ScopeViolation(session.id, "initial input has a foreign operation")
     operation = await active.store.get_operation(active.scope, key)
     if operation is None or operation.operation.status != "processed":
@@ -125,7 +125,8 @@ async def invocation_baseline(
     session: ResourceRef, observed_roots: tuple[str, ...]
 ) -> tuple[tuple[str, ...], bool]:
     active = persistence(session)
-    if await initial_input_consumed(session):
+    created_input = await initial_input_consumed(session)
+    if created_input:
         # Creation has already started the first root; it is part of this turn,
         # even when all its events were available before the first host read.
         observed_roots = ()
@@ -139,11 +140,11 @@ async def invocation_baseline(
                 active.scope, active.operation_key + ":send:0"
             )
             sent = operation is not None and operation.operation.status != "pending"
-            return tuple(str(root) for root in roots), sent
+            return tuple(str(root) for root in roots), sent or created_input
     await active.record(
         session, checkpoint(session, identity, _BASELINE, {"roots": list(observed_roots)})
     )
-    return observed_roots, False
+    return observed_roots, created_input
 
 
 class OpenAIUsageRevisions:

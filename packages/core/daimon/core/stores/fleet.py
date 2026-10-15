@@ -425,7 +425,7 @@ async def use_turn(
     worker_id: uuid.UUID,
     expected_version: int,
 ) -> FleetWorker:
-    """Count one model input of a running worker, refusing it past `max_turns`.
+    """Count one model input, including a starting worker's input-bearing create.
 
     Call it in the transaction that wins that input's `claim_send` (the state
     store's one `pending -> sent` compare-and-swap for the input's operation
@@ -440,7 +440,12 @@ async def use_turn(
                     FleetWorkerRow.tenant_id == tenant_id,
                     FleetWorkerRow.id == worker_id,
                     FleetWorkerRow.version == expected_version,
-                    FleetWorkerRow.status == "running",
+                    or_(
+                        FleetWorkerRow.status == "running",
+                        (FleetWorkerRow.status == "starting")
+                        & FleetWorkerRow.binding_id.is_(None)
+                        & (FleetWorkerRow.turns_used == 0),
+                    ),
                     FleetWorkerRow.turns_used < FleetWorkerRow.max_turns,
                 )
                 .values(
