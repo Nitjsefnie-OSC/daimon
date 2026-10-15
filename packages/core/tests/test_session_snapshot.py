@@ -334,8 +334,8 @@ def test_snapshot_from_created_session_captures_every_resource_handle() -> None:
     assert snapshot.agent_version == 3, "the agent version is kept for diagnostics"
     assert snapshot.agent_name == "research-bot", "the agent name is kept for diagnostics"
     backfilled = snapshot_from_retrieved_session(session)
-    assert backfilled.github_mode == "legacy"
-    assert "github_mode" in identity_change_reasons(backfilled, snapshot)
+    assert backfilled.github_mode == "app"
+    assert "github_mode" not in identity_change_reasons(backfilled, snapshot)
 
 
 def test_snapshot_survives_a_json_round_trip() -> None:

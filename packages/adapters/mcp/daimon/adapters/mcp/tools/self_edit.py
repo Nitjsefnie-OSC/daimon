@@ -1,16 +1,14 @@
-"""MCP tools for an agent to edit its own ``agent_files`` and manage its
-``agent_repo_binding`` from inside an MA turn.
+"""MCP tools for an agent to edit its own ``agent_files`` from inside an MA turn.
 
 Identity is read server-side from the JWT claims via ``_auth(ctx)``.
-Cross-agent isolation is enforced by composite-PK at the store layer
-(``(tenant_id, agent_id, key)`` for ``agent_files``;
-``(tenant_id, agent_id)`` for ``agent_repo_binding``).
+Cross-agent isolation is enforced by the ``agent_files`` composite key
+``(tenant_id, agent_id, key)`` at the store layer.
 
-All seven tools are tagged ``agent-chat`` and are therefore visible only
+All four tools are tagged ``agent-chat`` and are therefore visible only
 to a session whose token carries an agent identity — the same identity
 their ``_require_agent_id`` precondition needs to succeed. An ordinary
-chat session never discovers this group; chat users bind working repos with
-``request_repo_binding`` and manage keys with ``request_agent_key``,
+chat session never discovers this group; chat users request GitHub App access
+with ``request_github_access`` and manage keys with ``request_agent_key``,
 ``list_agent_keys`` and ``remove_agent_key``.
 
 ``register_self_edit_tools(mcp, runtime)`` wires the ``@mcp.tool`` closures.

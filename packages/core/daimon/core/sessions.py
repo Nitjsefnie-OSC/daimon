@@ -603,15 +603,9 @@ async def create_session(
     with a destination) leaves it off and mounts the shared store alone, with
     instructions that forbid recording personal facts.
 
-    When the agent has a repo binding, the clone credential is resolved via
-    ``daimon.core.github_repo_auth.resolve_clone_token``:
-    per-agent PAT wins, else the GitHub App installation token (``github_app_id``
-    + ``github_app_private_key``), else the operator ``github_fallback_pat`` for
-    a verified-public binding, else the resolver raises ``DaimonError`` — a
-    bound repo with no resolvable credential is a loud failure, never a
-    silently-omitted clone resource (never an empty ``authorization_token``).
-    ``http_client`` is test-injectable; when omitted, a short-lived
-    ``httpx.AsyncClient`` is constructed for the resolution.
+    GitHub repository resources and credentials come from the agent's usable
+    GitHub App grants. ``prepare_app_access`` mints installation tokens and
+    mounts the granted repositories when an App vault is available.
 
     ``extra_resources`` are mounted alongside everything this function
     assembles, for a caller that has a file the new session must start with —
