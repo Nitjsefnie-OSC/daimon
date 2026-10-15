@@ -1051,3 +1051,9 @@ Daimon agent ids. The owner reuses the existing registered token mint, private
 pending-intent receipt, readback and exact-JTI revocation lifecycle. Its legacy
 Anthropic LiveContext input retains the same ACK gate and behavior. This is a
 provisioning callback, not authorization to allocate sessions or send prompts.
+
+For a captured shared source, use consent's canonical source reference (transport
+service-account ownership is omitted), and verify the caller's captured resource
+scope and actual source/counterpart association before admitting the callback.
+The logical caller account always comes from the scoped authority, never the
+native source transport account.
