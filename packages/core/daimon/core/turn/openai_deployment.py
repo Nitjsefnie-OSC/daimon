@@ -47,6 +47,7 @@ from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.skill_bindings import reserved as skill_metadata_key
 from mux.drivers.openai.transport import Transport
 from mux.errors import ScopeViolation
+from mux.profiles import get_profile
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -109,7 +110,7 @@ class OpenAIDeployment(BaseModel):
                 or self.source_agent_id is None
                 or self.mcp_credential_file is None
                 or not self.mcp_credential_file.is_absolute()
-                or self.source_capabilities.model.provider != "openai"
+                or self.source_capabilities.model.provider != get_profile(self.profile).provider
                 or self.source_capabilities.model.id != "gpt-6-luna"
                 or tuple(item.target.id for item in self.source_capabilities.skills)
                 != self.skill_ids
