@@ -262,12 +262,20 @@ def _by_author(queued: list[TeamsInbound]) -> list[list[TeamsInbound]]:
 
 
 def _compose(items: list[TeamsInbound]) -> TeamsInbound:
-    """One author's messages as one turn, replying where the last came from."""
+    """One author's messages as one turn, replying where the last came from.
+
+    Its id is the latest message the person sent rather than a form submit,
+    whose id names no message, so 👀 and ✅ land there; a form only when all are.
+    """
+    sent = [item for item in items if not item.from_form]
+    named = sent[-1] if sent else items[-1]
     return dataclasses.replace(
         items[-1],
+        activity_id=named.activity_id,
+        from_form=not sent,
         text="\n\n".join(item.text for item in items),
         files=tuple(file for item in items for file in item.files),
-        composed_ids=tuple(item.activity_id for item in items[:-1]),
+        composed_ids=tuple(item.activity_id for item in items if item is not named),
     )
 
 

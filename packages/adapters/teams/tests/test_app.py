@@ -229,6 +229,20 @@ async def test_an_hourglass_only_for_a_message_admission_would_let_start(
     assert made[len(added) :] == removed, "a removal only for a ⌛ that was added"
 
 
+def test_a_message_composed_with_a_later_form_keeps_its_reactions() -> None:
+    """A form's id names no message: 👀 and ✅ go on the latest one the person sent."""
+    sent = make_inbound("the question")
+    form = dataclasses.replace(make_inbound("the form"), from_form=True)
+    composed = app_module._compose([sent, form])
+    assert (composed.activity_id, composed.from_form) == (sent.activity_id, False), (
+        "the turn reacts on the person's message"
+    )
+    assert set(composed.message_ids) == {sent.activity_id, form.activity_id}, "it answers both"
+    assert composed.text == "the question\n\nthe form", "in the order they came"
+    forms = app_module._compose([form, dataclasses.replace(form, activity_id="2")])
+    assert forms.from_form, "only forms: nothing to react on"
+
+
 async def test_a_replayed_message_loses_a_predecessors_hourglass(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
