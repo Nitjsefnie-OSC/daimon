@@ -852,6 +852,30 @@ async def test_an_owner_of_the_admin_team_gets_the_admin_role(
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_turn_reads_its_role_once_for_admission_and_its_origin(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two reads could disagree (the cache expiring between them): admit as one, prompt as other."""
+    teams = _app(db_session_factory, FakeSender())
+    role = AsyncMock(side_effect=[Role.ADMIN, Role.USER])
+    origins: list[Role] = []
+    real_origin = app_module.turn_origin
+
+    def recording_origin(*args: Any, **kwargs: Any) -> Any:
+        origins.append(kwargs["role"])
+        return real_origin(*args, **kwargs)
+
+    with (
+        patched_turns("done"),
+        patch.object(app_module, "inbound_role", role),
+        patch.object(app_module, "turn_origin", recording_origin),
+    ):
+        await teams._run_turn(make_inbound(), TENANT)
+    assert role.await_count == 1, "one role read per turn"
+    assert origins == [Role.ADMIN], "the origin carries the role admission recorded"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_turn_while_the_owners_cannot_be_read_keeps_a_stored_admin_role(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

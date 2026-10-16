@@ -1454,6 +1454,7 @@ class TeamsApp:
                     holder,
                     markers,
                     new_lifecycle,
+                    role=role or Role.USER,  # admission's: one read per turn
                     handoff=handoff,
                     reraise=reraise,
                     roster_open=roster_open,
@@ -1521,11 +1522,12 @@ class TeamsApp:
         markers: set[uuid.UUID],
         new_lifecycle: LifecycleFactory,
         *,
+        role: Role,
         handoff: HandoffFactory | None,
         reraise: bool,
         roster_open: RosterCheck | None,
     ) -> None:
-        deps, role = self.runtime.turn_deps, await self._role(inbound) or Role.USER
+        deps = self.runtime.turn_deps
         lifecycle = holder[-1]
         bare = _bare_mention(inbound)
         if bare and self._reader is None:
