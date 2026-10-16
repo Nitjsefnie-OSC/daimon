@@ -276,10 +276,7 @@ def render_termination_notice(
         return None
     copy = _COPY.get(reason, _FALLBACK)
     failure = error or (state.error if state is not None else None)
-    if any(
-        isinstance(cause, GitHubTokenMintUnavailable)
-        for cause in _error_chain(failure)
-    ):
+    if any(isinstance(cause, GitHubTokenMintUnavailable) for cause in _error_chain(failure)):
         copy = _Copy(
             "GitHub access is temporarily unavailable.",
             "@mention Daimon to try again.",

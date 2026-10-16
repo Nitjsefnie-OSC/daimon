@@ -29,7 +29,6 @@ from daimon.core.github_connect_cards import (
     teams_connect_card,
 )
 from daimon.core.github_credentials import encrypt_token
-from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
@@ -50,6 +49,7 @@ from daimon.core.stores.github_connect import (
     revoke_invitation,
     set_invitation_encrypted_token,
 )
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.security_audit import append_event
 from daimon.core.teams_threads import conversation_of
 from fastmcp import Context, FastMCP

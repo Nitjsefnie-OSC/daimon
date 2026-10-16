@@ -131,23 +131,29 @@ async def test_retained_grant_gets_app_mode_before_installation_recovers(
         params,
     )
     if installation_issue == "repo_missing":
-        await db_session.execute(text("""
+        await db_session.execute(
+            text("""
             UPDATE github_app_installations
             SET repo_full_names = ARRAY['example/widgets'],
                 github_repo_full_names = ARRAY[]::text[]
             WHERE installation_id = 11
-        """))
+        """)
+        )
         assert (await db_session.execute(text(RETIREMENT_LIVE_GRANTS_SQL))).all() == []
-        await db_session.execute(text("""
+        await db_session.execute(
+            text("""
             UPDATE github_app_installations SET github_repo_full_names = NULL
             WHERE installation_id = 11
-        """))
+        """)
+        )
         assert len((await db_session.execute(text(RETIREMENT_LIVE_GRANTS_SQL))).all()) == 1
-        await db_session.execute(text("""
+        await db_session.execute(
+            text("""
             UPDATE github_app_installations
             SET repo_full_names = ARRAY['example/other']
             WHERE installation_id = 11
-        """))
+        """)
+        )
     assert set((await db_session.execute(text(RETIREMENT_LOSS_SQL))).scalars()) == set()
     conn = await db_session.connection()
 
@@ -181,6 +187,10 @@ async def test_retained_grant_gets_app_mode_before_installation_recovers(
         account_type="Organization",
         repository_selection="selected",
         suspended_at=None,
+    )
+    # Connect leaves suspension to reconciliation, which records the recovery.
+    await db_session.execute(
+        text("UPDATE github_app_installations SET suspended_at = NULL WHERE installation_id = 11")
     )
     live = await list_live_grant_repositories(db_session, tenant_id=tenant, agent_id=agent)
     assert [

@@ -22,7 +22,6 @@ from daimon.adapters.mcp.tools.github_request_delivery import (
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.github_app_session import effective_repo_state
-from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.github_request_cards import RequestCard, requester_card
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.github_access import list_agent_grants, list_authorized_repos
@@ -33,6 +32,7 @@ from daimon.core.stores.github_access_requests import (
     request_access,
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.github_links import account_link_is_broken, account_link_status
 from daimon.core.stores.github_personal_links import mint_link
 from fastmcp import Context, FastMCP

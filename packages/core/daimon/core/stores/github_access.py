@@ -13,7 +13,7 @@ from daimon.core._models import (
     GitHubAppInstallation,
     TenantGitHubRepo,
 )
-from daimon.core.github_installation_coverage import installation_covers_repo
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import ColumnElement, or_, select, text

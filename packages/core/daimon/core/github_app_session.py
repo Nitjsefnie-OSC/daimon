@@ -18,7 +18,6 @@ from anthropic.types.beta.vaults.beta_managed_agents_static_bearer_auth_response
     BetaManagedAgentsStaticBearerAuthResponse,
 )
 from cryptography.fernet import InvalidToken, MultiFernet
-from daimon.core._models import GitHubAppInstallation
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     PERMISSION_PROFILES,
@@ -51,6 +50,7 @@ from daimon.core.stores.github_access import (
     list_live_grant_repositories,
     lock_agent_grants,
 )
+from daimon.core.stores.github_app_installations import get as get_installation
 from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
 from daimon.core.stores.github_issued_tokens import (
     GitHubTokenRowClosedError,
@@ -332,7 +332,7 @@ async def _enqueue_mint_failure_reconciliation(
     session: AsyncSession, *, installation_id: int, now: datetime
 ) -> None:
     """Queue once per installation snapshot, even if several groups fail."""
-    installation = await session.get(GitHubAppInstallation, installation_id)
+    installation = await get_installation(session, installation_id=installation_id)
     snapshot = (
         installation.github_refreshed_at.isoformat()
         if installation is not None and installation.github_refreshed_at is not None

@@ -10,7 +10,6 @@ import tempfile
 import time
 from pathlib import Path
 
-
 HERE = Path(__file__).resolve().parent
 JARS = (
     Path("/home/derick/scratch/daimon-os-devenv/tla2tools.jar"),
@@ -27,14 +26,28 @@ def size(path: Path) -> int:
 def run(config: str, jar: Path) -> tuple[str, int]:
     metadir = Path(tempfile.mkdtemp(prefix=".tlc-", dir=HERE))
     command = [
-        "java", "-Xmx768m", "-XX:+UseParallelGC", "-cp", str(jar),
-        "tlc2.TLC", "-deadlock", "-workers", "1", "-metadir", str(metadir),
-        "-config", f"{config}.cfg", "Reconcile.tla",
+        "java",
+        "-Xmx768m",
+        "-XX:+UseParallelGC",
+        "-cp",
+        str(jar),
+        "tlc2.TLC",
+        "-deadlock",
+        "-workers",
+        "1",
+        "-metadir",
+        str(metadir),
+        "-config",
+        f"{config}.cfg",
+        "Reconcile.tla",
     ]
     process = None
     try:
         process = subprocess.Popen(
-            command, cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            command,
+            cwd=HERE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
         )
         start = time.monotonic()

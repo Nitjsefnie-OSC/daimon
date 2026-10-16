@@ -10,12 +10,12 @@ from daimon.core._models import (
     AgentGitHubGrantDraft,
     GitHubAppInstallation,
 )
-from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.stores import github_access
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.github_connect import (
     require_app_eligible_agent,
 )
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession

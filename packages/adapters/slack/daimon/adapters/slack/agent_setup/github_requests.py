@@ -18,7 +18,6 @@ from daimon.core.github_connect_cards import (
     connect_button_blocks,
     resolve_connect_card,
 )
-from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import slack_mrkdwn_escape
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -33,6 +32,7 @@ from daimon.core.stores.github_access_requests import (
     set_status,
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.github_request_actions import (
     approve_connected_request,
     approve_connection_request,

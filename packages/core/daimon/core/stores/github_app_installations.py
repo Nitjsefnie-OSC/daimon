@@ -13,8 +13,8 @@ from datetime import datetime
 from typing import Literal
 
 from daimon.core._models import GitHubAppInstallation, TenantGitHubRepo
-from daimon.core.github_installation_coverage import installation_covers_repo_sql
 from daimon.core.stores.domain import GitHubAppInstallationRow
+from daimon.core.stores.github_installation_coverage import installation_covers_repo_sql
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession

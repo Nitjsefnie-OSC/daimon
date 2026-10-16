@@ -465,9 +465,7 @@ async def test_github_app_suspension_refreshes_without_listing_token(
             row = await install_store.get(session, installation_id=9901)
         assert row is not None and row.github_refreshed_at is not None
         assert (row.suspended_at is not None) == (action == "suspend")
-        assert row.github_repo_full_names == (
-            None if action == "suspend" else ("test-owner/repo",)
-        )
+        assert row.github_repo_full_names == (None if action == "suspend" else ("test-owner/repo",))
         assert row.repo_full_names == (), "refresh must not confirm repositories for Connect"
 
 

@@ -7,9 +7,9 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from daimon.core._models import GitHubAppInstallation
-from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.stores import github_app_installations as installation_store
 from daimon.core.stores import github_installation_reconciliation as store
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 

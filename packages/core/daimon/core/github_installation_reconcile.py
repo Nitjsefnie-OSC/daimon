@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import structlog
-from daimon.core._models import GitHubAppInstallation
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     build_app_jwt,
@@ -16,6 +15,7 @@ from daimon.core.github_app_auth import (
     list_installation_repositories,
     mint_installation_listing_token,
 )
+from daimon.core.stores import github_app_installations as installation_store
 from daimon.core.stores import github_installation_reconciliation as reconciliation_store
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -80,7 +80,9 @@ async def drain_github_installation_reconciliations(
                 repositories = None
             else:
                 async with sessionmaker() as session:
-                    existing = await session.get(GitHubAppInstallation, job.installation_id)
+                    existing = await installation_store.get(
+                        session, installation_id=job.installation_id
+                    )
                     is_github_app = existing is not None and existing.app == "github_app"
                 if is_github_app and installation_state.suspended_at is not None:
                     repositories = None

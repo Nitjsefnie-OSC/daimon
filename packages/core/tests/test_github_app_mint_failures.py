@@ -379,8 +379,26 @@ def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:
     from daimon.core.session_compat import identity_change_reasons
     from daimon.core.session_snapshot import SessionSnapshot
 
-    base = SessionSnapshot.model_construct(
-        **{name: None for name in SessionSnapshot.model_fields},
+    base = SessionSnapshot.model_validate(
+        {
+            "ma_agent_id": "agent_compat",
+            "model_id": "test-model",
+            "system_sha256": None,
+            "skills_sha256": "skills",
+            "environment_id": "environment",
+            "github_mode": "app",
+            "repo_urls": [],
+            "token_repo_urls": [],
+            "repo_url": None,
+            "repo_branch": None,
+            "memory_store_id": None,
+            "vault_id": "vault",
+            "tools_sha256": "tools",
+            "mcp_servers_sha256": "servers",
+            "env_sha256": None,
+            "agent_version": 1,
+            "agent_name": "Agent",
+        }
     )
     common = {
         "github_mode": "app",

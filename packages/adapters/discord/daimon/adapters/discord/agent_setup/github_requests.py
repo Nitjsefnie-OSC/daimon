@@ -13,7 +13,6 @@ from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, resolve_connect_card
-from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.stores.github_access import list_authorized_repos
@@ -25,6 +24,7 @@ from daimon.core.stores.github_access_requests import (
     set_status,
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.github_personal_links import mint_link
 from daimon.core.stores.github_request_actions import (
     approve_connected_request,

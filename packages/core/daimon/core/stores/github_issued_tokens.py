@@ -9,9 +9,9 @@ from typing import Literal
 from cryptography.fernet import MultiFernet
 from daimon.core._models import Account, GitHubAppSessionVault, GitHubIssuedToken, ThreadSession
 from daimon.core.github_credentials import decrypt_token, encrypt_token
-from daimon.core.github_installation_coverage import installation_covers_repo_sql
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.domain import ThreadSessionRow
+from daimon.core.stores.github_installation_coverage import installation_covers_repo_sql
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession

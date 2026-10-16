@@ -6,8 +6,8 @@ import os
 import uuid
 from collections.abc import Iterable
 
-from daimon.core.github_installation_coverage import installation_covers_repo_sql
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.github_installation_coverage import installation_covers_repo_sql
 
 ACCEPTED_LOSS_ENV = "DAIMON_GITHUB_APP_ONLY_ACCEPTED_LOSS"
 
