@@ -23,7 +23,7 @@ from daimon.core.authz import AgentRef, FleetFacts, Place, Subject
 from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer, result_digest
 from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
+from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions, resolve_worker_spec
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from discord.webhook.async_ import AsyncWebhookAdapter, async_context
@@ -102,23 +102,27 @@ def run():
 
 def worker(provider="anthropic", ordinal=1, **updates):
     owner = parent(provider)
+    limits = WorkerLimits(
+        budget_usd=Decimal("0.2"), deadline=NOW + timedelta(minutes=5), max_turns=2
+    )
+    resolved = resolve_worker_spec(owner, owner.spec, policy=POLICY, now=NOW, limits=limits)
     row = FleetWorker(
         UUID(int=50 + ordinal),
         RUN,
         TENANT,
         ordinal,
         "research @everyone <#50>",
-        owner.spec.model_dump(mode="json"),
-        "fixture-digest",
+        resolved.spec.model_dump(mode="json"),
+        resolved.digest,
         provider,
         owner.backend_grants[0].profile,
         owner.spec.model.id,
         "worker-binding",
         "pending",
+        limits.budget_usd,
         Decimal("0.2"),
-        Decimal("0.2"),
-        NOW + timedelta(minutes=5),
-        2,
+        limits.deadline,
+        limits.max_turns,
         0,
         1,
         None,
@@ -210,6 +214,20 @@ async def test_sdk_button_uses_real_shared_control_and_current_host_loader(provi
     assert loader.await_args_list[-1].args == (click,)
     click.response.defer.assert_awaited_once()
     assert str(RUN.hex) in buttons(view)[0].item.custom_id
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+async def test_resume_refuses_a_worker_with_a_changed_spec_digest(provider):
+    card, owner, loader, send, _ = setup(provider)
+    owner.read_run.return_value = (run(), (worker(provider, spec_digest="wrong-digest"),))
+    await card.refresh()
+    view = send.call_args.kwargs["view"]
+    click = interaction(card=card)
+    await next(item for item in buttons(view) if item.item.label == "Resume 1").callback(click)
+    owner.control.assert_not_awaited()
+    assert loader.await_args_list[-1].args == (click,)
+    click.response.send_message.assert_awaited_once()
+    click.response.edit_message.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
