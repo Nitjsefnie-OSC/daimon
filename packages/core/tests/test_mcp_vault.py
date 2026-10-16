@@ -158,7 +158,12 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
     # Warm path verifies the credential URL matches; no rebind needed when it does.
     expected = ["GET /v1/vaults", "GET /v1/vaults/vlt_old/credentials"]
     if legacy:
-        expected.append("POST /v1/vaults/vlt_old/credentials/vcrd_existing")
+        expected.extend(
+            [
+                "GET /v1/vaults/vlt_old/credentials",
+                "POST /v1/vaults/vlt_old/credentials/vcrd_existing",
+            ]
+        )
     assert calls == expected, (
         "must list creds to verify URL match, but not create/delete when matching"
     )

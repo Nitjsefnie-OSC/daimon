@@ -189,7 +189,10 @@ async def _refresh_chat_credential_locked(
     scope: Scope,
     slack_turn_context_id: uuid.UUID | None = None,
     preserve_context: bool = False,
+    registered_payload: dict[str, Any] | None = None,
 ) -> None:
+    target = None
+    metadata: dict[str, str] = {}
     async for cred in list_credentials(client, vault_id, scope=scope):
         if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse):
             continue
@@ -223,6 +226,10 @@ async def _refresh_chat_credential_locked(
             == (None if slack_turn_context_id is None else str(slack_turn_context_id))
         ):
             return
+        target = cred
+        break
+
+    if registered_payload is None:
         payload = await chat_mcp_credential(
             session,
             account_id=account_id,
@@ -232,24 +239,36 @@ async def _refresh_chat_credential_locked(
             now=now,
             slack_turn_context_id=slack_turn_context_id,
         )
-        payload["metadata"] = {
-            **{key: value for key, value in metadata.items() if key != "daimon_chat_context"},
-            **payload["metadata"],
-        }
-        # Update in place: no empty slot and no cross-thread delete/recreate race.
-        payload["auth"].pop("mcp_server_url")
-        await update_credential(client, vault_id, cred.id, payload, scope=scope)
+        # A running session can observe the provider write before its response
+        # returns. Commit first, then re-lock and re-read so another refresh or
+        # OAuth replacement wins safely. No second pooled connection is held.
+        await session.commit()
+        await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
+        await _refresh_chat_credential_locked(
+            client,
+            session=session,
+            vault_id=vault_id,
+            account_id=account_id,
+            agent_id=agent_id,
+            jwt_secret=jwt_secret,
+            public_url=public_url,
+            now=now,
+            scope=scope,
+            slack_turn_context_id=slack_turn_context_id,
+            registered_payload=payload,
+        )
         return
-    payload = await chat_mcp_credential(
-        session,
-        account_id=account_id,
-        agent_id=agent_id,
-        jwt_secret=jwt_secret,
-        public_url=public_url,
-        now=now,
-        slack_turn_context_id=slack_turn_context_id,
-    )
-    await store_credential(client, vault_id, payload, scope=scope)
+
+    if target is None:
+        await store_credential(client, vault_id, registered_payload, scope=scope)
+        return
+    registered_payload["metadata"] = {
+        **{key: value for key, value in metadata.items() if key != "daimon_chat_context"},
+        **registered_payload["metadata"],
+    }
+    # Update in place: no empty slot and no cross-thread delete/recreate race.
+    registered_payload["auth"].pop("mcp_server_url")
+    await update_credential(client, vault_id, target.id, registered_payload, scope=scope)
 
 
 async def refresh_agent_mcp_vault(
@@ -265,7 +284,7 @@ async def refresh_agent_mcp_vault(
     scope: Scope,
 ) -> None:
     """Refresh the vault already mounted by a reused ordinary chat session."""
-    async with session_factory() as session, session.begin():
+    async with session_factory() as session:
         await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
         await _refresh_chat_credential_locked(
             client,
@@ -279,6 +298,8 @@ async def refresh_agent_mcp_vault(
             scope=scope,
             preserve_context=True,
         )
+
+        await session.commit()
 
 
 async def _ensure_agent_mcp_vault_locked(
@@ -378,7 +399,8 @@ async def ensure_agent_mcp_vault(
     Cost: O(deploys-with-URL-change) orphan creds per agent, bounded and harmless.
 
     The JWT subject stays account-scoped. Its separate chat_agent_id claim is
-    consumed only by the Google broker; it does not confer agent-chat authority.
+    binds session reads and Google brokering to the executing agent without
+    conferring the separate external agent-chat tool authority.
 
     The entire list-then-create body runs inside a blocking Postgres
     advisory-transaction lock keyed on ``(account_id, agent_id)``:
@@ -389,9 +411,9 @@ async def ensure_agent_mcp_vault(
     scope = scope or Scope.legacy_host_authorized(
         call_site="daimon.core.mcp_vault:ensure_agent_mcp_vault"
     )
-    async with session_factory() as session, session.begin():
+    async with session_factory() as session:
         await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
-        return await _ensure_agent_mcp_vault_locked(
+        vault_id = await _ensure_agent_mcp_vault_locked(
             client,
             session=session,
             account_id=account_id,
@@ -402,6 +424,9 @@ async def ensure_agent_mcp_vault(
             slack_turn_context_id=slack_turn_context_id,
             scope=scope,
         )
+
+        await session.commit()
+        return vault_id
 
 
 async def add_github_copilot_credential(
@@ -512,7 +537,7 @@ async def add_external_mcp_credential(
         call_site="daimon.core.mcp_vault:add_external_mcp_credential"
     )
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
-    async with session_factory() as session, session.begin():
+    async with session_factory() as session:
         await _lock_vault_namespace(session, account_id=account_id, agent_id=agent_id)
         oldest = await _find_vault_by_name(client, display_name=display_name)
         if oldest is not None:
@@ -556,3 +581,4 @@ async def add_external_mcp_credential(
             },
             scope=scope,
         )
+        await session.commit()

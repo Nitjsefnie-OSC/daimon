@@ -132,6 +132,8 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(
         replies.append(("POST", "/v1/vaults", 200, vault))
     else:
         replies.append(("GET", "/v1/vaults/vault/credentials", 200, page([current])))
+    if case in ("upgrade", "heal"):
+        replies.append(("GET", "/v1/vaults/vault/credentials", 200, page([current])))
     if case in ("cold", "heal"):
         replies.append(("POST", "/v1/vaults/vault/credentials", 200, static("created", PUBLIC)))
     elif case == "upgrade":
@@ -167,6 +169,9 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(
             await before.beta.vaults.create(display_name=name)
         else:
             _ = [row async for row in before.beta.vaults.credentials.list(vault_id="vault")]
+        if case in ("upgrade", "heal"):
+            # A replacement rechecks the slot after committing its registry row.
+            _ = [row async for row in before.beta.vaults.credentials.list(vault_id="vault")]
         if case in ("cold", "heal"):
             await before.beta.vaults.credentials.create(
                 vault_id="vault",
@@ -180,7 +185,8 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(
                 auth={"type": "static_bearer", "token": token},
                 metadata={"kept": "yes", **new_metadata},
             )
-        async with db_session_factory() as db, db.begin():
+        async with db_session_factory() as db:
+            await host._lock_vault_namespace(db, account_id=ACCOUNT, agent_id=AGENT)
             assert (
                 await _ensure_agent_mcp_vault_locked(
                     after,
@@ -194,6 +200,7 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(
                 )
                 == "vault"
             )
+            await db.commit()
     equal_requests(old, new)
     assert seen[0][0] == "list_vaults"
     assert seen[0][1].is_legacy_host_authorized  # Name discovery precedes knowing the ID.

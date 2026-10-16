@@ -10,15 +10,21 @@ import httpx
 import jwt
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.core.mcp_auth import CHAT_TOKEN_TTL
 from daimon.core.mcp_vault import ensure_agent_mcp_vault
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 @pytest.mark.parametrize("private", [False, True])
-async def test_registered_vault_rotates_before_expiry_and_after_revoke(db_session_factory, private):
-    now = dt.datetime.now(dt.UTC).replace(microsecond=0)
+async def test_registered_vault_rotates_before_expiry_and_after_revoke(
+    db_engine, db_clean, private
+):
+    # Separate connections expose registry publication races hidden by shared-connection fixtures.
+    db_session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0) - dt.timedelta(minutes=30)
     async with db_session_factory() as db, db.begin():
         tenant = await make_tenant(db, platform="discord")
         account = await make_account(db, tenant=tenant)
@@ -30,9 +36,11 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(db_sessio
     secret = b"s" * 32
     slots = []
     minted = []
+    tokens = []
     writes = []
+    admitted_at_publication = []
 
-    def handler(req):
+    async def handler(req):
         if req.method == "GET" and req.url.path == "/v1/vaults":
             return httpx.Response(
                 200,
@@ -64,6 +72,12 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(db_sessio
                 options={"verify_iat": False, "verify_exp": False},
             )
             minted.append(claims)
+            tokens.append(body["auth"]["token"])
+            if len(minted) > 1:
+                verifier = DaimonJWTVerifier(secret=secret, sessionmaker=db_session_factory)
+                admitted_at_publication.append(
+                    await verifier.verify_token(body["auth"]["token"]) is not None
+                )
             writes.append(req.url.path)
             slot = {
                 "id": "cred_chat",
@@ -161,6 +175,11 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(db_sessio
         async with db_session_factory() as db:
             old = await get_mcp_token(db, jti=uuid.UUID(claims["jti"]))
         assert old is not None and old.revoked_at is None
+        verifier = DaimonJWTVerifier(secret=secret, sessionmaker=db_session_factory)
+        assert await verifier.verify_token(tokens[0]) is not None
         assert writes[1:] == ["/v1/vaults/vlt_chat/credentials/cred_chat"] * 2
+        assert admitted_at_publication == [True, True], (
+            "a running session can use the replacement before its vault-write response returns"
+        )
     finally:
         await client.close()
