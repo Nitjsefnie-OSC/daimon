@@ -220,6 +220,16 @@ async def test_send_message_refuses_unless_membership_is_confirmed(fake: _Fake, 
     assert fake.posts() == [], "nothing may be posted without a confirmed membership"
 
 
+@pytest.mark.parametrize("target", ["19:group@thread.v2", "19:meeting_x@thread.v2"])
+async def test_send_message_refuses_a_group_chat_before_any_call(target: str) -> None:
+    fake = _Fake()
+    with pytest.raises(ToolError, match="group chats"):
+        await _teams_send_message_impl(
+            _runtime(_client(fake)), _auth(), channel_id=target, content="hi"
+        )
+    assert fake.requests == []
+
+
 async def test_send_message_fails_closed_on_transport_error() -> None:
     def boom(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("down", request=request)

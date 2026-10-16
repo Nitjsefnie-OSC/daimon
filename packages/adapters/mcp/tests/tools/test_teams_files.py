@@ -237,7 +237,7 @@ async def test_a_chat_file_is_a_consent_card_with_a_signed_offer(
 @pytest.mark.parametrize(
     ("channel_id", "handles", "match"),
     [
-        ("19:group@thread.v2", None, "not a group chat"),
+        ("19:group@thread.v2", None, "group chats"),
         (_CHAT, ["missing"], "not found"),
     ],
 )

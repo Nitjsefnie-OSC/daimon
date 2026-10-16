@@ -81,10 +81,12 @@ from daimon.adapters.mcp.tools.teams._read import (
     _teams_search_messages_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.teams._send import (
+    GROUP_CHAT_REFUSED,
     TeamsMessageRow,
     _teams_create_thread_impl,  # pyright: ignore[reportPrivateUsage]
     _teams_send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.teams_threads import is_group_chat
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -98,12 +100,15 @@ async def _read_policy(
 ) -> ChannelReadPolicy:
     # Teams reads a private or shared channel only from inside it, so its
     # origin is resolved even when nothing is sealed.
-    return await load_read_policy(
+    read = await load_read_policy(
         runtime,
         auth,
         origin_context_id=origin_context_id,
         resolve_without_seals=auth.platform == "teams",
     )
+    if auth.platform == "teams" and read.origin and is_group_chat(read.origin.parent_channel_id):
+        raise ToolError(GROUP_CHAT_REFUSED)
+    return read
 
 
 def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:

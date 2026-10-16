@@ -264,6 +264,15 @@ async def test_reads_refuse_non_members_chats_and_unknown_channels(
         await _teams_read_thread_impl(
             runtime, auth, thread_id="a:chat", limit=5, cursor=None, read_policy=OPEN_READ_POLICY
         )
+    with pytest.raises(ToolError, match="group chats"):
+        await _teams_read_channel_impl(
+            runtime,
+            auth,
+            channel_id="19:group@thread.v2",
+            limit=5,
+            cursor=None,
+            read_policy=OPEN_READ_POLICY,
+        )
     with pytest.raises(ToolError, match="not in a team"):
         await _teams_read_channel_impl(
             runtime,
@@ -545,3 +554,21 @@ def test_parse_link_reads_message_and_channel_links() -> None:
     ):
         with pytest.raises(ToolError):
             _teams_parse_link_impl(bad)
+
+
+async def test_channel_reads_are_refused_from_a_group_chat_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.mcp.tools import channels
+
+    origin: Any = MagicMock(parent_channel_id="19:group@thread.v2")
+
+    async def from_a_group_chat(*_args: object, **_kwargs: object) -> ChannelReadPolicy:
+        return ChannelReadPolicy(policy=OPEN_ACCESS_POLICY, origin=origin)
+
+    monkeypatch.setattr(channels, "load_read_policy", from_a_group_chat)
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform="teams"
+    )
+    with pytest.raises(ToolError, match="group chats"):
+        await channels._read_policy(MagicMock(), auth, "origin")  # pyright: ignore[reportPrivateUsage]
