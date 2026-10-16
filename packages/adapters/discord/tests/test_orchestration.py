@@ -509,9 +509,10 @@ class TestNewThreadCreation:
                 session, id=prepared_entry.await_args.kwargs["turn_card_intent_id"]
             )
         assert intent is not None
-        assert (intent.tenant_id, intent.platform, intent.thread_id) == (
+        assert (intent.tenant_id, intent.platform, intent.channel_id, intent.thread_id) == (
             tenant.id,
             "discord",
+            str(message.channel.id),
             str(mock_thread.id),
         )
         assert mock_thread.send.await_count == (2 if completion_enabled else 1)
