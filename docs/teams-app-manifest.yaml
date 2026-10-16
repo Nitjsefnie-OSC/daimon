@@ -189,6 +189,6 @@ authorization:
       - name: ChatMessage.Read.Chat
         type: Application
       # Send activity feed notices for routine results and cards waiting on
-      # someone in the team's channels.
+      # someone in the team's channels; without it they are only logged.
       - name: TeamsActivity.Send.Group
         type: Application

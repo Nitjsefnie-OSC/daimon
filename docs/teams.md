@@ -80,6 +80,12 @@ as one follow-up per author. Work an agent hands off
 refuses that work, it is dropped without a notice, as on Slack. A retried
 delivery runs once, across restarts too (see Restart behaviour).
 
+Answers and `send_message` posts go out as Teams Extended Markdown, so `$…$`
+and `$$…$$` render as math. A `$` that opens or closes no math span by
+pandoc's dollar rules, such as a price, is escaped to stay literal; code is
+left as is. A message that @mentions someone (a completion ping) stays plain
+markdown, its math shown as typed.
+
 ### Feedback and Ask a person
 
 The card below an answer carries 👍 and 👎 buttons: Teams refuses an edit
@@ -353,7 +359,8 @@ setting off the routes answer 404 and nothing is subscribed.
   passed to the agent. Files shared in a 1:1 chat reach the agent as short-lived
   download links. The manifest must set `supportsFiles: true`.
 - **Out.** Files the agent writes to its outputs are offered in the 1:1 chat
-  with Teams' file consent card (the agent guidance describes this path); accepting uploads the file to the user's
+  with Teams' file consent card, "Save <name> to your OneDrive?" (the agent
+  guidance describes this path); accepting uploads the file to the user's
   OneDrive. Offers live in memory, so a restart drops them and the next turn
   that uses a tool offers the file again.
 - **Channels.** Teams sends the bot only a channel message's text, so the bot
@@ -393,6 +400,13 @@ setting off the routes answer 404 and nothing is subscribed.
   to three times while Graph renders it (ten seconds at most for them all),
   fetched without a token and re-encoded like an image. One that does not come
   is logged (`teams.output_thumbnail.skipped`, no name) and left out.
+- **Preview outputs.** An output named `<file>.preview.png`, such as
+  `report.pdf.preview.png`, is the agent's own picture of that file. It shows
+  inline like an image, under the file's name, and is never offered or
+  uploaded; delivery deletes it. In a channel it stands in for Graph's
+  thumbnail of that file. In a 1:1 chat `files_hint` tells the agent it may
+  make one when it can render cheaply (typst for a document it built with
+  typst, PyMuPDF for a PDF); no office renderer is installed by default.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts (a
@@ -531,6 +545,17 @@ channel, @mentioning the asker) so Teams notifies, and the card then reads
 "Done. The answer is below.". The asker's message also gets 👀 once the turn
 is accepted and ✅ in its place once it is answered, as on Discord. Teams renders markdown tables
 natively, so `DAIMON_TABLE_RENDERING` has nothing to do here.
+
+A routine result posted in a channel also sends its creator an activity feed
+notice that opens it. Each routine keeps one feed entry (its `chainId` comes
+from the routine's id), so a new run replaces the last. A tool approval or
+question card in a channel thread notifies the person who must answer it. A
+1:1 chat notifies on its own and gets none. Notices go through Graph's
+`sendActivityNotification` on the channel's team under the
+`TeamsActivity.Send.Group` consent, in the background within five seconds;
+one that fails is logged (`teams.activity_notice.failed`, status and reason
+only) and dropped, never touching the post. People turn them off under the
+app in their Teams notification settings.
 
 ### Capacity
 

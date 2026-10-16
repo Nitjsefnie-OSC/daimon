@@ -36,7 +36,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and routines and agent tools do not reach group chats yet. Rebuild the app
   package (version 0.6.0) for the `groupChat` scope and the
   `ChatMessage.Read.Chat` permission.
-
+- **Teams answers render math.** Answers, their follow-up chunks, MCP
+  `send_message` posts and new threads, and `tidy` text edits go out as Teams
+  Extended Markdown, so `$…$` and `$$…$$` show as formulas. A `$` that opens
+  or closes no math span by pandoc's dollar rules, such as a price in
+  "$5 and $10", is escaped to stay literal, and code spans and fences are left
+  untouched. A message that @mentions someone, such as a completion ping,
+  stays plain markdown, so its ping is unchanged and its math shows as typed.
+  Long answers still split at 4,000 characters.
+- **Teams agents can show a picture of a document they made.** An output named
+  `<file>.preview.png` (for example `report.pdf.preview.png`) shows inline,
+  under the file's name, and is never offered or uploaded; delivery deletes
+  it afterwards. In a channel it takes the place of Graph's thumbnail of that
+  file. In a 1:1 chat the turn context tells the agent it may make one when it
+  can render cheaply, with typst or PyMuPDF; no office renderer is installed
+  by default.
+- **Teams activity feed notices.** A routine result posted in a channel now
+  notifies its creator in their Teams activity feed, linking to the post, with
+  one feed entry per routine that each run replaces. An approval or question
+  card in a channel thread notifies the person who must answer it. 1:1 chats
+  already notify and get none. Notices run in the background through Graph
+  with a five-second limit; a failure is logged once and never delays or fails
+  the post. The manifest adds the `TeamsActivity.Send.Group` consent, so an
+  existing install needs the rebuilt package and a team owner to accept it.
 - **Teams now reacts on the asker's message, as Discord and Slack do.** Teams bots
   could not react, so a message queued behind a running turn showed nothing
   until its turn began, and a completion ping was an @mention alone. A message
@@ -89,6 +111,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Teams 1:1 file offer reads "Save <name> to your OneDrive?"**, naming
+  where the file goes, instead of a bare file name. Accepting still uploads
+  the file to the person's OneDrive and declining still drops the offer. The
+  card's buttons are Teams' own and unchanged, and channel uploads are
+  unaffected. No setting or manifest change.
 - Walls say who can fix them and the one next step: `/here` when Daimon can't see or answer in a channel, GitHub refusals, MCP connection refusals and expired approvals. Each slash command has one description on Discord and Slack, and `/help` lists `/here` first. The setup skill and docs no longer promise members MCP connections on shared agents or describe GitHub access levels removed in #1005.
 - **Thread titles and the thread-participation classifier now run on Claude Haiku 5.5** instead of Claude Haiku 4.5. Haiku 5.5 costs less per token but counts the same text as about 30% more tokens, so these calls' usage rows shift. Haiku 5.5 thinks by default and thinking counts toward the output cap, so naming now turns thinking off. The classifier runs at effort low with a 1,024-token cap, since its old 100-token cap cut off Haiku 5.5's verdict, which then counted as silence. A refused naming call falls back to the title taken from the message, and a refused classifier call stays silent, as other failures already did; both are still metered. `DAIMON_THREAD_PARTICIPATION__CLASSIFIER_MODEL` still picks the classifier's model, which must support the effort parameter (Claude Haiku 4.5 does not).
 - Connect GitHub pages now show clear next steps, keep repo additions and removals pending until Save, and hide repo names the current GitHub account cannot access.

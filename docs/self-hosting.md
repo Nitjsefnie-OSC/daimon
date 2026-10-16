@@ -410,6 +410,10 @@ app (more on that in step 7), and group chats through a chat-level one
 application permission: channel files (`Sites.Selected`) and private and
 shared channel messages (`ChannelMessage.Read.All`, which is tenant-wide; see
 [below](#private-and-shared-channels-optional)).
+The same team-level consent covers activity feed notices
+(`TeamsActivity.Send.Group`). A team that added an older package needs the
+rebuilt one uploaded again (see Updating the app) and an owner to accept it;
+until then its notices are refused and only logged.
 
 ### 2. Create the Azure Bot and connect it to Teams
 
