@@ -21,7 +21,9 @@ COMMAND_HELP = {
     "support": "Ask a person",
     "help": "This list",
 }
-_WHERE = "Send these in our 1:1 chat, or type / in a channel: only you see the answer."
+_WHERE = (
+    "Send these in our 1:1 chat, or type / in a channel or group chat: only you see the answer."
+)
 
 
 def help_card(names: Collection[str], *, bot: str) -> AdaptiveCard:
