@@ -35,7 +35,12 @@ from daimon.adapters.mcp.tools.teams._directory import (
 from daimon.core.media.filenames import sanitize_title
 from daimon.core.stores.domain import FileUploadRow
 from daimon.core.teams_file_offers import UploadOffer, consent_attachment
-from daimon.core.teams_graph import FILE_ATTACHMENT_TYPES, GraphMessage, GraphUnavailable
+from daimon.core.teams_graph import (
+    FILE_ATTACHMENT_TYPES,
+    GraphMessage,
+    GraphUnavailable,
+    linked_files,
+)
 from daimon.core.teams_sharepoint import SharePoint, file_link
 from fastmcp.exceptions import ToolError
 
@@ -125,13 +130,23 @@ async def file_links(
     ref: TeamsChannelRef,
     messages: Iterable[GraphMessage],
 ) -> dict[str, str]:
-    """Download URLs of the messages' shared files inside the channel's folder, by content URL."""
+    """Download URLs of the messages' files inside the channel's folder, by content URL.
+
+    Both shared files and the SharePoint links of a bot's message (`linked_files`),
+    so the agent can open what it delivered earlier.
+    """
     wanted = list(
         dict.fromkeys(
-            a.content_url
+            url
             for m in messages
-            for a in m.attachments
-            if a.content_type in FILE_ATTACHMENT_TYPES and a.content_url
+            for url in (
+                *(
+                    a.content_url
+                    for a in m.attachments
+                    if a.content_type in FILE_ATTACHMENT_TYPES and a.content_url
+                ),
+                *(link for _, link in linked_files(m)),
+            )
         )
     )[:MAX_LINKS]
     if not wanted:

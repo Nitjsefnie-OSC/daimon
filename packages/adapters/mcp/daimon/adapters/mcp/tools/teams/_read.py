@@ -50,6 +50,7 @@ from daimon.core.teams_graph import (
     GraphMessage,
     GraphUnavailable,
     image_sources,
+    linked_files,
     message_text,
     skiptoken_of,
 )
@@ -81,7 +82,8 @@ def _row(
 ) -> TeamsReadMessage | None:
     """The message as a row; None for a system event or a deleted message.
 
-    `links` maps a shared file's content URL to its download URL (`file_links`).
+    `links` maps a shared file's content URL, or a bot's file link, to its download URL
+    (`file_links`).
     """
     if message.message_type != "message" or message.deleted_date_time is not None:
         return None
@@ -102,9 +104,12 @@ def _row(
         timestamp=message.created_date_time,
         subject=message.subject or None,
         files=[
-            TeamsFileRow(name=a.name or "file", url=links.get(a.content_url or ""))
-            for a in message.attachments
-            if a.content_type in _FILES
+            *(
+                TeamsFileRow(name=a.name or "file", url=links.get(a.content_url or ""))
+                for a in message.attachments
+                if a.content_type in _FILES
+            ),
+            *(TeamsFileRow(name=name, url=links.get(url)) for name, url in linked_files(message)),
         ],
         images=len(image_sources(html)) if html else 0,
         web_url=message.web_url,

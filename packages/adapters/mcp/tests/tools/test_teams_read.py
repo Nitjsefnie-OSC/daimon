@@ -73,6 +73,8 @@ class _Fake:
         # A file posted from a library folder outside the channel's own (`Board`).
         self.restricted = False
         self.site_status = 200
+        # daimon's reply links the file it saved, as its answers read back from Graph.
+        self.saved_link = False
         # Shared file name -> its folder, as `/shares` found it.
         self._folders: dict[str, str] = {}
 
@@ -129,7 +131,7 @@ class _Fake:
                     "attachments": self._file("q3.xlsx")
                     + (self._file("plan.docx", folder="Board") if self.restricted else []),
                     "replies": [
-                        _message("1700000000002", "reply two", app=True),
+                        self._bot_reply(),
                         _message("1700000000001", "reply one"),
                     ],
                     "replies@odata.nextLink": "x",
@@ -141,6 +143,14 @@ class _Fake:
                     return httpx.Response(200, json=body)
                 return httpx.Response(200, json={"value": []})
         return httpx.Response(404)
+
+    def _bot_reply(self) -> dict[str, Any]:
+        reply = _message("1700000000002", "reply two", app=True)
+        if self.saved_link:
+            link = f"{_LIBRARY}/research/chart.png".replace(" ", "%20")
+            html = f'<p>Saved to this channel\'s files:</p><ul><li><a href="{link}">chart.png</a>'
+            reply["body"] = {"contentType": "html", "content": html + "</li></ul>"}
+        return reply
 
     def _file(self, name: str, *, folder: str = "research") -> list[dict[str, str]]:
         if not self.files:
@@ -381,6 +391,26 @@ async def test_files_are_linked_only_where_the_files_permission_is_granted(
         paths = [r.url.path for r in fake.graph()]
         assert len([p for p in paths if p.endswith("/filesFolder")]) == 2, "one try per read"
         assert not [p for p in paths if p.startswith("/v1.0/shares/")], "no file is looked up"
+
+
+async def test_a_file_daimon_saved_earlier_is_linked_from_its_own_reply(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """daimon's saved-file links are in its text, not attachments: they resolve all the same."""
+    auth, fake = await _setup(db_session), _Fake()
+    fake.saved_link = True
+    read = await _teams_read_channel_impl(
+        _runtime(fake, sessionmaker),
+        auth,
+        channel_id=_CHANNEL,
+        limit=5,
+        cursor=None,
+        read_policy=OPEN_READ_POLICY,
+    )
+    reply = next(r for p in read.posts for r in p.replies if r.is_bot)
+    assert [(f.name, f.url) for f in reply.files] == [
+        ("chart.png", "https://example.sharepoint.com/download/chart.png?tempauth=t")
+    ], "the link is checked against the channel's folder and resolved"
 
 
 async def test_a_file_outside_the_channels_folder_is_named_but_not_linked(
