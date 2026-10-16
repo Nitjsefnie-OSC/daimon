@@ -239,7 +239,8 @@ A turn replays the chat like a channel thread (Channel history, below): the
 first turn the newest 25 messages, a later one only newer messages, the
 newest 4 images, under the resource-specific consent `ChatMessage.Read.Chat`
 that a chat member grants when adding the app. Without it the agent gets the
-text of the message alone. Commands answer privately as in a channel; `new`
+text of the message alone. Those first 25 can predate the app's addition: the
+bot does not record when it joined a chat, so it reads them all. Commands answer privately as in a channel; `new`
 resets the sender's session there, and `setup` and `support` stay in the 1:1
 chat. Files are not shared in group chats: image previews are posted, any
 other output is skipped and deleted, and the agent is told so. Routines and
