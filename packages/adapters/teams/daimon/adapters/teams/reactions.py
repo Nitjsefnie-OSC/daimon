@@ -35,6 +35,10 @@ MAX_WAIT_S = 5.0
 CALL_TIMEOUT_S = 5.0
 
 
+# Activity ids are unique only within a conversation, as the app's delivery dedupe keys them.
+MessageKey = tuple[str, str]
+
+
 @dataclass(frozen=True)
 class ReactionTarget:
     """A message a person sent, where Bot Framework can react to it."""
@@ -42,6 +46,10 @@ class ReactionTarget:
     conversation_id: str
     activity_id: str
     service_url: str | None
+
+    @property
+    def key(self) -> MessageKey:
+        return (self.conversation_id, self.activity_id)
 
 
 def reaction_target(inbound: TeamsInbound) -> ReactionTarget | None:
@@ -80,9 +88,9 @@ class TeamsReactions:
         self._sleep = sleep
         self._next_slot = 0.0
         # The last call queued per message, which the next one on it waits for.
-        self._chains: dict[str, asyncio.Task[None]] = {}
-        # Messages showing ⌛, by activity id.
-        self._queued: dict[str, ReactionTarget] = {}
+        self._chains: dict[MessageKey, asyncio.Task[None]] = {}
+        # Messages showing ⌛.
+        self._queued: dict[MessageKey, ReactionTarget] = {}
 
     def acknowledger(self, inbound: TeamsInbound) -> Callable[[Acknowledgment], None] | None:
         """The lifecycle's `acknowledge` for a turn answering `inbound`, if it can react."""
@@ -102,21 +110,22 @@ class TeamsReactions:
         """⌛ on a message waiting behind the turn running in its chat."""
         if self._react is None or (target := reaction_target(inbound)) is None:
             return
-        self._queued[target.activity_id] = target
+        self._queued[target.key] = target
         self._queue(target, HOURGLASS, add=True)
 
     def clear_queued(self, items: Iterable[TeamsInbound]) -> None:
         """Remove the ⌛ from these messages, if they show one: their work started or settled."""
         for item in items:
             for activity_id in item.message_ids:
-                if (target := self._queued.pop(activity_id, None)) is not None:
+                key = (item.conversation_id, activity_id)
+                if (target := self._queued.pop(key, None)) is not None:
                     self._queue(target, HOURGLASS, add=False)
 
     def _queue(self, target: ReactionTarget, reaction: str, *, add: bool) -> None:
         react = self._react
         if react is None:
             return
-        key = target.activity_id
+        key = target.key
         task = self._spawn(self._run(react, self._chains.get(key), target, reaction, add=add))
         self._chains[key] = task
 

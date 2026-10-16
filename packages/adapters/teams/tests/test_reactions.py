@@ -27,10 +27,12 @@ class Calls:
 
     def __init__(self, *, fail: frozenset[str] = frozenset()) -> None:
         self.made: list[tuple[str, str, bool]] = []
+        self.chats: list[str] = []
         self.fail = fail
 
     async def __call__(self, target: ReactionTarget, reaction: str, *, add: bool) -> None:
         self.made.append((target.activity_id, reaction, add))
+        self.chats.append(target.conversation_id)
         if reaction in self.fail:
             request = httpx.Request("PUT", "https://smba.example.test/v3/conversations/c")
             response = httpx.Response(429, headers={"Retry-After": "1"}, request=request)
@@ -99,6 +101,23 @@ async def test_a_queued_message_shows_an_hourglass_until_its_work_starts() -> No
     assert calls.made.index((first.activity_id, HOURGLASS, True)) < calls.made.index(
         (first.activity_id, HOURGLASS, False)
     ), "a removal never overtakes the add it undoes"
+
+
+async def test_the_same_activity_id_in_two_chats_keeps_two_hourglasses() -> None:
+    """Activity ids repeat across conversations: each chat's ⌛ comes off its own message."""
+    calls = Calls()
+    harness = Harness(calls)
+    chat_a, chat_b = make_inbound(conversation="chat-a"), make_inbound(conversation="chat-b")
+    chat_b = dataclasses.replace(chat_b, activity_id=chat_a.activity_id)
+    harness.reactions.mark_queued(chat_a)
+    harness.reactions.mark_queued(chat_b)
+    harness.reactions.clear_queued([chat_a])
+    harness.reactions.clear_queued([chat_b])
+    await harness.settle()
+    removed = sorted(
+        chat for chat, (_, _, add) in zip(calls.chats, calls.made, strict=True) if not add
+    )
+    assert removed == ["chat-a", "chat-b"], "neither chat's mark overwrote the other's"
 
 
 async def test_a_throttled_reaction_is_dropped_and_the_next_still_runs() -> None:
