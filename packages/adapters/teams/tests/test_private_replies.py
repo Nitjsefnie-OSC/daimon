@@ -19,6 +19,7 @@ from daimon.adapters.teams.commands import (
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.private_replies import (
     NOT_YET_PRIVATE,
+    UNSHOWN,
     PrivateReplies,
     reply_privately,
 )
@@ -194,6 +195,19 @@ async def test_a_refused_private_answer_moves_to_the_1_1_chat(
     assert pointer[1].text == ANSWERED_IN_CHAT.format(name="memory") and _is_private(pointer[1])
     assert answer[0] == "a:direct" and not _is_private(answer[1])
     assert [inbound.kind for inbound in seen] == ["channel", "dm"]
+
+
+async def test_a_refused_forget_is_not_run_again() -> None:
+    """`memory forget-mine <code>` deletes before it answers: a refused answer never reruns it."""
+    sender, seen = FakeSender(refuse_on={0}, refuse_status=403), []
+    replies = _replies(sender, seen, direct=_Direct())
+    await replies.run(
+        _channel("memory forget-mine a1b2c3"), TENANT, ("memory", "forget-mine a1b2c3")
+    )
+    assert len(seen) == 1, "the deletion runs once"
+    notice = sender.sent[-1][1]
+    assert notice.text == UNSHOWN.format(name="memory forget-mine a1b2c3")
+    assert len(sender.sent) == 2, "no 1:1 chat answer follows"
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

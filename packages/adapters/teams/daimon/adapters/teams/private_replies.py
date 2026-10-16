@@ -8,6 +8,8 @@ have landed. Commands whose flows live in the 1:1 chat (`setup`'s setup
 conversations, `support`'s request) are answered there, as are messages read
 from Graph, which carry no Bot Framework id to address. In a group chat,
 whose one conversation `new` restarts, `new` is answered privately too.
+A command that changes something before it answers (`memory forget-mine
+<code>`) is never run twice: a refused answer gets a short notice instead.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
+from daimon.core.memory_view import parse_memory_args
 from daimon.core.turn.errors import AdmissionDenialReason
 from microsoft_teams.api import Account, MessageActivity, MessageActivityInput, SentActivity
 from microsoft_teams.apps import ActivityContext
@@ -50,6 +53,7 @@ NOT_YET_PRIVATE = (
     "Private questions aren't supported yet. Mention {bot} in the thread to ask there, "
     "or ask me in our 1:1 chat."
 )
+UNSHOWN = "I ran `{name}`, but couldn't show you its result privately here."
 # Admission refusals about the sender, not the thread: only they see them.
 SENDER_ONLY: frozenset[AdmissionDenialReason] = frozenset(
     {"invoker_not_allowed", "external_participant", "cap_exceeded"}
@@ -209,6 +213,10 @@ class PrivateReplies:
             except TargetedRefused:
                 if name == "new":  # it restarts this chat, so it is answered here
                     await self._invoke(name, args, inbound, tenant_id, send=self._public(inbound))
+                    return
+                if name == "memory" and parse_memory_args(args).kind == "forget_confirm":
+                    # It already deleted: a second run would find nothing and say so.
+                    await self.tell_sender(inbound, UNSHOWN.format(name=f"{name} {args}"))
                     return
                 # Otherwise nothing shown yet: answered in full in the 1:1 chat.
         chat = await self._direct_chat(inbound)
