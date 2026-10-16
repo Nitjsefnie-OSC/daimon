@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
-from daimon.adapters.teams.group_chats import ChatMember, GroupChatRoster, outsiders
+from daimon.adapters.teams.group_chats import ChatMember, GroupChatRoster, outsiders, turn_guard
+from microsoft_teams.api import ConversationUpdateActivity
 
 OURS = str(uuid.UUID(int=1))
 ADA = ChatMember("29:ada", str(uuid.UUID(int=2)), OURS, "user")
@@ -71,3 +75,67 @@ async def test_the_roster_is_cached_briefly_and_a_failure_closes_the_chat() -> N
     clock.now = 122
     assert await roster.has_outsiders("19:c@thread.v2"), "a guest joined"
     assert len(calls) == 3
+
+
+async def test_a_join_drops_the_cached_roster_and_a_fresh_read_skips_the_cache() -> None:
+    """Someone added to the chat is seen at once, not after the cache expires."""
+    rosters = [[ADA], [ADA, GUEST], [ADA]]
+
+    async def members(_chat_id: str) -> list[ChatMember]:
+        return rosters.pop(0)
+
+    async def guests() -> frozenset[str]:
+        return frozenset()
+
+    roster = GroupChatRoster(tenant_id=OURS, members=members, member_guests=guests)
+    assert not await roster.has_outsiders("19:c@thread.v2")
+    update = ConversationUpdateActivity.model_validate(
+        {
+            "type": "conversationUpdate",
+            "id": "u1",
+            "channelId": "msteams",
+            "from": {"id": "29:ada"},
+            "recipient": {"id": "28:bot"},
+            "conversation": {"id": "19:c@thread.v2", "conversationType": "groupChat"},
+            "membersAdded": [{"id": "29:guest"}],
+        }
+    )
+    chained: list[bool] = []
+
+    async def next_handler() -> None:
+        chained.append(True)
+
+    ctx = SimpleNamespace(activity=update, next=next_handler)
+    await roster.on_conversation_update(cast(Any, ctx))
+    assert chained, "the other conversationUpdate handlers still run"
+    assert await roster.has_outsiders("19:c@thread.v2"), "the join is seen at once"
+    assert not await roster.has_outsiders("19:c@thread.v2", fresh=True), "fresh reads again"
+    assert not rosters, "every check past the join read the roster"
+
+
+@pytest.mark.parametrize("closed", [False, True])
+async def test_a_turn_guard_stops_the_turn_and_tells_the_asker_once_the_chat_closes(
+    closed: bool,
+) -> None:
+    """A closed chat cancels the turn and tells the asker; an open one changes nothing."""
+    told: list[bool] = []
+
+    async def members(_chat_id: str) -> list[ChatMember]:
+        return [ADA, GUEST] if closed else [ADA]
+
+    async def guests() -> frozenset[str]:
+        return frozenset()
+
+    roster = GroupChatRoster(tenant_id=OURS, members=members, member_guests=guests)
+
+    async def tell() -> None:
+        told.append(True)
+
+    cancel = asyncio.Event()
+    still_ours = turn_guard(roster, "19:c@thread.v2", cancel, tell)
+    assert await still_ours(True) is not closed
+    assert cancel.is_set() is closed, "only a closed chat stops the turn"
+    assert bool(told) is closed, "only a closed chat tells the asker"
+    assert not await turn_guard(None, "19:c@thread.v2", asyncio.Event(), tell)(False), (
+        "no roster fails closed"
+    )

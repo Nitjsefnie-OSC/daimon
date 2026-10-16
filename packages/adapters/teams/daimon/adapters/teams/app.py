@@ -54,7 +54,7 @@ from daimon.adapters.teams.context import (
 )
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
 from daimon.adapters.teams.direct_chats import DirectChats
-from daimon.adapters.teams.group_chats import OUTSIDERS_PRESENT, placed
+from daimon.adapters.teams.group_chats import OUTSIDERS_PRESENT, placed, turn_guard
 from daimon.adapters.teams.identity import (
     DENIED,
     Refusal,
@@ -1358,6 +1358,7 @@ class TeamsApp:
         requester = None
         if inbound.kind != "dm":
             requester = Account(id=inbound.user_id, name=inbound.user_name or "you")
+        outsiders = functools.partial(self._private.tell_sender, inbound, OUTSIDERS_PRESENT)
 
         def new_lifecycle(cancel: asyncio.Event, adopt: str | None) -> TeamsTurnLifecycle:
             self._cancel_registry[cancel_key] = (cancel, inbound.user_id)
@@ -1388,6 +1389,9 @@ class TeamsApp:
                 sessionmaker=self.runtime.sessionmaker,
                 budget_channel_id=admission.budget_channel_id,
                 acknowledge=None if continuation else self._reactions.acknowledger(inbound),
+                roster_open=None
+                if inbound.kind != "group"
+                else turn_guard(self.runtime.group_chats, inbound.channel_id, cancel, outsiders),
             )
             holder.append(attempt)
             return attempt

@@ -227,7 +227,11 @@ with `--add-member-guest` (or every guest with
 `DAIMON_TEAMS__RESTRICT_GUESTS=false`). Anyone from another tenant, an
 unlisted guest, an anonymous member, or a roster that cannot be read closes
 the chat: the sender gets a private notice and no turn starts. The roster is
-read through Bot Framework and cached for a minute. A group chat has no team,
+read through Bot Framework and cached for a minute, or until someone joins.
+A running turn checks it again before its card shows any of its work, and
+reads it afresh before the answer. If the chat has closed meanwhile, the turn
+stops, its card says only that someone from outside is in the chat, and the
+asker gets the private notice. A group chat has no team,
 so team owners are not its channel admins: those settings need a workspace
 admin there.
 

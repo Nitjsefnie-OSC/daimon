@@ -5,12 +5,15 @@ whole roster is the host organisation's: members with our tenant and the
 "user" role. Anyone else (another tenant, a guest unless the tenant's access
 policy lists them or guests are unrestricted, an anonymous or unidentified
 member) closes the chat, as does a roster that cannot be read. Bots are not
-counted. Rosters are cached briefly, so a new member is seen within a minute.
+counted. Rosters are cached for a minute, and dropped when someone joins. A
+running turn checks again before it shows any of its work, and afresh before
+its answer: a chat that has closed meanwhile stops the turn (`turn_guard`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -23,6 +26,9 @@ from daimon.adapters.teams.externals import (
     _TtlCache as TtlCache,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.teams.identity import TeamsInbound, canonical_uuid
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
+from microsoft_teams.api import ConversationUpdateActivity
+from microsoft_teams.apps import ActivityContext
 
 log = structlog.get_logger()
 
@@ -85,9 +91,9 @@ class GroupChatRoster:
         self._timeout_s = timeout_s
         self._open = TtlCache[str, bool](clock)
 
-    async def has_outsiders(self, chat_id: str) -> bool:
-        """True unless the roster reads and every member is ours."""
-        cached = self._open.get(chat_id)
+    async def has_outsiders(self, chat_id: str, *, fresh: bool = False) -> bool:
+        """True unless the roster reads and every member is ours; `fresh` skips the cache."""
+        cached = None if fresh else self._open.get(chat_id)
         if cached is not None:
             return cached[0]
         try:
@@ -106,6 +112,38 @@ class GroupChatRoster:
             log.info("teams.group_chat.outsiders", count=found)
         self._open.put(chat_id, bool(found), ROSTER_TTL_S)
         return bool(found)
+
+    async def on_conversation_update(
+        self, ctx: ActivityContext[ConversationUpdateActivity]
+    ) -> None:
+        """Drop a group chat's cached roster when someone joins it."""
+        activity = ctx.activity
+        if activity.conversation.conversation_type == "groupChat" and activity.members_added:
+            self._open.pop(activity.conversation.id.split(";", 1)[0])
+        await ctx.next()
+
+
+def turn_guard(
+    roster: GroupChatRoster | None,
+    chat_id: str,
+    cancel: asyncio.Event,
+    tell: Callable[[], Awaitable[None]],
+) -> Callable[[bool], Awaitable[bool]]:
+    """A group-chat turn's check before it shows its work (`fresh`: uncached).
+
+    False once anyone from outside is in the chat, after stopping the turn and
+    telling the asker (`tell`); the caller then shows nothing more.
+    """
+
+    async def still_ours(fresh: bool) -> bool:
+        if roster is not None and not await roster.has_outsiders(chat_id, fresh=fresh):
+            return True
+        cancel.set()
+        with contextlib.suppress(*TEAMS_SEND_ERRORS):
+            await tell()
+        return False
+
+    return still_ours
 
 
 async def placed(roster: GroupChatRoster | None, inbound: TeamsInbound) -> TeamsInbound:

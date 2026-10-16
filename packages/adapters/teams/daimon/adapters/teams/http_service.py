@@ -322,6 +322,12 @@ def create_teams_http_service(
             policy = await load_access_policy(session, tenant_id=teams_tenant)
         return frozenset(policy.member_guest_ids)
 
+    roster = GroupChatRoster(
+        tenant_id=settings.tenant_id,
+        members=chat_members,
+        member_guests=member_guests,
+        restrict_guests=settings.restrict_guests,
+    )
     runtime = dataclasses.replace(
         runtime,
         externals=ExternalParticipants(
@@ -333,12 +339,7 @@ def create_teams_http_service(
             restrict_guests=settings.restrict_guests,
             restrict_external=settings.restrict_external_participants,
         ),
-        group_chats=GroupChatRoster(
-            tenant_id=settings.tenant_id,
-            members=chat_members,
-            member_guests=member_guests,
-            restrict_guests=settings.restrict_guests,
-        ),
+        group_chats=roster,
     )
     installs = TeamInstalls(
         runtime.sessionmaker,
@@ -441,6 +442,7 @@ def create_teams_http_service(
     feedback = TeamsFeedback(runtime, direct, spawn=spawn)
     teams_app.on_message(turns.handle_message)
     teams_app.on_install_add(installs.on_install)
+    teams_app.on_conversation_update(roster.on_conversation_update)
     if subscriptions is not None:
         watched = subscriptions
 
