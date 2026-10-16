@@ -1184,11 +1184,17 @@ coverage; later refreshes can restore it when the repo is still confirmed.
 The refresh never adds repos to the tenant-confirmed set.
 If token minting returns 403, 404, or 422 for a repository group, that group's
 pending token is closed, its installation is queued for reconciliation, and
-only successfully minted groups enter the session. The turn receives the
-unavailable repository names. Authentication failures, rate limits, timeouts,
-and server failures stop preparation so it can be retried. The session's
-snapshot records the repository set actually tokenised, allowing a later
-successful reconciliation to trigger normal session change handling.
+only successfully minted groups enter the session. The refused group's repos
+are excluded from the session snapshot and announced plainly on the next turn,
+subject to the requester's repository-name visibility. Authentication failures,
+rate limits, timeouts, and server failures stop preparation so it can be retried.
+Exclusions remain valid for 60 minutes; then the next turn replaces the session
+and retries minting once. A new refusal records a new 60-minute exclusion.
+Reconciliation can change coverage sooner, triggering normal session change
+handling. Issued installation tokens remain valid for up to one hour, so
+reconciliation does not immediately revoke access already delivered to a
+session. GitHub does not document a unique status code for an uncovered or
+suspended repository; HTTP 422 can also mean spam detection.
 The session mounts only the selected working
 repository, if there is one, and uses its own vault for `GH_TOKEN` and Copilot.
 Other granted repos are available through that token

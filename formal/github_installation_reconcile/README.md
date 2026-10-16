@@ -4,8 +4,7 @@ The user-visible risk is a cached installation with the wrong repositories,
 suspension flag, or existence after webhook traffic stops. This model checks
 whether duplicate and reordered deliveries, changes during a refresh, and a
 lease takeover can strand stale cache data or allow an old worker to finish.
-It describes the code at `origin/main`; the companion implementation is being
-changed separately.
+It maps to the implementation on `fix/app-installation-reconcile`.
 
 Run `python3 formal/github_installation_reconcile/run_models.py` from the repo
 root. The runner uses one TLC worker, a 30-second limit and 64 MiB metadir cap
@@ -15,15 +14,15 @@ represents a system at rest.
 
 ## Action-to-code map
 
-| Model action | Implementation boundary at `origin/main` |
+| Model action | Implementation boundary |
 | --- | --- |
-| `GitHubChange` | External GitHub event; webhook routing in `packages/adapters/mcp/daimon/adapters/mcp/webhooks.py:182-192`, handlers at `:208-262` and `:265-317`. `suspend`/`unsuspend` are planned additions and have no source line at `origin/main`. |
+| `GitHubChange` | External GitHub event; webhook routing in `packages/adapters/mcp/daimon/adapters/mcp/webhooks.py:182-192`, installation handler at `:208-269` accepts `suspend`/`unsuspend`, repository handler at `:271-325`. Connect saves at `packages/adapters/mcp/daimon/adapters/mcp/oauth_github.py:1925-1941,2143-2159` upsert and enqueue a synthetic refresh. |
 | `Duplicate` | A second delivery with the same ID enters the handler at `webhooks.py:245-253` or `:301-309`; GitHub redelivery behavior is unverified. |
 | `Enqueue` | `packages/core/daimon/core/stores/github_installation_reconciliation.py:28-102`: receipt conflict check at `:38-51`, generation and pending/running update at `:53-83`, deletion side effect at `:84-101`. |
 | `Claim` | `github_installation_reconciliation.py:117-155`: pending or expired running row, `FOR UPDATE SKIP LOCKED`, owner and claimed generation. Worker transaction at `packages/core/daimon/core/github_installation_reconcile.py:44-55`. |
-| `ReadGitHub` | `github_installation_reconcile.py:68-88`: installation lookup, token mint, complete repository listing. These calls are separate in real execution. |
+| `ReadGitHub` | `github_installation_reconcile.py:68-95`: installation lookup (including suspension), token mint, complete repository listing. These calls are separate in real execution. |
 | `LeaseExpire` | `github_installation_reconciliation.py:124-132`, `:149-151`; lease is two minutes at `github_installation_reconcile.py:22` with renewal every 30 seconds at `:23,136-165`. |
-| `Finish` | `github_installation_reconciliation.py:179-275`: owner/claim check `:193-206`, generation check `:208-217`, deletion `:219-235`, live snapshot write `:236-266`, done `:268-275`. The `app == "legacy"` write predicate at `:263` is represented by `LegacyOnlyWrite`; its removal is the target fix. Worker finish transaction is `github_installation_reconcile.py:90-99`. |
+| `Finish` | `github_installation_reconciliation.py:180-290`: owner/claim check `:195-208`, generation check `:210-219`, deletion `:221-240`, live snapshot and suspension write `:241-281`, done `:283-290`. Connect's `upsert_github_app` at `packages/core/daimon/core/stores/github_app_installations.py:55-94` writes suspension only on insert; reconciliation owns subsequent writes. `LegacyOnlyWrite` represents the old behavior that skipped App truth updates; the remaining `app == "legacy"` guard at `:278` protects Connect's confirmed set. Worker finish transaction is `github_installation_reconcile.py:97-111`. |
 
 The model treats each enqueue, claim, and finish database transaction as
 atomic. The read and finish are separate, so GitHub can change and a new
@@ -84,7 +83,7 @@ Counterexamples in domain terms:
 | Assumption | Evidence/status |
 | --- | --- |
 | Each GitHub change eventually emits a webhook that this service receives; duplicate IDs refer to the same change; deliveries can be delayed/reordered. | **UNVERIFIED GitHub webhook delivery semantics.** No vendor contract or staging trace was checked. Liveness depends on eventual delivery. |
-| Installation lookup and complete repository pagination behave like one consistent snapshot, including suspension. | **UNVERIFIED.** Actual calls are separate at `github_installation_reconcile.py:73-88`; current `origin/main` read does not fetch suspension. A change between pages or calls can yield a mixed view. |
+| Installation lookup and complete repository pagination behave like one consistent snapshot, including suspension. | **UNVERIFIED.** Actual calls are separate at `github_installation_reconcile.py:74-95`; a change between pages or calls can yield a mixed view. |
 | Database enqueue/claim/finish transactions commit atomically and are serialized on the queue row. | Code uses transaction blocks at `webhooks.py:245-253,301-309` and `github_installation_reconcile.py:48-55,91-99`; SQL row lock at `github_installation_reconciliation.py:141,201`. No database replay was run. |
 | Workers eventually run and successful GitHub API reads/DB writes finish. | Fairness assumption, not an operational guarantee. API failure/retry (`github_installation_reconcile.py:108-125`), renewal, receipt expiry, process crash, and account changes are not modeled. |
 

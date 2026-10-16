@@ -69,6 +69,7 @@ from daimon.core.stores.github_issued_tokens import (
     store_token,
 )
 from daimon.core.stores.security_audit import append_github_token_event
+from daimon.core.stores.thread_sessions import record_app_token_refresh
 from daimon.core.turn_origin import current_origin_id
 from mux.contracts.ids import Scope
 from mux.contracts.resources import WorkspaceSource
@@ -93,6 +94,7 @@ class AppSessionAccess:
     tokens: tuple[AppToken, ...]
     working_token: str | None
     excluded_repo_urls: tuple[str, ...] = ()
+    token_repo_urls: tuple[str, ...] = ()
 
 
 class GitHubTokenMintUnavailable(RuntimeError):
@@ -554,8 +556,15 @@ async def prepare_app_access(
             if repo.repo_id in excluded_repo_ids
         )
     )
+    token_repo_urls = tuple(
+        sorted(f"https://github.com/{repo.repo_full_name}" for _, repo, _ in available_rows)
+    )
     return AppSessionAccess(
-        tuple(resources), tuple(tokens), working or (tokens[0].token if tokens else None), excluded
+        tuple(resources),
+        tuple(tokens),
+        working or (tokens[0].token if tokens else None),
+        excluded,
+        token_repo_urls,
     )
 
 
@@ -905,7 +914,7 @@ async def _rotate_live_app_tokens_unlocked(
     config: GithubAppSettings,
     fernet: MultiFernet,
     active_turn: bool = False,
-) -> None:
+) -> AppSessionAccess:
     """Refresh resources and vault in place; leave equal-access old tokens to expire."""
     scope = resource_scope(
         tenant_id=str(tenant_id),
@@ -998,12 +1007,21 @@ async def _rotate_live_app_tokens_unlocked(
                 await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
                 if await _access_is_stale(session, access):
                     raise ValueError("GitHub access changed before token retirement")
+                finished_at = datetime.now(UTC)
                 await mark_session_tokens_superseded(
                     session,
                     session_id=session_id,
                     except_ids=frozenset(token.token_id for token in access.tokens),
-                    now=datetime.now(UTC),
+                    now=finished_at,
                 )
+                await record_app_token_refresh(
+                    session,
+                    ma_session_id=session_id,
+                    issued_at=int(finished_at.timestamp()),
+                    access=access,
+                    now=finished_at,
+                )
+            return access
         except Exception:
             kept: frozenset[uuid.UUID] = frozenset()
             try:
@@ -1115,9 +1133,9 @@ async def rotate_live_app_tokens(
     config: GithubAppSettings,
     fernet: MultiFernet,
     active_turn: bool = False,
-) -> None:
+) -> AppSessionAccess:
     """Rotate without holding a database connection during network calls."""
-    await _rotate_live_app_tokens_unlocked(
+    return await _rotate_live_app_tokens_unlocked(
         anthropic,
         sessionmaker,
         session_id=session_id,

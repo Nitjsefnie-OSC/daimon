@@ -339,7 +339,11 @@ def _mapped_app_session(
             active_turn_message_id="turn-1" if active_turn else None,
             active_turn_started_at=datetime.now(UTC) - started_ago if active_turn else None,
             effective_config=SimpleNamespace(
-                vault_id="mapped-vault", repo_urls=(url,), repo_resource_ids={url: "res-1"}
+                vault_id="mapped-vault",
+                repo_urls=(url,),
+                repo_resource_ids={url: "res-1"},
+                unavailable_repo_urls=(),
+                unavailable_since=None,
             ),
         ),
         agent_id=uuid.UUID(int=4),
@@ -420,6 +424,46 @@ async def test_mapped_active_turn_rotates_without_archiving(
     assert rotate.await_args.kwargs["active_turn"] is True
     archive.assert_not_awaited()
     assert lister.await_args_list[1].kwargs == {"session_id": "mapped-active-turn"}
+
+
+async def test_mapped_excluded_working_repo_is_not_archived_before_retry(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session(active_turn=False)
+    url = "https://github.com/acme/repo"
+    item.mapping.effective_config.repo_urls = ()
+    item.mapping.effective_config.unavailable_repo_urls = (url,)
+    item.mapping.effective_config.unavailable_since = datetime.now(UTC) - timedelta(minutes=30)
+    _, rotate, archive = await _refresh_mapped(
+        db_session_factory,
+        monkeypatch,
+        [[item], [item]],
+        desired=((url,), {11: {"contents": "read"}}),
+    )
+    archive.assert_not_awaited()
+    rotate.assert_awaited_once()
+
+
+async def test_mapped_excluded_working_repo_retries_after_one_hour(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session(active_turn=False)
+    url = "https://github.com/acme/repo"
+    item.mapping.effective_config.repo_urls = ()
+    item.mapping.effective_config.unavailable_repo_urls = (url,)
+    item.mapping.effective_config.unavailable_since = datetime.now(UTC) - timedelta(minutes=61)
+    _, rotate, archive = await _refresh_mapped(
+        db_session_factory,
+        monkeypatch,
+        [[item], [item]],
+        desired=((url,), {11: {"contents": "read"}}),
+    )
+    archive.assert_awaited_once()
+    rotate.assert_not_awaited()
 
 
 async def test_mapped_session_with_only_revoked_token_is_refreshed(

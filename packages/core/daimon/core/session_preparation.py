@@ -60,6 +60,7 @@ from daimon.core.session_compat import (
     UpdateInPlace,
     UpdateOp,
     decide_session_compatibility,
+    valid_unavailable_repo_urls,
 )
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import lock_session_mutation
@@ -109,6 +110,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
     mark_session_external,
+    record_snapshot,
     set_budget_channel_stamp,
     update_mutable_fingerprint,
 )
@@ -135,6 +137,26 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 log = structlog.get_logger(__name__)
 
 CONTINUED = ContinuityOutcome()
+
+
+def _with_unavailable_notice(
+    continuity: ContinuityOutcome, urls: tuple[str, ...]
+) -> ContinuityOutcome:
+    if not urls:
+        return continuity
+    return replace(
+        continuity,
+        user_prefix=(
+            continuity.user_prefix
+            + "\n<github_access_notice>GitHub access for these connected repositories is "
+            "unavailable in this session: "
+            + ", ".join(urls)
+            + ". Tell the requester plainly that GitHub access is unavailable for "
+            "those repositories. Follow repository-name visibility rules when naming them, "
+            "and do not claim to have accessed them.</github_access_notice>\n"
+        ),
+    )
+
 
 __all__ = [
     "PreparationBusy",
@@ -313,12 +335,26 @@ async def _destination_may_carry(
 
 
 async def _persist_refresh(
-    sessionmaker: async_sessionmaker[AsyncSession], *, id: uuid.UUID, snapshot: SessionSnapshot
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    id: uuid.UUID,
+    snapshot: SessionSnapshot,
+    identity_changed: bool = False,
 ) -> None:
     async with sessionmaker() as session, session.begin():
-        await update_mutable_fingerprint(
-            session, id=id, snapshot=snapshot, mutable_fingerprint=fingerprint_mutable(snapshot)
-        )
+        if identity_changed:
+            # A partial App rotation changes the tokenised set of this very session.
+            await record_snapshot(
+                session,
+                id=id,
+                snapshot=snapshot,
+                identity_fingerprint=fingerprint_identity(snapshot),
+                mutable_fingerprint=fingerprint_mutable(snapshot),
+            )
+        else:
+            await update_mutable_fingerprint(
+                session, id=id, snapshot=snapshot, mutable_fingerprint=fingerprint_mutable(snapshot)
+            )
 
 
 async def _heal_lineage(deps: TurnDeps, session: AsyncSession, *, row: ThreadSessionRow) -> None:
@@ -704,19 +740,7 @@ async def _prepare_session_for_turn_locked(
         )
 
     def from_fresh(fresh: FreshSession, continuity: ContinuityOutcome) -> PreparedTurn:
-        if fresh.snapshot.unavailable_repo_urls:
-            continuity = replace(
-                continuity,
-                user_prefix=(
-                    continuity.user_prefix
-                    + "\n<github_access_notice>GitHub access for these connected repositories is "
-                    "unavailable in this session: "
-                    + ", ".join(fresh.snapshot.unavailable_repo_urls)
-                    + ". Tell the requester plainly that GitHub access is unavailable for "
-                    "those repositories. Follow repository-name visibility rules when "
-                    "naming them, and do not claim to have accessed them.</github_access_notice>\n"
-                ),
-            )
+        continuity = _with_unavailable_notice(continuity, fresh.snapshot.unavailable_repo_urls)
         return prepared(
             ma_session_id=fresh.ma_session_id,
             mapping_id=fresh.mapping_id,
@@ -894,7 +918,25 @@ async def _prepare_session_for_turn_locked(
                 force_app_token_rotation=rotate_app_token,
             )
 
-        def on_current(continuity: ContinuityOutcome, model_id: str) -> PreparedTurn:
+        async def on_current(
+            continuity: ContinuityOutcome,
+            model_id: str,
+            snapshot: SessionSnapshot | None = recorded,
+        ) -> PreparedTurn:
+            valid_unavailable = (
+                () if snapshot is None else valid_unavailable_repo_urls(snapshot, now=moment)
+            )
+            if (
+                snapshot is not None
+                and valid_unavailable
+                and not snapshot.unavailable_notice_announced
+            ):
+                continuity = _with_unavailable_notice(continuity, valid_unavailable)
+                await _persist_refresh(
+                    deps.sessionmaker,
+                    id=row.id,
+                    snapshot=snapshot.model_copy(update={"unavailable_notice_announced": True}),
+                )
             return prepared(
                 ma_session_id=row.ma_session_id,
                 mapping_id=row.id,
@@ -944,7 +986,9 @@ async def _prepare_session_for_turn_locked(
             # and swapping a running session's `.env` or checkpointing it is a
             # race we have no reason to run.
             return PreparationDeferred(
-                prepared=on_current(ContinuityOutcome(pending=decision.reasons), current_model),
+                prepared=await on_current(
+                    ContinuityOutcome(pending=decision.reasons), current_model
+                ),
                 pending_reasons=decision.reasons,
             )
 
@@ -1079,7 +1123,7 @@ async def _prepare_session_for_turn_locked(
                     pending_reasons=("session_changed",),
                     retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
                 )
-            return on_current(CONTINUED, recorded.model_id)
+            return await on_current(CONTINUED, recorded.model_id)
 
         try:
             result = await run_ops()
@@ -1104,12 +1148,20 @@ async def _prepare_session_for_turn_locked(
             reason for reason in decision.reasons if reason not in result.applied
         )
         if applied:
-            await _persist_refresh(deps.sessionmaker, id=row.id, snapshot=result.snapshot)
+            await _persist_refresh(
+                deps.sessionmaker,
+                id=row.id,
+                snapshot=result.snapshot,
+                identity_changed=(
+                    result.snapshot.repo_urls != recorded.repo_urls
+                    or result.snapshot.token_repo_urls != recorded.token_repo_urls
+                ),
+            )
         outcome_state: Literal["continued", "updated"] = "updated" if applied else "continued"
         continuity = ContinuityOutcome(state=outcome_state, applied=applied, pending=pending)
         if isinstance(result, SessionBusy):
             return PreparationDeferred(
-                prepared=on_current(continuity, result.snapshot.model_id),
+                prepared=await on_current(continuity, result.snapshot.model_id, result.snapshot),
                 pending_reasons=pending,
             )
         log.info(
@@ -1117,4 +1169,4 @@ async def _prepare_session_for_turn_locked(
             session_id=row.ma_session_id,
             applied=list(applied),
         )
-        return on_current(continuity, result.snapshot.model_id)
+        return await on_current(continuity, result.snapshot.model_id, result.snapshot)

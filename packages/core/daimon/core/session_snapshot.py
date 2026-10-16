@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Collection, Sequence
+from datetime import datetime
 from typing import Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
@@ -110,6 +111,8 @@ class SessionSnapshot(BaseModel):
     # changes this set, and the session must be replaced to receive the token.
     token_repo_urls: tuple[str, ...] = ()
     unavailable_repo_urls: tuple[str, ...] = ()
+    unavailable_since: datetime | None = None
+    unavailable_notice_announced: bool = False
     repo_url: str | None
     repo_branch: str | None
     memory_store_id: str | None

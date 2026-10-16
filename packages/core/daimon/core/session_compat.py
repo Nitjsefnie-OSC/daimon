@@ -28,7 +28,7 @@ Pure module: no I/O and no clock. `now` is injected, and must be timezone-aware.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from daimon.core.session_snapshot import SessionSnapshot
@@ -136,14 +136,27 @@ class ReplaceSession:
 type CompatibilityDecision = ReuseAsIs | UpdateInPlace | ReplaceSession
 
 
+UNAVAILABLE_RETRY_AFTER = timedelta(minutes=60)  # One GitHub installation token lifetime.
+
+
+def valid_unavailable_repo_urls(recorded: SessionSnapshot, *, now: datetime) -> tuple[str, ...]:
+    since = getattr(recorded, "unavailable_since", None)
+    if since is None or since.tzinfo is None or since.tzinfo.utcoffset(since) is None:
+        return ()
+    if now - since >= UNAVAILABLE_RETRY_AFTER:
+        return ()
+    return recorded.unavailable_repo_urls
+
+
 def _without(urls: tuple[str, ...], excluded: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(url for url in urls if url not in excluded) if excluded else urls
 
 
 def identity_change_reasons(
-    recorded: SessionSnapshot, desired: SessionSnapshot
+    recorded: SessionSnapshot, desired: SessionSnapshot, *, now: datetime | None = None
 ) -> tuple[ChangeReason, ...]:
     """Every identity-axis field that differs, in a fixed, user-facing order."""
+    excluded = () if now is None else valid_unavailable_repo_urls(recorded, now=now)
     checks: tuple[tuple[bool, ChangeReason], ...] = (
         (recorded.ma_agent_id != desired.ma_agent_id, "agent_identity"),
         (recorded.model_id != desired.model_id, "model"),
@@ -154,9 +167,8 @@ def identity_change_reasons(
         (
             # Repos GitHub refused at mint stay excluded instead of replacing the
             # session every turn; reconciliation then removes them from desired.
-            recorded.repo_urls != _without(desired.repo_urls, recorded.unavailable_repo_urls)
-            or recorded.token_repo_urls
-            != _without(desired.token_repo_urls, recorded.unavailable_repo_urls),
+            recorded.repo_urls != _without(desired.repo_urls, excluded)
+            or recorded.token_repo_urls != _without(desired.token_repo_urls, excluded),
             "repo_set",
         ),
         (recorded.repo_url != desired.repo_url, "repo_url"),
@@ -196,7 +208,7 @@ def decide_session_compatibility(
     if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
         raise ValueError("now must be timezone-aware")
 
-    identity_reasons = identity_change_reasons(recorded, desired)
+    identity_reasons = identity_change_reasons(recorded, desired, now=now)
     if identity_reasons:
         return ReplaceSession(reasons=identity_reasons)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -23,7 +24,9 @@ from daimon.core.github_app_session import (
 )
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_requester_access import PermissionCache
+from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores import github_access, github_app_installations
+from daimon.core.stores.thread_sessions import create_thread_session, get_thread_session_by_id
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.termination import TerminationReason
 from pydantic import SecretStr
@@ -182,6 +185,38 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tenant_id, agent_id = await _two_groups(db_session_factory)
+    read_url = "https://github.com/example/read"
+    write_url = "https://github.com/example/write"
+    async with db_session_factory.begin() as session:
+        mapped = await create_thread_session(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id="rotation-refusal",
+            account_id=uuid.uuid4(),
+            ma_session_id="live-session",
+            effective_config=SessionSnapshot.model_validate(
+                {
+                    "ma_agent_id": "agent_rotation",
+                    "model_id": "test-model",
+                    "system_sha256": None,
+                    "skills_sha256": "skills",
+                    "environment_id": "environment",
+                    "github_mode": "app",
+                    "repo_urls": [write_url],
+                    "token_repo_urls": [read_url, write_url],
+                    "repo_url": None,
+                    "repo_branch": None,
+                    "memory_store_id": None,
+                    "vault_id": "vault",
+                    "tools_sha256": "tools",
+                    "mcp_servers_sha256": "servers",
+                    "env_sha256": None,
+                    "agent_version": 1,
+                    "agent_name": "Agent",
+                }
+            ),
+        )
     monkeypatch.setattr("daimon.core.github_app_session.build_app_jwt", lambda *a, **k: "jwt")
     real_prepare = prepare_app_access
 
@@ -210,7 +245,7 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
     monkeypatch.setattr(github_app_session, "add_app_credentials", add_credentials)
     monkeypatch.setattr(github_app_session, "rotate_session_repo_token", rotate_resource)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await rotate_live_app_tokens(
+    rotated = await rotate_live_app_tokens(
         None,  # type: ignore[arg-type]  # external MA calls are stubbed above
         db_session_factory,
         session_id="live-session",
@@ -224,6 +259,8 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
         fernet=fernet,
     )
     assert delivered == ["write-token", "write-token"]
+    assert rotated.excluded_repo_urls == (read_url,)
+    assert rotated.token_repo_urls == (write_url,)
     async with db_session_factory() as session:
         rows = list(
             await session.scalars(
@@ -233,6 +270,12 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
         assert sorted(row.status for row in rows) == ["delivered", "revoked"]
         job = await session.get(GitHubInstallationReconciliation, 771)
         assert job is not None and job.generation == 1
+        current = await get_thread_session_by_id(session, id=mapped.id)
+        assert current is not None and current.effective_config is not None
+        assert current.effective_config.token_repo_urls == (write_url,)
+        assert current.effective_config.unavailable_repo_urls == (read_url,)
+        assert current.effective_config.unavailable_since is not None
+        assert not current.effective_config.unavailable_notice_announced
 
 
 def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:
@@ -253,6 +296,7 @@ def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:
             **common,
             "token_repo_urls": ("https://github.com/acme/kept",),
             "unavailable_repo_urls": ("https://github.com/acme/refused",),
+            "unavailable_since": datetime(2026, 10, 16, 12, tzinfo=UTC),
         }
     )
     still_covered = base.model_copy(
@@ -272,6 +316,13 @@ def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:
         }
     )
 
-    assert "repo_set" not in identity_change_reasons(recorded, still_covered)
-    assert "repo_set" not in identity_change_reasons(recorded, reconciled)
-    assert "repo_set" in identity_change_reasons(recorded, newly_granted)
+    now = recorded.unavailable_since + timedelta(minutes=30)
+    assert "repo_set" not in identity_change_reasons(recorded, still_covered, now=now)
+    assert "repo_set" not in identity_change_reasons(recorded, reconciled, now=now)
+    assert "repo_set" in identity_change_reasons(recorded, newly_granted, now=now)
+    assert "repo_set" in identity_change_reasons(
+        recorded, still_covered, now=now + timedelta(minutes=30)
+    )
+    assert "repo_set" in identity_change_reasons(
+        recorded.model_copy(update={"unavailable_since": None}), still_covered, now=now
+    )

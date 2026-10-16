@@ -43,7 +43,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_memory_store_resource imp
     BetaManagedAgentsMemoryStoreResource,
 )
 from daimon.core.credential_env import assemble_env_bytes
-from daimon.core.session_compat import identity_change_reasons
+from daimon.core.session_compat import identity_change_reasons, valid_unavailable_repo_urls
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     desired_snapshot,
@@ -745,3 +745,24 @@ def test_a_snapshot_without_a_personal_store_keeps_its_recorded_fingerprint() ->
 
     assert fingerprint_identity(legacy) == fingerprint_identity(snapshot)
     assert fingerprint_identity(with_personal) != fingerprint_identity(snapshot)
+
+
+def test_a_snapshot_without_unavailable_since_has_no_valid_exclusions() -> None:
+    snapshot = desired_snapshot(
+        _agent(),
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_science",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+    )
+    legacy = SessionSnapshot.model_validate(
+        {
+            **snapshot.model_dump(exclude={"unavailable_since"}),
+            "unavailable_repo_urls": ("https://github.com/acme/refused",),
+        }
+    )
+    assert legacy.unavailable_since is None
+    assert valid_unavailable_repo_urls(legacy, now=_NOW) == ()

@@ -101,6 +101,7 @@ from daimon.core.rule_views import (
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.session_compat import valid_unavailable_repo_urls
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
@@ -805,7 +806,9 @@ async def _refresh_github_app_sessions(
                     fernet=fernet,
                     mounted_only=True,
                 )
-                if desired_urls != snapshot.repo_urls and not active_turn:
+                valid_exclusions = valid_unavailable_repo_urls(snapshot, now=now)
+                comparable_urls = tuple(url for url in desired_urls if url not in valid_exclusions)
+                if comparable_urls != snapshot.repo_urls and not active_turn:
                     scope = session_scope(
                         tenant_id=item.mapping.tenant_id,
                         account_id=item.mapping.account_id,
@@ -838,7 +841,7 @@ async def _refresh_github_app_sessions(
                     _last_app_access_checks[session_id] = now
                     _app_refresh_failures.pop(session_id, None)
                     continue
-                await rotate_live_app_tokens(
+                access = await rotate_live_app_tokens(
                     anthropic_client,
                     sm,
                     session_id=session_id,
@@ -857,6 +860,8 @@ async def _refresh_github_app_sessions(
                         session,
                         ma_session_id=session_id,
                         issued_at=int(now.timestamp()),
+                        access=access,
+                        now=now,
                     )
             _last_app_access_checks[session_id] = now
             _app_refresh_failures.pop(session_id, None)

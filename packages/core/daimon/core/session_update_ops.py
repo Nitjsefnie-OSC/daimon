@@ -317,9 +317,9 @@ async def apply_update_ops(
                 )
                 applied.extend(("tools", "mcp_servers"))
             case RotateAppTokens():
-                if snapshot.vault_id is None or fernet is None:
+                if snapshot.vault_id is None or not isinstance(fernet, MultiFernet):
                     raise ValueError("App session has no vault or encryption")
-                await rotate_live_app_tokens(
+                access = await rotate_live_app_tokens(
                     anthropic,
                     sessionmaker,
                     session_id=session_id,
@@ -333,7 +333,18 @@ async def apply_update_ops(
                     fernet=fernet,
                 )
                 snapshot = snapshot.model_copy(
-                    update={"repo_token_issued_at": int(now.timestamp())}
+                    update={
+                        "repo_urls": tuple(
+                            url
+                            for url in snapshot.repo_urls
+                            if url not in access.excluded_repo_urls
+                        ),
+                        "token_repo_urls": access.token_repo_urls,
+                        "unavailable_repo_urls": access.excluded_repo_urls,
+                        "unavailable_since": now if access.excluded_repo_urls else None,
+                        "unavailable_notice_announced": not bool(access.excluded_repo_urls),
+                        "repo_token_issued_at": int(now.timestamp()),
+                    }
                 )
                 applied.append("repo_token_age")
             case RemirrorVaultCredentials():

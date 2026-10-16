@@ -85,7 +85,9 @@ async def upsert_github_app(
         .values(installation_id=installation_id, **values)
         .on_conflict_do_update(
             index_elements=["installation_id"],
-            set_={**values, "updated_at": func.now()},
+            # Reconciliation alone owns suspension after the first insert.
+            set_={k: v for k, v in values.items() if k != "suspended_at"}
+            | {"updated_at": func.now()},
         )
         .returning(GitHubAppInstallation)
     )
