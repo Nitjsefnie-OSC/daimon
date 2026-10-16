@@ -466,10 +466,9 @@ A few things to know:
 - **Set the three credentials together.** Once any `DAIMON_TEAMS__` value is
   set, every Daimon process expects the full set. A half-filled block stops
   them all from starting, not just Teams.
-- **`DAIMON_TEAMS__ADMIN_USER_IDS` is deprecated.** It still adds admins by
-  Entra object ID (a JSON array) on top of the team's owners, and logs a
-  warning at startup. Make those people owners of the admin team, then remove
-  it.
+- **Admins are the admin team's owners.** `DAIMON_TEAMS__ADMIN_USER_IDS` is
+  no longer read, and a leftover value is ignored: make those people owners
+  of the admin team.
 - **`DAIMON_CRYPTO__KEYS` must be set** (see step 1 of this guide).
 - **The `mcp` service reads these same values**, because the agent's Teams
   tools (posting, reading channels, sending files) run there. With Compose,
@@ -703,13 +702,13 @@ Details are in [`teams.md`](teams.md#private-and-shared-channels-optional).
 - **A Reply on a bot message gets no answer in a private channel:** Teams
   sends the bot only the private channel posts that @mention it. Mention it.
 - **Every Daimon process fails at startup after adding Teams:** a
-  `DAIMON_TEAMS__` value is missing, `DAIMON_TEAMS__ADMIN_TEAM_ID` isn't a
-  group ID, or `DAIMON_TEAMS__ADMIN_USER_IDS` isn't a JSON array of object IDs.
+  `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_TEAM_ID` isn't a
+  group ID.
 - **Nobody is an admin:** `DAIMON_TEAMS__ADMIN_TEAM_ID` is unset, or the app
   isn't installed in that team (`teams.admin_team.lookup_failed` in the logs
   gives the reason and status). After a failed read the last owners count for
-  up to an hour; past that, only `DAIMON_TEAMS__ADMIN_USER_IDS` grants admin.
-  Re-adding the app restores the owners.
+  up to an hour; once no owner list has been read within an hour, nobody is
+  an admin until the next good read. Re-adding the app restores the owners.
 - **`teams.tenant_reconcile_failed` in the logs:** Daimon couldn't finish
   setting up your organisation, and it refuses turns until it does. The log
   line says why.

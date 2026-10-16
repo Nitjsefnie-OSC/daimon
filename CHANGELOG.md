@@ -17,19 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admins, so adding one needs no redeploy, and a removed one loses admin
   within about a minute, routines and tools included. Guests and people from
   another organisation never are. A failed owner read falls back to the last
-  good one for up to an hour, then grants nothing and demotes no one.
+  good one for up to an hour and demotes no one; once no owner list has been
+  read within an hour, nobody is an admin until the next good read.
   Support requests and channel budget notices for the admins reach these
   owners. Guest owners no longer count for channel-admin team grants
   (`role_ids`) either.
 
-### Deprecated
+### Removed
 
-- **`DAIMON_TEAMS__ADMIN_USER_IDS`.** Still honoured: the Entra object IDs
-  it lists are admins on top of the admin team's owners, and Daimon logs
-  `teams.admin_user_ids_deprecated` at startup while it is set. Make those
-  people owners of the admin team, then remove it; their stored admin role
-  carries over, and anyone neither listed nor an owner loses it at the next
-  owner read.
+- **`DAIMON_TEAMS__ADMIN_USER_IDS` is no longer read.** Make those admins
+  owners of the admin team; a leftover value is ignored, and anyone not an
+  owner loses the stored admin role at the next owner read or restart.
 
 ### Fixed
 
@@ -858,7 +856,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   participants (B2B direct connect) and guests (Entra B2B guest accounts, in
   any channel or 1:1 chat) are answered only inside an isolated channel, and
   never in its setup thread. They run as members, never admins or channel
-  admins (whatever `DAIMON_TEAMS__ADMIN_USER_IDS` or a grant says), commands
+  admins (whatever team ownership or a grant says), commands
   reach the agent as plain text, and their tool calls get only the
   conversation's tools; any other tool, including ones added later, returns
   an error the agent relays. A sender is placed by the activity's tenant,
@@ -974,8 +972,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   queueing, feedback buttons and restart recovery. The configured Entra
   organisation is provisioned at boot. The 1:1 chat offers `help`, `new`,
   `setup` (with setup conversations), `routines`, `memory`, `privacy` and
-  `billing`; admins are listed in
-  `DAIMON_TEAMS__ADMIN_USER_IDS`. Pasted images and files shared in 1:1 chats
+  `billing`; admins are the owners of the team in
+  `DAIMON_TEAMS__ADMIN_TEAM_ID`. Pasted images and files shared in 1:1 chats
   reach the agent, output files are delivered with file consent cards, and
   `send_message`, `create_thread`, task handoffs and timers work from Teams
   turns; the wake poller runs handoffs and timers across restarts.

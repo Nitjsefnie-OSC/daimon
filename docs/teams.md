@@ -189,8 +189,8 @@ A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's
 usual session resumes when `new` or **End** closes it. Opening one runs no turn.
 
-Daimon's admins are the owners of one team, named by its Entra group ID in
-`DAIMON_TEAMS__ADMIN_TEAM_ID` (the team's ⋯ → **Get link to team** → the
+Daimon's admins are the owners of one team, and nobody else. The team is named
+by its Entra group ID in `DAIMON_TEAMS__ADMIN_TEAM_ID` (the team's ⋯ → **Get link to team** → the
 `groupId` parameter). The app must be installed in that team: its
 `TeamMember.Read.Group` consent is what lets Daimon read the owners. Making
 someone an owner makes them an admin, with no redeploy; the owner list is
@@ -198,17 +198,15 @@ cached for a minute, so a removed owner loses admin within about a minute,
 everywhere: each owner read also takes the stored admin role, which routines,
 tools and MCP clients act on, from anyone no longer an admin. A failed read
 falls back to the last successful one for up to an hour, and demotes no one. If
-the app is removed from the admin team, or Graph can't be read for over an
-hour, only the deprecated list grants admin in chats and cards, while stored
-admin roles stand until a read succeeds; re-adding the app restores the
-owners. Guests, people from another organisation and anyone in a group chat
-with outsiders are never admins. The deprecated
-`DAIMON_TEAMS__ADMIN_USER_IDS` still adds admins by Entra object ID, and logs a
-warning at startup while set. Admins' turns run with the admin role, and the
+the app is removed from the admin team, or no owner list has been read within
+an hour, nobody is an admin in chats and cards until the next good read, while
+stored admin roles stand until then; re-adding the app restores the owners.
+Guests, people from another organisation and anyone in a group chat with
+outsiders are never admins. Admins' turns run with the admin role, and the
 panels unlock the admin actions for them. Every card click and dialog
 re-checks the organisation, the clicker and their role. Boot does the same
-demotion; support requests and budget notices for "the admins" reach the team's owners
-and the deprecated list. A refusal in a channel is a private
+demotion; support requests and budget notices for "the admins" reach the team's owners.
+A refusal in a channel is a private
 message, toast, dialog message or card edit only its sender or clicker sees.
 Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
 group ID in `role_ids` to admit that team's owners, guests left out), channel
