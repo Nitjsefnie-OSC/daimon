@@ -14,6 +14,7 @@ and a failure is logged once and dropped, never retried.
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -36,8 +37,14 @@ PREVIEW_MAX_CHARS = 150
 _THREAD = ";messageid="
 _CHANNEL_SUFFIXES = ("@thread.tacv2", "@thread.skype")
 
+# A channel nobody records is looked up again only after this long: each walk costs
+# one Bot Framework call per recorded team, from the budget sends and reactions share.
+MISS_TTL_S = 600.0
+
 TeamChannels = Callable[[str], Awaitable[Mapping[str, str]]]
 ListTeams = Callable[[], Awaitable[Sequence[TeamsInstallationRow]]]
+# The Entra group recorded for a channel (its Files site or its message subscription).
+StoredGroup = Callable[[str], Awaitable[str | None]]
 
 
 @dataclass(frozen=True)
@@ -119,32 +126,69 @@ def split_channel_thread(conversation_id: str) -> tuple[str, str | None] | None:
 
 
 class ChannelHomes:
-    """Which recorded team holds a channel: its id is a team's, or in that team's list. Cached."""
+    """Which team holds a channel. Cached; a miss for `miss_ttl_s`.
 
-    def __init__(self, list_teams: ListTeams, team_channels: TeamChannels) -> None:
+    General's id is its team's. Otherwise the group comes from the caller (an
+    inbound activity's team) or a stored row, and only then from walking every
+    recorded team's Bot Framework channel list, which may leave out private
+    and shared channels.
+    """
+
+    def __init__(
+        self,
+        list_teams: ListTeams,
+        team_channels: TeamChannels,
+        *,
+        stored_group: StoredGroup | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        miss_ttl_s: float = MISS_TTL_S,
+    ) -> None:
         self._list_teams = list_teams
         self._team_channels = team_channels
+        self._stored_group = stored_group
+        self._clock = clock
+        self._miss_ttl_s = miss_ttl_s
         self._homes: dict[str, ChannelHome] = {}
+        self._misses: dict[str, float] = {}
 
-    async def locate(self, channel_id: str) -> ChannelHome | None:
+    async def locate(self, channel_id: str, *, group_id: str | None = None) -> ChannelHome | None:
+        """`channel_id`'s home; `group_id` is its team's Entra group, when the caller knows it."""
         if (home := self._homes.get(channel_id)) is not None:
             return home
+        if group_id is None and self._misses.get(channel_id, 0.0) > self._clock():
+            return None
+        home = await self._find(channel_id, group_id)
+        if home is None:
+            self._misses[channel_id] = self._clock() + self._miss_ttl_s
+            return None
+        self._misses.pop(channel_id, None)
+        self._homes[channel_id] = home
+        return home
+
+    async def _find(self, channel_id: str, group_id: str | None) -> ChannelHome | None:
         teams = await self._list_teams()
-        # General's id is its team's: no channel list needed.
         if (general := next((t for t in teams if t.team_id == channel_id), None)) is not None:
-            home = self._homes[channel_id] = ChannelHome(general.group_id, general.name, "General")
-            return home
+            return ChannelHome(general.group_id, general.name, "General")
+        if group_id is None and self._stored_group is not None:
+            group_id = await self._stored_group(channel_id)
+        if group_id is not None:
+            team = next((t for t in teams if t.group_id == group_id), None)
+            # Names only label the notice: a team never recorded still gets it.
+            if team is None:
+                return ChannelHome(group_id)
+            channels = await self._channels(team) or {}
+            return ChannelHome(group_id, team.name, channels.get(channel_id))
         for team in teams:
-            try:
-                channels = await self._team_channels(team.team_id)
-            except TEAMS_SEND_ERRORS as err:
-                log.info("teams.activity_notice.team_skipped", error=type(err).__name__)
-                continue
-            if channel_id in channels:
-                home = ChannelHome(team.group_id, team.name, channels[channel_id])
-                self._homes[channel_id] = home
-                return home
+            if channel_id in (channels := await self._channels(team) or {}):
+                return ChannelHome(team.group_id, team.name, channels[channel_id])
         return None
+
+    async def _channels(self, team: TeamsInstallationRow) -> Mapping[str, str] | None:
+        try:
+            return await self._team_channels(team.team_id)
+        except TEAMS_SEND_ERRORS as err:
+            log.info("teams.activity_notice.team_skipped", error=type(err).__name__)
+            return None
 
 
 class ActivityFeed:
@@ -174,8 +218,12 @@ class ActivityFeed:
         text: str,
         preview: str,
         chain: int | None = None,
+        group_id: str | None = None,
     ) -> None:
-        """Point `recipient_id` at `message_id`, posted to `conversation_id`; chats are skipped."""
+        """Point `recipient_id` at `message_id`, posted to `conversation_id`; chats are skipped.
+
+        `group_id` is the team's Entra group when the caller knows it, saving a lookup.
+        """
         if (where := split_channel_thread(conversation_id)) is None or not message_id:
             return
         channel_id, root_id = where
@@ -187,6 +235,7 @@ class ActivityFeed:
             text=text,
             preview=preview,
             chain=chain,
+            group_id=group_id,
         )
         self._spawn(send, name="teams.activity-notice")
 
@@ -200,10 +249,11 @@ class ActivityFeed:
         text: str,
         preview: str,
         chain: int | None,
+        group_id: str | None,
     ) -> None:
         try:
             async with asyncio.timeout(self._timeout_s):
-                home = await self._homes.locate(channel_id)
+                home = await self._homes.locate(channel_id, group_id=group_id)
                 if home is None:
                     log.info("teams.activity_notice.failed", reason="team not found")
                     return

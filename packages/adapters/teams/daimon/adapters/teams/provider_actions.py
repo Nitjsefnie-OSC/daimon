@@ -95,8 +95,15 @@ class TeamsProviderActions:
         self.pending: dict[str, PendingAction] = {}
 
     def hook(
-        self, *, conversation_id: str, service_url: str | None, thread_id: str
+        self,
+        *,
+        conversation_id: str,
+        service_url: str | None,
+        thread_id: str,
+        team_group_id: str | None = None,
     ) -> ProviderActionHook:
+        """Posts each prompt's card; `team_group_id` is the channel's team, for its notice."""
+
         async def request(prompt: ProviderActionPrompt) -> NativeActionResponse | None:
             if (
                 prompt.context.requester.platform != "teams"
@@ -124,6 +131,7 @@ class TeamsProviderActions:
                         recipient_id=prompt.context.requester.platform_user_id,
                         text="Waiting for your answer",
                         preview=_words(prompt)[0],
+                        group_id=team_group_id,
                     )
                 remaining = max(
                     0.0, (prompt.context.expires_at - datetime.now(UTC)).total_seconds()

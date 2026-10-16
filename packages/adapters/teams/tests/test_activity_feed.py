@@ -43,10 +43,14 @@ class _Feed:
         channels: dict[str, str] | None = None,
         on_request: Callable[[httpx.Request], Coroutine[Any, Any, None]] | None = None,
         timeout_s: float = 5.0,
+        stored: dict[str, str] | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.requests: list[httpx.Request] = []
         self.tasks: list[asyncio.Task[None]] = []
         self.channel_lists: list[str] = []
+        self.stored_reads: list[str] = []
+        self.team_reads = 0
 
         async def handler(request: httpx.Request) -> httpx.Response:
             self.requests.append(request)
@@ -58,12 +62,17 @@ class _Feed:
             return "graph-token"
 
         async def teams() -> list[TeamsInstallationRow]:
+            self.team_reads += 1
             row = {"tenant_id": uuid.uuid4(), "team_id": TEAM_ID, "group_id": TEAM_GROUP_ID}
             return [TeamsInstallationRow.model_validate(row | {"name": "Research"})]
 
         async def team_channels(team_id: str) -> dict[str, str]:
             self.channel_lists.append(team_id)
             return channels if channels is not None else {CHANNEL_ID: "Weekly reports"}
+
+        async def stored_group(channel_id: str) -> str | None:
+            self.stored_reads.append(channel_id)
+            return (stored or {}).get(channel_id)
 
         def spawn(coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
             task = asyncio.create_task(coro, name=name)
@@ -73,7 +82,12 @@ class _Feed:
         graph = GraphClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)), token)
         self.feed = ActivityFeed(
             graph,
-            ChannelHomes(teams, team_channels),
+            ChannelHomes(
+                teams,
+                team_channels,
+                stored_group=stored_group,
+                **({"clock": clock} if clock is not None else {}),
+            ),
             entra_tenant_id=ENTRA_TENANT_ID,
             spawn=spawn,
             timeout_s=timeout_s,
@@ -191,6 +205,56 @@ async def test_a_channel_no_recorded_team_holds_is_skipped() -> None:
     assert any(e.get("reason") == "team not found" for e in logs), "logged"
 
 
+async def test_a_channel_not_found_is_not_looked_up_again_until_the_miss_expires() -> None:
+    """A miss is cached for its TTL: repeated notices cost no installs read or channel lists."""
+    now = [0.0]
+    fake = _Feed(channels={}, clock=lambda: now[0])
+    for _ in range(3):
+        fake.feed.notify(THREAD_ID, REPLY_ID, recipient_id=AAD_OBJECT_ID, text="t", preview="p")
+        await fake.settle()
+    assert (fake.team_reads, fake.channel_lists) == (1, [TEAM_ID]), "one walk for three notices"
+    now[0] = 601.0
+    fake.feed.notify(THREAD_ID, REPLY_ID, recipient_id=AAD_OBJECT_ID, text="t", preview="p")
+    await fake.settle()
+    assert fake.team_reads == 2, "looked up again once the miss expires"
+    assert fake.requests == [], "never sent"
+
+
+async def test_a_stored_channel_row_names_the_team_without_walking_every_team() -> None:
+    """A private channel the lists leave out is found by its stored row's group."""
+    fake = _Feed(channels={}, stored={CHANNEL_ID: "group-private"})
+    fake.feed.notify(THREAD_ID, REPLY_ID, recipient_id=AAD_OBJECT_ID, text="t", preview="p")
+    await fake.settle()
+    [request] = fake.requests
+    assert request.url.path == "/v1.0/teams/group-private/sendActivityNotification", "its team"
+    assert fake.channel_lists == [], "no team's channel list is walked"
+
+
+async def test_a_stored_group_of_a_recorded_team_lists_only_that_team() -> None:
+    """The recorded team gives the names, from its one channel list."""
+    fake = _Feed(stored={CHANNEL_ID: TEAM_GROUP_ID})
+    fake.feed.notify(THREAD_ID, REPLY_ID, recipient_id=AAD_OBJECT_ID, text="t", preview="p")
+    await fake.settle()
+    body = json.loads(fake.requests[0].content)
+    assert body["topic"]["value"] == "Weekly reports", "named by its channel"
+    assert fake.channel_lists == [TEAM_ID], "only its own team's list"
+
+
+async def test_a_known_group_skips_the_stored_read_and_overrides_a_cached_miss() -> None:
+    """A caller that knows the team (an inbound activity's) is believed at once."""
+    fake = _Feed(channels={})
+    fake.feed.notify(THREAD_ID, REPLY_ID, recipient_id=AAD_OBJECT_ID, text="t", preview="p")
+    await fake.settle()
+    assert fake.requests == [], "a miss first"
+    fake.feed.notify(
+        THREAD_ID, REPLY_ID, recipient_id=AAD_OBJECT_ID, text="t", preview="p", group_id="g-2"
+    )
+    await fake.settle()
+    [request] = fake.requests
+    assert request.url.path == "/v1.0/teams/g-2/sendActivityNotification", "the given team"
+    assert fake.stored_reads == [CHANNEL_ID], "the stored rows are read only for the miss"
+
+
 def test_chain_id_is_a_stable_positive_int64() -> None:
     """One routine keeps one feed entry: the same id gives the same chain."""
     key = uuid.uuid4()
@@ -198,10 +262,14 @@ def test_chain_id_is_a_stable_positive_int64() -> None:
     assert 0 < chain_id(key) < 2**63, "a positive Int64"
 
 
-async def _confirm_once(fake: _Feed, conversation_id: str) -> FakeSender:
+async def _confirm_once(
+    fake: _Feed, conversation_id: str, *, team_group_id: str | None = None
+) -> FakeSender:
     sender = FakeSender()
     cards = TeamsConfirmationCards(sender, feed=fake.feed)
-    hook = cards.hook(conversation_id=conversation_id, service_url=None)
+    hook = cards.hook(
+        conversation_id=conversation_id, service_url=None, team_group_id=team_group_id
+    )
     call = ToolCall(tool_use_id="tu_1", server_name="linear", tool_name="create_issue", input={})
     now = datetime.now(UTC)
     prompt = prompt_for_tool_call(call, requester_platform_user_id=AAD_OBJECT_ID, now=now)
@@ -220,6 +288,15 @@ async def test_an_approval_card_in_a_thread_notifies_its_requester() -> None:
     assert body["recipient"]["userId"] == AAD_OBJECT_ID, "the requester"
     assert body["templateParameters"][0]["value"] == APPROVAL_NOTICE, "an approval notice"
     assert "/m-1?" in body["topic"]["webUrl"], "linked to the posted card"
+
+
+async def test_an_approval_card_passes_the_inbound_team_to_its_notice() -> None:
+    """The turn's team comes from the inbound activity: no channel list is needed."""
+    fake = _Feed(channels={})
+    await _confirm_once(fake, THREAD_ID, team_group_id="g-inbound")
+    [request] = fake.requests
+    assert request.url.path == "/v1.0/teams/g-inbound/sendActivityNotification", "that team"
+    assert fake.stored_reads == [], "no stored read"
 
 
 async def test_an_approval_card_in_a_chat_sends_no_notice() -> None:

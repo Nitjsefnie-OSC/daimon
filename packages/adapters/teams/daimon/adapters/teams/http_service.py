@@ -80,6 +80,7 @@ from daimon.core.stores.teams_channel_sites import (
     get_teams_channel_site,
     upsert_teams_channel_site,
 )
+from daimon.core.stores.teams_channel_subscriptions import get_teams_channel_subscription
 from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, GraphMessage, TeamGroups
@@ -414,7 +415,23 @@ def create_teams_http_service(
         async with runtime.sessionmaker() as session:
             return await list_teams_installations(session, tenant_id=teams_tenant)
 
-    homes = ChannelHomes(installed_teams, billing_panel.sdk_team_channels(teams_app))
+    async def stored_group(channel_id: str) -> str | None:
+        # A private or shared channel may be missing from the bot's channel list:
+        # its Files site or its message subscription records the team.
+        async with runtime.sessionmaker() as session:
+            site = await get_teams_channel_site(
+                session, tenant_id=teams_tenant, channel_id=channel_id
+            )
+            if site is not None:
+                return site.group_id
+            watched = await get_teams_channel_subscription(
+                session, tenant_id=teams_tenant, channel_id=channel_id
+            )
+            return None if watched is None else watched.group_id
+
+    homes = ChannelHomes(
+        installed_teams, billing_panel.sdk_team_channels(teams_app), stored_group=stored_group
+    )
     feed = ActivityFeed(graph, homes, entra_tenant_id=settings.tenant_id, spawn=spawn)
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
     turns = TeamsApp(

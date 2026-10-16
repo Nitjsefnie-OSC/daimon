@@ -200,6 +200,7 @@ class TeamsConfirmationCards:
         *,
         conversation_id: str,
         service_url: str | None,
+        team_group_id: str | None = None,
         requester_display_name: str | None = None,
         runtime: TeamsRuntime | None = None,
         admission: Admission | None = None,
@@ -208,7 +209,10 @@ class TeamsConfirmationCards:
         prepare_admin: Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]] | None = None,
         check_admin: Callable[[ConfirmationPrompt, str], Awaitable[str | None]] | None = None,
     ) -> ConfirmationHook:
-        """A hook that posts each prompt's card into the turn's conversation."""
+        """A hook that posts each prompt's card into the turn's conversation.
+
+        `team_group_id` is the channel's team, from the inbound activity, for its notice.
+        """
 
         if runtime is not None:
             from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
@@ -290,6 +294,7 @@ class TeamsConfirmationCards:
                         recipient_id=prompt.requester_platform_user_id,
                         text=APPROVAL_NOTICE,
                         preview=card.headline,
+                        group_id=team_group_id,
                     )
                 posted = _PostedCard(
                     prompt,
