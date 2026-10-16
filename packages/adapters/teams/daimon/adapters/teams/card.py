@@ -9,12 +9,15 @@ summary line, 👍/👎 buttons (`vote_actions`, answered by `feedback`) and
 Ask a person when support is on: Teams refuses an edit carrying both text
 and a card. The votes sit beside Ask a person, as on Slack and Discord,
 not in Teams' feedback loop. A tool-only or failed turn's notice card
-carries them itself.
+carries them itself. Output previews ride in the answer's text as markdown
+images, in plain markdown: Teams refuses an edit with text and an image
+attachment too, and splits such a new post into two messages.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -29,7 +32,7 @@ from daimon.core.turn.status_lines import (
     format_tool_lines,
     has_running_tool,
 )
-from microsoft_teams.api import Account, MentionEntity, MessageActivityInput
+from microsoft_teams.api import Account, Attachment, MentionEntity, MessageActivityInput
 from microsoft_teams.cards import (
     Action,
     ActionSet,
@@ -194,19 +197,41 @@ def controls_card(summary: str, *, ask_human: bool) -> MessageActivityInput:
     return _card([_summary_line(summary), ActionSet(actions=actions)], fallback=summary)
 
 
-def answer_message(text: str, *, mention: Account | None = None) -> MessageActivityInput:
+# Alt text that could end the image's brackets or start markup.
+_ALT_SPECIAL = re.compile(r"([\\\[\]*_`<>$])")
+
+
+def inline_image(preview: Attachment) -> str:
+    """A data-URI preview as a markdown image, which Teams hosts in the text's message.
+
+    Only data URIs: a Graph thumbnail's https URL is kept as sent but expires.
+    """
+    alt = _ALT_SPECIAL.sub(r"\\\1", " ".join((preview.name or "image").split()))
+    return f"![{alt}]({preview.content_url})"
+
+
+def answer_message(
+    text: str, *, mention: Account | None = None, images: Sequence[Attachment] = ()
+) -> MessageActivityInput:
     """One chunk of the answer, text only, in Extended Markdown (math, tables, code).
 
     A completion ping leads with `mention` (an AAD object id is enough) and
     stays plain markdown: whether Extended Markdown keeps an `<at>` mention is
-    undocumented.
+    undocumented. `images`, data-URI previews, follow the text as markdown
+    images, outside `TEAMS_LIMIT`, and make it plain markdown too: Teams then
+    stores each as hosted content Graph reads back, where Extended Markdown
+    keeps a URL no daimon token can fetch. The caller keeps math out of such a
+    message (`has_math`), since plain markdown shows no math.
     """
-    if mention is None:
+    tail = "".join(f"\n\n{inline_image(image)}" for image in images)
+    if mention is None and not images:
         return MessageActivityInput(
             text=escape_dollars(text), text_format="extendedmarkdown"
         ).add_ai_generated()
-    message = MessageActivityInput(text=text, text_format="markdown").add_ai_generated()
+    message = MessageActivityInput(text=text + tail, text_format="markdown").add_ai_generated()
+    if mention is None:
+        return message
     tag = f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
-    message.text = f"{tag}\n\n{text}"
+    message.text = f"{tag}\n\n{text}{tail}"
     message.add_entity(MentionEntity(mentioned=mention, text=tag))
     return message

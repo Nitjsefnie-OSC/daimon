@@ -16,13 +16,14 @@ around an answer is thread clutter. Without access a file goes down the
 skip path to be logged, and the agent guidance has the agent say so in its
 reply.
 Image outputs also travel as inline previews (`image_preview`), up to
-MAX_PREVIEWS in delivery order, edited into the answer's last message: in a
-channel in the same edit as the links, in a 1:1 chat above the consent
-cards. Where files cannot be saved, a group chat included, none is shown.
+MAX_PREVIEWS in delivery order, edited into the answer's last message as
+markdown images in its text (Teams refuses an edit with text and an
+attachment): in a channel in the same edit as the links, in a 1:1 chat
+above the consent cards. Where files cannot be saved, a group chat included, none is shown.
 Up to MAX_PREVIEWS uploaded Office files and PDFs then show their first
 page, Graph's thumbnail of each, in a second edit. Previews the answer
-cannot take (a notice card, a refused edit) go in a message of their own,
-as with no answer to edit. A failed preview is only logged.
+cannot take (a notice card, a refused edit) go as attachments in a message
+of their own, with no text, as with no answer to edit. A failed preview is only logged.
 An output named `<file>.preview.png` (`is_preview_output`) is the agent's own
 picture of `<file>`, such as a document's first page in a 1:1 chat, where
 Graph makes no thumbnail: it is only shown as a preview, never offered or
@@ -77,7 +78,7 @@ from daimon.core.teams_file_offers import (
     verify_offer,
 )
 from daimon.core.teams_graph import GraphUnavailable, is_sharepoint_host
-from daimon.core.teams_sharepoint import DriveItem, file_link
+from daimon.core.teams_sharepoint import SAVED_FILES_HEADING, DriveItem, file_link
 from microsoft_teams.api import (
     Attachment,
     FileConsentCard,
@@ -94,10 +95,9 @@ FILE_INFO_CONTENT_TYPE = "application/vnd.microsoft.teams.card.file.info"
 OFFER_TTL_S = 3600.0
 _EXPIRED = "That file offer has expired. Ask me again and I'll resend it."
 _UPLOAD_FAILED = "I couldn't upload `{name}`. Ask me again to retry."
-_SAVED = "Saved to this channel's files:"
 PREVIEW_SUFFIX = ".preview.png"
 
-# Edits text, attachments or both in below the answer on screen; False if they cannot go there.
+# Edits text, data-URI previews or both in below the answer on screen; False if they cannot.
 AppendToAnswer = Callable[[str | None, Sequence[Attachment]], Awaitable[bool]]
 
 # Graph renders a first-page thumbnail of these, often seconds after the upload.
@@ -408,7 +408,7 @@ class TeamsOutputDelivery:
             sleep=self._sleep,
         )
         # Links and images in one edit of the answer; refused, each goes as on its own.
-        text = "\n".join([_SAVED, *links])
+        text = "\n".join([SAVED_FILES_HEADING, *links])
         if not links:
             await self._show_previews(inbound, previews, append)
         elif not (previews and append is not None and await append(text, previews)):
@@ -571,7 +571,8 @@ class TeamsOutputDelivery:
             return False
         name = display_filename_for(file.filename, file.mime_type)
         item = await files.upload(inbound, name, file.content)
-        text = f"{_SAVED}\n{file_link(sanitize_title(item.name or name), item.web_url)}"
+        link = file_link(sanitize_title(item.name or name), item.web_url)
+        text = f"{SAVED_FILES_HEADING}\n{link}"
         if append is not None and await append(text, ()):
             return True
         if inbound.unprompted:

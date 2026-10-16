@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import dataclasses
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
@@ -554,8 +555,10 @@ def _image(name: str) -> Attachment:
     return Attachment(content_type="image/png", content_url="data:image/png;base64,AA==", name=name)
 
 
-def _names(activity: MessageActivityInput) -> list[str | None]:
-    return [a.name for a in activity.attachments or []]
+def _names(activity: MessageActivityInput) -> list[str]:
+    """The previews shown in an answer's text, by alt text; it carries no attachment."""
+    assert not activity.attachments, "Teams refuses text beside an attachment"
+    return re.findall(r"!\[((?:\\.|[^\]])*)\]\(data:image/", activity.text or "")
 
 
 async def test_previews_ride_the_links_edit_and_later_edits_keep_them() -> None:
@@ -569,10 +572,13 @@ async def test_previews_ride_the_links_edit_and_later_edits_keep_them() -> None:
     assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
     links, thumbnails, notice = sender.activities[-3:]
     assert {links.id, thumbnails.id, notice.id} == {"m-1"}, "each one an edit of the answer"
-    assert links.text == "The posterior mean is 3.\n\nSaved to this channel's files:"
-    assert _names(links) == ["a.png"], "the image rides the links' edit"
-    assert thumbnails.text == links.text, "no text added"
+    assert links.text == (
+        "The posterior mean is 3.\n\nSaved to this channel's files:"
+        "\n\n![a.png](data:image/png;base64,AA==)"
+    ), "the image follows the links, in the same text"
+    assert links.text_format == "markdown", "Graph reads back a markdown message's images"
     assert _names(thumbnails) == ["a.png", "deck.pptx"], "added after the one already there"
+    assert (thumbnails.text or "").startswith(links.text or "-"), "no text added"
     assert notice.text and notice.text.startswith("I lost the workspace.")
     assert _names(notice) == ["a.png", "deck.pptx"], "an edit never drops a shown preview"
 
@@ -597,7 +603,28 @@ async def test_previews_the_answer_cannot_take_are_refused() -> None:
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
     assert not await lifecycle.append_to_answer(attachments=[_image("a.png")]), "a 413"
     assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
-    assert not sender.activities[-1].attachments, "a refused preview is not sent again"
+    assert _names(sender.activities[-1]) == [], "a refused preview is not sent again"
+
+
+async def test_previews_stay_out_of_an_answer_with_math() -> None:
+    """Plain markdown shows math raw, so the previews go in a message of their own."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The mean is $\\mu = 3$."))
+    edits = len(sender.sent)
+
+    assert not await lifecycle.append_to_answer(attachments=[_image("a.png")]), "math"
+    assert len(sender.sent) == edits, "no edit was tried"
+    assert await lifecycle.append_to_answer("Saved to this channel's files:"), "links still fit"
+    assert sender.activities[-1].text_format == "extendedmarkdown", "the math still renders"
+
+
+def test_preview_alt_text_cannot_break_out_of_its_image() -> None:
+    """A file name with brackets or markup stays the image's alt text."""
+    image = card.inline_image(_image("a]![x](https://example.com/y) *b*\n.png"))
+    assert image == (
+        r"![a\]!\[x\](https://example.com/y) \*b\* .png](data:image/png;base64,AA==)"
+    ), "brackets and markup are escaped, the newline folded"
 
 
 async def test_an_answer_holds_no_more_previews_than_one_preview_message() -> None:
