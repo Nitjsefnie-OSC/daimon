@@ -244,6 +244,24 @@ def test_the_files_hint_mentions_image_previews_only_where_they_are_sent() -> No
     assert "still shows inline" not in unprompted, "but is promised no preview"
 
 
+def test_only_a_direct_chat_turn_hears_about_preview_outputs() -> None:
+    """A 1:1 chat has no Graph thumbnails, so its agent may picture a document itself."""
+    direct = render_user_message(
+        "<controls/>", make_inbound("hi"), is_admin=False, keys="", prefix="", history=None
+    )
+    channel = render_user_message(
+        "<controls/>",
+        make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel"),
+        is_admin=False,
+        keys="",
+        prefix="",
+        history=None,
+        channel_files=True,
+    )
+    assert ".preview.png" in direct, "a 1:1 turn learns the preview output convention"
+    assert ".preview.png" not in channel, "a channel already gets Graph's thumbnails"
+
+
 def test_a_channel_turn_names_its_thread_and_channel() -> None:
     """The ids `set_thread_participation` keys on, as Discord's `<thread>` and `<channel>`."""
     inbound = make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel")

@@ -57,6 +57,16 @@ _GROUP_FILES_HINT = (
     "Files you make cannot be shared in a group chat. Say so when someone asks for a file "
     "here, and offer to send it in a 1:1 chat with them instead."
 )
+# A 1:1 chat has no Graph thumbnails: the agent may picture a document itself
+# (`output_delivery.is_preview_output`). The default environment has typst, no office suite.
+_DIRECT_FILES_HINT = (
+    "When you deliver a .docx, .pptx, .xlsx or .pdf here, you may also save a PNG of its "
+    "first page or slide, at most 1024 px, to your outputs as <file name>.preview.png "
+    "(report.pdf.preview.png for report.pdf): it shows inline as a picture and is never "
+    "offered as a file. Only when you can render one cheaply, such as "
+    'typst.compile(..., format="png") for a document built with typst or PyMuPDF '
+    "(pip install pymupdf) for a PDF; no office renderer is installed by default."
+)
 # Only where previews are sent: an unprompted answer posts none.
 _PREVIEW_NOTE = (
     " An image among your session outputs still shows inline here as a preview, though it is "
@@ -416,11 +426,13 @@ def render_user_message(
     `set_thread_participation` key on, and says with `files` whether a file
     saved now reaches the channel (`channel_files`; None in a chat). Where it
     does not, `files_hint` says what to do when asked for one: offer the
-    Enable files card when the deployment can (`can_enable_files`).
+    Enable files card when the deployment can (`can_enable_files`). In a 1:1
+    chat `files_hint` says how to picture a document inline.
     `unprompted="true"` marks a message nobody addressed to the bot (organic
     thread participation); `external="true"` a sender from another organisation.
     """
-    context = [f'<channel platform="teams" id={quoteattr(inbound.channel_id)}/>']
+    hint = quoteattr(_DIRECT_FILES_HINT)
+    context = [f'<channel platform="teams" id={quoteattr(inbound.channel_id)} files_hint={hint}/>']
     if inbound.kind == "channel":
         files = ""
         if channel_files is not None:

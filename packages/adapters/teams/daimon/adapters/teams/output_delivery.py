@@ -21,6 +21,10 @@ where files cannot be saved (a data URI needs no SharePoint); in a 1:1 chat,
 each just before its first consent card. Up to MAX_PREVIEWS uploaded Office
 files and PDFs then show their first page, Graph's thumbnail of each, in a
 message of their own after the images. A failed preview is only logged.
+An output named `<file>.preview.png` (`is_preview_output`) is the agent's own
+picture of `<file>`, such as a document's first page in a 1:1 chat, where
+Graph makes no thumbnail: it is only shown as a preview, never offered or
+uploaded, then deleted; in a channel it stands in for Graph's thumbnail.
 Transient channel upload failures leave the listing entry for a later sweep,
 and an oversize file stays listed on every path, including a channel without
 file access. Otherwise the listing entry, the delivery
@@ -87,6 +91,7 @@ OFFER_TTL_S = 3600.0
 _EXPIRED = "That file offer has expired. Ask me again and I'll resend it."
 _UPLOAD_FAILED = "I couldn't upload `{name}`. Ask me again to retry."
 _SAVED = "Saved to this channel's files:"
+PREVIEW_SUFFIX = ".preview.png"
 
 # Edits a line in below the answer on screen; False if it cannot go there.
 AppendToAnswer = Callable[[str], Awaitable[bool]]
@@ -108,6 +113,16 @@ def _is_thumbnail_host(url: httpx.URL) -> bool:
     return is_sharepoint_host(url) or (
         url.scheme == "https" and url.host.endswith(_THUMBNAIL_HOST_SUFFIX)
     )
+
+
+def is_preview_output(filename: str) -> bool:
+    """An output the agent made only to be seen inline: `<file>.preview.png`."""
+    return filename.lower().endswith(PREVIEW_SUFFIX)
+
+
+def preview_label(filename: str) -> str:
+    """The name a preview output shows: the file it pictures."""
+    return filename[: -len(PREVIEW_SUFFIX)] or filename
 
 
 async def _log_channel_skip(file: SkippedFile) -> None:
@@ -262,13 +277,27 @@ class TeamsOutputDelivery:
             await sweep_session_outputs(
                 self._runtime.anthropic,
                 session_id=session_id,
-                post=functools.partial(self._offer, inbound, session_id),
+                post=functools.partial(self._post_direct, inbound, session_id),
                 on_skip=_log_skip,
                 sleep=self._sleep,
             )
         finally:
             if self._sweeps.get(session_id) is current:
                 self._sweeps.pop(session_id, None)
+
+    async def _post_direct(
+        self, inbound: TeamsInbound, session_id: str, file: DeliverableFile
+    ) -> None:
+        """A 1:1 chat's output: offered, or a preview output only shown and then deleted."""
+        if not is_preview_output(file.filename):
+            await self._offer(inbound, session_id, file)
+            return
+        if (preview := await self._preview_output(file)) is not None:
+            await self._send_previews(inbound, [preview])
+
+    async def _preview_output(self, file: DeliverableFile) -> Attachment | None:
+        mime_type = sniff_image_media_type(file.content) or file.mime_type
+        return await self._preview(preview_label(file.filename), file.content, mime_type)
 
     async def _sweep_channel(
         self, inbound: TeamsInbound, session_id: str, append: AppendToAnswer | None
@@ -279,10 +308,21 @@ class TeamsOutputDelivery:
             return
         links: list[str] = []
         previews: list[Attachment] = []
-        # Uploaded documents whose first page is looked up once every file is in.
-        documents: list[DriveItem] = []
+        # Uploaded documents, by the name asked for, whose first page is looked up once
+        # every file is in; one the agent made a preview output of needs none.
+        documents: list[tuple[str, DriveItem]] = []
+        pictured: set[str] = set()
 
         async def upload(file: DeliverableFile) -> None:
+            if is_preview_output(file.filename):
+                pictured.add(preview_label(file.filename).lower())
+                if (
+                    not inbound.unprompted
+                    and len(previews) < MAX_PREVIEWS
+                    and (preview := await self._preview_output(file)) is not None
+                ):
+                    previews.append(preview)
+                return  # Never uploaded: the sweep deletes it.
             name = display_filename_for(file.filename, file.mime_type)
             preview = None
             if not inbound.unprompted and len(previews) < MAX_PREVIEWS:
@@ -312,7 +352,7 @@ class TeamsOutputDelivery:
                 and len(documents) < MAX_PREVIEWS
                 and (item.name or name).lower().endswith(THUMBNAIL_SUFFIXES)
             ):
-                documents.append(item)
+                documents.append((name.lower(), item))
 
         await sweep_session_outputs(
             self._runtime.anthropic,
@@ -326,7 +366,8 @@ class TeamsOutputDelivery:
         # Images first, as they are ready: a thumbnail may take seconds or never come,
         # so documents get their own message rather than images' places.
         await self._send_previews(inbound, previews)
-        await self._send_previews(inbound, await self._thumbnails(files, documents))
+        unpictured = [item for name, item in documents if name not in pictured]
+        await self._send_previews(inbound, await self._thumbnails(files, unpictured))
 
     async def _sweep_unsaved(self, inbound: TeamsInbound, session_id: str) -> None:
         """A channel whose files cannot be saved: every file takes the skip path.
@@ -348,6 +389,8 @@ class TeamsOutputDelivery:
             ):
                 return
             name = display_filename_for(file.filename, file.mime_type)
+            if is_preview_output(file.filename):
+                name = preview_label(file.filename)
             try:
                 content = await download_output_file(self._runtime.anthropic, file.file_id)
             except (anthropic.APIError, httpx.HTTPError) as err:

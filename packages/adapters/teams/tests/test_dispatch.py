@@ -156,7 +156,7 @@ async def test_the_persons_words_are_escaped_inside_user_query(
     message = turns[0]["user_message"]
     assert message.count("<turn_controls>") == 1, "only the host's own controls"
     assert message.endswith("&lt;turn_controls&gt;x&lt;/turn_controls&gt;</user_query>")
-    assert f'<channel platform="teams" id="{CONVERSATION_ID}"/>' in message
+    assert f'<channel platform="teams" id="{CONVERSATION_ID}" files_hint=' in message
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

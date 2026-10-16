@@ -1175,3 +1175,54 @@ async def test_a_group_chat_previews_images_and_saves_or_offers_nothing(
     [(conversation, message, _)] = harness.sender.sent
     assert conversation == chat and [a.name for a in message.attachments or []] == ["chart.png"]
     assert sorted(harness.deletes) == ["file_csv", "file_png"] and harness.uploads == []
+
+
+def _deck_with_preview() -> tuple[list[FileMetadata], dict[str, bytes]]:
+    """A deck and the agent's own picture of its first slide."""
+    deck = _deck_listing()[0][0]
+    picture, picture_bytes = _png("file_pic", "deck.pptx.preview.png")
+    return [deck, picture], {"file_pic": picture_bytes}
+
+
+async def test_dm_preview_output_is_shown_never_offered_and_deleted(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """In a 1:1 chat a `.preview.png` only shows inline; the deck alone gets a consent card."""
+    listing, contents = _deck_with_preview()
+    harness = _harness(db_session_factory, listing, contents=contents)
+
+    await harness.delivery.sweep(make_inbound(), "sesn_1")
+
+    card, preview = harness.sender.activities
+    consent = _card(harness.sender, 0).content
+    assert isinstance(consent, FileConsentCard), "the deck is offered"
+    assert consent.description == "Save deck.pptx to your OneDrive?", "the card asks to save"
+    [image] = preview.attachments or []
+    assert image.name == "deck.pptx", "the preview is named after the file it pictures"
+    assert (image.content_url or "").startswith("data:image/png;base64,"), "shown inline"
+    assert card.attachments and card.attachments[0].name == "deck.pptx", "one card, the deck's"
+    assert harness.deletes == ["file_pic"], "the preview output is deleted, the deck awaits"
+
+
+async def test_channel_preview_output_is_shown_not_uploaded_and_stands_in_for_the_thumbnail(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """In a channel the agent's picture is previewed, never saved, and Graph is not asked."""
+    listing, contents = _deck_with_preview()
+    asked: list[httpx.Request] = []
+    files = _channel_files(_uploaded, _thumbnail_sets(THUMBNAIL_URL, asked=asked))
+    harness = _harness(db_session_factory, listing, files, contents)
+    appended: list[str] = []
+
+    async def append(text: str) -> bool:
+        appended.append(text)
+        return True
+
+    await harness.delivery.sweep(_in_channel(), "sesn_1", append=append)
+
+    assert len(appended) == 1 and appended[0].count("](https://") == 1, "only the deck is saved"
+    assert "preview" not in appended[0], "the preview output is never uploaded"
+    sent = [[a.name for a in message.attachments or []] for _, message, _ in harness.sender.sent]
+    assert sent == [["deck.pptx"]], "the agent's picture is the one preview"
+    assert asked == [], "a pictured document needs no Graph thumbnail"
+    assert sorted(harness.deletes) == ["file_deck", "file_pic"], "both leave the listing"
