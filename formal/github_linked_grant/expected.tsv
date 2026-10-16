@@ -1,3 +1,5 @@
 config	verdict	distinct_states
-Safe.cfg	clean	33
-NoRecheck.cfg	violates:Safe	11
+clean	clean	5435
+no_platform_identity	violates:NoForeignLink	140
+no_commit_recheck	violates:GrantRestsOnCurrentAuthority	1388
+permission_gap	violates:NoStalePermission	1644

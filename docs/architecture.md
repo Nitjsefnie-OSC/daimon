@@ -1793,7 +1793,12 @@ admission before any of this runs.
   snapshot (or confirmed names before the first snapshot), so later covered
   repositories join automatically and removed ones leave. The App mints scoped
   name-based tokens in groups of at most 500 repositories, exposing further
-  groups as `GH_TOKEN_2`, `GH_TOKEN_3`, and so on. A single-repo grant
+  groups as `GH_TOKEN_2`, `GH_TOKEN_3`, and so on.
+  `GH_TOKEN`, numbered `GH_TOKEN_<n>`, `GITHUB_TOKEN`, and numbered
+  `GITHUB_TOKEN_<n>` are reserved for App credentials. Uploaded secrets with
+  those names are refused and stored legacy rows are omitted from mounted
+  `.env` files, including during session refresh.
+  A single-repo grant
   can coexist and the higher access wins; only an explicit single grant can
   select the working repo. Removing one repo under `owner/*` keeps it excluded
   across owner-grant removal and regrant until an explicit single grant clears

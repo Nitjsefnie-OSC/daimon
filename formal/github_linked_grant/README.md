@@ -1,18 +1,25 @@
-# Linked grant commit fence (disposable spike)
+# Linked GitHub chat grant model
 
-Question: can an agent grant commit after management, link generation, installation coverage, or tenant association changes between a GitHub permission check and the database write?
+`GitHubChatGrant.tla` asks whether a chat request can save a grant after link identity, manager authority, or installation coverage changes. One intent and one request cross the browser, GitHub, and serializable database boundaries. Run `FORMAL_CHECK_FILTER=github_linked_grant formal/check.sh` from the repository root with the jar specified in [`formal/README.md`](../README.md).
+
+## Action-to-code map
 
 | Model action | Code boundary |
 | --- | --- |
-| `GitHubCheck` | `github_linked_grant.py:125-193` fetches GitHub permissions and reaches `_before_commit`. |
-| `RevokeManager` | `github_connect.py:382-404` supplies the live manager check; `github_linked_grant.py:221` applies it. |
-| `Unlink` | `github_linked_grant.py:197-214` locks and checks the account link and generation. |
-| `Suspend` | `github_linked_grant.py:199-220` locks and checks installation coverage. |
-| `Disassociate` | `github_linked_grant.py:202-218` checks a tenant association. |
-| `Commit` | `github_linked_grant.py:196-268` writes authorization and grant in one serializable transaction. |
+| `Mint`, `Open` | `packages/core/daimon/core/stores/github_personal_links.py:19` creates a one-use intent; `packages/adapters/mcp/daimon/adapters/mcp/oauth_github_personal.py:190` opens it. |
+| `PlatformCallback`, `RejectForeign` | `packages/adapters/mcp/daimon/adapters/mcp/oauth_github_personal.py:262` verifies the chat identity before GitHub authorization. |
+| `GitHubCallback`, `ReplayCallback` | `packages/adapters/mcp/daimon/adapters/mcp/oauth_github_personal.py:385` and `:467-490` save a verified link and consume the intent in one transaction. |
+| `Request`, `CheckPermission` | `packages/adapters/mcp/daimon/adapters/mcp/tools/github_connect.py:297` checks manager policy; `packages/adapters/mcp/daimon/adapters/mcp/tools/github_linked_grant.py:90-252` uses the linked token to discover installation and repo permissions. |
+| `Commit`, `RejectGrant` | `packages/adapters/mcp/daimon/adapters/mcp/tools/github_linked_grant.py:260-334` compares the generation paired with that token, installation coverage, and live manager policy inside a serializable transaction. |
+| `RevokeManager`, `Unlink`, `Rotate`, `RemoveCoverage`, `RevokePermission` | `packages/core/daimon/core/github_panel.py:97` is the policy function; `packages/core/daimon/core/stores/github_links.py:90,239` rotates or unlinks; `packages/core/daimon/core/stores/github_installation_reconciliation.py:180` refreshes coverage. External permission revocation can happen between GitHub's answer and commit. |
 
-All state variables are Boolean except link generation (0 initially, 1 after unlink) and phase (`start`, `checked`, `done`). These are bounded stand-ins for the real row values. No timeouts or network retries are modelled. `Safe` means a successful grant had all four prerequisites at its commit check. It does not claim that GitHub permission remains valid after the check. The model assumes the serializable transaction sees or conflicts with concurrent writes to the checked rows; this is supported by the PostgreSQL isolation level and row locks in the code, but an external concurrency stress run is UNVERIFIED.
+The model uses two people, two GitHub users, two agents, two repos, one intent, and one request. These are finite bounds, not production sizes. The platform and GitHub calls are separate actions. The database recheck and commit are one atomic model action; live external authority can still change after the policy lookup answers but before the transaction commits.
 
-`Safe.cfg`: 33 distinct states, clean. `NoRecheck.cfg`: 11 distinct states before `Safe` fails. Counterexample: GitHub check succeeds, manager rights are revoked, then a commit without rechecks grants the repo. The same manager-revocation sequence is replayed by `test_revocation_between_lookup_and_commit[manager]`; link unlink is replayed separately by `[link]` in `test_github_linked_grant_spike.py:385`. GitHub is `httpx.MockTransport` in those tests; no live GitHub contract or trace replay was run. The model result is provisional.
+| Config | Verdict | Distinct states | Meaning |
+| --- | --- | ---: | --- |
+| `clean` | clean | 5,435 | Link identity, single use, and commit authority hold within the bounds. |
+| `no_platform_identity` | violates `NoForeignLink` | 140 | A forwarded link can attach another person's GitHub account. |
+| `no_commit_recheck` | violates `GrantRestsOnCurrentAuthority` | 1,388 | A revoked manager, relink, or coverage change can be accepted. |
+| `permission_gap` | violates `NoStalePermission` | 1,644 | GitHub permission can be revoked after its response and before commit. |
 
-Run with `timeout 30s java -Xmx256m -cp /home/derick/.cache/daimon/tla/tla2tools.jar tlc2.TLC -workers 1 -deadlock -metadir /tmp/gh-linked-safe -config Safe.cfg Grant.tla` (use a different metadir and `NoRecheck.cfg` for the unsafe check). TLC 2.19. No CI job is added for this disposable spike.
+`EveryRequestResolves` uses weak fairness for permission checking and commit or rejection, with no timeout shortcut. The permission gap is a real limit: GitHub permission is not re-read inside the database transaction. The model does not cover multiple requests, OAuth provider failure, token refresh internals, repo renames, or read/write levels. Upstream staging contract tests and real trace validation remain unrun. Counterexample tests for relink and manager revocation are in `packages/adapters/mcp/tests/tools/test_github_linked_grant.py`; results are provisional for external services.

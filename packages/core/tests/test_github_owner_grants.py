@@ -70,9 +70,7 @@ async def test_future_snapshot_exclusion_and_removal(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id, agent_id = await _owner_setup(db_session_factory)
-    assert await has_declared_app_access(
-        db_session_factory, tenant_id=tenant_id, agent_id=agent_id
-    )
+    assert await has_declared_app_access(db_session_factory, tenant_id=tenant_id, agent_id=agent_id)
     async with db_session_factory() as session:
         assert [
             row.full_name
@@ -91,6 +89,7 @@ async def test_future_snapshot_exclusion_and_removal(
                 session, tenant_id=tenant_id, agent_id=agent_id
             )
         } == {"example/repo-0", "example/repo-1"}
+
     async with db_session_factory.begin() as session:
         await exclude_repo(
             session, tenant_id=tenant_id, agent_id=agent_id, repo_full_name="example/repo-1"
@@ -122,6 +121,55 @@ async def test_future_snapshot_exclusion_and_removal(
                 session, tenant_id=tenant_id, agent_id=agent_id
             )
         } == {"example/repo-0", "example/repo-1"}
+
+
+@pytest.mark.asyncio
+async def test_mixed_case_exclusion_is_absent_from_minted_token(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, agent_id = await _owner_setup(db_session_factory)
+    async with db_session_factory.begin() as session:
+        installation = await session.get(GitHubAppInstallation, 771)
+        assert installation is not None
+        installation.github_repo_full_names = ["example/repo-0", "example/repo-1"]
+        await exclude_repo(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_full_name="Example/Repo-0",
+        )
+    async with db_session_factory() as session:
+        assert [
+            repo.full_name
+            for repo in await resolve_owner_repositories(
+                session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        ] == ["example/repo-1"]
+    monkeypatch.setattr("daimon.core.github_app_session.build_app_jwt", lambda *a, **k: "jwt")
+    minted_names: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        names = json.loads(request.content)["repositories"]
+        minted_names.append(names)
+        return httpx.Response(201, json={"token": "scoped-token"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await prepare_app_access(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            is_external=False,
+            provisional_session_id="mixed-case-owner",
+            config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            cache=PermissionCache(),
+        )
+    assert minted_names == [["repo-1"]]
 
 
 @pytest.mark.asyncio

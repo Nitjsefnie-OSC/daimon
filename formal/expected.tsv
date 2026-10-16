@@ -349,3 +349,19 @@ tool_rules	ToolRules	ToolRulesSnapshot	violates:RunAuthorized	37	-	unsafe: rules
 tool_rules	ToolRules	ToolRulesAnyClicker	violates:RunAuthorized	61	-	unsafe: a non-admin's Always allow runs the call
 tool_rules	ToolRules	ToolRulesBlindUpsert	violates:NoResurrection	553	-	unsafe: a save from before a clear restores the rule
 tool_rules	ToolRules	ToolRulesSaveIfLost	violates:SaveFollowsSettlement	534	-	unsafe: a click that lost to expiry or Deny still saves a rule
+# ---- linked GitHub chat grants ----
+github_linked_grant	GitHubChatGrant	clean	clean	5435	-seed 1 -fp 0	chat link identity, replay, commit authority and permission gap
+github_linked_grant	GitHubChatGrant	no_platform_identity	violates:NoForeignLink	140	-seed 1 -fp 0	chat link identity, replay, commit authority and permission gap
+github_linked_grant	GitHubChatGrant	no_commit_recheck	violates:GrantRestsOnCurrentAuthority	1388	-seed 1 -fp 0	chat link identity, replay, commit authority and permission gap
+github_linked_grant	GitHubChatGrant	permission_gap	violates:NoStalePermission	1644	-seed 1 -fp 0	chat link identity, replay, commit authority and permission gap
+# ---- GitHub owner grants ----
+github_owner_grant	OwnerGrant	clean	clean	66096	-seed 1 -fp 0	owner coverage, exclusions and future repositories
+github_owner_grant	OwnerGrant	no_exclusion	violates:ExcludedNeverMinted	114	-seed 1 -fp 0	owner coverage, exclusions and future repositories
+github_owner_grant	OwnerGrant	mint_from_cache	violates:MintedSubsetCovered	133	-seed 1 -fp 0	owner coverage, exclusions and future repositories
+github_owner_grant	OwnerGrant	future_repo_witness	violates:FutureRepoNeverMinted	139	-seed 1 -fp 0	owner coverage, exclusions and future repositories
+# ---- GitHub installation reconciliation ----
+github_installation_reconcile	Reconcile	Safe	clean	40493	-deadlock	installation queue generation, lease, and convergence witness
+github_installation_reconcile	Reconcile	NoGenerationCheck	violates:NoStaleOverwrite	1577	-deadlock	installation queue generation, lease, and convergence witness
+github_installation_reconcile	Reconcile	LegacyOnlyWrite	violates:EventuallyConsistent	24851	-deadlock	installation queue generation, lease, and convergence witness
+github_installation_reconcile	Reconcile	NoLeaseOwnerCheck	violates:NoStaleOverwrite	1606	-deadlock	installation queue generation, lease, and convergence witness
+github_installation_reconcile	Reconcile	ReorderDuplicateWitness	violates:NoReorderDuplicateWitness	4358	-deadlock	installation queue generation, lease, and convergence witness

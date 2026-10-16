@@ -12,7 +12,7 @@ from daimon.core._models import (
     TenantGitHubRepo,
 )
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -124,6 +124,7 @@ async def remove_owner_grants(
 async def exclude_repo(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, repo_full_name: str
 ) -> None:
+    repo_full_name = repo_full_name.casefold()
     await session.execute(
         insert(AgentGitHubOwnerExclusion)
         .values(
@@ -138,11 +139,12 @@ async def exclude_repo(
 async def clear_exclusion(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, repo_full_name: str
 ) -> None:
+    repo_full_name = repo_full_name.casefold()
     await session.execute(
         delete(AgentGitHubOwnerExclusion).where(
             AgentGitHubOwnerExclusion.tenant_id == tenant_id,
             AgentGitHubOwnerExclusion.agent_id == agent_id,
-            AgentGitHubOwnerExclusion.repo_full_name == repo_full_name,
+            func.lower(AgentGitHubOwnerExclusion.repo_full_name) == repo_full_name,
         )
     )
 
@@ -150,14 +152,15 @@ async def clear_exclusion(
 async def resolve_owner_repositories(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> list[OwnerRepository]:
-    excluded = set(
-        await session.scalars(
+    excluded = {
+        name.casefold()
+        for name in await session.scalars(
             select(AgentGitHubOwnerExclusion.repo_full_name).where(
                 AgentGitHubOwnerExclusion.tenant_id == tenant_id,
                 AgentGitHubOwnerExclusion.agent_id == agent_id,
             )
         )
-    )
+    }
     result: list[OwnerRepository] = []
     for grant in await list_owner_grants(session, tenant_id=tenant_id, agent_id=agent_id):
         installation = await session.get(GitHubAppInstallation, grant.installation_id)
@@ -175,7 +178,7 @@ async def resolve_owner_repositories(
         for name in names:
             if (
                 name.split("/", 1)[0].casefold() == grant.owner_login.casefold()
-                and name not in excluded
+                and name.casefold() not in excluded
             ):
                 result.append(
                     OwnerRepository(

@@ -276,6 +276,24 @@ async def test_tool_uses_verified_turn_account_and_private_link(
     )
     assert result.status == "granted"
     post_link.assert_not_awaited()
+    result = await connect_tool._github_connect_impl(
+        runtime, auth, origin_context_id="synthetic", repo_name="acme/new"
+    )
+    assert result.status == "needs_install"
+    assert "https://" not in result.message
+    assert post_link.await_args.kwargs["label"] == "Open GitHub setup"
+    post_link.reset_mock()
+    async with setup_linked.sessionmaker.begin() as session:
+        await session.execute(
+            text("UPDATE github_user_links SET status = 'broken' WHERE github_user_id = 300")
+        )
+    result = await connect_tool._github_connect_impl(
+        runtime, auth, origin_context_id="synthetic", repo_name="acme/new"
+    )
+    assert result.status == "relink"
+    post_link.assert_awaited_once()
+    assert "/oauth/github/link/" in post_link.await_args.kwargs["url"]
+    post_link.reset_mock()
     async with setup_linked.sessionmaker.begin() as session:
         await unlink_account(session, account_id=setup_linked.account.id)
     result = await connect_tool._github_connect_impl(
@@ -342,6 +360,146 @@ async def test_explicit_single_grant_clears_owner_exclusion(setup_linked, github
             {"tenant": setup_linked.tenant.id, "agent": setup_linked.agent_id},
         )
         assert excluded == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo_name", ["acme/widgets", "acme/*"])
+async def test_relink_during_github_lookup_rejects_old_token_evidence(
+    setup_linked, github_http, monkeypatch: pytest.MonkeyPatch, repo_name: str
+) -> None:
+    if repo_name.endswith("/*"):
+        async with setup_linked.sessionmaker.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE github_app_installations SET repo_full_names = "
+                    "ARRAY['acme/widgets'] WHERE installation_id = 201"
+                )
+            )
+    original_installations = linked._installations
+
+    async def relink_during_lookup(client: httpx.AsyncClient, token: str):
+        async with setup_linked.sessionmaker.begin() as session:
+            await save_verified_link(
+                session,
+                intent_account_id=setup_linked.account.id,
+                platform="discord",
+                platform_user_id="person",
+                github_user_id=300,
+                login="person",
+                access_token="new-token",
+                refresh_token="new-refresh",
+                expires_in=3600,
+                refresh_expires_in=86400,
+                fernet=setup_linked.fernet,
+            )
+        return await original_installations(client, token)
+
+    monkeypatch.setattr(linked, "_installations", relink_during_lookup)
+
+    async def manages(session: AsyncSession) -> bool:
+        account = await get_account(session, setup_linked.account.id)
+        return account is not None and account.role == Role.ADMIN
+
+    result = await linked.linked_grant(
+        setup_linked.sessionmaker,
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        agent_id=setup_linked.agent_id,
+        agent_name="Agent",
+        repo_name=repo_name,
+        fernet=setup_linked.fernet,
+        client_id="synthetic",
+        client_secret="synthetic",
+        app_id="42",
+        private_key="synthetic",
+        manages_now=manages,
+    )
+    assert result.status == "changed_try_again"
+    async with setup_linked.sessionmaker() as session:
+        assert not await list_agent_grants(
+            session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+        )
+        assert not await list_owner_grants(
+            session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+        )
+
+
+@pytest.mark.asyncio
+async def test_owner_first_use_associates_existing_installation(
+    setup_linked, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with setup_linked.sessionmaker.begin() as session:
+        await session.execute(text("DELETE FROM tenant_github_repos WHERE installation_id = 201"))
+        await session.execute(
+            text("DELETE FROM github_app_installations WHERE installation_id = 201")
+        )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/app/installations/201/access_tokens":
+            return httpx.Response(201, json={"token": "listing-token"})
+        if request.url.path == "/installation/repositories":
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": 1,
+                    "repositories": [{"full_name": "acme/widgets"}],
+                },
+            )
+        return github_http.respond(request)
+
+    monkeypatch.setattr(
+        linked.httpx,
+        "AsyncClient",
+        lambda **kwargs: github_http.original_client(transport=httpx.MockTransport(respond)),
+    )
+
+    async def manages(session: AsyncSession) -> bool:
+        account = await get_account(session, setup_linked.account.id)
+        return account is not None and account.role == Role.ADMIN
+
+    result = await linked.linked_grant(
+        setup_linked.sessionmaker,
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        agent_id=setup_linked.agent_id,
+        agent_name="Agent",
+        repo_name="acme/*",
+        fernet=setup_linked.fernet,
+        client_id="synthetic",
+        client_secret="synthetic",
+        app_id="42",
+        private_key="synthetic",
+        manages_now=manages,
+    )
+    assert result.status == "granted_read_only"
+    async with setup_linked.sessionmaker() as session:
+        assert await get_installation(session, installation_id=201) is not None
+        assert [
+            grant.owner_login
+            for grant in await list_owner_grants(
+                session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+            )
+        ] == ["acme"]
+        assert await get_reconciliation(session, installation_id=201) is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_result_posts_to_originating_slack_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SimpleNamespace(chat_postMessage=AsyncMock())
+    monkeypatch.setattr(linked_pending, "slack_web_client", AsyncMock(return_value=client))
+    pending = SimpleNamespace(
+        platform="slack",
+        workspace_id="team",
+        parent_channel_id="channel",
+        thread_id="thread",
+        platform_user_id="person",
+    )
+    await linked_pending._deliver_result(SimpleNamespace(), pending, "Grant completed.")
+    client.chat_postMessage.assert_awaited_once_with(
+        channel="channel", thread_ts="thread", text="Grant completed."
+    )
 
 
 @pytest.mark.asyncio

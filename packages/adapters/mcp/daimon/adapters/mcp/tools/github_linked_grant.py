@@ -6,7 +6,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 
 import httpx
 from cryptography.fernet import MultiFernet
@@ -15,8 +15,10 @@ from daimon.core.github_app_auth import (
     build_app_jwt,
     get_app_installation_details,
     installation_supports_write,
+    list_installation_repositories,
+    mint_installation_listing_token,
 )
-from daimon.core.github_requester_access import linked_access_token
+from daimon.core.github_requester_access import linked_access_token_with_generation
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.github_access import (
     list_agent_grants,
@@ -135,7 +137,7 @@ async def linked_grant(
             return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            access_token = await linked_access_token(
+            access_token, checked_generation = await linked_access_token_with_generation(
                 sessionmaker,
                 client,
                 user_id=link.github_user_id,
@@ -241,7 +243,6 @@ async def linked_grant(
     access, permission = policy
     if listed_repo.permission in ("triage", "read"):
         access = "read"
-    checked_generation = fresh_user.link_generation
     async with sessionmaker() as session:
         original_installation = await get_installation(session, installation_id=installation.id)
         originally_present = original_installation is not None
@@ -372,7 +373,7 @@ async def linked_owner_grant(
             return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            token = await linked_access_token(
+            token, checked_generation = await linked_access_token_with_generation(
                 sessionmaker,
                 client,
                 user_id=link.github_user_id,
@@ -388,52 +389,16 @@ async def linked_owner_grant(
                 return LinkedOutcome(
                     status="needs_install", message="Install the GitHub App for this owner first."
                 )
-            checked: list[tuple[int, str, frozenset[str]]] = []
+            checked: list[tuple[int, str, frozenset[str], list[tuple[int, str, str]]]] = []
             async with sessionmaker() as session:
                 for candidate in candidates:
                     current = await get_installation(session, installation_id=candidate.id)
-                    if (
-                        current is None
-                        or current.suspended_at is not None
+                    if current is not None and (
+                        current.suspended_at is not None
                         or current.github_removed_at is not None
                         or current.account_login.casefold() != owner.casefold()
-                        or not await installation_associated(
-                            session, tenant_id=tenant_id, installation_id=candidate.id
-                        )
                     ):
                         continue
-                    names = frozenset(
-                        current.github_repo_full_names
-                        if current.github_repo_full_names is not None
-                        else current.repo_full_names
-                    )
-                    covered = {
-                        name
-                        for name in names
-                        if name.split("/", 1)[0].casefold() == owner.casefold()
-                    }
-                    listed = {repo.full_name: repo for repo in candidate.repos}
-                    if (
-                        candidate.owner_type.casefold() == "user"
-                        and user.login.casefold() != owner.casefold()
-                    ):
-                        return LinkedOutcome(
-                            status="no_github_access",
-                            message=f"You need access to every {owner} repo the GitHub App covers.",
-                        )
-                    if candidate.owner_type.casefold() != "user" and any(
-                        name not in listed
-                        or listed[name].permission is None
-                        or (
-                            access == "write"
-                            and listed[name].permission not in ("write", "maintain", "admin")
-                        )
-                        for name in covered
-                    ):
-                        return LinkedOutcome(
-                            status="no_github_access",
-                            message=f"You need access to every {owner} repo the GitHub App covers.",
-                        )
                     detail = await get_app_installation_details(
                         client,
                         jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
@@ -444,9 +409,61 @@ async def linked_owner_grant(
                         or detail.account_login.casefold() != owner.casefold()
                         or detail.suspended_at is not None
                         or not installation_supports_write(detail.permissions)
+                        or candidate.repository_selection not in ("all", "selected")
                     ):
                         continue
-                    checked.append((candidate.id, candidate.owner_login, names))
+                    first_use = current is None or not await installation_associated(
+                        session, tenant_id=tenant_id, installation_id=candidate.id
+                    )
+                    if current is None:
+                        listing_token = await mint_installation_listing_token(
+                            client,
+                            jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
+                            installation_id=candidate.id,
+                        )
+                        names = frozenset(
+                            await list_installation_repositories(client, token=listing_token)
+                        )
+                    else:
+                        names = frozenset(
+                            current.github_repo_full_names
+                            if current.github_repo_full_names is not None
+                            else current.repo_full_names
+                        )
+                    covered = {
+                        name
+                        for name in names
+                        if name.split("/", 1)[0].casefold() == owner.casefold()
+                    }
+                    listed = {repo.full_name.casefold(): repo for repo in candidate.repos}
+                    if (
+                        candidate.owner_type.casefold() == "user"
+                        and user.login.casefold() != owner.casefold()
+                    ):
+                        return LinkedOutcome(
+                            status="no_github_access",
+                            message=f"You need access to every {owner} repo the GitHub App covers.",
+                        )
+                    if candidate.owner_type.casefold() != "user" and any(
+                        name.casefold() not in listed
+                        or listed[name.casefold()].permission is None
+                        or (
+                            access == "write"
+                            and listed[name.casefold()].permission
+                            not in ("write", "maintain", "admin")
+                        )
+                        for name in covered
+                    ):
+                        return LinkedOutcome(
+                            status="no_github_access",
+                            message=f"You need access to every {owner} repo the GitHub App covers.",
+                        )
+                    new_rows = [
+                        (listed[name.casefold()].id, name, listed[name.casefold()].permission or "")
+                        for name in covered
+                        if first_use and name.casefold() in listed
+                    ]
+                    checked.append((candidate.id, candidate.owner_login, names, new_rows))
             if not checked:
                 return LinkedOutcome(
                     status="needs_install",
@@ -464,10 +481,6 @@ async def linked_owner_grant(
                 message=f"You need access to every {owner} repo the GitHub App covers.",
             )
         raise
-    async with sessionmaker() as session:
-        fresh_user = await get_user(session, github_user_id=link.github_user_id)
-    if fresh_user is None or fresh_user.status != "active":
-        return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
     await _before_commit()
     async with sessionmaker.begin() as session:
         await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
@@ -478,15 +491,14 @@ async def linked_owner_grant(
             or current_link.github_user_id != link.github_user_id
             or current_user is None
             or current_user.status != "active"
-            or current_user.link_generation != fresh_user.link_generation
+            or current_user.link_generation != checked_generation
             or not await manages_now(session)
         ):
             return LinkedOutcome(status="changed_try_again", message="Access changed. Try again.")
-        for installation_id, owner_login, names in checked:
+        for installation_id, _owner_login, names, new_rows in checked:
             current = await get_for_update(session, installation_id=installation_id)
-            if (
-                current is None
-                or current.suspended_at is not None
+            if current is not None and (
+                current.suspended_at is not None
                 or current.github_removed_at is not None
                 or current.account_login.casefold() != owner.casefold()
                 or frozenset(
@@ -495,13 +507,56 @@ async def linked_owner_grant(
                     else current.repo_full_names
                 )
                 != names
-                or not await installation_associated(
-                    session, tenant_id=tenant_id, installation_id=installation_id
-                )
             ):
                 return LinkedOutcome(
                     status="changed_try_again", message="Access changed. Try again."
                 )
+            if not new_rows and not await installation_associated(
+                session, tenant_id=tenant_id, installation_id=installation_id
+            ):
+                return LinkedOutcome(
+                    status="changed_try_again", message="Access changed. Try again."
+                )
+        for installation_id, owner_login, _names, new_rows in checked:
+            if new_rows:
+                for repo_id, repo_full_name, permission in new_rows:
+                    await upsert_linked_agent_authorization(
+                        session,
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        repo_id=repo_id,
+                        owner_id=next(i.owner_id for i in candidates if i.id == installation_id),
+                        installation_id=installation_id,
+                        repo_full_name=repo_full_name,
+                        access=access,
+                        github_user_id=link.github_user_id,
+                        account_id=account_id,
+                        permission=permission,
+                    )
+                candidate = next(i for i in candidates if i.id == installation_id)
+                await upsert_github_app(
+                    session,
+                    installation_id=installation_id,
+                    account_id=candidate.owner_id,
+                    account_login=candidate.owner_login,
+                    account_type=candidate.owner_type,
+                    repository_selection=cast(
+                        Literal["all", "selected"], candidate.repository_selection
+                    ),
+                    suspended_at=None,
+                )
+                await enqueue_reconciliation(
+                    session,
+                    installation_id=installation_id,
+                    delivery_id=f"connect:{uuid.uuid4()}",
+                    event="connect",
+                    deleted=False,
+                    now=datetime.now(UTC),
+                )
+            if not await installation_associated(
+                session, tenant_id=tenant_id, installation_id=installation_id
+            ):
+                raise ValueError("Owner installation association was not saved")
             await upsert_owner_grant(
                 session,
                 tenant_id=tenant_id,

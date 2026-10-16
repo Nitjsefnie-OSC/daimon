@@ -133,7 +133,10 @@ async def remove_repo_impl(
         )
         if owner_active:
             await exclude_repo(
-                session, tenant_id=auth.tenant_id, agent_id=agent_id, repo_full_name=requested
+                session,
+                tenant_id=auth.tenant_id,
+                agent_id=agent_id,
+                repo_full_name=requested.casefold(),
             )
         if not removed and not owner_active:
             raise ToolError("That repo is no longer on this agent's list.")

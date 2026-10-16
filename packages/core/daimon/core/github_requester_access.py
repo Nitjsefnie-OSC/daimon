@@ -199,7 +199,7 @@ async def _linked_permissions_once(
     if cached is not None:
         return cached
 
-    token, used_generation = await _linked_access_token_once(
+    token, used_generation, _ = await _linked_access_token_once(
         sessionmaker,
         client,
         user_id=user_id,
@@ -251,13 +251,34 @@ async def linked_access_token(
     client_secret: str,
 ) -> str | None:
     """Get a current linked-user token, using the same serialized refresh path."""
+    token, _ = await linked_access_token_with_generation(
+        sessionmaker,
+        client,
+        user_id=user_id,
+        fernet=fernet,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    return token
+
+
+async def linked_access_token_with_generation(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: httpx.AsyncClient,
+    *,
+    user_id: int,
+    fernet: MultiFernet,
+    client_id: str,
+    client_secret: str,
+) -> tuple[str | None, int | None]:
+    """Return the token and link generation from the same stored credential row."""
     for _ in range(3):
         async with sessionmaker() as session:
             row = await get_user(session, github_user_id=user_id)
         if row is None or row.status != "active":
-            return None
+            return None, None
         try:
-            token, _ = await _linked_access_token_once(
+            token, _, link_generation = await _linked_access_token_once(
                 sessionmaker,
                 client,
                 user_id=user_id,
@@ -267,7 +288,7 @@ async def linked_access_token(
                 client_secret=client_secret,
                 cache=PermissionCache(ttl_seconds=0),
             )
-            return token
+            return token, link_generation
         except _RefreshRace:
             continue
     raise RuntimeError("GitHub user token changed repeatedly during refresh")
@@ -283,7 +304,7 @@ async def _linked_access_token_once(
     client_id: str,
     client_secret: str,
     cache: PermissionCache,
-) -> tuple[str | None, int]:
+) -> tuple[str | None, int, int]:
     now = datetime.now(UTC)
     if row.access_expires_at <= now + timedelta(minutes=1):
         async with sessionmaker.begin() as session:
@@ -298,7 +319,7 @@ async def _linked_access_token_once(
             )
             fresh = await get_user(session, github_user_id=user_id)
             if fresh is None or fresh.status != "active":
-                return None, row.token_generation
+                return None, row.token_generation, row.link_generation
             row = fresh
             if row.access_expires_at <= datetime.now(UTC) + timedelta(minutes=1):
                 if row.encrypted_refresh_token is None or (
@@ -314,7 +335,7 @@ async def _linked_access_token_once(
                     if broken is None:
                         raise _RefreshRace
                     cache.drop_user(user_id)
-                    return None, row.token_generation
+                    return None, row.token_generation, row.link_generation
                 response = await client.post(
                     "https://github.com/login/oauth/access_token",
                     data={
@@ -346,7 +367,7 @@ async def _linked_access_token_once(
                     if broken is None:
                         raise _RefreshRace
                     cache.drop_user(user_id)
-                    return None, row.token_generation
+                    return None, row.token_generation, row.link_generation
                 response.raise_for_status()
                 if isinstance(error_payload.get("error"), str):
                     raise RuntimeError(f"GitHub refresh refused: {error_payload['error']}")
@@ -372,4 +393,4 @@ async def _linked_access_token_once(
         token = decrypt_token(fernet, row.encrypted_access_token)
         used_generation = row.token_generation
 
-    return token, used_generation
+    return token, used_generation, row.link_generation

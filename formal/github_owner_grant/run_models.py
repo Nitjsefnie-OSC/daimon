@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-JAR = Path(os.environ.get("TLA2TOOLS_JAR", "/home/derick/scratch/daimon-os-devenv/tla2tools.jar"))
+JAR = Path(os.environ.get("TLA2TOOLS_JAR", str(Path.home() / ".cache/daimon/tla/tla2tools.jar")))
 TIMEOUT_SECONDS = 45
 MAX_METADIR_BYTES = 64 * 1024 * 1024
 
@@ -26,9 +26,22 @@ def run(config: str) -> tuple[str, int]:
     metadir = Path(tempfile.mkdtemp(prefix="tlc-ownergrant-"))
     process = subprocess.Popen(
         [
-            "java", "-Xmx512m", "-XX:+UseParallelGC", "-cp", str(JAR),
-            "tlc2.TLC", "-workers", "1", "-seed", "1", "-fp", "0",
-            "-metadir", str(metadir), "-config", f"{config}.cfg",
+            "java",
+            "-Xmx512m",
+            "-XX:+UseParallelGC",
+            "-cp",
+            str(JAR),
+            "tlc2.TLC",
+            "-workers",
+            "1",
+            "-seed",
+            "1",
+            "-fp",
+            "0",
+            "-metadir",
+            str(metadir),
+            "-config",
+            f"{config}.cfg",
             "OwnerGrant.tla",
         ],
         cwd=HERE,

@@ -183,35 +183,46 @@ async def _post_teams_connect_card(
 
 
 async def _post_personal_link(
-    runtime: McpRuntime, auth: AuthIdentity, *, url: str, channel_id: str, thread_id: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    url: str,
+    channel_id: str,
+    thread_id: str,
+    label: str = "Link GitHub",
 ) -> None:
-    """Keep the one-use link in a private button, never in the model result."""
+    """Keep GitHub link and setup URLs in private buttons, outside model results."""
     if auth.platform_user_id is None:
         raise ToolError("GitHub linking needs a chat requester.")
     if auth.platform == "discord":
         view = discord.ui.View(timeout=None)
-        view.add_item(
-            discord.ui.Button(label="Link GitHub", style=discord.ButtonStyle.link, url=url)
-        )
+        view.add_item(discord.ui.Button(label=label, style=discord.ButtonStyle.link, url=url))
         async with rest_client(_require_bot_token(runtime)) as client:
             user = await client.fetch_user(int(auth.platform_user_id or ""))
-            await user.send("Link GitHub to check access to your requested repo.", view=view)
+            await user.send(
+                "Link GitHub to check access to your requested repo."
+                if label == "Link GitHub"
+                else "Open GitHub setup to add this repo to the App installation.",
+                view=view,
+            )
     elif auth.platform == "slack":
         client = await slack_web_client(runtime, team_id=auth.external_id or "")
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             thread_ts=thread_id,
             user=auth.platform_user_id,
-            text="Link GitHub",
+            text=label,
             blocks=[
                 {
                     "type": "actions",
                     "elements": [
                         {
                             "type": "button",
-                            "action_id": "github_personal_link",
+                            "action_id": "github_personal_link"
+                            if label == "Link GitHub"
+                            else "github_app_setup",
                             "url": url,
-                            "text": {"type": "plain_text", "text": "Link GitHub"},
+                            "text": {"type": "plain_text", "text": label},
                         }
                     ],
                 }
@@ -281,7 +292,7 @@ async def _github_connect_impl(
         # A channel admin may connect their own repos for an agent they manage,
         # by their groups as the platform reports them now, not as cached.
         lookups = runtime.group_lookups
-        manages = is_admin or await requester_manages_agent(
+        policy_manages = await requester_manages_agent(
             session,
             tenant_id=auth.tenant_id,
             account_id=auth.account_id,
@@ -298,6 +309,7 @@ async def _github_connect_impl(
                 else None
             ),
         )
+        manages = is_admin or policy_manages
         if not manages:
             await record_connect_request(
                 session,
@@ -406,8 +418,6 @@ async def _github_connect_impl(
                     or current_account.is_external
                 ):
                     return False
-                if current_account.role == Role.ADMIN and auth.is_admin:
-                    return True
                 return await requester_manages_agent(
                     current_session,
                     tenant_id=auth.tenant_id,
@@ -426,6 +436,10 @@ async def _github_connect_impl(
                     ),
                 )
 
+            if not policy_manages:
+                return ConnectResult(
+                    status="changed_try_again", message="Agent access changed. Ask again."
+                )
             try:
                 outcome = await linked_grant(
                     runtime.session_factory,
@@ -450,7 +464,7 @@ async def _github_connect_impl(
                 return ConnectResult(
                     status="changed_try_again", message="Access changed. Try again."
                 )
-            if outcome.status == "needs_link" and auth.platform in ("discord", "slack"):
+            if outcome.status in ("needs_link", "relink") and auth.platform in ("discord", "slack"):
                 try:
                     async with runtime.session_factory.begin() as link_session:
                         url = await mint_link(
@@ -493,16 +507,38 @@ async def _github_connect_impl(
                             status="delivery_failed",
                             message="I couldn't send the private GitHub link. Try again.",
                         )
-                    return ConnectResult(status="needs_link", message=outcome.message)
-            elif outcome.status == "needs_link":
+                    return ConnectResult(status=outcome.status, message=outcome.message)
+            elif outcome.status in ("needs_link", "relink"):
                 # The existing personal-link flow does not support Teams.
+                pass
+            elif outcome.status == "needs_install" and auth.platform == "teams":
+                # Teams uses the existing private picker rather than an ephemeral button.
                 pass
             else:
                 if outcome.status == "needs_install":
                     install_url = f"https://github.com/apps/{config.app_slug}/installations/new"
+                    if auth.platform in ("discord", "slack"):
+                        try:
+                            await _post_personal_link(
+                                runtime,
+                                auth,
+                                url=install_url,
+                                channel_id=origin.parent_channel_id,
+                                thread_id=origin.thread_id,
+                                label="Open GitHub setup",
+                            )
+                        except discord.HTTPException:
+                            return ConnectResult(
+                                status="delivery_failed",
+                                message=(
+                                    "I couldn't send the private GitHub setup button. Try again."
+                                ),
+                            )
                     return ConnectResult(
                         status="needs_install",
-                        message=f"Open {install_url} and select {requested_repo}.",
+                        message=(
+                            "This repo isn't in a GitHub App installation for this workspace yet."
+                        ),
                     )
                 return ConnectResult(status=outcome.status, message=outcome.message)
         intent_id: uuid.UUID | None = None

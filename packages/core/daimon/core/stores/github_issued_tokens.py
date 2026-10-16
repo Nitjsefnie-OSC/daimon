@@ -284,7 +284,7 @@ async def select_stale_tokens(
                   LEFT JOIN agent_github_owner_exclusions AS exclusion
                     ON exclusion.tenant_id = token.tenant_id
                    AND exclusion.agent_id = token.agent_id
-                   AND exclusion.repo_full_name = repo.repo_name
+                   AND lower(exclusion.repo_full_name) = lower(repo.repo_name)
                   WHERE owner_grant.installation_id IS NULL
                      OR exclusion.repo_full_name IS NOT NULL
                      OR repo.repo_name <> ALL(COALESCE(

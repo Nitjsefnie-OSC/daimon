@@ -20,7 +20,6 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_K
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.domain import Role
 from daimon.core.stores.github_linked_pending import PendingGrant, save, take
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -81,14 +80,15 @@ async def _take_pending(
 async def _deliver_result(runtime: McpRuntime, pending: PendingGrant, message: str) -> None:
     if pending.platform == "discord":
         async with rest_client(_require_bot_token(runtime)) as client:
-            user = await client.fetch_user(int(pending.platform_user_id))
-            await user.send(message, allowed_mentions=discord.AllowedMentions.none())
+            channel = await client.fetch_channel(int(pending.thread_id))
+            if not isinstance(channel, discord.Thread):
+                raise ValueError("The originating GitHub grant thread is unavailable.")
+            await channel.send(message, allowed_mentions=discord.AllowedMentions.none())
     elif pending.platform == "slack":
         client = await slack_web_client(runtime, team_id=pending.workspace_id)
-        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+        await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
             channel=pending.parent_channel_id,
             thread_ts=pending.thread_id,
-            user=pending.platform_user_id,
             text=message,
         )
 
@@ -130,8 +130,6 @@ async def resume_pending(
                 account = await get_account(session, account_id)
                 if account is None or account.tenant_id != tenant_id or account.is_external:
                     return False
-                if account.role == Role.ADMIN:
-                    return True
                 return await requester_manages_agent(
                     session,
                     tenant_id=tenant_id,

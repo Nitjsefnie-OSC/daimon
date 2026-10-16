@@ -4,12 +4,13 @@ The user-visible risk is a cached installation with the wrong repositories,
 suspension flag, or existence after webhook traffic stops. This model checks
 whether duplicate and reordered deliveries, changes during a refresh, and a
 lease takeover can strand stale cache data or allow an old worker to finish.
-It maps to the implementation on `fix/app-installation-reconcile`.
+It maps to the installation reconciliation implementation in this branch.
 
 Run `python3 formal/github_installation_reconcile/run_models.py` from the repo
 root. The runner uses one TLC worker, a 30-second limit and 64 MiB metadir cap
 per case, removes each metadir, and pins distinct-state counts in
-`expected.tsv`. Terminal states are allowed because TLA's stuttering step
+`expected.tsv`; the central `formal/expected.tsv` runs the same configurations.
+Terminal states are allowed because TLA's stuttering step
 represents a system at rest.
 
 ## Action-to-code map

@@ -10,8 +10,8 @@ Counterexample behavior is replayed by `packages/core/tests/test_github_owner_gr
 Run `python3 formal/github_owner_grant/run_models.py` from the repository root.
 Set `TLA2TOOLS_JAR` to override the default jar path. The runner uses one TLC
 worker, a 45-second timeout, a 64 MiB metadir cap, and deletes each metadir.
-`expected.tsv` pins both verdict and distinct-state count. This registry is
-local to the owned directory; it is not registered in `formal/expected.tsv`.
+`expected.tsv` pins both verdict and distinct-state count. The central
+`formal/expected.tsv` also runs these configurations through `formal/check.sh`.
 
 ## Model and contract mapping
 
