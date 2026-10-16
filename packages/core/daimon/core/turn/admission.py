@@ -745,7 +745,7 @@ async def admit_impl(
         run_place=Place()
         if is_dm
         else replace(
-            build_turn_place(channel_id=channel_id, thread_id=thread_id),
+            turn_place,
             setup_thread=config.thread_binding_kind == "setup",
         ),
         channel_id=channel_id,

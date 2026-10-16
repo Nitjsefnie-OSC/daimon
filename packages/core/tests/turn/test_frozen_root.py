@@ -1566,12 +1566,19 @@ async def recorded_fresh_root(db_preflight, db_nullpool_engine):
         yield value
 
 
+@pytest.mark.parametrize(
+    ("category_id", "category_unresolved"),
+    [(None, False), ("1558361838960382032", False), (None, True)],
+    ids=["uncategorized", "recorded-category", "unresolved-category"],
+)
 @pytest.mark.parametrize("configured_channel", [False, True])
 @pytest.mark.parametrize("funded_root", [False, True])
 async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send(
     recorded_fresh_root,
     configured_channel,
     funded_root,
+    category_id,
+    category_unresolved,
 ):
     from types import SimpleNamespace
 
@@ -1691,6 +1698,8 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
             external_user_id="requester",
             channel_id=channel_id,
             thread_id=None,
+            category_id=category_id,
+            category_unresolved=category_unresolved,
             now=datetime.now(UTC),
         )
         assert admission.backend_revision_origin == ("channel" if configured_channel else None)
@@ -1782,6 +1791,9 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
             assert request.admission.backend_revision == admission.backend_revision
             assert request.admission.backend_revision_origin == admission.backend_revision_origin
             assert request.admission.grant.thread_id == thread_id
+            assert request.admission.grant.turn_place == request.admission.grant.run_place
+            assert parent.fleet.place.category_id == category_id
+            assert parent.fleet.place.category_unresolved == category_unresolved
 
 
 @pytest.mark.parametrize("fault", ["missing", "digest", "origin"])
