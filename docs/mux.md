@@ -3132,7 +3132,10 @@ Publish the counterpart through the existing NeutralResourceHost and record its
 native ACK/readback before invoking the credential owner. Persistent native
 agent definitions contain the MCP URL and allowlist, never bearer headers.
 `mcp_credential_file` must be an owned regular 0600 file with a short-lived
-registered caller token for the original canonical agent. The runtime checks
+registered chat-execution caller token for the original canonical agent
+(`{sub, chat_agent_id, jti, exp}`). The after-ACK owner must select
+`AgentMCPAuthority.chat_execution=True`; its default remains the restricted
+external agent-key surface, which full mode refuses. The runtime checks
 signature, exact claims, account/tenant/agent, registry expiry and revocation
 before each provider exposure, after independent native counterpart verification.
 It does not mint or store a bearer in a catalog or runtime manifest.
@@ -3160,9 +3163,17 @@ provider web-tool fees need their own finance terms before a live attempt.
 The native per-toolset schema represents MCP only with an explicitly verified
 catalogue and fully resolved automatic enablement; legacy and worker projections
 still exclude native-only MCP toolsets. Capture authenticates to the configured
-server as the original caller using the existing caller JWT owner, reads
-`tools/list`, and requires the operator allowlist to equal the complete effective
-source set. Any source connection allowlist must name actual server tools. Before
+server using a registered short-lived chat-execution credential from the existing
+MCP mint/registry owner, reads `tools/list`, and revokes that preview credential
+in a finally block before returning. This retains the ordinary source caller
+visibility, including search collapse. Runtime uses the same registered authority
+mode, account and canonical agent after its native ACK. An enabled automatic
+`daimon-mcp` entry must actually exist in the source; a credential binding alone
+cannot synthesize tool authority. The operator allowlist and any source connection
+allowlist must equal the complete actual server catalogue. A source restricted to
+`describe_agent` and `list_my_sessions` cannot be claimed equivalent to the ordinary
+chat catalogue (`search_tools`/`call_tool` and any directly exposed approval tools);
+it refuses full mode rather than dropping those capabilities. Before
 provider exposure the registered target credential must see the same catalogue.
 Unknown names, silent narrowing, unresolved policies and unexpected toolsets
 therefore cannot count as preserved capabilities.
@@ -3175,9 +3186,13 @@ every configured GCS prefix, rejects missing/extra/duplicate objects, requires
 locked object retention through the admitted deadline plus the seven-day inline
 environment lifetime, and downloads each current generation to check SHA-256.
 Receipt metadata alone is insufficient. The storage read path never writes or
-modifies retention. Provisioners must also prevent new objects under published
-prefixes; a readback is a point-in-time observation, not a transactional directory
-mount. Private-bucket mount authentication must be verified separately against the
+modifies retention. Provisioners must grant creation only to the explicit
+provisioner during upload, then revoke that grant and all other effective create
+permissions under published prefixes before final inventory verification. Retain
+read-back bucket/project/inherited IAM evidence that the provisioner and runtime
+principals cannot append objects through cleanup. Locked retention prevents
+replacement/deletion, not new objects. A readback is a point-in-time observation,
+not a transactional directory mount. Private-bucket mount authentication must be verified separately against the
 provider's documented network credentials before live provisioning.
 
 Capture currently re-downloads the attached source versions and verifies the
@@ -3227,8 +3242,8 @@ configuration still refuses.
 The deployment also needs all target `skill_ids`, normal counterpart catalogue
 pins and an absolute `mcp_credential_file`. The credential file must be a regular
 file, owned by the runtime user, mode 0600. Provisioners use the existing
-provider-neutral after-ACK credential binding against the retained canonical
-source; they must not mint a token before the native agent has been acknowledged
+provider-neutral after-ACK credential binding with `chat_execution=True` against
+the retained canonical source; they must not mint a token before the native agent has been acknowledged
 and read back. The real host factory passes the scoped resolver into the OpenAI
 driver. Only session creation receives the bearer: its registered identity,
 account/tenant, expiry, revocation and exact authenticated catalogue are checked
@@ -3239,3 +3254,9 @@ Memory has no native preservation mapping in this profile and remains an
 explicit preview/consent loss. Model controls, repositories and any other source
 obligations retain their existing classification. Preserving skills, filesystem
 tools and authenticated MCP does not discharge those separate obligations.
+
+The MCP allowlist must equal the ordinary chat catalogue after the server's
+search transform (normally `search_tools` and `call_tool`). A recorded source
+restricted to direct `describe_agent`/`list_my_sessions` is refused; preserving
+those operations through the proxy requires explicit consent to the actual
+source catalogue, rather than narrowing or expanding authority during a switch.

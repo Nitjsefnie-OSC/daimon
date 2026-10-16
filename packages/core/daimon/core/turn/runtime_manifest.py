@@ -1348,15 +1348,17 @@ async def _capture_source_capabilities(
     """
     from anthropic import AnthropicError
     from daimon.core.defaults.ma_index import download_skill_version
-    from daimon.core.mcp_auth import mint_jwt
+    from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti, validate_agent_mcp_token
     from daimon.core.mcp_oauth.discovery import list_mcp_tools
     from daimon.core.mux_backend import managed_agents
     from daimon.core.mux_compat import legacy_call
     from daimon.core.skills.ingest import retained_archive_files
     from daimon.core.stores.domain import SourceRepresentation
+    from daimon.core.stores.mcp_tokens import revoke_mcp_token
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
     from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
     from mux.profiles import represented_execution_tools
+    from sqlalchemy.exc import SQLAlchemyError
 
     source = source.model_copy(update={"representations": ()})
     path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
@@ -1441,13 +1443,38 @@ async def _capture_source_capabilities(
                 raise ValueError("environment representation differs from captured policy")
             if request.deps.mcp.public_url is None or request.deps.mcp.jwt_secret is None:
                 raise ValueError("MCP catalogue requires the captured caller")
-            catalogue_token = mint_jwt(
-                account_id=request.admission.account_id,
-                chat_agent_id=source.agent_id,
-                secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
-                now=request.now(),
-            )
-            catalogue = await list_mcp_tools(str(request.deps.mcp.public_url), catalogue_token)
+            # Use the runtime's registered chat-execution authority, never the
+            # restricted external-agent key (which sees a different catalogue).
+            # This preview credential is revoked before returning and never
+            # exposed to a provider; the ACK owner mints the runtime credential.
+            now = request.now()
+            secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
+            async with request.deps.sessionmaker.begin() as db:
+                catalogue_token = await mint_agent_mcp_token(
+                    db,
+                    account_id=request.admission.account_id,
+                    tenant_id=source.tenant_id,
+                    agent_id=source.agent_id,
+                    label="source-catalogue",
+                    secret=secret,
+                    now=now,
+                    ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
+                    chat_execution=True,
+                )
+            try:
+                await validate_agent_mcp_token(
+                    request.deps.sessionmaker,
+                    token=catalogue_token,
+                    secret=secret,
+                    scope=scope,
+                    agent_id=source.agent_id,
+                    now=now,
+                    chat_execution=True,
+                )
+                catalogue = await list_mcp_tools(str(request.deps.mcp.public_url), catalogue_token)
+            finally:
+                async with request.deps.sessionmaker.begin() as db:
+                    await revoke_mcp_token(db, jti=token_jti(catalogue_token), now=request.now())
             allowed = next(
                 (
                     server.tool_policy.get("allowed_tools")
@@ -1461,8 +1488,8 @@ async def _capture_source_capabilities(
                     not isinstance(name, str) for name in allowed
                 ):
                     raise ValueError("invalid source MCP allowlist")
-                if not set(allowed).issubset(catalogue):
-                    raise ValueError("source MCP names absent from server")
+                if frozenset(allowed) != catalogue:
+                    raise ValueError("source MCP allowlist differs from complete server catalogue")
                 catalogue = frozenset(cast(list[str], allowed))
             if frozenset(inputs.mcp_tools) != catalogue:
                 raise ValueError("MCP representation must preserve the exact source catalogue")
@@ -1472,6 +1499,13 @@ async def _capture_source_capabilities(
                     tools = agent_tools(extension).intent(
                         exact=True, mcp_catalogues={DAIMON_SERVER_NAME: catalogue}
                     )
+            if not any(
+                tool.kind == "mcp_toolset"
+                and tool.name == DAIMON_SERVER_NAME
+                and tool.permission == "auto"
+                for tool in tools
+            ):
+                raise ValueError("source has no enabled daimon-mcp toolset")
             mapped_tools = represented_execution_tools(
                 profile, tuple(tool for tool in tools if tool.kind != "mcp_toolset")
             )
@@ -1605,7 +1639,7 @@ async def _capture_source_capabilities(
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
             raise ValueError("ambiguous source representation")
         return source.model_copy(update={"representations": tuple(represented)})
-    except (OSError, ValueError, DaimonError, MuxError, AnthropicError):
+    except (OSError, ValueError, DaimonError, MuxError, AnthropicError, SQLAlchemyError):
         # Representations are optional capture evidence, never a new failure
         # mode for native callers or worker ceilings. Full deployments require
         # this evidence independently and refuse before any provider exposure.

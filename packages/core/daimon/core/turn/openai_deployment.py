@@ -527,6 +527,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
                 agent_id=deployment.source_agent_id,
                 destination=destination,
                 tools=capabilities.mcp_tools,
+                chat_execution=True,
                 now=request.now(),
             )
         except (OSError, ValueError):

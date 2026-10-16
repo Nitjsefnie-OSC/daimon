@@ -77,13 +77,20 @@ async def resolve_agent_mcp_credential(
     destination: str,
     tools: tuple[str, ...],
     now: dt.datetime,
+    chat_execution: bool,
 ) -> str:
     """Recheck registered caller authority and its exact remote catalogue before exposure."""
     from daimon.core.mcp_oauth.discovery import list_mcp_tools
 
     token = read_private_credential(path)
     await validate_agent_mcp_token(
-        sessionmaker, token=token, secret=secret, scope=scope, agent_id=agent_id, now=now
+        sessionmaker,
+        token=token,
+        secret=secret,
+        scope=scope,
+        agent_id=agent_id,
+        now=now,
+        chat_execution=chat_execution,
     )
     if await list_mcp_tools(destination, token) != frozenset(tools):
         raise ValueError("target MCP catalogue differs from captured source")
@@ -188,11 +195,16 @@ async def mint_agent_mcp_token(
     ttl_days: int = 90,
     platform: str | None = None,
     channel_id: str | None = None,
+    chat_execution: bool = False,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
     Writes an mcp_tokens row (jti registry) then signs a token carrying
-    exactly {sub, agent_id, jti, exp} — no role, no tenant_id.
+    exactly {sub, agent_id, jti, exp} — no role, no tenant_id. Explicit
+    ``chat_execution`` instead signs ``chat_agent_id`` and requires a TTL of
+    at most 900 seconds, retaining the ordinary source chat tool surface.
+    Existing external agent credentials retain ``agent_id`` and their narrower
+    surface; callers must validate the expected mode before provider exposure.
     The verifier re-derives role and tenant from the DB on each request.
 
     `agent_id` is the derived per-agent UUID (derive_agent_uuid output).
@@ -208,8 +220,13 @@ async def mint_agent_mcp_token(
     (`coding_token_channel`). They live on the row only, never in the JWT, so
     the verifier reads the binding from the database like the revocation.
     """
+    # Registered chat execution retains the ordinary chat surface. External
+    # agent keys keep their existing restricted agent-chat surface. The signed
+    # identity claim selects the mode; both modes use the same registry owner.
     from daimon.core.stores.mcp_tokens import create_mcp_token_row
 
+    if chat_execution and not 0 < ttl_days * 86400 <= 900:
+        raise ValueError("registered chat execution requires a TTL of at most 900 seconds")
     assert (platform is None) == (channel_id is None), "a channel binding needs both"
     jti = uuid.uuid4()
     expires_at = now + dt.timedelta(days=ttl_days)
@@ -228,7 +245,7 @@ async def mint_agent_mcp_token(
     return pyjwt.encode(
         {
             "sub": str(account_id),
-            "agent_id": str(agent_id),
+            "chat_agent_id" if chat_execution else "agent_id": str(agent_id),
             "jti": str(jti),
             "exp": int(expires_at.timestamp()),
         },
@@ -246,6 +263,7 @@ async def validate_agent_mcp_token(
     agent_id: uuid.UUID,
     now: dt.datetime,
     max_ttl_s: int = 900,
+    chat_execution: bool = False,
 ) -> None:
     """Check a minted caller-bound token before exposing it to a remote provider.
 
@@ -256,6 +274,7 @@ async def validate_agent_mcp_token(
     from daimon.core.stores.accounts import get_account_with_tenant
     from daimon.core.stores.mcp_tokens import get_mcp_token
 
+    identity_claim = "chat_agent_id" if chat_execution else "agent_id"
     try:
         claims = pyjwt.decode(
             token,
@@ -265,7 +284,7 @@ async def validate_agent_mcp_token(
                 "verify_exp": False,
                 "verify_iat": False,
                 "verify_nbf": False,
-                "require": ["sub", "agent_id", "jti", "exp"],
+                "require": ["sub", identity_claim, "jti", "exp"],
             },
         )
         expiry = claims.get("exp")
@@ -273,9 +292,9 @@ async def validate_agent_mcp_token(
             not 0 < max_ttl_s <= 900
             or scope.is_platform
             or scope.is_legacy_host_authorized
-            or set(claims) != {"sub", "agent_id", "jti", "exp"}
+            or set(claims) != {"sub", identity_claim, "jti", "exp"}
             or claims["sub"] != scope.account_id
-            or claims["agent_id"] != str(agent_id)
+            or claims[identity_claim] != str(agent_id)
             or type(expiry) is not int
             or not now.timestamp() < expiry <= now.timestamp() + max_ttl_s
         ):

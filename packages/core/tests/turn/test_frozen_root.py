@@ -406,6 +406,8 @@ async def test_real_native_ack_root_join_is_shared_by_intent_and_origin(root_tur
         "expired",
         "intent_retired",
         "intent_foreign",
+        "intent_parent_missing",
+        "intent_parent_wrong",
         "responder",
         "binding",
         "principal",
@@ -433,6 +435,15 @@ async def test_root_join_refuses_missing_foreign_stale_and_retargeted_authority(
                 update(TurnOrigin)
                 .where(TurnOrigin.id == origin.id)
                 .values(responder_ma_agent_id="other")
+            )
+        elif change in ("intent_parent_missing", "intent_parent_wrong"):
+            from daimon.core._models import TurnCardIntent
+            from sqlalchemy import update
+
+            await db.execute(
+                update(TurnCardIntent)
+                .where(TurnCardIntent.id == intent.id)
+                .values(channel_id=None if change == "intent_parent_missing" else "other")
             )
     if change == "expired":
         now = origin.expires_at + timedelta(seconds=1)
@@ -1562,6 +1573,10 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
     configured_channel,
     funded_root,
 ):
+    from types import SimpleNamespace
+
+    from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
+    from daimon.adapters.discord.turn_card_recovery import post_initial_turn_card
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
     from daimon.core.scope import DeploymentDefault
     from daimon.core.stores import tenant_ledger
@@ -1681,15 +1696,27 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
         assert admission.backend_revision_origin == ("channel" if configured_channel else None)
         assert (admission.backend_revision is not None) == configured_channel
         assert admission.grant.thread_id is None
-        async with deps.sessionmaker.begin() as db:
-            intent = await turn_card_intents.create_turn_card_intent(
-                db,
-                tenant_id=tenant_id,
-                platform="discord",
-                channel_id=channel_id,
-                thread_id=thread_id,
-                turn_token=uuid4(),
-            )
+
+        async def send_card(**_kwargs):
+            return SimpleNamespace(id=900)
+
+        async def edit_card(_message, **_kwargs):
+            pass
+
+        intent, _ = await post_initial_turn_card(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            thread_id=thread_id,
+            channel_id=channel_id,
+            make_lifecycle=lambda turn_id, on_first_post: DiscordTurnLifecycle(
+                send=send_card,
+                edit=edit_card,
+                agent_name="root",
+                model_id=native.model.id,
+                turn_id=turn_id,
+                on_first_post=on_first_post,
+            ),
+        )
         async with turn_origin(
             deps.sessionmaker,
             tenant_id=tenant_id,

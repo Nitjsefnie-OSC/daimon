@@ -44,13 +44,28 @@ from mux.drivers.openai.skills import bundle_digest
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import consent_request as consent_request
 from .test_gemini_full_source import DEFAULT, F2_PARAMS, ROOT, archive
+from .test_gemini_full_source import source_mcp as source_mcp
 from .test_openai_host import Wire
 from .test_openai_runtime_transport import clients_for
 
 RECORDED_ENVIRONMENT = json.loads(
     (ROOT / "packages/core/tests/fixtures/anthropic_live_root.json").read_text()
 )["environment"]
-PARAMS = {**F2_PARAMS, "backend": "openai", "environment": RECORDED_ENVIRONMENT}
+PARAMS = {
+    **F2_PARAMS,
+    "backend": "openai",
+    "environment": RECORDED_ENVIRONMENT,
+    "tools": [
+        F2_PARAMS["tools"][0],
+        {
+            **F2_PARAMS["tools"][1],
+            "configs": [
+                {"name": name, "enabled": True, "permission_policy": {"type": "always_allow"}}
+                for name in ("search_tools", "call_tool")
+            ],
+        },
+    ],
+}
 
 
 class FullWire(Wire):
@@ -132,7 +147,7 @@ class FullWire(Wire):
 
 
 @pytest.fixture
-async def full_openai(consent_request, monkeypatch, tmp_path):
+async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path):
     request, _, source, actor, accepted, router, source_reads, *_ = consent_request
     sessions = request.deps.sessionmaker
     scope = admitted_session_scope(
@@ -180,9 +195,10 @@ async def full_openai(consent_request, monkeypatch, tmp_path):
     wire = FullWire(scope.tenant_id)
     clients = clients_for(monkeypatch, wire.handle)
     mcp_calls = []
-    names = ["describe_agent", "list_my_sessions"]
+    names = ["search_tools", "call_tool"]
+    catalogue_state = {"names": None}
 
-    def mcp(call):
+    async def mcp(call):
         mcp_calls.append(call)
         body = json.loads(call.content)
         if body["method"] == "notifications/initialized":
@@ -193,9 +209,22 @@ async def full_openai(consent_request, monkeypatch, tmp_path):
             "serverInfo": {"name": "offline", "version": "1"},
         }
         if body["method"] == "tools/list":
-            result = {
-                "tools": [{"name": name, "inputSchema": {"type": "object"}} for name in names]
-            }
+            from daimon.testing.asgi import mcp_session
+
+            result = (
+                await mcp_session(
+                    source_mcp,
+                    token=call.headers["Authorization"].removeprefix("Bearer "),
+                    method="tools/list",
+                )
+            )["result"]
+            if catalogue_state["names"] is not None:
+                result = {
+                    "tools": [
+                        {"name": name, "inputSchema": {"type": "object"}}
+                        for name in catalogue_state["names"]
+                    ]
+                }
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
 
     original = httpx.AsyncClient
@@ -339,6 +368,7 @@ async def full_openai(consent_request, monkeypatch, tmp_path):
             database_url=os.environ["DAIMON_DATABASE__TEST_URL"],
             mcp_signing_secret_file=signer,
             canonical_source=source.source.ref.model_copy(update={"account_id": None}),
+            chat_execution=True,
             acknowledged=lambda actual: actual == counterpart.agent.ref and bool(wire.agent),
             redact=lambda _: None,
         )
@@ -370,7 +400,7 @@ async def full_openai(consent_request, monkeypatch, tmp_path):
             wire,
             token,
             archives,
-            names,
+            catalogue_state,
             mcp_calls,
             binding,
             router,
@@ -382,7 +412,9 @@ async def full_openai(consent_request, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_full_default_public_switch_real_factory_and_authenticated_session(full_openai):
+async def test_full_default_public_switch_real_factory_and_authenticated_session(
+    full_openai, source_mcp
+):
     request, plan, canonical, wire, token, *_ = full_openai
     assert canonical.target_spec.declared_drops == ("memory",)
     assert len(canonical.target_spec.skills) == 11
@@ -426,7 +458,20 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
     assert len(body["environment"]["skills"]) == 11
     mcp = body["agent"]["tools"][0]
     assert mcp["transport"]["authorization"] == "Bearer " + token
-    assert mcp["allowed_tools"] == ["describe_agent", "list_my_sessions"]
+    assert mcp["allowed_tools"] == ["search_tools", "call_tool"]
+    from daimon.testing.asgi import mcp_session
+
+    for name in ("describe_agent", "list_my_sessions"):
+        result = await mcp_session(
+            source_mcp,
+            token=token,
+            method="tools/call",
+            params={
+                "name": "call_tool",
+                "arguments": {"name": name, "arguments": {}},
+            },
+        )
+        assert not result["result"].get("isError", False)
     assert "Bearer" not in json.dumps(wire.agent)
 
 
@@ -450,7 +495,7 @@ async def test_full_source_drift_refuses_before_session_post(full_openai, defect
     from daimon.core.turn.errors import AdmissionDenied
     from mux.errors import ProviderError, UnsupportedCapability
 
-    request, plan, _, wire, token, archives, names, _, _, _, manifest = full_openai
+    request, plan, _, wire, token, archives, catalogue_state, _, _, _, manifest = full_openai
     if defect == "archive":
         archives[0].write_bytes(archive({"SKILL.md": b"changed source archive"}))
     elif defect == "native_skill":
@@ -463,7 +508,7 @@ async def test_full_source_drift_refuses_before_session_post(full_openai, defect
         async with request.deps.sessionmaker.begin() as db:
             await revoke_mcp_token(db, jti=token_jti(token), now=request.now())
     elif defect == "catalogue":
-        names.append("additional_authority")
+        catalogue_state["names"] = ["search_tools", "call_tool", "additional_authority"]
     elif defect == "native_environment":
         wire.template["network"]["access"] = "disabled"
     else:

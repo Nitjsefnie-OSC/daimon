@@ -467,6 +467,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 agent_id=plan.source_agent_id,
                 destination=destination,
                 tools=plan.source_capabilities.mcp_tools,
+                chat_execution=True,
                 now=request.now(),
             )
             await verify_storage()
