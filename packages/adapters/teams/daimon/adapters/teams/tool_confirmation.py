@@ -23,6 +23,7 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
     toast,
 )
+from daimon.adapters.teams.deployment_admins import admin_team_owners, is_deployment_admin
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.core.authz import Subject
@@ -97,6 +98,15 @@ APPROVAL_NOTICE = "Waiting for your approval"
 
 #: Most time a card edit may take.
 EDIT_TIMEOUT_S = 2.0
+
+
+async def _is_admin_now(runtime: TeamsRuntime, clicker: str) -> bool:
+    """A live admin check at a click: a revoked team ownership counts at once."""
+    settings = runtime.settings.teams
+    if settings is None:
+        return False
+    owners = admin_team_owners(runtime, fresh=True)
+    return await is_deployment_admin(settings, owners, user_id=clicker, is_external=False)
 
 
 def _footer(
@@ -227,8 +237,7 @@ class TeamsConfirmationCards:
                     raise ValueError("Backend confirmation requires an admitted account and tenant")
 
                 async def current_admin(clicker: str) -> bool:
-                    settings = runtime.settings.teams
-                    return settings is not None and clicker in settings.admin_user_ids
+                    return await _is_admin_now(runtime, clicker)
 
                 from functools import partial
 
@@ -261,8 +270,7 @@ class TeamsConfirmationCards:
 
             if runtime is None or tenant_id is None:
                 return Subject()
-            settings = runtime.settings.teams
-            admin = settings is not None and clicker in settings.admin_user_ids
+            admin = await _is_admin_now(runtime, clicker)
             caller = await channel_admin_caller(
                 runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
             )

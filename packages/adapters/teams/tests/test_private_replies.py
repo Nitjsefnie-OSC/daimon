@@ -98,7 +98,7 @@ def _replies(
         sender=sender,
         commands=dict.fromkeys(names, _answer),
         direct=cast(Any, direct),
-        is_admin=lambda _: False,
+        is_admin=AsyncMock(return_value=False),
     )
 
 

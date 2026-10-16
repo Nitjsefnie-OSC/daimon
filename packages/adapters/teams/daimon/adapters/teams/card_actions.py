@@ -16,6 +16,7 @@ from typing import cast
 
 import anthropic
 import structlog
+from daimon.adapters.teams.deployment_admins import admin_team_owners, is_deployment_admin
 from daimon.adapters.teams.identity import canonical_uuid, foreign_tenant, live_tenant_id
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -137,7 +138,13 @@ async def card_actor(
     return Actor(
         user_id=user_id,
         tenant_id=tenant_id,
-        is_admin=not is_external and user_id in teams.admin_user_ids,
+        is_admin=await is_deployment_admin(
+            teams,
+            admin_team_owners(runtime),
+            user_id=user_id,
+            is_external=is_external,
+            home_tenant_id=home,
+        ),
         conversation_id=conversation.id,
         is_external=is_external,
         is_external_known=is_known,

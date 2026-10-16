@@ -261,7 +261,7 @@ class TeamsDriver:
     _panel_card: dict[str, Any] = field(default_factory=dict[str, Any])
     _panel_message_id: str = ""
     _panel_form: dict[str, Any] = field(default_factory=dict[str, Any])
-    #: Teams reads a caller's role off `DAIMON_TEAMS__ADMIN_USER_IDS`.
+    #: Teams admins: the admin team's owners, plus `DAIMON_TEAMS__ADMIN_USER_IDS`.
     _panel_admins: tuple[str, ...] = ()
     _panel_aliases: dict[str, str] = field(default_factory=dict[str, str])
 

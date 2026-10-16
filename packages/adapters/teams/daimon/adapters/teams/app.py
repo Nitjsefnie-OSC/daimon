@@ -53,6 +53,7 @@ from daimon.adapters.teams.context import (
     render_user_message,
 )
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
+from daimon.adapters.teams.deployment_admins import boot_admin_ids, inbound_is_admin
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.group_chats import OUTSIDERS_PRESENT, RosterCheck, placed, turn_guard
 from daimon.adapters.teams.identity import (
@@ -350,7 +351,7 @@ class TeamsApp:
             sender=self._sender,
             commands=commands,
             direct=direct,
-            is_admin=lambda inbound: self._role(inbound) is Role.ADMIN,
+            is_admin=self._is_admin,
         )
         # Posts routine results to their channels; None leaves them pending.
         self._routine_poster = routine_poster
@@ -710,7 +711,7 @@ class TeamsApp:
             public_url=public_url,
             entra_tenant_id=self._teams.tenant_id,
             signup_credit=settings.billing.signup_credit,
-            admin_user_ids=self._teams.admin_user_ids,
+            admin_user_ids=await boot_admin_ids(self.runtime, self._teams),
         )
 
     async def drain(self, timeout: float) -> None:
@@ -742,11 +743,11 @@ class TeamsApp:
         await self._reactions.close()
         self.outputs.close()
 
-    def _role(self, inbound: TeamsInbound) -> Role:
-        # Someone from another organisation is never an admin, whatever ids are configured.
-        if inbound.is_external:
-            return Role.USER
-        return Role.ADMIN if inbound.user_id in self._teams.admin_user_ids else Role.USER
+    async def _is_admin(self, inbound: TeamsInbound) -> bool:
+        return await inbound_is_admin(self.runtime, self._teams, inbound)
+
+    async def _role(self, inbound: TeamsInbound) -> Role:
+        return Role.ADMIN if await self._is_admin(inbound) else Role.USER
 
     async def _classified(self, inbound: TeamsInbound) -> TeamsInbound:
         """`inbound` with what its member lists say about the sender (`externals`)."""
@@ -1183,7 +1184,7 @@ class TeamsApp:
             if inbound.kind != "channel" or not here.answers_external:
                 return False
         subject = build_subject(
-            is_admin=self._role(inbound) is Role.ADMIN, platform_user_id=inbound.user_id
+            is_admin=await self._is_admin(inbound), platform_user_id=inbound.user_id
         )
         place = build_turn_place(channel_id=inbound.channel_id, thread_id=inbound.thread_id)
         return bool(authorize(policy, subject=subject, action=Action.START_TURN, place=place))
@@ -1298,7 +1299,7 @@ class TeamsApp:
         the person (nothing, in a protected channel), so the dispatcher can
         settle or re-queue the work.
         """
-        deps = self.runtime.turn_deps
+        deps, role = self.runtime.turn_deps, await self._role(inbound)
         try:
             admission = await admit(
                 deps,
@@ -1307,12 +1308,12 @@ class TeamsApp:
                 external_user_id=inbound.user_id,
                 channel_id=inbound.channel_id,
                 thread_id=inbound.thread_id,
-                role=self._role(inbound),
+                role=role,
                 platform_role_ids=sorted(
                     await owned_team_ids(self.runtime, tenant_id=tenant_id, user_id=inbound.user_id)
                 )
                 # An admin needs no grant; someone from another organisation gets none.
-                if self._role(inbound) is not Role.ADMIN and not inbound.is_external
+                if role is not Role.ADMIN and not inbound.is_external
                 else (),
                 now=datetime.now(UTC),
                 is_dm=inbound.kind == "dm",
@@ -1524,7 +1525,7 @@ class TeamsApp:
         reraise: bool,
         roster_open: RosterCheck | None,
     ) -> None:
-        deps = self.runtime.turn_deps
+        deps, role = self.runtime.turn_deps, await self._role(inbound)
         lifecycle = holder[-1]
         bare = _bare_mention(inbound)
         if bare and self._reader is None:
@@ -1606,7 +1607,7 @@ class TeamsApp:
             thread_id=inbound.thread_id,
             responder_ma_agent_id=str(admission.agent.id),
             responder_name=config.agent_name or admission.agent.name,
-            role=self._role(inbound),
+            role=role,
             configuration_target_ma_agent_id=config.configuration_target_ma_agent_id,
             configuration_target_name=config.configuration_target_name,
             is_setup=config.thread_binding_kind == "setup",
@@ -1624,7 +1625,7 @@ class TeamsApp:
                 render_user_message,
                 controls,
                 inbound,
-                is_admin=self._role(inbound) is Role.ADMIN,
+                is_admin=role is Role.ADMIN,
                 keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
                 prefix=attachments.prefix,
                 channel_files=await self._files_reachable(inbound),
@@ -1717,7 +1718,7 @@ class TeamsApp:
             or inbound.kind != "channel"
             or teams.public_url is None
             or (inbound.unprompted and not asked)
-            or self._role(inbound) is not Role.ADMIN
+            or not await self._is_admin(inbound)
             or (not asked and now - last < STATE_TTL_S)
         ):
             if asked:

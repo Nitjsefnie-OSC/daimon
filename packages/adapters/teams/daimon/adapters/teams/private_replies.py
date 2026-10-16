@@ -148,7 +148,7 @@ class PrivateReplies:
         sender: TeamsSender,
         commands: Mapping[str, CommandHandler],
         direct: DirectChats | None,
-        is_admin: Callable[[TeamsInbound], bool],
+        is_admin: Callable[[TeamsInbound], Awaitable[bool]],
     ) -> None:
         self._runtime = runtime
         self._sender = sender
@@ -252,7 +252,7 @@ class PrivateReplies:
                 inbound=inbound,
                 tenant_id=tenant_id,
                 args=args,
-                is_admin=self._is_admin(inbound),
+                is_admin=await self._is_admin(inbound),
                 runtime=self._runtime,
                 send=send,
                 asked_in=asked,

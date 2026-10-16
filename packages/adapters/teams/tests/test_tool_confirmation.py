@@ -736,6 +736,7 @@ async def test_runtime_hook_rechecks_current_configured_admins(
     runtime = MagicMock()
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
     runtime.settings.teams.admin_user_ids = (AAD_OBJECT_ID,)
+    runtime.settings.teams.admin_team_id = None
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
     TeamsConfirmationCards(FakeSender()).hook(
@@ -793,6 +794,7 @@ async def test_always_click_rechecks_revoked_team_owner_after_cache_fill(
     )
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=False)
     runtime.settings.teams.admin_user_ids = ()
+    runtime.settings.teams.admin_team_id = None
     members = team_owner_lookup(runtime)
     assert members is not None and OTHER_AAD_OBJECT_ID in await members(team_id)
     owners.return_value = frozenset()

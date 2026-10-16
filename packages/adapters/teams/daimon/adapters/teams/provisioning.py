@@ -6,7 +6,9 @@ boot instead. Same status rules as the Slack boot sweep: success (clean
 reconcile and the default agent on the roster) flips to `ready`; a failure
 keeps an already-ready tenant ready and records the reason; otherwise the
 tenant flips to `failed`. An archived tenant is left alone. Anyone no
-longer in `DAIMON_TEAMS__ADMIN_USER_IDS` loses the stored admin role here.
+longer an admin (an owner of `DAIMON_TEAMS__ADMIN_TEAM_ID`'s team, or in the
+deprecated `DAIMON_TEAMS__ADMIN_USER_IDS`) loses the stored admin role here; a
+failed owner read demotes the owners too, until their next turn.
 """
 
 from __future__ import annotations
