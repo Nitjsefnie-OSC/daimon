@@ -55,7 +55,7 @@ _FILES_HINT_NO_CARD = (
 )
 _GROUP_FILES_HINT = (
     "Files you make cannot be shared in a group chat. Say so when someone asks for a file "
-    "here, and offer to send it in a 1:1 chat with them instead."
+    "here; they can ask you for it in their 1:1 chat with you."
 )
 # A 1:1 chat has no Graph thumbnails: the agent may picture a document itself
 # (`output_delivery.is_preview_output`). The default environment has typst, no office suite.

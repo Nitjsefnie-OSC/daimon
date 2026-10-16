@@ -357,6 +357,7 @@ def test_a_group_chat_turn_is_one_place_without_files() -> None:
         message
     )
     assert 'files="unavailable"' in message and "cannot be shared in a group chat" in message
+    assert "offer" not in message, "no tool can send a group chat's file to a 1:1 chat"
     assert "still shows inline" in message, "image outputs preview there"
     assert "<thread " not in message and "read_thread" not in message
 
