@@ -80,17 +80,23 @@ class React(Protocol):
 Spawn = Callable[[Coroutine[Any, Any, None]], asyncio.Task[None]]
 
 
+def _spawn_reaction(coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+    return asyncio.create_task(coro, name="teams.reaction")
+
+
 class TeamsReactions:
     """Background, rate-spaced reactions, with the ⌛ marks still owed a removal.
 
-    Without `react` (no Bot Framework client) every method does nothing.
+    Without `react` (no Bot Framework client) every method does nothing. Its
+    tasks are its own, outside the app's: shutdown cancels them (`close`)
+    rather than wait on a reaction.
     """
 
     def __init__(
         self,
         react: React | None,
         *,
-        spawn: Spawn,
+        spawn: Spawn = _spawn_reaction,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -105,6 +111,8 @@ class TeamsReactions:
         self._queued: dict[MessageKey, ReactionTarget] = {}
         # Reactions whose add never reached the message: their removal is skipped.
         self._absent: OrderedDict[tuple[MessageKey, str], None] = OrderedDict()
+        self._running: set[asyncio.Task[None]] = set()
+        self._closed = False
 
     def acknowledger(self, inbound: TeamsInbound) -> Callable[[Acknowledgment], None] | None:
         """The lifecycle's `acknowledge` for a turn answering `inbound`, if it can react."""
@@ -135,15 +143,39 @@ class TeamsReactions:
                 if (target := self._queued.pop(key, None)) is not None:
                     self._queue(target, HOURGLASS, add=False)
 
-    def _queue(self, target: ReactionTarget, reaction: str, *, add: bool) -> None:
+    def clear_held(self, items: Iterable[TeamsInbound]) -> None:
+        """Remove ⌛ from messages an earlier process may have marked, now picked up again.
+
+        A restart can cut off that process's removal, and this one cannot tell
+        which messages it marked, so the removal is sent whatever they show.
+        """
+        for item in items:
+            if (target := reaction_target(item)) is not None:
+                self._queued.pop(target.key, None)
+                self._queue(target, HOURGLASS, add=False, known=False)
+
+    async def close(self) -> None:
+        """Cancel every reaction still waiting or in flight, and send no more."""
+        self._closed = True
+        running = list(self._running)
+        for task in running:
+            task.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
+
+    def _queue(
+        self, target: ReactionTarget, reaction: str, *, add: bool, known: bool = True
+    ) -> None:
         react = self._react
-        if react is None:
+        if react is None or self._closed:
             return
         key = target.key
-        task = self._spawn(self._run(react, self._chains.get(key), target, reaction, add=add))
+        previous = self._chains.get(key)
+        task = self._spawn(self._run(react, previous, target, reaction, add=add, known=known))
         self._chains[key] = task
+        self._running.add(task)
 
         def forget(done: asyncio.Task[None]) -> None:
+            self._running.discard(done)
             if self._chains.get(key) is done:
                 del self._chains[key]
 
@@ -157,14 +189,16 @@ class TeamsReactions:
         reaction: str,
         *,
         add: bool,
+        known: bool,
     ) -> None:
         if previous is not None:
             await asyncio.wait([previous])  # never raises: its outcome is its own
         mark = (target.key, reaction)
         if not add and mark in self._absent:
             del self._absent[mark]
-            log.debug("teams.reaction.skipped", reaction=reaction, add=add, reason="not_added")
-            return
+            if known:  # this process's own add never landed: nothing to take off
+                log.debug("teams.reaction.skipped", reaction=reaction, add=add, reason="not_added")
+                return
         now = self._clock()
         slot = max(now, self._next_slot)
         if add and slot - now > MAX_WAIT_S:

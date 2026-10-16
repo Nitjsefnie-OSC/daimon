@@ -196,6 +196,34 @@ async def test_a_removal_is_skipped_when_its_add_was_dropped_or_refused() -> Non
     assert removals == [], "a refused 👀 is not removed either"
 
 
+async def test_a_message_held_across_a_restart_loses_its_hourglass_once_picked_up() -> None:
+    """This process never marked it, but the one before may have: the removal goes anyway."""
+    calls = Calls()
+    harness = Harness(calls)
+    held = make_inbound()
+    harness.reactions.clear_held([held])
+    await harness.settle()
+    assert calls.made == [(held.activity_id, HOURGLASS, False)], "⌛ is taken off regardless"
+
+
+async def test_close_cancels_waiting_reactions_and_sends_no_more() -> None:
+    """Shutdown never waits on a reaction, whether it waits for Teams or for its slot."""
+    stuck = asyncio.Event()
+
+    async def react(target: ReactionTarget, reaction: str, *, add: bool) -> None:
+        await stuck.wait()
+
+    reactions = TeamsReactions(react)
+    reactions.mark_queued(make_inbound("one"))
+    reactions.mark_queued(make_inbound("two"))
+    await asyncio.sleep(0)
+    async with asyncio.timeout(1):
+        await reactions.close()
+    assert reactions._running == set(), "every reaction task ended"
+    reactions.mark_queued(make_inbound("three"))
+    assert reactions._running == set(), "nothing new starts after close"
+
+
 async def test_nothing_reacts_to_a_form_a_reply_nobody_addressed_or_without_a_client() -> None:
     form = dataclasses.replace(make_inbound(), from_form=True)
     unprompted = dataclasses.replace(make_inbound(), unprompted=True)

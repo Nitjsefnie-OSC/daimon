@@ -365,8 +365,8 @@ class TeamsApp:
         # cancel_key (the card intent id) -> (cancel Event, author's Entra id).
         self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
-        spawn = functools.partial(self.spawn, name="teams.reaction")
-        self._reactions = TeamsReactions(react, spawn=spawn)
+        # Not `spawn`: a reaction never holds up a drain.
+        self._reactions = TeamsReactions(react)
         # Bot Framework retries a slow delivery with the same activity id.
         # Not durable: a retry landing after a restart runs a second turn.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
@@ -566,12 +566,16 @@ class TeamsApp:
         for inbound in stale:
             chats.setdefault(inbound.conversation_id, []).append(inbound)
         closed = [i for chat in chats.values() for i in await self._finish(chat)]
+        self._reactions.clear_held(closed)
         await self._tell_stale(closed)
 
     async def _replay_chat(self, queue: list[TeamsInbound]) -> None:
         """Feed one chat's replays through the intake in order, each queued behind
         the last before the next starts."""
         for inbound in queue:
+            # A predecessor that queued it may have left ⌛ on it; if it queues here
+            # again, its new ⌛ follows this removal.
+            self._reactions.clear_held([inbound])
             key = (inbound.conversation_id, inbound.activity_id)
             queued = self._replay_queued[key] = asyncio.Event()
             intake = self.spawn(self._intake(inbound), name="teams.turn")
@@ -721,6 +725,8 @@ class TeamsApp:
                 task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+        # A held message keeps its ⌛ until the next boot replays it (`_replay_chat`).
+        await self._reactions.close()
         self.outputs.close()
 
     def _role(self, inbound: TeamsInbound) -> Role:

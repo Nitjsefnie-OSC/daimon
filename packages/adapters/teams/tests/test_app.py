@@ -169,6 +169,58 @@ async def test_a_queued_message_shows_an_hourglass_until_its_turn_starts(
     )
 
 
+async def test_a_replayed_message_loses_a_predecessors_hourglass(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The process that queued it may have exited before its ⌛ came off."""
+    monkeypatch.setattr(reactions, "MIN_INTERVAL_S", 0.0)
+    made: list[tuple[str, str, bool]] = []
+
+    async def react(target: reactions.ReactionTarget, reaction: str, *, add: bool) -> None:
+        made.append((target.activity_id, reaction, add))
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+        react=react,
+    )
+    held = make_inbound("held")
+
+    async def _intake(self: TeamsApp, inbound: TeamsInbound) -> None:
+        return None
+
+    with patch.object(TeamsApp, "_intake", _intake):
+        teams._replay([held])
+        await settle(teams)
+    await teams.drain(timeout=5)
+    assert made == [(held.activity_id, reactions.HOURGLASS, False)], "⌛ comes off on replay"
+
+
+async def test_a_reaction_in_flight_does_not_hold_up_a_drain(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    stuck = asyncio.Event()
+
+    async def react(target: reactions.ReactionTarget, reaction: str, *, add: bool) -> None:
+        await stuck.wait()
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+        react=react,
+    )
+    teams._reactions.mark_queued(make_inbound())
+    await asyncio.sleep(0)
+    assert teams.in_flight == 0, "a reaction is not app work"
+    async with asyncio.timeout(2):
+        await teams.drain(timeout=30)
+    assert teams._reactions._running == set(), "the unanswered reaction was cancelled"
+
+
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_mention_drops_the_threads_waiting_batch_only_once_its_turn_runs(
     db_session_factory: async_sessionmaker[AsyncSession],

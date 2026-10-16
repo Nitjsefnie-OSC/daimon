@@ -520,7 +520,9 @@ seconds) is kept: its chat gets one "I'm restarting for an update. I'll pick
 this up as soon as I'm back." note, and the next process runs it once, in
 order, through the usual admission checks. One more than 10 minutes old by
 then gets "I restarted for an update and couldn't get to this in time. Please
-send it again." instead. A turn that had started is never rerun: its card is
+send it again." instead. Either way its ⌛ comes off once the next process
+picks it up; shutdown never waits on a reaction. A turn that had started is
+never rerun: its card is
 marked interrupted as above. Nothing is said about a message until its receipt
 is written: while the database is unreachable the chat hears nothing, and a
 message whose start could not be recorded is tried again every 30 seconds. A message's
