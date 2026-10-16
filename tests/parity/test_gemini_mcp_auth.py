@@ -1143,6 +1143,14 @@ async def test_private_gcs_mount_auth_is_fresh_exact_and_memory_only(
         assert f"Bearer offline-private-storage-{index}" in post.content.decode()
     assert "offline-private-storage" not in caplog.text
     assert "offline-private-storage" not in repr(wire.saved)
+    # A later read must recognize the actual freshly dispatched token even if
+    # the provider echoes it under another field, without a network transform.
+    identity = f"interaction-{wire.counter}"
+    wire.saved[identity]["headers"] = {
+        "Authorization": f"Bearer offline-private-storage-{len(calls)}"
+    }
+    with pytest.raises(ProviderError, match="gcs_token_echo"):
+        await sdk.get(identity)
 
 
 @pytest.mark.asyncio
@@ -1213,7 +1221,7 @@ async def test_private_gcs_changed_or_unavailable_auth_never_dispatches(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["create", "get"])
+@pytest.mark.parametrize("operation", ["create", "get", "cancel"])
 async def test_protected_response_refuses_network_transform_echo_without_exposing_it(
     operation: str, caplog: pytest.LogCaptureFixture, recwarn: pytest.WarningsRecorder
 ) -> None:
@@ -1244,7 +1252,7 @@ async def test_protected_response_refuses_network_transform_echo_without_exposin
             if operation == "create":
                 await sdk.create({"agent": "antigravity-preview-05-2026", "tools": [], "input": []})
             else:
-                await sdk.get("native")
+                await getattr(sdk, operation)("native")
     assert echoed not in str(error.value) and echoed not in caplog.text
     assert not any(echoed in str(warning.message) for warning in recwarn)
 
@@ -1285,3 +1293,85 @@ async def test_protected_stream_refuses_transform_echo_without_serializer_warnin
             await anext(opened)
     assert echoed not in caplog.text
     assert not any(echoed in str(warning.message) for warning in recwarn)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "get", "cancel"])
+@pytest.mark.parametrize("echo", [True, False])
+async def test_protected_raw_token_echo_refuses_before_sdk_serialization(
+    operation, echo, caplog, recwarn
+):
+    from mux.drivers.gemini.mcp_auth import RedactedCredential
+
+    token = RedactedCredential("offline-cab-token-never-log")
+
+    # The provider may echo a credential outside network.transform, including
+    # in an unknown environment shape that triggers SDK serialization warnings.
+    def handle(request):
+        return httpx.Response(
+            200,
+            json={
+                **interaction("native"),
+                "environment": {
+                    "headers": {"Authorization": "Bearer " + token if echo else "safe"}
+                },
+            },
+        )
+
+    caplog.set_level(logging.DEBUG)
+    async with mcp_sdk(httpx.MockTransport(handle)) as client:
+        sdk = SDKTransport(client, protect_storage_credentials=True, storage_tokens={token})
+
+        async def run():
+            if operation == "create":
+                return await sdk.create(
+                    {"agent": "antigravity-preview-05-2026", "tools": [], "input": []}
+                )
+            return await getattr(sdk, operation)("native")
+
+        if echo:
+            with pytest.raises(ProviderError, match="gcs_token_echo") as error:
+                await run()
+            assert token not in str(error.value)
+        else:
+            assert (await run())["id"] == "native"
+    assert token not in caplog.text
+    assert not any(token in str(warning.message) for warning in recwarn)
+
+
+def test_storage_echo_token_collection_is_exact_and_redacted():
+    from mux.drivers.gemini.transport import storage_request_token
+
+    token = storage_request_token(
+        {
+            "environment": {
+                "network": {
+                    "allowlist": [
+                        {
+                            "domain": "storage.googleapis.com",
+                            "transform": {"Authorization": "Bearer offline-cab"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert token == "offline-cab"
+    assert "offline-cab" not in repr({token})
+    assert (
+        storage_request_token(
+            {
+                "environment": {
+                    "network": {
+                        "allowlist": [
+                            {
+                                "domain": "other.invalid",
+                                "transform": {"Authorization": "Bearer offline-cab"},
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        is None
+    )

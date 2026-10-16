@@ -16,6 +16,7 @@ from pydantic import JsonValue
 
 from mux.drivers import isolated_ssl_context
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgentCatalogTransport
+from mux.drivers.gemini.mcp_auth import RedactedCredential
 from mux.drivers.gemini.transport import Object, SDKTransport, Transport
 
 if TYPE_CHECKING:
@@ -80,6 +81,7 @@ class _ConfiguredTransport:
     def __init__(self, api_key: str, *, protect_storage_credentials: bool = False) -> None:
         self._api_key = api_key
         self._protect_storage_credentials = protect_storage_credentials
+        self._storage_tokens: set[RedactedCredential] = set()
 
     @asynccontextmanager
     async def _client(self) -> AsyncIterator[genai.Client]:
@@ -134,31 +136,41 @@ class _ConfiguredTransport:
     async def count_input_tokens(self, request: Mapping[str, JsonValue]) -> int:
         async with self._client() as client:
             return await SDKTransport(
-                client, protect_storage_credentials=self._protect_storage_credentials
+                client,
+                protect_storage_credentials=self._protect_storage_credentials,
+                storage_tokens=self._storage_tokens,
             ).count_input_tokens(request)
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         async with self._client() as client:
             return await SDKTransport(
-                client, protect_storage_credentials=self._protect_storage_credentials
+                client,
+                protect_storage_credentials=self._protect_storage_credentials,
+                storage_tokens=self._storage_tokens,
             ).create(request)
 
     async def get(self, interaction_id: str) -> Object:
         async with self._client() as client:
             return await SDKTransport(
-                client, protect_storage_credentials=self._protect_storage_credentials
+                client,
+                protect_storage_credentials=self._protect_storage_credentials,
+                storage_tokens=self._storage_tokens,
             ).get(interaction_id)
 
     async def cancel(self, interaction_id: str) -> Object:
         async with self._client() as client:
             return await SDKTransport(
-                client, protect_storage_credentials=self._protect_storage_credentials
+                client,
+                protect_storage_credentials=self._protect_storage_credentials,
+                storage_tokens=self._storage_tokens,
             ).cancel(interaction_id)
 
     async def download_snapshot(self, environment_id: str) -> bytes:
         async with self._client() as client:
             return await SDKTransport(
-                client, protect_storage_credentials=self._protect_storage_credentials
+                client,
+                protect_storage_credentials=self._protect_storage_credentials,
+                storage_tokens=self._storage_tokens,
             ).download_snapshot(environment_id)
 
     async def open_stream(
@@ -171,7 +183,9 @@ class _ConfiguredTransport:
         client = await lifetime.__aenter__()
         try:
             source = await SDKTransport(
-                client, protect_storage_credentials=self._protect_storage_credentials
+                client,
+                protect_storage_credentials=self._protect_storage_credentials,
+                storage_tokens=self._storage_tokens,
             ).open_stream(interaction_id, after=after)
         except BaseException:
             await lifetime.__aexit__(None, None, None)
