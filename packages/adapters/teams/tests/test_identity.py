@@ -60,6 +60,7 @@ def test_personal_message_is_a_dm_keyed_on_the_chat() -> None:
         activity_id="activity-1",
         text="hello there",
         service_url=SERVICE_URL,
+        sender_id=f"29:{AAD_OBJECT_ID}",
     )
 
 
@@ -87,6 +88,30 @@ def test_channel_root_post_becomes_its_own_thread() -> None:
     assert isinstance(inbound, TeamsInbound)
     assert inbound.conversation_id == f"{CHANNEL_ID};messageid=1700000000009"
     assert inbound.channel_id == CHANNEL_ID
+
+
+def test_a_targeted_thread_reply_is_addressed_and_marked() -> None:
+    """A slash command reaches the bot alone, with no mention: it is still asked of it."""
+    inbound = _parse(make_channel_activity(mention_bot=False, text="/memory", targeted=True))
+    assert isinstance(inbound, TeamsInbound), "a targeted message is addressed to the bot"
+    assert inbound.is_targeted and not inbound.unprompted, "never a participation candidate"
+    assert (inbound.conversation_id, inbound.sender_id) == (THREAD_ID, f"29:{AAD_OBJECT_ID}")
+
+
+def test_a_targeted_root_post_is_answered_in_the_channel_itself() -> None:
+    """A targeted message takes no replies, so its answer cannot thread under it."""
+    payload = make_channel_activity(
+        mention_bot=False, conversation_id=CHANNEL_ID, activity_id="1700000000009", targeted=True
+    )
+    inbound = _parse(payload)
+    assert isinstance(inbound, TeamsInbound) and inbound.is_targeted
+    assert (inbound.conversation_id, inbound.channel_id) == (CHANNEL_ID, CHANNEL_ID)
+
+
+def test_a_targeted_message_in_a_personal_chat_is_an_ordinary_one() -> None:
+    """Everything in a 1:1 chat is private already."""
+    inbound = _parse(make_message_activity(text="hello", targeted=True))
+    assert isinstance(inbound, TeamsInbound) and not inbound.is_targeted
 
 
 def _quoting(sender_id: str | None, *, text: str = "is this right?") -> dict[str, object]:

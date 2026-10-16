@@ -44,14 +44,7 @@ from daimon.adapters.teams.card_actions import stored_external, toast
 from daimon.adapters.teams.channel_admin_groups import owned_team_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.channel_subscriptions import ChannelSubscriptions, SeenChannel
-from daimon.adapters.teams.commands import (
-    ANSWERED_IN_CHAT,
-    CHANNEL_POINTER,
-    NEW_IN_CHANNEL,
-    CommandContext,
-    CommandHandler,
-    parse_command,
-)
+from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.context import (
     NOTHING_ATTACHED,
     HistoryBlock,
@@ -82,6 +75,7 @@ from daimon.adapters.teams.lifecycle import (
 from daimon.adapters.teams.names import remember_inbound
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.participation import TeamsParticipation
+from daimon.adapters.teams.private_replies import SENDER_ONLY, PrivateReplies, reply_privately
 from daimon.adapters.teams.provider_actions import TeamsProviderActions, provider_action_options
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.reactions import React, TeamsReactions
@@ -338,7 +332,6 @@ class TeamsApp:
         # With Graph subscriptions, a channel send refused as not in the roster drops the
         # channel: a lost removal event would otherwise keep its subscription alive.
         self._sender = TimedSender(subscriptions.watch(sender) if subscriptions else sender)
-        self._commands = commands
         self._bot_token = bot_token
         # Channel history and media through Graph; None replays nothing.
         self._reader = reader
@@ -346,8 +339,14 @@ class TeamsApp:
         self._channel_files = channel_files
         # Records each team for the MCP server's channel reads; None records nothing.
         self._installs = installs
-        # Opens 1:1 chats for commands sent in a channel; None points the sender there.
-        self._direct = direct
+        # Commands and sender-only notices; `direct` opens a channel command's 1:1 chat.
+        self._private = PrivateReplies(
+            runtime=self.runtime,
+            sender=self._sender,
+            commands=commands,
+            direct=direct,
+            is_admin=lambda inbound: self._role(inbound) is Role.ADMIN,
+        )
         # Posts routine results to their channels; None leaves them pending.
         self._routine_poster = routine_poster
         # Support is on: answers carry an Ask a human button.
@@ -803,7 +802,7 @@ class TeamsApp:
                 activity.conversation.id,
                 activity.id,
                 activity.conversation.conversation_type,
-                ctx.reply,
+                reply_privately(ctx),
             )
             return
         if parsed.kind == "channel" and parsed.team_id and self._subscriptions is not None:
@@ -1017,10 +1016,14 @@ class TeamsApp:
                 await self._participation.record(trigger, tenant_id)
             await self._run_turns(key, tenant_id, [trigger])
 
-    async def _say(self, inbound: TeamsInbound, text: str) -> None:
+    async def _say(self, inbound: TeamsInbound, text: str, *, sender_only: bool = False) -> None:
+        """Post `text` in reply; `sender_only`, or to a targeted message, for its sender alone."""
         if inbound.unprompted:
             # Nobody asked: a refusal or notice per quiet burst would spam the thread.
             log.info("teams.notice.withheld", reason="unprompted")
+            return
+        if sender_only or inbound.is_targeted:
+            await self._private.tell_sender(inbound, text)
             return
         await self._sender.send(
             inbound.conversation_id,
@@ -1085,69 +1088,14 @@ class TeamsApp:
         tenant_id = await live_tenant_id(self.runtime.sessionmaker, inbound.entra_tenant_id)
         if tenant_id is None:
             if await self._finish([inbound]):
-                await self._say(inbound, DENIED)
+                await self._say(inbound, DENIED, sender_only=True)
             return
         inbound = await self._stored_external(inbound, tenant_id)
-        # Someone from another organisation gets no command: the agent hears their words,
-        # and a command's 1:1 chat cannot be opened across organisations.
-        command = None if inbound.is_external else parse_command(inbound.text, self._commands)
-        if command is not None:
-            if not await self._finish([inbound]):
-                return
-            name, args = command
-            asked_in = None
-            if inbound.kind != "dm" and name == "new":
-                await self._say(inbound, NEW_IN_CHANNEL)
-                return
-            if inbound.kind != "dm":
-                # Teams has no message only its sender sees: answer in their 1:1 chat.
-                chat = await self._direct_chat(inbound)
-                await self._say(
-                    inbound, (ANSWERED_IN_CHAT if chat else CHANNEL_POINTER).format(name=name)
-                )
-                if chat is None:
-                    return
-                asked_in, inbound = inbound, chat
-            inbound = await route_to_setup(self.runtime.sessionmaker, inbound, tenant_id)
-            await self._commands[name](
-                CommandContext(
-                    inbound=inbound,
-                    tenant_id=tenant_id,
-                    args=args,
-                    is_admin=self._role(inbound) is Role.ADMIN,
-                    runtime=self.runtime,
-                    send=functools.partial(
-                        self._sender.send, inbound.conversation_id, service_url=inbound.service_url
-                    ),
-                    asked_in=asked_in,
-                )
-            )
-            return
-        await self._orchestrate(inbound, tenant_id)
-
-    async def _direct_chat(self, inbound: TeamsInbound) -> TeamsInbound | None:
-        """`inbound` moved to its sender's 1:1 chat; None when Teams will not open one."""
-        if self._direct is None:
-            return None
-        try:
-            member = await self._direct.member(inbound.channel_id, inbound.user_id)
-            chat = await self._direct.open_chat(member) if member else None
-        except TEAMS_SEND_ERRORS as exc:
-            log.info("teams.command.no_direct_chat", reason=type(exc).__name__)
-            return None
-        if chat is None:
-            return None
-        return dataclasses.replace(
-            inbound,
-            kind="dm",
-            conversation_id=chat,
-            channel_id=chat,
-            team_id=None,
-            team_group_id=None,
-            channel_name=None,
-            channel_type=None,
-            team_name=None,
-        )
+        command = self._private.command(inbound)
+        if command is None and not inbound.is_targeted:
+            await self._orchestrate(inbound, tenant_id)
+        elif await self._finish([inbound]):
+            await self._private.run(inbound, tenant_id, command)
 
     async def _find_card(self, intent: TurnCardIntentRow) -> str | None:
         """A channel card whose post returned no id, found by its Cancel key."""
@@ -1361,7 +1309,8 @@ class TeamsApp:
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
             refusal = _admission_refusal(err, tenant_id, in_dm=inbound.kind == "dm")
             if refusal is not None and continuation is None:  # queued work settles silently
-                await self._say(inbound, refusal)
+                private = isinstance(err, AdmissionDenied) and err.reason in SENDER_ONLY
+                await self._say(inbound, refusal, sender_only=private)
             if reraise:
                 raise
             return

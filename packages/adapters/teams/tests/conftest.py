@@ -130,10 +130,12 @@ def make_message_activity(
     is_group: bool | None = None,
     mention_bot: bool = False,
     service_url: str = SERVICE_URL,
+    targeted: bool = False,
 ) -> dict[str, object]:
     """An inbound Bot Framework `message` activity, camelCase as Teams posts it.
 
-    `mention_bot` prefixes an `<at>` mention of the bot, as a channel post has.
+    `mention_bot` prefixes an `<at>` mention of the bot, as a channel post has;
+    `targeted` sends it to the bot alone, as a slash command does.
     """
     conversation: dict[str, object] = {
         "id": conversation_id,
@@ -171,7 +173,7 @@ def make_message_activity(
         "serviceUrl": service_url,
         "from": from_,
         "conversation": conversation,
-        "recipient": {"id": BOT_ACCOUNT_ID},
+        "recipient": {"id": BOT_ACCOUNT_ID} | ({"isTargeted": True} if targeted else {}),
         "text": text,
         "entities": entities,
         "channelData": channel_data,
@@ -332,6 +334,11 @@ class TeamsApiFake:
     @property
     def activity_requests(self) -> list[SentRequest]:
         return [r for r in self.requests if "/activities" in r.url]
+
+    @property
+    def private_requests(self) -> list[SentRequest]:
+        """Activities only their recipient sees, as channel commands are answered."""
+        return [r for r in self.activity_requests if "isTargetedActivity=true" in r.url]
 
 
 @functools.cache

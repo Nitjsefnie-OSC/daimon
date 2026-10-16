@@ -1,0 +1,262 @@
+"""Commands and sender-only notices answered where only the sender sees them."""
+
+from __future__ import annotations
+
+import dataclasses
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+from daimon.adapters.teams.app import TeamsApp
+from daimon.adapters.teams.card_actions import edit_origin_card, text_card
+from daimon.adapters.teams.commands import (
+    ANSWERED_IN_CHAT,
+    NEW_IN_CHANNEL,
+    parse_command,
+)
+from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.private_replies import (
+    NOT_YET_PRIVATE,
+    PrivateReplies,
+    reply_privately,
+)
+from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.ma_identity import derive_tenant_uuid
+from microsoft_teams.api import (
+    Account,
+    MessageActivity,
+    MessageActivityInput,
+    TargetedMessageInfoEntity,
+)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .conftest import (
+    CHANNEL_ID,
+    ENTRA_TENANT_ID,
+    THREAD_ID,
+    FakeSender,
+    bot_token,
+    build_teams_runtime,
+    make_channel_activity,
+    make_inbound,
+    make_message_activity,
+)
+
+TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+SENDER_ID = "29:sender"
+REFUSALS = [400, 403, 404]
+
+
+@dataclasses.dataclass
+class _Direct:
+    looked_up: int = 0
+
+    async def member(self, conversation_id: str, aad_object_id: str) -> str | None:
+        self.looked_up += 1
+        return "29:member"
+
+    async def open_chat(self, member_id: str) -> str:
+        return "a:direct"
+
+    async def post(self, conversation_id: str, text: str) -> None:
+        raise AssertionError("commands answer through the sender")
+
+
+def _channel(text: str, *, targeted: bool = False) -> TeamsInbound:
+    inbound = make_inbound(text, conversation=THREAD_ID, kind="channel")
+    return dataclasses.replace(
+        inbound, channel_id=CHANNEL_ID, sender_id=SENDER_ID, is_targeted=targeted
+    )
+
+
+def _replies(
+    sender: FakeSender,
+    seen: list[TeamsInbound],
+    *,
+    runtime: TeamsRuntime | None = None,
+    direct: _Direct | None = None,
+) -> PrivateReplies:
+    async def _answer(context: Any) -> None:
+        seen.append(context.inbound)
+        await context.send(MessageActivityInput(text="answer"))
+
+    names = ("help", "memory", "setup", "new")
+    return PrivateReplies(
+        runtime=runtime or cast(TeamsRuntime, SimpleNamespace()),
+        sender=sender,
+        commands=dict.fromkeys(names, _answer),
+        direct=cast(Any, direct),
+        is_admin=lambda _: False,
+    )
+
+
+def _is_private(activity: MessageActivityInput) -> bool:
+    return activity.recipient is not None and activity.recipient.is_targeted is True
+
+
+async def test_a_notice_reaches_only_its_sender() -> None:
+    sender = FakeSender()
+    await _replies(sender, []).tell_sender(_channel("hi"), "only you")
+    [(where, notice, _)] = sender.sent
+    assert where == THREAD_ID and notice.text == "only you" and _is_private(notice)
+    assert notice.recipient is not None and notice.recipient.id == SENDER_ID
+
+
+@pytest.mark.parametrize("status", REFUSALS)
+async def test_a_refused_notice_is_posted_in_the_thread(status: int) -> None:
+    sender = FakeSender(refuse_on={0}, refuse_status=status)
+    await _replies(sender, []).tell_sender(_channel("hi"), "only you")
+    first, second = sender.activities
+    assert _is_private(first) and not _is_private(second) and second.text == "only you"
+
+
+async def test_a_timed_out_notice_is_not_sent_twice() -> None:
+    sender = FakeSender(timeout_on={1})
+    replies = _replies(sender, [])
+    await replies.tell_sender(_channel("hi"), "first")
+    with pytest.raises(httpx.TimeoutException):
+        await replies.tell_sender(_channel("hi"), "second")
+    assert len(sender.sent) == 2
+
+
+async def test_a_channel_command_is_answered_privately_in_its_thread() -> None:
+    sender, seen, direct = FakeSender(), [], _Direct()
+    await _replies(sender, seen, direct=direct).run(_channel("help"), TENANT, ("help", ""))
+    [(where, answer, _)] = sender.sent
+    assert where == THREAD_ID and answer.text == "answer" and _is_private(answer)
+    assert [inbound.kind for inbound in seen] == ["channel"] and direct.looked_up == 0
+    assert not answer.entities, "an @mention gets no prompt preview"
+
+
+async def test_a_targeted_command_previews_its_prompt() -> None:
+    sender, inbound = FakeSender(), _channel("/help", targeted=True)
+    await _replies(sender, []).run(inbound, TENANT, ("help", ""))
+    [answer] = sender.activities
+    assert _is_private(answer)
+    assert any(isinstance(entity, TargetedMessageInfoEntity) for entity in answer.entities or [])
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize("status", REFUSALS)
+async def test_a_refused_private_answer_moves_to_the_1_1_chat(
+    db_session_factory: async_sessionmaker[AsyncSession], status: int
+) -> None:
+    sender, seen = FakeSender(refuse_on={0}, refuse_status=status), []
+    runtime = build_teams_runtime(db_session_factory)
+    replies = _replies(sender, seen, runtime=runtime, direct=_Direct())
+    await replies.run(_channel("memory"), TENANT, ("memory", ""))
+    _, pointer, answer = sender.sent
+    assert pointer[1].text == ANSWERED_IN_CHAT.format(name="memory") and _is_private(pointer[1])
+    assert answer[0] == "a:direct" and not _is_private(answer[1])
+    assert [inbound.kind for inbound in seen] == ["channel", "dm"]
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_setup_in_a_channel_keeps_the_1_1_chat(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender, seen = FakeSender(), []
+    runtime = build_teams_runtime(db_session_factory)
+    await _replies(sender, seen, runtime=runtime, direct=_Direct()).run(
+        _channel("setup"), TENANT, ("setup", "")
+    )
+    [(_, pointer, _), (where, _, _)] = sender.sent
+    assert pointer.text == ANSWERED_IN_CHAT.format(name="setup") and _is_private(pointer)
+    assert where == "a:direct" and [inbound.kind for inbound in seen] == ["dm"]
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_1_1_command_is_answered_plainly(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender, seen = FakeSender(), []
+    runtime = build_teams_runtime(db_session_factory)
+    await _replies(sender, seen, runtime=runtime).run(make_inbound("help"), TENANT, ("help", ""))
+    [answer] = sender.activities
+    assert not _is_private(answer) and [inbound.kind for inbound in seen] == ["dm"]
+
+
+async def test_new_in_a_channel_is_told_privately() -> None:
+    sender = FakeSender()
+    await _replies(sender, []).run(_channel("new"), TENANT, ("new", ""))
+    [notice] = sender.activities
+    assert notice.text == NEW_IN_CHANNEL and _is_private(notice)
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_targeted_question_starts_no_turn(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sender = FakeSender()
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=sender,
+        commands={},
+        bot_token=bot_token,
+    )
+
+    async def _no_turn(*_: object) -> None:
+        raise AssertionError("a targeted question must not start a turn")
+
+    monkeypatch.setattr(TeamsApp, "_orchestrate", _no_turn)
+    inbound = dataclasses.replace(_channel("what changed?", targeted=True), bot_name="Daimon")
+    await teams._handle(inbound)
+    [notice] = sender.activities
+    assert notice.text == NOT_YET_PRIVATE.format(bot="Daimon") and _is_private(notice)
+
+
+@pytest.mark.parametrize(
+    ("text", "parsed"), [("/help", ("help", "")), ("/memory mine", ("memory", "mine"))]
+)
+def test_the_slash_form_parses_as_the_command(text: str, parsed: tuple[str, str]) -> None:
+    assert parse_command(text, {"help": AsyncMock(), "memory": AsyncMock()}) == parsed
+
+
+def _ctx(payload: dict[str, object], send: AsyncMock) -> Any:
+    return SimpleNamespace(
+        activity=MessageActivity.model_validate(payload), send=send, reply=AsyncMock()
+    )
+
+
+@pytest.mark.parametrize("targeted", [False, True])
+async def test_a_channel_refusal_reaches_only_its_sender(targeted: bool) -> None:
+    send = AsyncMock()
+    ctx = _ctx(make_channel_activity(targeted=targeted), send)
+    await reply_privately(ctx)("no")
+    (notice,) = send.await_args.args
+    assert notice.text == "no" and _is_private(notice)
+    assert bool(notice.entities) is targeted, "only a targeted prompt is previewed"
+    ctx.reply.assert_not_awaited()
+
+
+async def test_a_refused_channel_refusal_is_replied_as_before() -> None:
+    request = httpx.Request("POST", "https://teams.test")
+    refused = httpx.HTTPStatusError(
+        "x", request=request, response=httpx.Response(403, request=request)
+    )
+    ctx = _ctx(make_channel_activity(), AsyncMock(side_effect=refused))
+    await reply_privately(ctx)("no")
+    ctx.reply.assert_awaited_once_with("no")
+
+
+async def test_a_1_1_refusal_is_replied_as_before() -> None:
+    send = AsyncMock()
+    ctx = _ctx(make_message_activity(), send)
+    await reply_privately(ctx)("no")
+    ctx.reply.assert_awaited_once_with("no")
+    send.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("kind", "private"), [("channel", True), ("personal", False)])
+async def test_a_panel_is_edited_for_whoever_saw_it(kind: str, private: bool) -> None:
+    send = AsyncMock()
+    activity = SimpleNamespace(
+        reply_to_id="m-1",
+        conversation=SimpleNamespace(conversation_type=kind),
+        from_=Account(id=SENDER_ID, name="Ada"),
+    )
+    await edit_origin_card(cast(Any, SimpleNamespace(activity=activity, send=send)), text_card("x"))
+    (edit,) = send.await_args.args
+    assert edit.id == "m-1" and _is_private(edit) is private

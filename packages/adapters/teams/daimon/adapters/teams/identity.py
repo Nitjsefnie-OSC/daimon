@@ -100,6 +100,10 @@ class TeamsInbound:
     answered as from another organisation, `is_external_known` that it rests on
     positive evidence (`externals.Membership`), `home_tenant_id` their tenant.
     `from_form` marks a submitted form's turn: its `activity_id` names no message.
+    `sender_id` is the sender's Bot Framework id (`29:…`), which a reply only
+    they see is addressed to; Graph-read messages have none. `is_targeted`
+    marks a channel message only the bot sees (a slash command, say): it is
+    answered privately and never enters the thread's session.
     """
 
     kind: Literal["dm", "channel"]
@@ -127,6 +131,8 @@ class TeamsInbound:
     is_external_known: bool = False
     home_tenant_id: str | None = None
     from_form: bool = False
+    sender_id: str | None = None
+    is_targeted: bool = False
 
     @property
     def thread_id(self) -> str:
@@ -315,7 +321,11 @@ def parse_inbound(
         return Refusal(GROUP_CHAT_UNSUPPORTED)
     if kind not in ("personal", "channel"):
         return Refusal(DENIED)
-    addressed = kind != "channel" or activity.is_recipient_mentioned() or quotes_bot(activity)
+    # A targeted message (`supportsTargetedMessages`) is addressed to the bot alone.
+    targeted = kind == "channel" and activity.recipient.is_targeted is True
+    addressed = (
+        kind != "channel" or targeted or activity.is_recipient_mentioned() or quotes_bot(activity)
+    )
     thread_reply = not addressed and _is_thread_reply_by_person(activity)
     # Typed text, not a mention: whether it counts is the tenant's switch, read later.
     by_name = (
@@ -362,6 +372,9 @@ def parse_inbound(
     if kind == "personal":
         conversation_id = channel_id = conversation.id
         team = channel = None
+    elif targeted and ";messageid=" not in conversation.id:
+        # A targeted root post takes no replies: answers go to the channel itself.
+        conversation_id = channel_id = conversation.id
     else:
         conversation_id = channel_thread_id(conversation.id, activity.id)
         channel_id = conversation_id.split(";", 1)[0]
@@ -389,6 +402,8 @@ def parse_inbound(
         is_external=home is not None,
         is_external_known=home is not None,
         home_tenant_id=home,
+        sender_id=activity.from_.id or None,
+        is_targeted=targeted,
     )
     return _admitted(inbound, addressed=addressed)
 

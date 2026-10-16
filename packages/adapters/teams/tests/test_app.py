@@ -581,10 +581,13 @@ def _click(key: str, clicker: str) -> Any:
     return SimpleNamespace(activity=activity)
 
 
-def _message(payload: dict[str, object], reply: AsyncMock) -> Any:
+def _message(payload: dict[str, object], reply: AsyncMock, send: AsyncMock | None = None) -> Any:
     activity = MessageActivity.model_validate(payload)
     return SimpleNamespace(
-        activity=activity, conversation_ref=SimpleNamespace(service_url=SERVICE_URL), reply=reply
+        activity=activity,
+        conversation_ref=SimpleNamespace(service_url=SERVICE_URL),
+        reply=reply,
+        send=send or AsyncMock(),
     )
 
 
@@ -1076,16 +1079,20 @@ async def test_a_typed_bot_name_behaves_as_before_when_the_switch_is_off(
 async def test_an_oversize_typed_bot_name_gets_the_notice_only_when_the_switch_is_on(
     db_session_factory: async_sessionmaker[AsyncSession], on: bool
 ) -> None:
-    """On, it is a mention and owed the too-long notice; off, nobody asked."""
+    """On, it is a mention and owed the too-long notice, for the sender only; off, nobody asked."""
     await _switch(db_session_factory, on=on)
-    teams, reply = _app(db_session_factory, FakeSender()), AsyncMock()
+    teams, reply, send = _app(db_session_factory, FakeSender()), AsyncMock(), AsyncMock()
     text = "@Daimon " + "x" * MAX_INBOUND_MESSAGE_BYTES
     with structlog.testing.capture_logs() as logs:
-        await teams.handle_message(_message(_named_post(text, conversation_id=CHANNEL_ID), reply))
+        post = _named_post(text, conversation_id=CHANNEL_ID)
+        await teams.handle_message(_message(post, reply, send))
+    reply.assert_not_awaited()
     if on:
-        reply.assert_awaited_once_with(INPUT_TOO_LONG)
+        (notice,) = send.await_args.args
+        assert notice.text == INPUT_TOO_LONG
+        assert notice.recipient.is_targeted, "only the sender sees a refusal in a channel"
     else:
-        reply.assert_not_awaited()
+        send.assert_not_awaited()
     events = [entry["event"] for entry in logs]
     assert "plain_text_mention.accepted" not in events, "a refusal starts no turn"
 

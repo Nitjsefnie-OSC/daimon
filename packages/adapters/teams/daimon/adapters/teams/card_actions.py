@@ -180,8 +180,15 @@ async def edit_origin_card(
     ctx: ActivityContext[TaskSubmitInvokeActivity] | ActivityContext[AdaptiveCardInvokeActivity],
     card: AdaptiveCard,
 ) -> None:
-    """Best effort: show `card` in place of the one the dialog was opened from."""
-    edit = MessageActivityInput(id=ctx.activity.reply_to_id).add_card(card)
+    """Best effort: show `card` in place of the one the dialog was opened from.
+
+    In a channel that is a command panel only its clicker sees, edited as one;
+    a 404 says it expired after Teams' 24 hours, so the panel stays closed.
+    """
+    activity = ctx.activity
+    edit = MessageActivityInput(id=activity.reply_to_id).add_card(card)
+    if activity.conversation.conversation_type == "channel":
+        edit.with_recipient(activity.from_, is_targeted=True)
     with contextlib.suppress(*TEAMS_SEND_ERRORS):
         await asyncio.wait_for(ctx.send(edit), _EDIT_TIMEOUT_S)
 
