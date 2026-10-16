@@ -335,9 +335,11 @@ setting off the routes answer 404 and nothing is subscribed.
   Teams renders a base64 image attachment: downscaled to fit 1024x1024 and
   re-encoded under 512 KiB (PNG, else JPEG). In a 1:1 chat each image comes
   just before its consent card; in a channel up to four, in delivery order,
-  follow the links in one message (not after an unprompted answer, nor in a
-  channel without file access). Animated GIFs get no preview, and a preview
-  Teams refuses is only logged (`teams.output_preview.send_failed`).
+  follow the links in one message (not after an unprompted answer). A channel
+  without file access gets the previews too, after the answer, while the
+  images themselves are logged and dropped like any other output there.
+  Animated GIFs get no preview, and a preview Teams refuses is only logged
+  (`teams.output_preview.send_failed`).
   Where they are unavailable, `files_hint` tells the agent, asked for a file or
   to turn files on, to call `enable_channel_files` first rather than offer an
   artifact, report or notebook; the bot posts the Enable files card (below)

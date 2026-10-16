@@ -365,6 +365,41 @@ async def test_channel_outputs_are_logged_not_posted_and_are_deleted(
     assert harness.deletes == ["file_csv"], "the listing entry goes, so later sweeps skip it"
 
 
+async def test_a_channel_without_file_access_still_previews_its_images(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Images show inline though nothing is saved; every file is still logged and deleted."""
+    images = [_png(f"file_{n}", f"chart{n}.png") for n in range(5)]
+    listing = [_csv(), *(meta for meta, _ in images)]
+    contents = {meta.id: content for meta, content in images}
+    harness = _harness(db_session_factory, listing, contents=contents)
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(make_inbound(kind="channel", conversation=THREAD_ID), "sesn_1")
+
+    [(conversation, message, _)] = harness.sender.sent
+    assert conversation == THREAD_ID, "the previews go in the thread"
+    names = [a.name for a in message.attachments or []]
+    assert names == ["chart0.png", "chart1.png", "chart2.png", "chart3.png"], "first four"
+    skipped = {e["file_id"] for e in logs if e["event"] == "teams.channel_output.skipped"}
+    assert skipped == {meta.id for meta in listing}, "each file is logged as not saved"
+    assert sorted(harness.deletes) == sorted(meta.id for meta in listing), "and leaves"
+    assert harness.uploads == [], "nothing is saved anywhere"
+
+
+async def test_an_unprompted_turn_without_file_access_previews_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    meta, content = _png("file_png")
+    harness = _harness(db_session_factory, [meta], contents={"file_png": content})
+    inbound = make_inbound(kind="channel", conversation=THREAD_ID)
+
+    await harness.delivery.sweep(dataclasses.replace(inbound, unprompted=True), "sesn_1")
+
+    assert harness.sender.sent == [], "an unprompted answer stands alone"
+    assert harness.deletes == ["file_png"], "the image is still dropped"
+
+
 def _channel_files(put: Callable[[httpx.Request], httpx.Response]) -> ChannelFiles:
     """A team whose channel folder Graph finds; `put` answers each simple upload."""
     folder = {"id": "01FOLDER", "parentReference": {"driveId": "b!drive-1"}}

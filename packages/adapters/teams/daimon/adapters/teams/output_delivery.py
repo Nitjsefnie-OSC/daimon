@@ -16,8 +16,9 @@ around an answer is thread clutter. Without access a file goes down the
 skip path to be logged, and the agent guidance has the agent say so in its
 reply.
 Image outputs also travel as inline previews (`image_preview`): in a channel,
-up to MAX_PREVIEWS in delivery order in one message after the links; in a 1:1
-chat, each just before its first consent card. A failed preview is only logged.
+up to MAX_PREVIEWS in delivery order in one message after the links, also
+where files cannot be saved (a data URI needs no SharePoint); in a 1:1 chat,
+each just before its first consent card. A failed preview is only logged.
 Transient channel upload failures leave the listing entry for a later sweep,
 and an oversize file stays listed on every path, including a channel without
 file access. Otherwise the listing entry, the delivery
@@ -45,7 +46,11 @@ from daimon.adapters.teams.attachments import FetchRefused
 from daimon.adapters.teams.card_actions import Actor, card_actor, submitted_fields
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.adapters.teams.image_preview import MAX_PREVIEWS, preview_attachment
+from daimon.adapters.teams.image_preview import (
+    MAX_PREVIEWS,
+    PREVIEW_MIME_TYPES,
+    preview_attachment,
+)
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.media.filenames import display_filename_for, sanitize_title
@@ -173,11 +178,11 @@ class TeamsOutputDelivery:
         """Drop queued decodes; one already running finishes on its thread."""
         self._decoder.shutdown(wait=False, cancel_futures=True)
 
-    async def _preview(self, name: str, file: DeliverableFile) -> Attachment | None:
+    async def _preview(self, name: str, content: bytes, mime_type: str) -> Attachment | None:
         # Off the event loop: decoding and re-encoding a large image would stall other turns.
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            self._decoder, preview_attachment, name, file.content, file.mime_type
+            self._decoder, preview_attachment, name, content, mime_type
         )
 
     async def _send_previews(self, inbound: TeamsInbound, previews: list[Attachment]) -> None:
@@ -246,20 +251,7 @@ class TeamsOutputDelivery:
     ) -> None:
         files = self._files
         if files is None or not await files.is_available(inbound):
-            # Zero sends every file down the skip path: a log line, then a
-            # delete for a file that fits the cap. A file over it is kept,
-            # as on every other path: no channel could take it either.
-            # No preview here: the skip path never downloads the bytes, and
-            # the agent's reply already says the files could not be saved.
-            await sweep_session_outputs(
-                self._runtime.anthropic,
-                session_id=session_id,
-                post=functools.partial(self._offer, inbound, session_id),
-                on_skip=_log_channel_skip,
-                sleep=self._sleep,
-                max_bytes=0,
-                discard_skipped_up_to=MAX_BYTES_PER_FILE,
-            )
+            await self._sweep_unsaved(inbound, session_id)
             return
         links: list[str] = []
         previews: list[Attachment] = []
@@ -269,7 +261,7 @@ class TeamsOutputDelivery:
             preview = None
             if not inbound.unprompted and len(previews) < MAX_PREVIEWS:
                 # Before the upload: a preview error must never re-upload a saved file.
-                preview = await self._preview(name, file)
+                preview = await self._preview(name, file.content, file.mime_type)
             try:
                 item = await files.upload(inbound, name, file.content)
             except GraphUnavailable as err:
@@ -299,6 +291,37 @@ class TeamsOutputDelivery:
         )
         if links:
             await self._post_links(inbound, links, append)
+        await self._send_previews(inbound, previews)
+
+    async def _sweep_unsaved(self, inbound: TeamsInbound, session_id: str) -> None:
+        """A channel whose files cannot be saved: every file is skipped, images still preview.
+
+        A skipped file is logged, then deleted if it fits the cap; one over it
+        is kept, as on every other path: no channel could take it either. An
+        image is downloaded only for its preview, then dropped the same way.
+        """
+        previews: list[Attachment] = []
+
+        def cap(mime_type: str) -> int:
+            wanted = not inbound.unprompted and len(previews) < MAX_PREVIEWS
+            return MAX_BYTES_PER_FILE if wanted and mime_type in PREVIEW_MIME_TYPES else 0
+
+        async def preview_only(file: DeliverableFile) -> None:
+            await _log_channel_skip(SkippedFile(file.file_id, file.filename, file.size_bytes))
+            name = display_filename_for(file.filename, file.mime_type)
+            if (preview := await self._preview(name, file.content, file.mime_type)) is not None:
+                previews.append(preview)
+
+        await sweep_session_outputs(
+            self._runtime.anthropic,
+            session_id=session_id,
+            post=preview_only,
+            on_skip=_log_channel_skip,
+            sleep=self._sleep,
+            max_bytes=0,
+            max_bytes_for=cap,
+            discard_skipped_up_to=MAX_BYTES_PER_FILE,
+        )
         await self._send_previews(inbound, previews)
 
     async def _post_links(
@@ -404,7 +427,7 @@ class TeamsOutputDelivery:
         name = display_filename_for(file.filename, file.mime_type)
         if file.file_id not in self._previewed:
             self._previewed.add(file.file_id)
-            if (preview := await self._preview(name, file)) is not None:
+            if (preview := await self._preview(name, file.content, file.mime_type)) is not None:
                 await self._send_previews(inbound, [preview])
         token = secrets.token_urlsafe(24)
         self._offers[token] = _Offer(

@@ -42,7 +42,8 @@ HISTORY_FILE_LIMIT = 10
 # What the agent does, in a channel where files cannot be saved, when asked for one.
 _FILES_HINT = (
     "Files you make (session outputs, send_message file_handles) cannot be saved in this "
-    "channel yet. When someone asks for a file here, or to turn files on, and they are an "
+    "channel yet; an image among your session outputs still shows inline as a preview, but is "
+    "not saved. When someone asks for a file here, or to turn files on, and they are an "
     f'admin (is_admin="true"), call {ENABLE_FILES_TOOL} first: an Enable files card follows '
     "your reply, for an admin who is a member of this channel to sign in with. Tell them to "
     "ask again once that is done. Anyone else: tell them an admin can ask you to turn files "
@@ -50,7 +51,8 @@ _FILES_HINT = (
 )
 _FILES_HINT_NO_CARD = (
     "Files you make cannot be saved in this channel until the deployment's operator grants "
-    "daimon its SharePoint site. Say so when someone asks for a file here; do not swap in "
+    "daimon its SharePoint site; an image among your session outputs still shows inline as a "
+    "preview, but is not saved. Say so when someone asks for a file here; do not swap in "
     "an artifact, report or notebook unless they ask for one."
 )
 
