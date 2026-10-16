@@ -9,6 +9,7 @@ settle floor produces.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import httpx
@@ -1146,3 +1147,53 @@ async def test_sweep_posts_handoff_bundle_when_exclusions_are_cleared() -> None:
     assert count == 1, "with no exclusions the bundle is an ordinary output"
     assert posted == ["daimon-handoff-0f9d1c4e.tar.gz"]
     assert deleted == {"file_bundle"}
+
+
+async def test_sweep_posts_in_the_order_the_caller_gives() -> None:
+    """`order` maps the listed filenames to the indexes to post them in."""
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    names = ["first.pdf", "second.png"]
+    listing = [
+        FileMetadata(
+            id=f"file_{index}",
+            created_at=NOW,
+            filename=name,
+            mime_type="application/octet-stream",
+            size_bytes=3,
+            type="file",
+            downloadable=True,
+        ).model_dump(mode="json")
+        for index, name in enumerate(names)
+    ]
+    router = MARouter()
+    router.add("GET", r"/v1/files", lambda request, match: list_response(listing))
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"x"),
+    )
+    router.add(
+        "DELETE",
+        r"/v1/files/([^/]+)",
+        lambda request, match: httpx.Response(
+            200, json={"id": match.group(1), "type": "file_deleted"}
+        ),
+    )
+    seen: list[list[str]] = []
+    posted: list[str] = []
+
+    def reverse(filenames: Sequence[str]) -> list[int]:
+        seen.append(list(filenames))
+        return [1, 0]
+
+    async def post(file: DeliverableFile) -> None:
+        posted.append(file.filename)
+
+    client = build_fake_anthropic(router.dispatch)
+    await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep, order=reverse)
+
+    assert seen == [names], "order sees the listed names"
+    assert posted == ["second.png", "first.pdf"], "posted in the order given"

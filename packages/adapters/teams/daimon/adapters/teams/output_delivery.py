@@ -24,7 +24,9 @@ message of their own after the images. A failed preview is only logged.
 An output named `<file>.preview.png` (`is_preview_output`) is the agent's own
 picture of `<file>`, such as a document's first page in a 1:1 chat, where
 Graph makes no thumbnail: it is only shown as a preview, never offered or
-uploaded, then deleted; in a channel it stands in for Graph's thumbnail.
+uploaded, then deleted. In a 1:1 chat it comes just before its document's
+consent card, whatever the listing order; in a channel it stands in for
+Graph's thumbnail.
 Transient channel upload failures leave the listing entry for a later sweep,
 and an oversize file stays listed on every path, including a channel without
 file access. Otherwise the listing entry, the delivery
@@ -40,7 +42,7 @@ import functools
 import hashlib
 import secrets
 import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
@@ -128,6 +130,27 @@ def preview_label(filename: str) -> str:
 def picture_key(filename: str) -> str:
     """Matches a preview output's label to its document, as saved (`sanitize_title`)."""
     return sanitize_title(filename).lower()
+
+
+def previews_first(filenames: Sequence[str]) -> list[int]:
+    """A 1:1 sweep's order: each preview output just before its document, else in place.
+
+    The agent renders a document before picturing it, so the listing may name
+    the picture second; its consent card would then come before the picture.
+    """
+    documents = {picture_key(name) for name in filenames if not is_preview_output(name)}
+    held: dict[str, list[int]] = {}
+    for index, name in enumerate(filenames):
+        if is_preview_output(name) and (key := picture_key(preview_label(name))) in documents:
+            held.setdefault(key, []).append(index)
+    order: list[int] = []
+    for index, name in enumerate(filenames):
+        if not is_preview_output(name):
+            order.extend(held.pop(picture_key(name), []))
+            order.append(index)
+        elif picture_key(preview_label(name)) not in documents:
+            order.append(index)
+    return order
 
 
 async def _log_channel_skip(file: SkippedFile) -> None:
@@ -285,6 +308,7 @@ class TeamsOutputDelivery:
                 post=functools.partial(self._post_direct, inbound, session_id),
                 on_skip=_log_skip,
                 sleep=self._sleep,
+                order=previews_first,
             )
         finally:
             if self._sweeps.get(session_id) is current:

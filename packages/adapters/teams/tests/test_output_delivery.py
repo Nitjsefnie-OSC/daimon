@@ -1184,17 +1184,18 @@ def _deck_with_preview() -> tuple[list[FileMetadata], dict[str, bytes]]:
     return [deck, picture], {"file_pic": picture_bytes}
 
 
+@pytest.mark.parametrize("reverse", [False, True], ids=["deck first", "picture first"])
 async def test_dm_preview_output_is_shown_never_offered_and_deleted(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession], reverse: bool
 ) -> None:
-    """In a 1:1 chat a `.preview.png` only shows inline; the deck alone gets a consent card."""
+    """In a 1:1 chat a `.preview.png` only shows inline, before the deck's consent card."""
     listing, contents = _deck_with_preview()
-    harness = _harness(db_session_factory, listing, contents=contents)
+    harness = _harness(db_session_factory, listing[::-1] if reverse else listing, contents=contents)
 
     await harness.delivery.sweep(make_inbound(), "sesn_1")
 
-    card, preview = harness.sender.activities
-    consent = _card(harness.sender, 0).content
+    preview, card = harness.sender.activities
+    consent = _card(harness.sender, 1).content
     assert isinstance(consent, FileConsentCard), "the deck is offered"
     assert consent.description == "Save deck.pptx to your OneDrive?", "the card asks to save"
     [image] = preview.attachments or []
@@ -1226,6 +1227,19 @@ async def test_channel_preview_output_is_shown_not_uploaded_and_stands_in_for_th
     assert sent == [["deck.pptx"]], "the agent's picture is the one preview"
     assert asked == [], "a pictured document needs no Graph thumbnail"
     assert sorted(harness.deletes) == ["file_deck", "file_pic"], "both leave the listing"
+
+
+def test_previews_first_puts_each_picture_just_before_its_document() -> None:
+    """Unpaired files keep their places; a picture of no listed file stays where it was."""
+    names = ["a.csv", "Q3 report.pdf", "b.png", "Q3 report.pdf.preview.png", "x.preview.png"]
+    order = output_delivery.previews_first(names)
+    assert [names[i] for i in order] == [
+        "a.csv",
+        "Q3 report.pdf.preview.png",
+        "Q3 report.pdf",
+        "b.png",
+        "x.preview.png",
+    ], "the picture moves up to its document"
 
 
 @pytest.mark.parametrize(
