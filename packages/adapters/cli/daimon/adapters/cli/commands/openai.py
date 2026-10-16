@@ -42,12 +42,17 @@ from mux.drivers.openai.sessions import OpenAISessions
 from mux.drivers.openai.skills import OpenAISkills, bundle_digest
 from mux.drivers.openai.turn import MemoryRecoveryJournal, OpenAIEvents
 from mux.errors import MuxError
+from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
 from rich.console import Console
+
+PROVIDER_NAME = PERSISTENT_WORKSPACE.provider
+"""The subcommand name this module registers under — derived from the
+profile contract, never hand-typed, so it can't drift from it."""
 
 openai_app = typer.Typer(help="Self-host Daimon on an OpenAI-only key.")
 
-_PERSISTENT_WORKSPACE = "openai.persistent_workspace"
-_CONVERSATION_ONLY = "openai.conversation_only"
+_PERSISTENT_WORKSPACE = PERSISTENT_WORKSPACE.profile_id
+_CONVERSATION_ONLY = CONVERSATION_ONLY.profile_id
 _WILDCARD = "*"
 _MANIFEST_ENV = "DAIMON_TURN__PROVIDER_RUNTIME_FILE"
 _SMOKE_TENANT_ID = uuid.uuid5(uuid.NAMESPACE_URL, "daimon-openai-smoke")
@@ -195,7 +200,9 @@ def openai_init_command(
         agents = OpenAIAgents(context)
         agent_key = f"daimon-openai-init-agent:{tenant_id}:{platform}:{channel_id}:{account_id}"
         agent = await agents.create(
-            scope, AgentSpec(name=name, model=ModelRef(provider="openai", id=model)), key=agent_key
+            scope,
+            AgentSpec(name=name, model=ModelRef(provider=PROVIDER_NAME, id=model)),
+            key=agent_key,
         )
 
         environment_id: str | None = None
@@ -299,7 +306,7 @@ def openai_smoke_command(
             scope,
             AgentSpec(
                 name="daimon-smoke",
-                model=ModelRef(provider="openai", id=model),
+                model=ModelRef(provider=PROVIDER_NAME, id=model),
                 system=(
                     "You are a deployment smoke test. When the user says "
                     f"'run smoke check', call the {_SMOKE_TOOL_NAME} tool exactly once "
