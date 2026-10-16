@@ -215,3 +215,20 @@ async def test_postgres_state_migration_matches_models_and_refuses_state_loss(db
 
     connection = await db_session.connection()
     await connection.run_sync(check)
+
+
+async def test_open_records_do_not_hold_the_financial_tenant_fence(postgres_state):
+    from uuid import UUID
+
+    from daimon.core.stores.tenant_ledger import lock_funds
+
+    sessions, scope, _, _ = postgres_state
+
+    async def financial_admission():
+        async with sessions.begin() as db:
+            assert await lock_funds(db, tenant_id=UUID(scope.tenant_id)) == UUID(scope.tenant_id)
+
+    # The first row insert must finish its parent FK lock before records can
+    # remain open across provider I/O, even with an independent hold in flight.
+    async with PostgresGeminiStorage(sessions, scope=scope, project="new-project").transaction():
+        await asyncio.wait_for(financial_admission(), timeout=1)
