@@ -641,3 +641,100 @@ async def test_checkout_hop_revokes_its_registered_bearer_on_every_exit(
                     amount=10,
                 )
     assert len(tokens) == 1 and await verifier.verify_token(tokens[0]) is None
+
+
+@pytest.mark.parametrize("outcome", ["ok", "refused", "transport-error", "bad-json"])
+@pytest.mark.parametrize("failure_at", ["update", "commit"])
+async def test_checkout_revoke_database_failure_preserves_the_real_outcome(
+    db_engine, db_clean, outcome, failure_at
+):
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+    from structlog.testing import capture_logs
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory.begin() as session:
+        account = await make_account(session)
+    secret = _mcp_settings().jwt_secret.get_secret_value().encode()
+    verifier = DaimonJWTVerifier(secret=secret, sessionmaker=factory)
+    tokens = []
+    original_transport_error = httpx.ConnectError("checkout transport failed")
+    response = None
+
+    async def http(request):
+        nonlocal response
+        token = request.headers["authorization"].removeprefix("Bearer ")
+        assert await verifier.verify_token(token) is not None
+        tokens.append(token)
+        if outcome == "transport-error":
+            raise original_transport_error
+        response = (
+            httpx.Response(200, text="not-json")
+            if outcome == "bad-json"
+            else httpx.Response(403 if outcome == "refused" else 200, json={"url": _CHECKOUT_URL})
+        )
+        return response
+
+    # Exercise actual database statement AND transaction-exit failures, not a
+    # patched cleanup owner. Both must leave the original HTTP outcome intact.
+    deferred = "DEFERRABLE INITIALLY DEFERRED" if failure_at == "commit" else "NOT DEFERRABLE"
+    async with db_engine.begin() as connection:
+        await connection.execute(
+            text("""
+            CREATE FUNCTION checkout_revoke_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'cleanup-private-marker'; END;
+            $$
+        """)
+        )
+        await connection.execute(
+            text(f"""
+            CREATE CONSTRAINT TRIGGER checkout_revoke_failure AFTER UPDATE ON mcp_tokens
+            {deferred} FOR EACH ROW EXECUTE FUNCTION checkout_revoke_failure()
+        """)
+        )
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+            with capture_logs() as logs:
+                if outcome == "ok":
+                    assert (
+                        await create_checkout(
+                            client,
+                            settings=_mcp_settings(),
+                            session_factory=factory,
+                            account_id=account.id,
+                            amount=10,
+                        )
+                        == _CHECKOUT_URL
+                    )
+                else:
+                    expected = {
+                        "refused": httpx.HTTPStatusError,
+                        "transport-error": httpx.ConnectError,
+                        "bad-json": json.JSONDecodeError,
+                    }[outcome]
+                    with pytest.raises(expected) as raised:
+                        await create_checkout(
+                            client,
+                            settings=_mcp_settings(),
+                            session_factory=factory,
+                            account_id=account.id,
+                            amount=10,
+                        )
+                    if outcome == "refused":
+                        assert raised.value.response is response
+                    elif outcome == "transport-error":
+                        assert raised.value is original_transport_error
+        failures = [
+            event for event in logs if event.get("event") == "billing_panel.checkout_revoke_failed"
+        ]
+        assert len(failures) == 1 and failures[0]["error_type"]
+        assert "cleanup-private-marker" not in repr(logs)
+        assert str(account.id) not in repr(logs)
+        assert len(tokens) == 1 and tokens[0] not in repr(logs)
+        # Failed cleanup does not extend the existing ten-minute upper bound.
+        assert await verifier.verify_token(tokens[0]) is not None
+        claims = pyjwt.decode(tokens[0], options={"verify_signature": False})
+        assert 0 < claims["exp"] - claims["iat"] <= 600
+    finally:
+        async with db_engine.begin() as connection:
+            await connection.execute(text("DROP TRIGGER checkout_revoke_failure ON mcp_tokens"))
+            await connection.execute(text("DROP FUNCTION checkout_revoke_failure()"))

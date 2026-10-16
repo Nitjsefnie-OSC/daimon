@@ -472,5 +472,8 @@ async def create_checkout(
         response.raise_for_status()
         return str(response.json()["url"])
     finally:
-        async with session_factory.begin() as session:
-            await revoke_mcp_token(session, jti=jti, now=datetime.now(UTC))
+        try:
+            async with session_factory.begin() as session:
+                await revoke_mcp_token(session, jti=jti, now=datetime.now(UTC))
+        except Exception as exc:  # boundary: cleanup must preserve the checkout outcome
+            log.warning("billing_panel.checkout_revoke_failed", error_type=type(exc).__name__)

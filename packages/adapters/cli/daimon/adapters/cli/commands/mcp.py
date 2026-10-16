@@ -75,7 +75,7 @@ async def mint_token(*, rt: CliRuntime, os_user: str | None, ttl_days: int = 90)
     """Mint the CLI principal's token with a jti, an exp and a registry row.
 
     `daimon mcp revoke-token` revokes it. Tokens minted before rows existed
-    carry no jti; the verifier applies its configured legacy issuance cutoff.
+    carry no jti and must be re-minted for strict verifier admission.
     """
     if not 1 <= ttl_days <= 365:
         raise typer.BadParameter("--ttl-days must be 1 to 365")
