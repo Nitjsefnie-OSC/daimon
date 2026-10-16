@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from decimal import Decimal
 from typing import cast
@@ -80,7 +80,7 @@ class OpenAIHostRuntime(TurnRuntime):
     session_plan: Callable[[ProviderPreparationRequest], Awaitable[SessionSpec]]
     authorization: Authorization
     controls: SessionControls
-    mcp_secrets: MCPSecretResolver | None = None
+    mcp_secrets: MCPSecretResolver | None = field(default=None, kw_only=True)
     price: ProviderPrice | None = None
     infrastructure: Callable[[UsageObservation], Awaitable[Decimal | None]] = unknown_infrastructure
 

@@ -1317,3 +1317,21 @@ async def test_prechange_processed_creation_receipt_recovers_same_key_and_sessio
     again = await prepare_openai(application)
     assert again.reused and again.session_ref == native.ref
     assert len([request for request in wire.requests if request.method == "POST"]) == 1
+
+
+async def test_existing_positional_runtime_constructor_keeps_billing_arguments(composed):
+    _, _, _, _, runtime = composed
+    retained = OpenAIHostRuntime(
+        runtime.transport_factory,
+        runtime.journal,
+        runtime.usage_store,
+        runtime.account_scope_id,
+        runtime.session_plan,
+        runtime.authorization,
+        runtime.controls,
+        runtime.price,
+        runtime.infrastructure,
+    )
+    assert retained.price is runtime.price
+    assert retained.infrastructure is runtime.infrastructure
+    assert retained.mcp_secrets is None

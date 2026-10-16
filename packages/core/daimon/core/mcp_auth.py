@@ -60,7 +60,7 @@ def read_private_credential(path: Path) -> str:
         if len(raw) > 16_384:
             raise ValueError("invalid credential")
         token = raw.decode().strip()
-        if not token or any(character.isspace() for character in token):
+        if not token or any(ord(character) < 33 or ord(character) > 126 for character in token):
             raise ValueError("invalid credential")
         return token
     finally:
