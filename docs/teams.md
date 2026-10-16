@@ -61,7 +61,8 @@ is supported; government and China clouds use other Bot Framework hosts.
   package declares `supportsChannelFeatures: tier1` (manifest 1.30), but
   adding the app to a team does not add it to these channels: each one's
   owner adds it from the channel.
-- **Group chats** get a short refusal.
+- **Group chats** answer an @mention, a reply or a command, only while
+  everyone in the chat is from the organisation (see [Group chats](#group-chats)).
 - **Channels with `writers: none`** (ids look like `19:…@thread.tacv2`) and
   their threads get no reply, notice or tool post. One thread is named by
   adding `;messageid=<root post id>`. Where readers are limited, the agent's
@@ -147,7 +148,7 @@ members, and the lookups only their kind needs are skipped.
 
 ### Commands and admins
 
-In a 1:1 chat a command answers there. In a channel, `help`, `here`,
+In a 1:1 chat a command answers there. In a channel or group chat, `help`, `here`,
 `memory`, `routines`, `billing` and `privacy` answer in the thread as a
 private message only the sender sees, and their panels stay private when
 clicked. Teams expires a private message after 24 hours, which closes its
@@ -205,6 +206,35 @@ CLI can't read channel names, so a copy it makes is named from the channel id.
 Members see only the responders and agents explicitly allowed at the panel's
 channel/thread. A panel opened in a 1:1 chat has no verified channel and lists
 no agents for members; an admin retains the existing full panel roster.
+
+### Group chats
+
+A group chat is one session, keyed on the chat. The bot answers a message that
+@mentions it, quotes one of its messages, or is a command; with plain-text
+mentions on, a typed name counts too. It never joins in unprompted. A
+targeted message to it runs a command privately, and anything else there
+gets a one-line notice.
+
+Everyone in a group chat sees each answer, so the bot answers only while the
+whole roster is the organisation's: members of the tenant, plus guests listed
+with `--add-member-guest` (or every guest with
+`DAIMON_TEAMS__RESTRICT_GUESTS=false`). Anyone from another tenant, an
+unlisted guest, an anonymous member, or a roster that cannot be read closes
+the chat: the sender gets a private notice and no turn starts. The roster is
+read through Bot Framework and cached for a minute. A group chat has no team,
+so team owners are not its channel admins: those settings need a workspace
+admin there.
+
+A turn replays the chat like a channel thread (Channel history, below): the
+first turn the newest 25 messages, a later one only newer messages, the
+newest 4 images, under the resource-specific consent `ChatMessage.Read.Chat`
+that a chat member grants when adding the app. Without it the agent gets the
+text of the message alone. Commands answer privately as in a channel; `new`
+resets the sender's session there, and `setup` and `support` stay in the 1:1
+chat. Files are not shared in group chats: image previews are posted, any
+other output is skipped and deleted, and the agent is told so. Routines and
+the agent's Teams tools do not reach group chats yet, and adding the app to
+one posts no welcome.
 
 ### Channel history
 
@@ -551,7 +581,7 @@ different agent posts a notice instead of running. A deployment with
 
 ### Not supported
 
-Group chats, `/dm` conversations, files in channels whose site is
+`/dm` conversations, files, routines and agent tools in group chats, files in channels whose site is
 not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.
 

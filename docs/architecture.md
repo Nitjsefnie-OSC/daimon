@@ -219,7 +219,9 @@ config). The order is load-bearing and documented as such in the module:
    channel's B2B direct connect participant or a guest,
    `admit(external=ExternalFinding(…))`) raises
    `AdmissionDenied("external_participant")` anywhere but a channel with
-   `readers: own` or a thread in one, and in its setup thread too. Only a finding on
+   `readers: own` or a thread in one, and in its setup thread too. A Teams
+   group chat holding anyone from outside counts every sender there as
+   external, so it is never answered. Only a finding on
    positive evidence is stored on `accounts.is_external`; one without holds
    that turn alone (`turn_origins.is_external`, which the MCP verifier reads)
    and keeps the stored role. An external account's stored role is always

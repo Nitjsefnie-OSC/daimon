@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teams now answers in group chats.** Each group chat is one session: the bot
+  answers an @mention, a reply to it or a command, replays the chat's history
+  and images through Graph, and answers commands privately. It answers only
+  while everyone in the chat is from the organisation; otherwise the sender is
+  told privately why not. Files are not shared there, beyond image previews,
+  and routines and agent tools do not reach group chats yet. Rebuild the app
+  package (version 0.6.0) for the `groupChat` scope and the
+  `ChatMessage.Read.Chat` permission.
+
 - **Teams now reacts on the asker's message, as Discord and Slack do.** Teams bots
   could not react, so a message queued behind a running turn showed nothing
   until its turn began, and a completion ping was an @mention alone. A message

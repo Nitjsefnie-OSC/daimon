@@ -405,7 +405,8 @@ This registration is the identity Daimon signs in as.
 
 You don't need to add any API permissions here. The bot reads channels
 through a team-level permission that a team owner grants when they add the
-app (more on that in step 7). Only two optional features need a Graph
+app (more on that in step 7), and group chats through a chat-level one
+(`ChatMessage.Read.Chat`) granted when the app is added to the chat. Only two optional features need a Graph
 application permission: channel files (`Sites.Selected`) and private and
 shared channel messages (`ChannelMessage.Read.All`, which is tenant-wide; see
 [below](#private-and-shared-channels-optional)).
@@ -590,8 +591,10 @@ your apps** → **Upload an app**.
   older template, before manifest 1.25, can't be added to these channels:
   rebuild it and upload it again (see Updating the app).
 
-Group chats aren't supported: the package doesn't offer them, and the bot
-turns away any that reach it.
+- **A group chat:** add the app from the chat's apps, and allow it to read
+  the chat's messages (`ChatMessage.Read.Chat`) when asked. The bot answers
+  there only while everyone in the chat is from your organisation. See
+  [`teams.md`](teams.md#group-chats).
 
 ### People from another organisation (optional)
 
@@ -706,7 +709,8 @@ Changes to the manifest only reach Teams in a new package. Bump `version` in
 Teams admin center (the app → **Upload file**). Teams that already have the
 app pick up the update, and a team owner may be asked to accept new
 permissions. A package from before template version 0.5.0 has no `/`
-commands, prompt starters or private messages to Daimon: rebuild it.
+commands, prompt starters or private messages to Daimon: rebuild it. One
+from before 0.6.0 cannot be added to group chats.
 
 ## Claude Code login mounts
 
