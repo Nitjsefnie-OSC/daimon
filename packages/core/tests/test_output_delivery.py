@@ -612,40 +612,6 @@ async def test_a_skipped_file_carries_its_mime_type() -> None:
     ], "each skipped file names its type"
 
 
-async def test_max_bytes_for_lets_one_type_through_a_sweep_that_skips_the_rest() -> None:
-    """A per-type cap overrides ``max_bytes``: here only text is posted, while
-    the video is skipped and, under ``discard_skipped_up_to``, discarded."""
-
-    async def sleep(delay: float) -> None:
-        pass
-
-    deletes: list[str] = []
-    skipped: list[str] = []
-    posted: list[str] = []
-    client = _oversize_then_normal_client(deletes)
-
-    async def post(file: DeliverableFile) -> None:
-        posted.append(file.file_id)
-
-    async def on_skip(file: SkippedFile) -> None:
-        skipped.append(file.file_id)
-
-    await sweep_session_outputs(
-        client,
-        session_id="sesn_1",
-        post=post,
-        on_skip=on_skip,
-        sleep=sleep,
-        max_bytes=0,
-        max_bytes_for=lambda mime: 10 if mime == "text/plain" else 0,
-        discard_skipped_up_to=20,
-    )
-
-    assert posted == ["file_ok"], "only the type with a cap is downloaded and posted"
-    assert skipped == ["file_big"], "every other type takes the skip path"
-    assert sorted(deletes) == ["file_big", "file_ok"], "both leave the listing, as before"
-
-
 async def test_a_kept_original_stays_downloadable_byte_for_byte() -> None:
     """Against the stateful Files API fake: after a failed then retried notice,
     the oversize original is still listed and downloads unchanged, while the

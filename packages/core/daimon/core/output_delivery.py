@@ -257,7 +257,6 @@ async def sweep_session_outputs(
     scope: Scope | None = None,
     noticed: NoticedFiles | None = None,
     discard_skipped_up_to: int = 0,
-    max_bytes_for: Callable[[str], int] | None = None,
 ) -> int:
     """Deliver the session's output files via ``post``; return how many posted.
 
@@ -281,9 +280,6 @@ async def sweep_session_outputs(
     "cannot deliver anything here right now" (``max_bytes=0``): a skipped
     file no larger than it is deleted after its notice, as before, while a
     larger one, which no destination could take, is still kept.
-    ``max_bytes_for`` gives the cap per MIME type in place of ``max_bytes``,
-    read just before each file, so such a caller can still take some types
-    (inline image previews) while skipping the rest.
     """
     settled = await _poll_until_settled(
         anthropic_client, session_id=session_id, sleep=sleep, scope=scope
@@ -311,14 +307,13 @@ async def sweep_session_outputs(
             continue
 
         try:
-            cap = max_bytes if max_bytes_for is None else max_bytes_for(meta.mime_type)
-            if meta.size_bytes > cap:
+            if meta.size_bytes > max_bytes:
                 _log.info(
                     "output_delivery.skipped_oversize",
                     session_id=session_id,
                     file_id=meta.id,
                     size_bytes=meta.size_bytes,
-                    max_bytes=cap,
+                    max_bytes=max_bytes,
                 )
                 if on_skip is not None and (noticed is None or meta.id not in noticed):
                     # Notice before any delete: if the notice fails, the
