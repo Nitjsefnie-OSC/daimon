@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A GitHub App token mint rejected for one repository group now leaves other groups available, queues an installation refresh, and tells the turn which repositories are unavailable. Authentication and transient failures still stop session setup and close pending token rows.
+
 - GitHub App grants stop covering repositories removed from an installation, suspended installations, and installations GitHub confirms deleted. A refreshed GitHub repository snapshot is intersected with the tenant's confirmed Connect set; webhook changes and existing installations queue a refresh.
 
 - Require fleet reviewers to use a different backend from the primary, including retained reviews checked before summary delivery.

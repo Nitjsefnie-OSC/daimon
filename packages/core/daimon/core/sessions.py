@@ -514,6 +514,7 @@ async def create_session(
     origin_thread_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
     before_create: Callable[[], Awaitable[None]] | None = None,
+    on_app_access: Callable[[AppSessionAccess], None] | None = None,
     allocation: Callable[
         [Callable[[], Awaitable[BetaManagedAgentsSession]], SessionCreateRequest],
         Awaitable[BetaManagedAgentsSession],
@@ -1026,6 +1027,8 @@ async def create_session(
                         fernet=fernet,
                         cache=REQUESTER_CACHE,
                     )
+                if on_app_access is not None:
+                    on_app_access(app_access)
                 resources.extend(app_access.resources)
                 if app_access.tokens:
                     # Degrade-not-block: without it, commits just carry no preset author.

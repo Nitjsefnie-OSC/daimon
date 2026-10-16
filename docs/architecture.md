@@ -1182,6 +1182,13 @@ latest complete GitHub installation snapshot. Until the first refresh, the
 confirmed set applies. A GitHub-confirmed uninstall or suspension disables
 coverage; later refreshes can restore it when the repo is still confirmed.
 The refresh never adds repos to the tenant-confirmed set.
+If token minting returns 403, 404, or 422 for a repository group, that group's
+pending token is closed, its installation is queued for reconciliation, and
+only successfully minted groups enter the session. The turn receives the
+unavailable repository names. Authentication failures, rate limits, timeouts,
+and server failures stop preparation so it can be retried. The session's
+snapshot records the repository set actually tokenised, allowing a later
+successful reconciliation to trigger normal session change handling.
 The session mounts only the selected working
 repository, if there is one, and uses its own vault for `GH_TOKEN` and Copilot.
 Other granted repos are available through that token

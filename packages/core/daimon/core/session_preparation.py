@@ -704,6 +704,19 @@ async def _prepare_session_for_turn_locked(
         )
 
     def from_fresh(fresh: FreshSession, continuity: ContinuityOutcome) -> PreparedTurn:
+        if fresh.snapshot.unavailable_repo_urls:
+            continuity = replace(
+                continuity,
+                user_prefix=(
+                    continuity.user_prefix
+                    + "\n<github_access_notice>GitHub access for these connected repositories is "
+                    "unavailable in this session: "
+                    + ", ".join(fresh.snapshot.unavailable_repo_urls)
+                    + ". Tell the requester plainly that GitHub access is unavailable for "
+                    "those repositories. Follow repository-name visibility rules when "
+                    "naming them, and do not claim to have accessed them.</github_access_notice>\n"
+                ),
+            )
         return prepared(
             ma_session_id=fresh.ma_session_id,
             mapping_id=fresh.mapping_id,

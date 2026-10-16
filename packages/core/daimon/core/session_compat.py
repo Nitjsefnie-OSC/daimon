@@ -136,6 +136,10 @@ class ReplaceSession:
 type CompatibilityDecision = ReuseAsIs | UpdateInPlace | ReplaceSession
 
 
+def _without(urls: tuple[str, ...], excluded: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(url for url in urls if url not in excluded) if excluded else urls
+
+
 def identity_change_reasons(
     recorded: SessionSnapshot, desired: SessionSnapshot
 ) -> tuple[ChangeReason, ...]:
@@ -148,8 +152,11 @@ def identity_change_reasons(
         (recorded.environment_id != desired.environment_id, "environment"),
         (recorded.github_mode != desired.github_mode, "github_mode"),
         (
-            recorded.repo_urls != desired.repo_urls
-            or recorded.token_repo_urls != desired.token_repo_urls,
+            # Repos GitHub refused at mint stay excluded instead of replacing the
+            # session every turn; reconciliation then removes them from desired.
+            recorded.repo_urls != _without(desired.repo_urls, recorded.unavailable_repo_urls)
+            or recorded.token_repo_urls
+            != _without(desired.token_repo_urls, recorded.unavailable_repo_urls),
             "repo_set",
         ),
         (recorded.repo_url != desired.repo_url, "repo_url"),

@@ -18,6 +18,7 @@ from anthropic.types.beta.vaults.beta_managed_agents_static_bearer_auth_response
     BetaManagedAgentsStaticBearerAuthResponse,
 )
 from cryptography.fernet import InvalidToken, MultiFernet
+from daimon.core._models import GitHubAppInstallation
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     PERMISSION_PROFILES,
@@ -50,6 +51,7 @@ from daimon.core.stores.github_access import (
     list_live_grant_repositories,
     lock_agent_grants,
 )
+from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
 from daimon.core.stores.github_issued_tokens import (
     GitHubTokenRowClosedError,
     create_pending,
@@ -90,6 +92,11 @@ class AppSessionAccess:
     resources: tuple[Resource, ...]
     tokens: tuple[AppToken, ...]
     working_token: str | None
+    excluded_repo_urls: tuple[str, ...] = ()
+
+
+class GitHubTokenMintUnavailable(RuntimeError):
+    """A retryable App token exchange failure, without GitHub response content."""
 
 
 REQUESTER_CACHE = PermissionCache()
@@ -319,6 +326,26 @@ async def _declared_repositories(
         return await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
 
 
+async def _enqueue_mint_failure_reconciliation(
+    session: AsyncSession, *, installation_id: int, now: datetime
+) -> None:
+    """Queue once per installation snapshot, even if several groups fail."""
+    installation = await session.get(GitHubAppInstallation, installation_id)
+    snapshot = (
+        installation.github_refreshed_at.isoformat()
+        if installation is not None and installation.github_refreshed_at is not None
+        else "unrefreshed"
+    )
+    await enqueue_reconciliation(
+        session,
+        installation_id=installation_id,
+        delivery_id=f"mint-failure:{installation_id}:{snapshot}",
+        event="mint_failure",
+        deleted=False,
+        now=now,
+    )
+
+
 async def declared_app_repositories(
     sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> tuple[WorkspaceSource, ...]:
@@ -377,6 +404,8 @@ async def prepare_app_access(
         config.private_key.get_secret_value(), config.app_id, now=int(datetime.now(UTC).timestamp())
     )
     tokens: list[AppToken] = []
+    excluded_repo_ids: set[int] = set()
+    pending_token_id: uuid.UUID | None = None
     try:
         for installation_id, profile, repo_ids in groups:
             versions = {
@@ -404,13 +433,38 @@ async def prepare_app_access(
                     github_user_id=user_id,
                     link_generation=link_generation,
                 )
-            token = await mint_installation_token(
-                client,
-                jwt=jwt,
-                installation_id=installation_id,
-                repository_ids=list(repo_ids),
-                profile=profile,
-            )
+            pending_token_id = pending.token_id
+            try:
+                token = await mint_installation_token(
+                    client,
+                    jwt=jwt,
+                    installation_id=installation_id,
+                    repository_ids=list(repo_ids),
+                    profile=profile,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code not in (403, 404, 422):
+                    raise GitHubTokenMintUnavailable(
+                        "GitHub access is temporarily unavailable. Try again."
+                    ) from exc
+                async with sessionmaker.begin() as session:
+                    await mark_revoked(session, token_id=pending.token_id)
+                    await _enqueue_mint_failure_reconciliation(
+                        session, installation_id=installation_id, now=datetime.now(UTC)
+                    )
+                pending_token_id = None
+                excluded_repo_ids.update(repo_ids)
+                _log.warning(
+                    "GitHub App token mint could not cover installation %s (HTTP %s)",
+                    installation_id,
+                    exc.response.status_code,
+                )
+                continue
+            except Exception as exc:
+                raise GitHubTokenMintUnavailable(
+                    "GitHub access is temporarily unavailable. Try again."
+                ) from exc
+            pending_token_id = None
             try:
                 async with sessionmaker.begin() as session:
                     await store_token(
@@ -455,6 +509,12 @@ async def prepare_app_access(
             if any(row.token_id == pending.token_id for row in stale):
                 raise ValueError("GitHub access changed during token mint")
     except Exception:
+        if pending_token_id is not None:
+            try:
+                async with sessionmaker.begin() as session:
+                    await mark_revoked(session, token_id=pending_token_id)
+            except Exception:
+                _log.exception("Failed to close pending GitHub token row %s", pending_token_id)
         for issued in tokens:
             try:
                 await revoke_token(client, issued.token)
@@ -465,11 +525,14 @@ async def prepare_app_access(
         raise
     by_repo = {repo_id: item.token for item in tokens for repo_id in item.repo_ids}
     resources: list[Resource] = []
+    available_rows = [
+        (grant, repo, profile) for grant, repo, profile in rows if repo.repo_id in by_repo
+    ]
     mounted = _mounted_repo_ids(
-        [repo.repo_id for _, repo, _ in rows],
+        [repo.repo_id for _, repo, _ in available_rows],
         working_ids={grant.repo_id for grant, _, _ in rows if grant.is_working_repo},
     )
-    for grant, repo, _ in rows:
+    for grant, repo, _ in available_rows:
         if repo.repo_id not in mounted:
             continue
         owner, name = repo.repo_full_name.split("/", 1)
@@ -481,8 +544,19 @@ async def prepare_app_access(
                 "mount_path": grant.mount_path or f"/workspace/{owner}/{name}",
             }
         )
-    working = next((by_repo[grant.repo_id] for grant, _, _ in rows if grant.is_working_repo), None)
-    return AppSessionAccess(tuple(resources), tuple(tokens), working or tokens[0].token)
+    working = next(
+        (by_repo[grant.repo_id] for grant, _, _ in available_rows if grant.is_working_repo), None
+    )
+    excluded = tuple(
+        sorted(
+            f"https://github.com/{repo.repo_full_name}"
+            for _, repo, _ in rows
+            if repo.repo_id in excluded_repo_ids
+        )
+    )
+    return AppSessionAccess(
+        tuple(resources), tuple(tokens), working or (tokens[0].token if tokens else None), excluded
+    )
 
 
 #: The sandbox holds at most one repo: the agent's working repo, chosen in setup.

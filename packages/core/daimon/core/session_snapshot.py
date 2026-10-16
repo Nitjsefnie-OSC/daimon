@@ -109,6 +109,7 @@ class SessionSnapshot(BaseModel):
     # Every repo the session's App tokens cover, mounted or not. A new grant
     # changes this set, and the session must be replaced to receive the token.
     token_repo_urls: tuple[str, ...] = ()
+    unavailable_repo_urls: tuple[str, ...] = ()
     repo_url: str | None
     repo_branch: str | None
     memory_store_id: str | None

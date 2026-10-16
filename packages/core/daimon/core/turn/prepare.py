@@ -43,6 +43,7 @@ from daimon.core.channel_backend import BackendUnsupported
 from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import backend_switch_tools_for_turn
 from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.github_app_session import AppSessionAccess
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, retrieve_agent, sdk_agent
@@ -590,6 +591,12 @@ async def create_ma_session(
     native_controls: _NativeBudgetArgs = {}
     if preparation is not None and preparation.native_budget_usd is not None:
         native_controls["native_budget_usd"] = preparation.native_budget_usd
+    excluded_repo_urls: tuple[str, ...] = ()
+
+    def capture_app_access(access: AppSessionAccess) -> None:
+        nonlocal excluded_repo_urls
+        excluded_repo_urls = access.excluded_repo_urls
+
     ma_session = await create_session(
         deps.anthropic,
         agent=admission.agent,
@@ -623,6 +630,7 @@ async def create_ma_session(
         origin_thread_id=admission.origin_thread_id,
         origin_seal_ids=frozenset(seal),
         before_create=fence,
+        on_app_access=capture_app_access,
         channel_skills=admission.channel_skills,
         resource_source=preparation.source
         if preparation is not None and preparation.worker is not None
@@ -689,7 +697,12 @@ async def create_ma_session(
         personal_memory_store_ids=(
             () if personal_memory_store_id is None else (personal_memory_store_id,)
         ),
-    ).model_copy(update={"token_repo_urls": token_repo_urls})
+    ).model_copy(
+        update={
+            "token_repo_urls": token_repo_urls,
+            "unavailable_repo_urls": excluded_repo_urls,
+        }
+    )
     return CreatedSession(
         ma_session_id=ma_session.id,
         snapshot=snapshot,
