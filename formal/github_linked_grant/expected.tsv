@@ -1,0 +1,3 @@
+config	verdict	distinct_states
+Safe.cfg	clean	33
+NoRecheck.cfg	violates:Safe	11

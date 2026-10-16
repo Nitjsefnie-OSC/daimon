@@ -16,6 +16,7 @@ import httpx
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.branded_pages import branded_page
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools.github_linked_pending import resume_pending
 from daimon.adapters.mcp.tools.github_request_delivery import deliver_private_request_card
 from daimon.adapters.mcp.web_icons import icon
 from daimon.core.config import Settings
@@ -510,6 +511,15 @@ def build_personal_link_routes(
             tenant_id=intent.tenant_id,
             account_id=intent.account_id,
         )
+        linked_results: list[str] = []
+        if runtime is not None:
+            linked_results = await resume_pending(
+                runtime,
+                tenant_id=intent.tenant_id,
+                account_id=intent.account_id,
+                platform=intent.platform,
+                platform_user_id=intent.platform_user_id,
+            )
         if runtime is not None:
             for waiting in pending:
                 async with sessionmaker() as session:
@@ -551,6 +561,8 @@ def build_personal_link_routes(
                 )
         message = (
             f"Linked as @{login}. You can close this tab; your request is continuing."
+            if linked_results
+            else f"Linked as @{login}. You can close this tab; your request is continuing."
             if resumed_ids
             else "This GitHub account doesn't have access to what this request needs."
             if pending

@@ -10,6 +10,7 @@ from typing import Literal
 
 import httpx
 from cryptography.fernet import MultiFernet
+from daimon.core._models import GitHubUserLink
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.stores.github_links import (
     bump_link_generation,
@@ -138,9 +139,9 @@ async def requester_permissions(
         permissions = parsed.permissions
         result[parsed.id] = (
             "write"
-            if permissions.get("push") is True or permissions.get("admin") is True
+            if any(permissions.get(key) is True for key in ("admin", "maintain", "push"))
             else "read"
-            if permissions.get("pull") is True
+            if permissions.get("triage") is True or permissions.get("pull") is True
             else "none"
         )
     return result
@@ -198,6 +199,91 @@ async def _linked_permissions_once(
     if cached is not None:
         return cached
 
+    token, used_generation = await _linked_access_token_once(
+        sessionmaker,
+        client,
+        user_id=user_id,
+        row=row,
+        fernet=fernet,
+        client_id=client_id,
+        client_secret=client_secret,
+        cache=cache,
+    )
+    if token is None:
+        return {}
+
+    try:
+        permissions = await requester_permissions(
+            client, token=token, installation_id=installation_id
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (403, 404):
+            if exc.response.status_code == 403 and (
+                exc.response.headers.get("x-ratelimit-remaining") == "0"
+                or "retry-after" in exc.response.headers
+                or "secondary rate limit" in exc.response.text.lower()
+            ):
+                raise
+            permissions = {}
+        elif exc.response.status_code == 401:
+            async with sessionmaker.begin() as session:
+                locked = await get_user_for_update(session, github_user_id=user_id)
+                if locked is None or locked.status != "active":
+                    return {}
+                if locked.token_generation != used_generation:
+                    raise _RefreshRace from exc
+                await bump_link_generation(session, github_user_id=user_id, broken=True)
+            cache.drop_user(user_id)
+            return {}
+        else:
+            raise
+    cache.put(user_id, installation_id, row.link_generation, permissions)
+    return permissions
+
+
+async def linked_access_token(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: httpx.AsyncClient,
+    *,
+    user_id: int,
+    fernet: MultiFernet,
+    client_id: str,
+    client_secret: str,
+) -> str | None:
+    """Get a current linked-user token, using the same serialized refresh path."""
+    for _ in range(3):
+        async with sessionmaker() as session:
+            row = await get_user(session, github_user_id=user_id)
+        if row is None or row.status != "active":
+            return None
+        try:
+            token, _ = await _linked_access_token_once(
+                sessionmaker,
+                client,
+                user_id=user_id,
+                row=row,
+                fernet=fernet,
+                client_id=client_id,
+                client_secret=client_secret,
+                cache=PermissionCache(ttl_seconds=0),
+            )
+            return token
+        except _RefreshRace:
+            continue
+    raise RuntimeError("GitHub user token changed repeatedly during refresh")
+
+
+async def _linked_access_token_once(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: httpx.AsyncClient,
+    *,
+    user_id: int,
+    row: GitHubUserLink,
+    fernet: MultiFernet,
+    client_id: str,
+    client_secret: str,
+    cache: PermissionCache,
+) -> tuple[str | None, int]:
     now = datetime.now(UTC)
     if row.access_expires_at <= now + timedelta(minutes=1):
         async with sessionmaker.begin() as session:
@@ -212,7 +298,7 @@ async def _linked_permissions_once(
             )
             fresh = await get_user(session, github_user_id=user_id)
             if fresh is None or fresh.status != "active":
-                return {}
+                return None, row.token_generation
             row = fresh
             if row.access_expires_at <= datetime.now(UTC) + timedelta(minutes=1):
                 if row.encrypted_refresh_token is None or (
@@ -228,7 +314,7 @@ async def _linked_permissions_once(
                     if broken is None:
                         raise _RefreshRace
                     cache.drop_user(user_id)
-                    return {}
+                    return None, row.token_generation
                 response = await client.post(
                     "https://github.com/login/oauth/access_token",
                     data={
@@ -260,7 +346,7 @@ async def _linked_permissions_once(
                     if broken is None:
                         raise _RefreshRace
                     cache.drop_user(user_id)
-                    return {}
+                    return None, row.token_generation
                 response.raise_for_status()
                 if isinstance(error_payload.get("error"), str):
                     raise RuntimeError(f"GitHub refresh refused: {error_payload['error']}")
@@ -286,30 +372,4 @@ async def _linked_permissions_once(
         token = decrypt_token(fernet, row.encrypted_access_token)
         used_generation = row.token_generation
 
-    try:
-        permissions = await requester_permissions(
-            client, token=token, installation_id=installation_id
-        )
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (403, 404):
-            if exc.response.status_code == 403 and (
-                exc.response.headers.get("x-ratelimit-remaining") == "0"
-                or "retry-after" in exc.response.headers
-                or "secondary rate limit" in exc.response.text.lower()
-            ):
-                raise
-            permissions = {}
-        elif exc.response.status_code == 401:
-            async with sessionmaker.begin() as session:
-                locked = await get_user_for_update(session, github_user_id=user_id)
-                if locked is None or locked.status != "active":
-                    return {}
-                if locked.token_generation != used_generation:
-                    raise _RefreshRace from exc
-                await bump_link_generation(session, github_user_id=user_id, broken=True)
-            cache.drop_user(user_id)
-            return {}
-        else:
-            raise
-    cache.put(user_id, installation_id, row.link_generation, permissions)
-    return permissions
+    return token, used_generation
