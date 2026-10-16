@@ -14,6 +14,7 @@ failed owner read demotes the owners too, until their next turn.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from decimal import Decimal
 from pathlib import Path
 
@@ -34,6 +35,25 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 log = structlog.get_logger()
 
 
+async def demote_former_admins(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    admin_ids: Collection[str],
+) -> None:
+    """Demote stored Teams admins not in `admin_ids`; a database failure is logged, not raised."""
+    try:
+        async with sessionmaker.begin() as session:
+            demoted = await demote_unlisted_admins(
+                session, tenant_id=tenant_id, platform="teams", admin_ids=admin_ids
+            )
+    except SQLAlchemyError:
+        log.exception("teams.admin_demotion_failed", tenant_id=str(tenant_id))
+    else:
+        if demoted:
+            log.info("teams.admins_demoted", tenant_id=str(tenant_id), count=demoted)
+
+
 async def provision_configured_tenant(
     *,
     anthropic: AsyncAnthropic,
@@ -52,16 +72,7 @@ async def provision_configured_tenant(
         log.warning("teams.tenant_archived", tenant_id=str(tenant_id))
         return None
     # First, so the reconcile below neither delays nor skips it; a failure never blocks it.
-    try:
-        async with sessionmaker.begin() as session:
-            demoted = await demote_unlisted_admins(
-                session, tenant_id=tenant_id, platform="teams", admin_ids=admin_user_ids
-            )
-    except SQLAlchemyError:
-        log.exception("teams.admin_demotion_failed", tenant_id=str(tenant_id))
-    else:
-        if demoted:
-            log.info("teams.admins_demoted", tenant_id=str(tenant_id), count=demoted)
+    await demote_former_admins(sessionmaker, tenant_id=tenant_id, admin_ids=admin_user_ids)
     await provision_tenant(
         sessionmaker, platform="teams", workspace_id=entra_tenant_id, signup_credit=signup_credit
     )

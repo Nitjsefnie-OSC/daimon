@@ -39,6 +39,7 @@ from daimon.adapters.teams.channel_subscriptions import (
     notification_route,
 )
 from daimon.adapters.teams.commands import CommandHandler
+from daimon.adapters.teams.deployment_admins import demoting_owner_reads
 from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
@@ -277,9 +278,13 @@ def create_teams_http_service(
         return {channel.id: channel.name for channel in standard if channel.id}
 
     graph, groups = GraphClient(runtime.http_client, graph_token), TeamGroups(team_group)
-    runtime = dataclasses.replace(
-        runtime, team_owners=functools.partial(fetch_team_owner_ids, graph)
+    owner_reads = demoting_owner_reads(
+        runtime,
+        functools.partial(fetch_team_owner_ids, graph),
+        # `spawn` is bound below, before any read: the drain waits for a demotion.
+        in_background=lambda coro: spawn(coro, name="teams.admin_demotion"),
     )
+    runtime = dataclasses.replace(runtime, team_owners=owner_reads)
 
     async def roster_member(conversation_id: str, aad_object_id: str) -> MemberFacts | None:
         conversations = teams_app.api.from_service_url(SERVICE_URL).conversations

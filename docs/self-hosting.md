@@ -449,7 +449,8 @@ can create routines, mint coding-tool tokens, replace shared keys, top up and
 see everyone's usage. Anyone can create an agent. In Teams, open the team's
 ⋯ → **Get link to team** and copy the `groupId` parameter from the link. Once
 the service runs, add the app to that team (step 7). To add or remove an
-admin later, change the team's owners; no redeploy.
+admin later, change the team's owners; no redeploy. A removed owner loses
+admin within about a minute, everywhere, routines and tools included.
 
 **Add the values to `.env`:**
 

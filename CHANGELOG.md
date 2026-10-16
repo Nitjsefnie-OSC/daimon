@@ -14,9 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Teams admins are the owners of one team.** Set
   `DAIMON_TEAMS__ADMIN_TEAM_ID` to the team's Entra group ID and add the app
   to that team; its owners, read live and cached for a minute, are Daimon's
-  admins, so adding one needs no redeploy. Guests and people from another
-  organisation never are, and a failed owner read grants nothing. Support
-  requests and channel budget notices for the admins reach these owners.
+  admins, so adding one needs no redeploy, and a removed one loses admin
+  within about a minute, routines and tools included. Guests and people from
+  another organisation never are, and a failed owner read grants nothing.
+  Support requests and channel budget notices for the admins reach these
+  owners.
 
 ### Deprecated
 

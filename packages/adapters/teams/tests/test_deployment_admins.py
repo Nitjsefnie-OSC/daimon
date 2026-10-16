@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
+from collections.abc import Coroutine
 from dataclasses import MISSING, fields
 from typing import Any
 from unittest.mock import MagicMock
@@ -11,6 +14,7 @@ from daimon.adapters.teams.budget_notice import with_budget_notifier
 from daimon.adapters.teams.deployment_admins import (
     admin_team_owners,
     boot_admin_ids,
+    demoting_owner_reads,
     deployment_admin_ids,
     is_deployment_admin,
     live_admin_ids,
@@ -18,12 +22,18 @@ from daimon.adapters.teams.deployment_admins import (
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.channel_admins import GroupLookupFailed, GroupMembersCache
 from daimon.core.config import TeamsSettings
+from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.domain import Role
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.turn.deps import TurnDeps
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import AAD_OBJECT_ID, ENTRA_TENANT_ID, OTHER_AAD_OBJECT_ID, teams_settings
 
 TEAM = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
 FOREIGN_TENANT = "99999999-9999-9999-9999-999999999999"
+REMOVED_OWNER = str(uuid.UUID(int=4))
 
 
 def _settings(*, team: str | None = TEAM, admins: tuple[str, ...] = ()) -> TeamsSettings:
@@ -158,3 +168,66 @@ async def test_the_budget_notice_reads_the_live_admins() -> None:
     server_admins = with_budget_notifier(runtime, MagicMock()).turn_deps.server_admins
     assert server_admins is not None, "a notifier comes with the live admins"
     assert tuple(await server_admins()) == (AAD_OBJECT_ID,), "the admin team's owners"
+
+
+class _Background:
+    """`spawn`: runs each demotion as a task the test can wait for."""
+
+    def __init__(self) -> None:
+        self.tasks: list[asyncio.Task[None]] = []
+
+    def __call__(self, coro: Coroutine[Any, Any, None]) -> None:
+        self.tasks.append(asyncio.create_task(coro))
+
+
+async def _stored_admins(
+    db_factory: async_sessionmaker[AsyncSession], *user_ids: str
+) -> dict[str, uuid.UUID]:
+    tenant = await provision_tenant(db_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    accounts: dict[str, uuid.UUID] = {}
+    async with db_factory.begin() as session:
+        for user_id in user_ids:
+            principal = await get_or_create_platform_principal(
+                session, tenant_id=tenant.tenant_id, platform="teams", external_id=user_id
+            )
+            await set_role(session, principal.account_id, Role.ADMIN)
+            accounts[user_id] = principal.account_id
+    return accounts
+
+
+async def _roles(
+    db_factory: async_sessionmaker[AsyncSession], accounts: dict[str, uuid.UUID]
+) -> dict[str, Role | None]:
+    async with db_factory() as session:
+        return {
+            user: getattr(await get_account(session, account), "role", None)
+            for user, account in accounts.items()
+        }
+
+
+async def test_each_owner_read_demotes_a_removed_owners_stored_role_in_the_background(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Routines and tools read the stored role, so it follows the team within the minute."""
+    accounts = await _stored_admins(
+        db_session_factory, AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID, REMOVED_OWNER
+    )
+    graph, clock, background = _Owners(AAD_OBJECT_ID), [0.0], _Background()
+    runtime = _runtime(graph, clock=clock)
+    runtime.settings.teams = settings = _settings(admins=(OTHER_AAD_OBJECT_ID,))
+    runtime.sessionmaker = db_session_factory
+    runtime.team_owners = demoting_owner_reads(runtime, graph, in_background=background)
+
+    assert await _is_admin(runtime, settings, AAD_OBJECT_ID), "an owner administers"
+    assert await _is_admin(runtime, settings, AAD_OBJECT_ID), "a cached read, no new demotion"
+    assert len(background.tasks) == 1, "one demotion per read, off the caller's path"
+    await asyncio.gather(*background.tasks)
+    assert await _roles(db_session_factory, accounts) == {
+        AAD_OBJECT_ID: Role.ADMIN,
+        OTHER_AAD_OBJECT_ID: Role.ADMIN,
+        REMOVED_OWNER: Role.USER,
+    }, "only someone neither an owner nor listed is demoted"
+
+    graph.failure, clock[0] = "http error (status 503)", 61.0
+    await _is_admin(runtime, settings, AAD_OBJECT_ID)
+    assert len(background.tasks) == 1, "a failed read demotes no one"

@@ -194,15 +194,16 @@ Daimon's admins are the owners of one team, named by its Entra group ID in
 `groupId` parameter). The app must be installed in that team: its
 `TeamMember.Read.Group` consent is what lets Daimon read the owners. Making
 someone an owner makes them an admin, with no redeploy; the owner list is
-cached for a minute, so a removed owner loses admin within it, and a failed
-read grants nothing. Guests, people from another organisation and anyone in a
+cached for a minute, so a removed owner loses admin within about a minute,
+everywhere: each owner read also takes the stored admin role, which routines,
+tools and MCP clients act on, from anyone no longer an admin. A failed read
+grants nothing. Guests, people from another organisation and anyone in a
 group chat with outsiders are never admins. The deprecated
 `DAIMON_TEAMS__ADMIN_USER_IDS` still adds admins by Entra object ID, and logs a
 warning at startup while set. Admins' turns run with the admin role, and the
 panels unlock the admin actions for them. Every card click and dialog
-re-checks the organisation, the clicker and their role. Boot takes the stored
-admin role, used by routines and MCP clients, from anyone no longer an admin;
-support requests and budget notices for "the admins" reach the team's owners
+re-checks the organisation, the clicker and their role. Boot does the same
+demotion; support requests and budget notices for "the admins" reach the team's owners
 and the deprecated list. A refusal in a channel is a private
 message, toast, dialog message or card edit only its sender or clicker sees.
 Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
