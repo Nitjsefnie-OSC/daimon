@@ -411,7 +411,7 @@ application permission: channel files (`Sites.Selected`) and private and
 shared channel messages (`ChannelMessage.Read.All`, which is tenant-wide; see
 [below](#private-and-shared-channels-optional)).
 The same team-level consent covers activity feed notices
-(`TeamsActivity.Send.Group`). A team that added an older package needs the
+(`TeamsActivity.Send.Group`). A team that added a package from before 0.6.0 needs the
 rebuilt one uploaded again (see Updating the app) and an owner to accept it;
 until then its notices are refused and only logged.
 
@@ -712,9 +712,9 @@ Changes to the manifest only reach Teams in a new package. Bump `version` in
 `manifest.json`, zip it again and upload it over the existing app in the
 Teams admin center (the app → **Upload file**). Teams that already have the
 app pick up the update, and a team owner may be asked to accept new
-permissions. A package from before template version 0.5.0 has no `/`
-commands, prompt starters or private messages to Daimon: rebuild it. One
-from before 0.6.0 cannot be added to group chats.
+permissions. A package from before template version 0.6.0 has no `/`
+commands, prompt starters, private messages to Daimon, group chats or
+activity feed notices: rebuild it.
 
 ## Claude Code login mounts
 

@@ -59,7 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already notify and get none. Notices run in the background through Graph
   with a five-second limit; a failure is logged once and never delays or fails
   the post. The manifest adds the `TeamsActivity.Send.Group` consent, so an
-  existing install needs the rebuilt package and a team owner to accept it.
+  existing install needs the rebuilt package (version 0.6.0) and a team owner
+  to accept it.
 - **Teams now reacts on the asker's message, as Discord and Slack do.** Teams bots
   could not react, so a message queued behind a running turn showed nothing
   until its turn began, and a completion ping was an @mention alone. A message
@@ -83,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lists the in-thread commands, and a command may start with `/`. The
   personal chat and channel @mentions offer ready-made requests: explore a
   dataset, build a notebook, set up the workspace; summarise the thread,
-  analyse its data, write it up. Manifest 1.30, template version 0.5.0:
+  analyse its data, write it up. Manifest 1.30, template version 0.6.0:
   rebuild and upload the package to get them.
 - **Fleet roots now run against one retained original reservation.** A fleet root is admitted once against a scoped hold that it keeps for its whole run: pending financial state is settled before any funding check, each original input the root sends is counted against that hold, and a native root carries its explicit budget into the session. A root is an ordinary agent session, so it keeps the agent's personal memory store, which is neither counted nor funded. Off by default: fleet roots run only with `DAIMON_FLEET__ENABLED=true`. No migration.
 - Explicitly authorized OpenAI fleet workers can run without a workspace, tools, MCP, memory or skills. Their initial task is counted and sent with session creation; retries reuse the acknowledged input and uncertain delivery requires reconciliation.
