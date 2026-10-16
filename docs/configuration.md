@@ -276,9 +276,19 @@ Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapte
 
 `AwareDatetime | None` · optional · default unset
 
-Reject unregistered non-internal MCP tokens issued before this UTC instant. Unset uses
-verifier startup time. Deploy registered minters, refresh vaults and drain legacy turns
-before deploying the verifier.
+UTC deadline for a temporary legacy-token deployment window. Dates before 2026-10-16 or
+over six hours in the future are refused. At/after the deadline all unregistered tokens
+are rejected, regardless of issuance time. Internal tokens are always rejected without a
+registry row.
+
+### `DAIMON_MCP__ALLOW_LEGACY_TOKENS`
+
+`bool` · optional · default `False`
+
+Temporary minters-first deployment compatibility only. Requires a bounded
+legacy_token_cutoff; only non-internal legacy tokens qualify and stop working at that
+deadline even if the deployment is interrupted. Default false requires registered tokens
+immediately.
 
 ### `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION`
 

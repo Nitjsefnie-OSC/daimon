@@ -6,7 +6,6 @@ Real ASGI app via httpx.ASGITransport, real DaimonJWTVerifier, real Postgres
 
 from __future__ import annotations
 
-import datetime as dt
 import uuid
 
 import httpx
@@ -58,10 +57,10 @@ async def test_valid_account_jwt_handshakes_ok(
         ),
         sessionmaker=sessionmaker,
     )
-    token = pyjwt.encode(
-        {"sub": str(account_id), "iat": int(dt.datetime.now().timestamp())},
-        SECRET,
-        algorithm="HS256",
+    from .harness import registered_account_token
+
+    token = await registered_account_token(
+        sessionmaker, account_id=account_id, secret=SECRET.encode()
     )
     r = await _post(app, token=token)
     assert r.status_code == 200, r.text

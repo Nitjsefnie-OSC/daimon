@@ -1170,9 +1170,10 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
     from daimon.adapters.mcp.tools.slack._read import _slack_read_channel_impl
     from daimon.core.headless_runner import run_turn as headless_turn
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.mcp_auth import mint_internal_mcp_token, mint_jwt
+    from daimon.core.mcp_auth import mint_jwt
     from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
     from daimon.testing.asgi import call_mcp_tool
+    from daimon.testing.legacy_mcp_tokens import mint_internal_mcp_token
     from fastmcp import FastMCP
     from pydantic import HttpUrl, SecretStr
 

@@ -50,7 +50,7 @@ from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import assemble_env_bytes, upload_env_file
 from daimon.core.errors import DaimonError
 from daimon.core.github_app_session import rotate_live_app_tokens
-from daimon.core.mcp_vault import refresh_agent_mcp_vault
+from daimon.core.mcp_vault import refresh_mounted_mcp_vaults
 from daimon.core.session_compat import (
     ChangeReason,
     RemirrorVaultCredentials,
@@ -271,18 +271,17 @@ async def apply_update_ops(
         if snapshot.github_mode == "app":
             live = await retrieve_session_record(anthropic, session_id, scope=scope)
             mounted_vaults = tuple(dict.fromkeys(live.vault_ids))
-        for vault_id in mounted_vaults:
-            await refresh_agent_mcp_vault(
-                anthropic,
-                vault_id=vault_id,
-                account_id=account_id,
-                agent_id=agent_uuid,
-                jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
-                public_url=str(mcp.public_url),
-                now=now,
-                session_factory=sessionmaker,
-                scope=scope,
-            )
+        await refresh_mounted_mcp_vaults(
+            anthropic,
+            vault_ids=mounted_vaults,
+            account_id=account_id,
+            agent_id=agent_uuid,
+            jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
+            public_url=str(mcp.public_url),
+            now=now,
+            session_factory=sessionmaker,
+            scope=scope,
+        )
 
     for op in ops:
         match op:

@@ -23,11 +23,11 @@ from daimon.core.mcp_auth import (
     coding_token_channel,
     mint_agent_mcp_token,
     mint_cli_mcp_token,
-    mint_internal_mcp_token,
     mint_jwt,
     mint_operator_mcp_token,
 )
 from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.testing.legacy_mcp_tokens import mint_internal_mcp_token
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Agent tokens are minted with a TTL, and the tests below mint them at a fixed

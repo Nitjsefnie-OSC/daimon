@@ -25,9 +25,10 @@ from daimon.core.channel_budget import (
 )
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
-from daimon.core.mcp_auth import mint_panel_mcp_token
+from daimon.core.mcp_auth import mint_panel_mcp_token, token_jti
 from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, get_active_timed_credit
 from daimon.core.stores import tenant_user_caps
+from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenant_ledger import get_balance
@@ -461,10 +462,15 @@ async def create_checkout(
             secret=jwt_secret.get_secret_value().encode(),
             now=datetime.now(UTC),
         )
-    response = await http_client.post(
-        f"{app_root_url.rstrip('/')}/billing/checkout",
-        json={"amount": amount},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    response.raise_for_status()
-    return str(response.json()["url"])
+    jti = token_jti(token)
+    try:
+        response = await http_client.post(
+            f"{app_root_url.rstrip('/')}/billing/checkout",
+            json={"amount": amount},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        return str(response.json()["url"])
+    finally:
+        async with session_factory.begin() as session:
+            await revoke_mcp_token(session, jti=jti, now=datetime.now(UTC))

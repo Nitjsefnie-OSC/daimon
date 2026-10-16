@@ -153,7 +153,8 @@ def _make_app(sessionmaker: async_sessionmaker[AsyncSession], anthropic: AsyncAn
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
             mcp=McpSettings(
-                legacy_token_cutoff=dt.datetime(1970, 1, 1, tzinfo=dt.UTC),
+                legacy_token_cutoff=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
+                allow_legacy_tokens=True,
                 jwt_secret=SecretStr(SECRET),
                 public_url=HttpUrl("https://x/mcp"),
             ),

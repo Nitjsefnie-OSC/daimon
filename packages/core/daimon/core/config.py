@@ -11,6 +11,7 @@ import binascii
 import json
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, cast
@@ -169,11 +170,34 @@ class McpSettings(BaseModel):
     legacy_token_cutoff: AwareDatetime | None = Field(
         default=None,
         description=(
-            "Reject unregistered non-internal MCP tokens issued before this UTC instant. "
-            "Unset uses verifier startup time. Deploy registered minters, refresh vaults "
-            "and drain legacy turns before deploying the verifier."
+            "UTC deadline for a temporary legacy-token deployment window. Dates before "
+            "2026-10-16 or over six hours in the future are refused. At/after the deadline "
+            "all unregistered tokens are rejected, regardless of issuance time. Internal "
+            "tokens are always rejected without a registry row."
         ),
     )
+    allow_legacy_tokens: bool = Field(
+        default=False,
+        description=(
+            "Temporary minters-first deployment compatibility only. Requires a bounded "
+            "legacy_token_cutoff; only non-internal legacy tokens qualify and stop working at that "
+            "deadline even if the deployment is interrupted. Default false requires "
+            "registered tokens immediately."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def bounded_legacy_window(self) -> McpSettings:
+        cutoff = self.legacy_token_cutoff
+        now = datetime.now(UTC)
+        if cutoff is not None and cutoff < datetime(2026, 10, 16, tzinfo=UTC):
+            raise ValueError("legacy_token_cutoff must be on or after 2026-10-16 UTC")
+        if cutoff is not None and cutoff > now + timedelta(hours=6):
+            raise ValueError("legacy_token_cutoff cannot be more than six hours ahead")
+        if self.allow_legacy_tokens and cutoff is None:
+            raise ValueError("legacy compatibility requires an explicit cutoff")
+        return self
+
     require_routine_destination: bool = Field(
         default=False,
         description=(

@@ -309,6 +309,8 @@ async def mcp_sweep_credentials(*, rt: CliRuntime, console: Console, apply: bool
         table.add_row(vid, "—", "unparseable display_name (left alone)")
     for vid in report.archived_vault_ids:
         table.add_row(vid, "—", "archived retired account vault" if apply else "archive planned")
+    for vid in report.in_use_vault_ids:
+        table.add_row(vid, "—", "kept: mounted by a live session")
     for vid, error_type in report.failures:
         table.add_row(vid, "—", f"failed: {error_type} (other vaults continued)")
     console.print(table)

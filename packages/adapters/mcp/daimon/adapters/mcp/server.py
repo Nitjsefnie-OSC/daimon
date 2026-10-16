@@ -334,6 +334,7 @@ def create_mcp_app(
             raise BootstrapError("DAIMON_MCP__JWT_SECRET missing after validation")
         effective_auth = DaimonJWTVerifier(
             legacy_token_cutoff=effective_settings.mcp.legacy_token_cutoff,
+            allow_legacy_tokens=effective_settings.mcp.allow_legacy_tokens,
             secret=secret_value.get_secret_value().encode(),
             sessionmaker=effective_sessionmaker,
             group_members=group_lookups.members,

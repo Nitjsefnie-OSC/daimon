@@ -569,7 +569,6 @@ def test_redeemed_text_names_what_each_redemption_did() -> None:
 
 async def test_checkout_registration_is_committed_before_the_http_hop(db_engine, db_clean):
     from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
-    from daimon.core.stores.mcp_tokens import revoke_mcp_token
 
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     async with factory.begin() as session:
@@ -593,6 +592,52 @@ async def test_checkout_registration_is_committed_before_the_http_hop(db_engine,
             amount=10,
         )
     claims = pyjwt.decode(observed[0], options={"verify_signature": False})
-    async with factory.begin() as session:
-        await revoke_mcp_token(session, jti=uuid.UUID(claims["jti"]), now=datetime.now(UTC))
+    assert claims["jti"]
     assert await verifier.verify_token(observed[0]) is None
+
+
+@pytest.mark.parametrize("outcome", ["ok", "refused", "transport-error", "bad-json"])
+async def test_checkout_hop_revokes_its_registered_bearer_on_every_exit(
+    db_engine, db_clean, outcome
+):
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory.begin() as session:
+        account = await make_account(session)
+    secret = _mcp_settings().jwt_secret.get_secret_value().encode()
+    verifier = DaimonJWTVerifier(secret=secret, sessionmaker=factory)
+    tokens = []
+
+    async def http(request):
+        token = request.headers["authorization"].removeprefix("Bearer ")
+        assert await verifier.verify_token(token) is not None
+        tokens.append(token)
+        if outcome == "transport-error":
+            raise httpx.ConnectError("offline", request=request)
+        if outcome == "bad-json":
+            return httpx.Response(200, text="not-json")
+        return httpx.Response(403 if outcome == "refused" else 200, json={"url": _CHECKOUT_URL})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+        if outcome == "ok":
+            assert (
+                await create_checkout(
+                    client,
+                    settings=_mcp_settings(),
+                    session_factory=factory,
+                    account_id=account.id,
+                    amount=10,
+                )
+                == _CHECKOUT_URL
+            )
+        else:
+            with pytest.raises((httpx.HTTPError, ValueError)):
+                await create_checkout(
+                    client,
+                    settings=_mcp_settings(),
+                    session_factory=factory,
+                    account_id=account.id,
+                    amount=10,
+                )
+    assert len(tokens) == 1 and await verifier.verify_token(tokens[0]) is None

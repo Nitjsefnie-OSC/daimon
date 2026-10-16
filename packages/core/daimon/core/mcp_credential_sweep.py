@@ -54,6 +54,7 @@ from daimon.core.mux_compat import (
     list_credentials,
     list_vaults,
 )
+from daimon.core.session_ports_compat import mounted_live_vault_ids
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -81,6 +82,7 @@ class SweepReport:
     unparseable_vault_ids: list[str] = field(default_factory=list[str])
     archived_vault_ids: list[str] = field(default_factory=list[str])
     failures: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    in_use_vault_ids: list[str] = field(default_factory=list[str])
 
 
 def partition_daimon_mcp_vault_ids(
@@ -147,6 +149,7 @@ async def sweep_stale_admin_credentials(
 
     archived_vault_ids: list[str] = []
     failures: list[tuple[str, str]] = []
+    in_use_vault_ids: list[str] = []
 
     for vault_id in daimon_mcp_ids:
         vault = vault_by_id[vault_id]
@@ -158,6 +161,9 @@ async def sweep_stale_admin_credentials(
             account_id = uuid.UUID(parts[0])
             if len(parts) == 1:
                 try:
+                    if vault_id in await mounted_live_vault_ids(client, scope=scope):
+                        in_use_vault_ids.append(vault_id)
+                        continue
                     if not dry_run:
                         await archive_vault(client, vault_id, scope=scope)
                     archived_vault_ids.append(vault_id)
@@ -207,6 +213,7 @@ async def sweep_stale_admin_credentials(
         unparseable_vault_ids=unparseable_vault_ids,
         archived_vault_ids=archived_vault_ids,
         failures=failures,
+        in_use_vault_ids=in_use_vault_ids,
     )
 
 

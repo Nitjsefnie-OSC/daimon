@@ -10,8 +10,8 @@ The injected `now` keeps lifetimes deterministic in tests.
 Server-side verification lives in `daimon.adapters.mcp.auth.verifier`
 (FastMCP's `JWTVerifier`, which is authlib-backed). We don't verify here.
 
-`mint_internal_mcp_token` is a retained internal compatibility seam. Current
-chat workers and CLI commands use registered mint functions instead.
+Historical internal credentials have no production minter and are rejected by
+the verifier. Chat workers and CLI commands use registered mint functions.
 """
 
 from __future__ import annotations
@@ -73,7 +73,8 @@ def mint_jwt(
     - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
       Omitted when ``False`` to keep non-admin tokens minimal. Note: the MCP
       admin gate only trusts ``is_admin`` when the token also carries ``internal=True``
-      (minted only by ``mint_internal_mcp_token``), so a Discord vault token's baked
+      (historical unregistered internal tokens are refused by the verifier), so a
+      Discord vault token's baked
       ``is_admin`` claim alone never elevates a non-admin caller.
     """
     claims: dict[str, str | int | bool] = {
@@ -155,45 +156,6 @@ async def mint_chat_mcp_token(
         expires_at=expires_at,
     )
     return token, jti, expires_at
-
-
-def mint_internal_mcp_token(
-    *,
-    account_id: uuid.UUID,
-    secret: bytes,
-    now: dt.datetime,
-) -> str:
-    """Retained signer for legacy trusted internal callers.
-
-    Claims: ``{sub: <account_uuid>, iat, is_admin: True, internal: True}``.
-    Signed HS256 with ``secret``. ``sub`` is the stringified account UUID (stable
-    across principal renames); ``iat`` is ``int(now.timestamp())``.
-
-    ``is_admin: True`` is always minted — headless/routine tokens run with
-    admin privileges.
-
-    ``internal: True`` is the trusted-token discriminator. The MCP admin
-    gate keys on ``is_admin AND internal`` together: a Discord vault token minted by
-    ``mint_jwt`` never carries ``internal``, so a stale pre-sweep Discord vault cred
-    with ``is_admin=True`` and ``role=user`` is DENIED admin elevation at the gate.
-    Only tokens minted here carry both claims and can gain
-    admin via the claim path.
-
-    There are no current in-repository production callers. Chat/headless
-    workers use registered ordinary-chat tokens; CLI mint-token uses the
-    registered account-token owner. Retiring this compatibility seam requires
-    inventorying external callers before removing the internal cutoff exception.
-    """
-    return pyjwt.encode(
-        {
-            "sub": str(account_id),
-            "iat": int(now.timestamp()),
-            "is_admin": True,
-            "internal": True,
-        },
-        secret,
-        algorithm="HS256",
-    )
 
 
 async def mint_agent_mcp_token(

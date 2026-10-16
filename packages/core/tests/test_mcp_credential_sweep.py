@@ -534,6 +534,8 @@ async def test_sweep_never_recreates_an_unbound_or_malformed_vault(db_session_fa
 
     def handler(req):
         requests.append((req.method, req.url.path))
+        if req.method == "GET" and req.url.path == "/v1/sessions":
+            return httpx.Response(200, json={"data": [], "has_more": False})
         if req.method == "POST" and req.url.path == "/v1/vaults/vlt_retired/archive":
             return httpx.Response(
                 200,
@@ -559,7 +561,9 @@ async def test_sweep_never_recreates_an_unbound_or_malformed_vault(db_session_fa
         assert report.archived_vault_ids == (["vlt_retired"] if suffix == "legacy" else [])
         assert report.swept_pairs == [] and report.recreated_cred_ids == []
         assert requests == [("GET", "/v1/vaults")] + (
-            [("POST", "/v1/vaults/vlt_retired/archive")] if suffix == "legacy" else []
+            [("GET", "/v1/sessions"), ("POST", "/v1/vaults/vlt_retired/archive")]
+            if suffix == "legacy"
+            else []
         )
     finally:
         await client.close()
@@ -623,5 +627,54 @@ async def test_sweep_isolates_one_vault_failure_and_continues(
         assert report.recreated_cred_ids == ["cred_new"]
         assert report.swept_pairs == [("vlt_good", "cred_old")]
         assert writes == ["vlt_good", "vlt_good"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("mounted", [True, False])
+async def test_retired_vault_is_not_archived_while_any_live_session_mounts_it(
+    db_session_factory, mounted
+):
+    from daimon.testing import ma_session
+
+    display = f"daimon-mcp:{uuid.uuid4()}"
+    archives = []
+
+    def handler(req):
+        if req.method == "GET" and req.url.path == "/v1/vaults":
+            return httpx.Response(
+                200, json={"data": [_vault_wire("vlt_old", display)], "has_more": False}
+            )
+        if req.method == "GET" and req.url.path == "/v1/sessions":
+            live = ma_session(
+                id="sess_old", vault_ids=["vlt_old"] if mounted else [], archived_at=None
+            )
+            archived = ma_session(id="sess_archived", vault_ids=["vlt_old"], archived_at=_NOW)
+            return httpx.Response(
+                200,
+                json={
+                    "data": [live.model_dump(mode="json"), archived.model_dump(mode="json")],
+                    "has_more": False,
+                },
+            )
+        assert req.method == "POST" and req.url.path == "/v1/vaults/vlt_old/archive"
+        archives.append(req.url.path)
+        return httpx.Response(
+            200, json={**_vault_wire("vlt_old", display), "archived_at": _NOW.isoformat()}
+        )
+
+    client = _make_client(httpx.MockTransport(handler))
+    try:
+        report = await sweep_stale_admin_credentials(
+            client,
+            session_factory=db_session_factory,
+            jwt_secret=_SECRET,
+            public_url=_PUBLIC_URL,
+            now=_NOW,
+            dry_run=False,
+        )
+        assert report.failures == []
+        assert report.in_use_vault_ids == (["vlt_old"] if mounted else [])
+        assert archives == ([] if mounted else ["/v1/vaults/vlt_old/archive"])
     finally:
         await client.close()

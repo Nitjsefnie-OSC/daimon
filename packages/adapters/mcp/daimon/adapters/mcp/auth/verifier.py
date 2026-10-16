@@ -20,6 +20,7 @@ while a live lookup (`group_members`, cached a minute) still admits the person.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -34,6 +35,7 @@ from daimon.core.channel_admins import (
     grant_group_ids,
 )
 from daimon.core.channel_admins import administered_channel_ids as administered_channel_ids_for
+from daimon.core.config import McpSettings
 from daimon.core.mcp_auth import CHAT_TOKEN_TTL, chat_token_label
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.channel_admins import list_channel_admins
@@ -113,6 +115,45 @@ def token_row_refusal(
     return None
 
 
+def _token_diagnostics(claims: Mapping[str, object]) -> dict[str, object]:
+    """Bounded, value-free telemetry; callers pass only verified claims."""
+    issued = claims.get("iat")
+    age_bucket = "unknown"
+    if type(issued) is int:
+        age = int(datetime.now(UTC).timestamp()) - issued
+        if age < 0:
+            age_bucket = "future"
+        else:
+            age_bucket = ">90d"
+            for days, label in [(1, "<1d"), (7, "1-7d"), (30, "7-30d"), (90, "30-90d")]:
+                if age < days * 86400:
+                    age_bucket = label
+                    break
+    return {
+        "token_age_bucket": age_bucket,
+        "has_sub": "sub" in claims,
+        "sub_is_str": isinstance(claims.get("sub"), str),
+        "has_jti": "jti" in claims,
+        "jti_is_str": isinstance(claims.get("jti"), str),
+        "has_iat": "iat" in claims,
+        "iat_is_int": type(issued) is int,
+        "has_exp": "exp" in claims,
+        "exp_is_int": type(claims.get("exp")) is int,
+        "has_internal": "internal" in claims,
+        "internal_true": claims.get("internal") is True,
+        "has_chat_agent_id": "chat_agent_id" in claims,
+        "has_agent_id": "agent_id" in claims,
+        "has_kind": "kind" in claims,
+    }
+
+
+def _reject_token(reason: str, claims: Mapping[str, object]) -> None:
+    structlog.get_logger(__name__).warning(
+        "mcp.token_rejected", reason=reason, **_token_diagnostics(claims)
+    )
+    return None
+
+
 class DaimonJWTVerifier(JWTVerifier):
     """HS256 verifier + account-existence guard.
 
@@ -130,12 +171,25 @@ class DaimonJWTVerifier(JWTVerifier):
         sessionmaker: async_sessionmaker[AsyncSession],
         group_members: GroupMembersFor | None = None,
         legacy_token_cutoff: datetime | None = None,
+        allow_legacy_tokens: bool = False,
     ) -> None:
         super().__init__(
             public_key=secret.decode(),
             algorithm="HS256",
         )
-        self._legacy_token_cutoff = int((legacy_token_cutoff or datetime.now(UTC)).timestamp())
+        # The dependency logs client_id/sub on expiry. Keep verification there,
+        # but route every refusal through our value-free diagnostics instead.
+        self.logger = logging.Logger(f"{__name__}.signature")
+        self.logger.addHandler(logging.NullHandler())
+        self.logger.propagate = False
+        policy = McpSettings(
+            legacy_token_cutoff=legacy_token_cutoff,
+            allow_legacy_tokens=allow_legacy_tokens,
+        )
+        self._legacy_token_cutoff = int(
+            (policy.legacy_token_cutoff or datetime.now(UTC)).timestamp()
+        )
+        self._allow_legacy_tokens = policy.allow_legacy_tokens
         self._sessionmaker = sessionmaker
         self._group_members_for = group_members
 
@@ -147,41 +201,59 @@ class DaimonJWTVerifier(JWTVerifier):
     async def verify_token(self, token: str) -> AccessToken | None:
         access = await super().verify_token(token)
         if access is None:
-            return None
+            return _reject_token("signature_or_expiry", {})
         # Only the registry row sets these, never a claim.
         for key in (TOKEN_KIND_CLAIM, TOKEN_JTI_CLAIM, SCOPES_CLAIM, "bound_channel_id"):
             access.claims.pop(key, None)
         sub = access.claims.get("sub")
         if not isinstance(sub, str):
-            return None
+            return _reject_token("missing_subject", access.claims)
         try:
             account_id = uuid.UUID(sub)
         except ValueError:
-            return None
+            return _reject_token("malformed_subject", access.claims)
         async with self._sessionmaker() as session:
             identity_row = await get_account_with_tenant(session, account_id=account_id)
             if identity_row is None:
-                return None
+                return _reject_token("unknown_account", access.claims)
             row: McpTokenRow | None = None
             jti = access.claims.get("jti")
-            if access.claims.get("chat_agent_id") is not None and (
-                not isinstance(jti, str) or type(access.claims.get("exp")) is not int
-            ):
-                return None
+            legacy_window = (
+                self._allow_legacy_tokens
+                and int(datetime.now(UTC).timestamp()) < self._legacy_token_cutoff
+            )
             if isinstance(jti, str):
+                if (
+                    access.claims.get("chat_agent_id") is not None
+                    and type(access.claims.get("exp")) is not int
+                ):
+                    return _reject_token("chat_expiry_shape", access.claims)
                 try:
                     jti_uuid = uuid.UUID(jti)
                 except ValueError:
-                    return None
+                    return _reject_token("malformed_jti", access.claims)
                 row = await get_mcp_token(session, jti=jti_uuid)
                 if row is None:
-                    return None
-            elif jti is not None or access.claims.get("kind") is not None:
-                return None  # malformed registry ids never fall back to legacy auth
-            elif access.claims.get("internal") is not True:
+                    return _reject_token("unknown_jti", access.claims)
+            elif "jti" in access.claims or access.claims.get("kind") is not None:
+                return _reject_token(
+                    "malformed_registry_claims", access.claims
+                )  # malformed registry ids never fall back to legacy auth
+            elif "internal" in access.claims:
+                return _reject_token("unregistered_internal", access.claims)
+            else:
                 issued = access.claims.get("iat")
-                if type(issued) is not int or issued < self._legacy_token_cutoff:
-                    return None
+                if (
+                    not legacy_window
+                    or type(issued) is not int
+                    or issued >= self._legacy_token_cutoff
+                ):
+                    return _reject_token("unregistered_token", access.claims)
+                structlog.get_logger(__name__).warning(
+                    "mcp.legacy_token_admitted",
+                    reason="bounded_non_internal_rollout",
+                    **_token_diagnostics(access.claims),
+                )
             # A turn may hold its sender as external without storing it (no
             # evidence either way): while it runs, every tool call is held too.
             external = identity_row.is_external or (
@@ -204,7 +276,7 @@ class DaimonJWTVerifier(JWTVerifier):
             )
             if refusal is not None:
                 await self._audit_refusal(row, identity=identity_row, reason=refusal)
-                return None
+                return _reject_token(refusal, access.claims)
         # Outside the DB session: a stored Slack group or Teams team is
         # looked up live, and only one that still admits the person counts.
         role_ids = await confirm_stored_group_ids(
@@ -247,7 +319,6 @@ class DaimonJWTVerifier(JWTVerifier):
     ) -> None:
         """Record a refused registry row under its own tenant, never the token itself."""
         log = structlog.get_logger(__name__)
-        log.info("mcp.token_refused", jti=str(row.jti), kind=row.kind, reason=reason)
         same_account = identity.account_id == row.account_id
         try:
             async with self._sessionmaker.begin() as session:
@@ -268,6 +339,5 @@ class DaimonJWTVerifier(JWTVerifier):
         except Exception as exc:  # boundary: a lost audit row must not turn the 401 into a 500
             log.warning(
                 "security_audit.write_failed",
-                tenant_id=str(row.tenant_id),
                 error_type=type(exc).__name__,
             )

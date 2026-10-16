@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -305,6 +305,33 @@ async def refresh_agent_mcp_vault(
         )
 
         await session.commit()
+
+
+async def refresh_mounted_mcp_vaults(
+    client: AsyncAnthropic,
+    *,
+    vault_ids: Iterable[str],
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    jwt_secret: bytes,
+    public_url: str,
+    now: dt.datetime,
+    session_factory: async_sessionmaker[AsyncSession],
+    scope: Scope,
+) -> None:
+    """Renew every actually mounted Daimon slot, without creating missing slots."""
+    for vault_id in dict.fromkeys(vault_ids):
+        await refresh_agent_mcp_vault(
+            client,
+            vault_id=vault_id,
+            account_id=account_id,
+            agent_id=agent_id,
+            jwt_secret=jwt_secret,
+            public_url=public_url,
+            now=now,
+            session_factory=session_factory,
+            scope=scope,
+        )
 
 
 async def _ensure_agent_mcp_vault_locked(
