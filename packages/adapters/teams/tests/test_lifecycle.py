@@ -69,6 +69,9 @@ async def _posted(
     return lifecycle
 
 
+_TOOL = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+
+
 def _answer(text: str) -> TurnState:
     return TurnState(content=[TextBlock(kind="text", text=text)])
 
@@ -438,6 +441,47 @@ async def test_a_ping_whose_answer_fails_collapses_the_card_to_the_failure() -> 
     assert lifecycle.final_message_id is None, "no watermark past an answer nobody saw"
 
 
+@pytest.mark.parametrize(
+    ("ping", "state", "expected"),
+    [
+        (True, _answer("Done."), ["accepted", "done"]),
+        (True, TurnState(content=[_TOOL]), ["accepted", "done"]),
+        (True, TurnState(), ["accepted"]),
+        (False, _answer("Done."), []),
+    ],
+    ids=["answered", "tool-only", "cancelled", "no-ping"],
+)
+async def test_a_ping_reacts_on_the_askers_message_as_on_discord(
+    ping: bool, state: TurnState, expected: list[str]
+) -> None:
+    phases: list[str] = []
+    lifecycle = await _posted(FakeSender(), completion_ping=ping, acknowledge=phases.append)
+    await lifecycle.on_acknowledgment("accepted")
+    await lifecycle.on_terminal_success(state)
+    await lifecycle.on_acknowledgment("done")
+    assert phases == expected, "👀 on acceptance with a ping, ✅ only once something was answered"
+
+
+async def test_a_failed_answer_or_an_unprompted_turn_earns_no_check() -> None:
+    phases: list[str] = []
+    lifecycle = await _posted(
+        FakeSender(fail_on={1}), completion_ping=True, acknowledge=phases.append
+    )
+    await lifecycle.on_terminal_success(_answer("Done."))
+    await lifecycle.on_acknowledgment("done")
+    unprompted = TeamsTurnLifecycle(
+        sender=FakeSender(),
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        unprompted=True,
+        completion_ping=True,
+        acknowledge=phases.append,
+    )
+    await unprompted.on_acknowledgment("accepted")
+    assert phases == [], "no ✅ for an answer nobody saw, no reaction in a thread nobody asked in"
+
+
 async def test_a_late_notice_is_edited_in_above_the_answer() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
@@ -748,3 +792,47 @@ async def test_unchanged_running_state_rerendered_moves_the_elapsed_time() -> No
     assert len(sender.activities) == 3
     assert all(activity.id == "m-1" for activity in sender.activities[1:])
     assert [_card_body(sender, i)[-2]["text"] for i in (1, 2)] == ["12s", "24s"]
+
+
+async def test_a_group_chat_that_closes_mid_turn_shows_none_of_the_turn() -> None:
+    """A status edit with a draft checks the roster; once closed, the answer never posts."""
+    sender, clock = FakeSender(), Clock()
+    checks: list[bool] = []
+
+    async def roster_open(fresh: bool) -> bool:
+        checks.append(fresh)
+        return False
+
+    lifecycle = await _posted(sender, clock, roster_open=roster_open)
+    message: Any = BetaManagedAgentsAgentMessageEvent(
+        id="evt_1",
+        type="agent.message",
+        processed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content=[BetaManagedAgentsTextBlock(type="text", text="The secret plan is…")],
+    )
+    await lifecycle.on_sse_event(message)
+    clock.now += 6
+    await lifecycle.on_render(TurnState())
+    await lifecycle.on_terminal_success(_answer("The secret plan is X."))
+
+    assert checks == [False], "a status edit uses the cached roster, once"
+    assert len(sender.activities) == 2, "the card edit is the only post after the card"
+    notice = sender.activities[1]
+    assert notice.id == "m-1", "the card itself is replaced"
+    assert _card_text(sender, 1) == card.OUTSIDER_JOINED_NOTICE
+    assert "secret" not in _card_json(sender, 1), "no word of the turn's work"
+
+
+async def test_a_group_chat_answer_reads_the_roster_afresh_before_it_posts() -> None:
+    """The answer waits on an uncached roster read; an open chat gets it as usual."""
+    sender = FakeSender()
+    checks: list[bool] = []
+
+    async def roster_open(fresh: bool) -> bool:
+        checks.append(fresh)
+        return True
+
+    lifecycle = await _posted(sender, roster_open=roster_open)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+    assert checks == [True], "one fresh read before the answer"
+    assert sender.activities[1].text == "The posterior mean is 3."
