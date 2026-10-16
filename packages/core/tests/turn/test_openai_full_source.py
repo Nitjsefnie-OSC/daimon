@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from email import policy
 from email.parser import BytesParser
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -70,7 +71,7 @@ PARAMS = {
 
 class FullWire(Wire):
     def __init__(self, tenant):
-        super().__init__()
+        super().__init__(session_id=f"native-openai-session-{uuid4().hex}")
         self.tenant = tenant
         self.skills = {}
         self.agent = {}
