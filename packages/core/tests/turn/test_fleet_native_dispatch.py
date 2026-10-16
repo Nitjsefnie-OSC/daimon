@@ -834,7 +834,7 @@ async def _assert_completion_offered(request, key):
 
 
 @pytest.mark.parametrize("fault", ["policy", "stop"])
-async def test_run_worker_prelude_refusal_ends_run_and_withdraws_completion(
+async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
     worker_root, monkeypatch, fault
 ):
     from daimon.core import headless_runner
@@ -909,13 +909,9 @@ async def test_run_worker_prelude_refusal_ends_run_and_withdraws_completion(
         assert ended.status == "failed" and ended.error_code == "dispatch_refused"
         assert ended.binding_id is None and ended.attempts == ended.turns_used == 0
         assert ended.reserved_usd == claimed.reserved_usd > 0 and not calls
-        from daimon.core.stores.task_continuations import get_continuation
-
-        async with request.deps.sessionmaker() as db:
-            wake = await get_continuation(db, idempotency_key=wake_key)
-        assert wake is not None and wake.status == "cancelled" and wake.skip_reason == "run_ended"
-        failed_run, _ = await ports.read_run(root.fleet.scope, root.fleet.run_id)
-        assert failed_run.status == "failed"
+        await _assert_completion_offered(request, wake_key)
+        live_run, _ = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+        assert live_run.status == "running"
         async with request.deps.sessionmaker.begin() as db:
             await access_policy.set_access_policy(
                 db, tenant_id=request.tenant_id, policy=original_policy
@@ -1067,17 +1063,20 @@ async def test_worker_failure_log_retains_closed_refusal_without_private_payload
 
 
 @pytest.mark.parametrize("error_kind", ["fleet", "unexpected", "already_terminal"])
-async def test_dispatch_failure_terminalizes_claim_and_run_without_waiting_for_sweep(
+async def test_dispatch_failure_ends_claim_and_preserves_siblings_and_collection(
     worker_root, monkeypatch, error_kind
 ):
     from daimon.core import headless_runner
     from daimon.core.fleet import FleetConflict
     from structlog.testing import capture_logs
 
-    request, root, _, resolved, prices, calls, _, _, _ = worker_root
+    request, root, sibling, resolved, prices, calls, _, _, _ = worker_root
     private = "PRIVATE_PROVIDER_BODY_KEY_SQL"
+    entered, release = asyncio.Event(), asyncio.Event()
 
     async def fail(prepared, *, worker, **kwargs):
+        entered.set()
+        await release.wait()
         if error_kind == "already_terminal":
             async with request.deps.sessionmaker.begin() as db:
                 await fleet.lock_budget(
@@ -1120,6 +1119,12 @@ async def test_dispatch_failure_terminalizes_claim_and_run_without_waiting_for_s
                 await _policy(request),
                 **_spawn_terms(request, root, resolved, "dispatch-failure"),
             )
+            async with asyncio.timeout(5):
+                await entered.wait()
+            _, claimed_rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+            claimed = next(row for row in claimed_rows if str(row.id) == reply["worker_id"])
+            wake_key = await _arm_completion(request, root, claimed)
+            release.set()
             ended = await _settled(ports, root, reply["worker_id"])
             async with asyncio.timeout(5):
                 while not any(row.get("event") == "fleet.worker_task_failed" for row in logs):
@@ -1128,8 +1133,10 @@ async def test_dispatch_failure_terminalizes_claim_and_run_without_waiting_for_s
         assert ended.error_code == (
             "deadline_expired" if error_kind == "already_terminal" else "dispatch_refused"
         )
-        run, _ = await ports.read_run(root.fleet.scope, root.fleet.run_id)
-        assert run.status == "failed"
+        run, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+        assert run.status == "running"
+        assert next(row for row in rows if row.id == sibling.id) == sibling
+        await _assert_completion_offered(request, wake_key)
         assert ended.binding_id is None and ended.turns_used == 0 and not calls
         # Terminalization never releases money on an unmeasured failure.
         assert ended.reserved_usd > 0 and run.reserved_usd >= ended.reserved_usd
@@ -1148,6 +1155,7 @@ async def test_dispatch_failure_terminalizes_claim_and_run_without_waiting_for_s
         scrubbed = redact_log_event(None, "warning", row)
         assert scrubbed["causes"] == expected and private not in json.dumps(scrubbed)
     finally:
+        release.set()
         await ports.close()
 
 

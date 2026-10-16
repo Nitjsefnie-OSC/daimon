@@ -1934,7 +1934,7 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
 
 
 @pytest.mark.parametrize("explicit_worker_request", [False, True], indirect=True)
-async def test_worker_cancelled_before_binding_ends_run_without_native_io(
+async def test_worker_cancelled_before_binding_ends_worker_without_native_io(
     materialization_worker_request,
     monkeypatch,
 ):

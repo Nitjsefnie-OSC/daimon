@@ -567,20 +567,6 @@ async def commit_worker_transition(
                     status="failed",
                     error_code=failure_code,
                 )
-            if failure_code == "dispatch_refused" and updated.status in (
-                "failed",
-                "timed_out",
-                "budget_exceeded",
-            ):
-                run = next(run for run, _ in graph if run.id == worker.run_id)
-                if run.status in ("running", "collecting"):
-                    await fleet_store.set_run_status(
-                        db,
-                        tenant_id=worker.tenant_id,
-                        run_id=run.id,
-                        expected_version=run.version,
-                        status="failed",
-                    )
         else:
             updated = await action(db, latest)
         if updated.status in TERMINAL:
