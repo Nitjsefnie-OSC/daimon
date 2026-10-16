@@ -319,32 +319,40 @@ class TeamsOutputDelivery:
         await self._send_previews(inbound, await self._with_thumbnails(files, previews))
 
     async def _sweep_unsaved(self, inbound: TeamsInbound, session_id: str) -> None:
-        """A channel whose files cannot be saved: every file is skipped, images still preview.
+        """A channel whose files cannot be saved: every file takes the skip path.
 
         A skipped file is logged, then deleted if it fits the cap; one over it
-        is kept, as on every other path: no channel could take it either. An
-        image is downloaded only for its preview, then dropped the same way.
+        is kept, as on every other path: no channel could take it either. The
+        first images are also downloaded for a preview, an extra that never
+        changes what is logged or deleted, a failed download included.
         """
         previews: list[Attachment] = []
 
-        def cap(mime_type: str) -> int:
-            wanted = not inbound.unprompted and len(previews) < MAX_PREVIEWS
-            return MAX_BYTES_PER_FILE if wanted and mime_type in PREVIEW_MIME_TYPES else 0
-
-        async def preview_only(file: DeliverableFile) -> None:
-            await _log_channel_skip(SkippedFile(file.file_id, file.filename, file.size_bytes))
+        async def skip(file: SkippedFile) -> None:
+            await _log_channel_skip(file)
+            if (
+                inbound.unprompted
+                or len(previews) >= MAX_PREVIEWS
+                or file.mime_type not in PREVIEW_MIME_TYPES
+                or file.size_bytes > MAX_BYTES_PER_FILE
+            ):
+                return
             name = display_filename_for(file.filename, file.mime_type)
-            if (preview := await self._preview(name, file.content, file.mime_type)) is not None:
+            try:
+                content = await download_output_file(self._runtime.anthropic, file.file_id)
+            except (anthropic.APIError, httpx.HTTPError) as err:
+                log.info("teams.output_preview.skipped", reason=type(err).__name__)
+                return
+            if (preview := await self._preview(name, content, file.mime_type)) is not None:
                 previews.append(preview)
 
         await sweep_session_outputs(
             self._runtime.anthropic,
             session_id=session_id,
-            post=preview_only,
-            on_skip=_log_channel_skip,
+            post=functools.partial(self._offer, inbound, session_id),
+            on_skip=skip,
             sleep=self._sleep,
             max_bytes=0,
-            max_bytes_for=cap,
             discard_skipped_up_to=MAX_BYTES_PER_FILE,
         )
         await self._send_previews(inbound, previews)

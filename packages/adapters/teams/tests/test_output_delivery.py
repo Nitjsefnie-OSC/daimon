@@ -76,10 +76,12 @@ def _harness(
     contents: dict[str, bytes] | None = None,
     clock: Callable[[], float] = time.monotonic,
     served: dict[str, bytes] | None = None,
+    unreadable: frozenset[str] = frozenset(),
 ) -> _Harness:
     """MA serves `listing` (a small CSV by default) minus deleted entries;
-    a file's bytes come from `contents` by id, else a small CSV. Other plain
-    HTTP is recorded in `uploads`; a URL in `served` answers with its bytes."""
+    a file's bytes come from `contents` by id, else a small CSV, and one in
+    `unreadable` answers 404. Other plain HTTP is recorded in `uploads`; a URL
+    in `served` answers with its bytes."""
     files = listing if listing is not None else [_csv()]
     deletes: list[str] = []
     uploads: list[httpx.Request] = []
@@ -109,11 +111,13 @@ def _harness(
     router = MARouter()
     router.add("GET", r"/v1/files", on_list)
     bodies = contents or {}
-    router.add(
-        "GET",
-        r"/v1/files/([^/]+)/content",
-        lambda r, m: httpx.Response(200, content=bodies.get(m.group(1), b"a,b\n")),
-    )
+
+    def on_download(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        if match.group(1) in unreadable:
+            return httpx.Response(404, json={"type": "error", "error": {"type": "not_found_error"}})
+        return httpx.Response(200, content=bodies.get(match.group(1), b"a,b\n"))
+
+    router.add("GET", r"/v1/files/([^/]+)/content", on_download)
     router.add("DELETE", r"/v1/files/([^/]+)", on_delete)
     runtime = build_teams_runtime(
         db_factory,
@@ -389,6 +393,28 @@ async def test_a_channel_without_file_access_still_previews_its_images(
     assert skipped == {meta.id for meta in listing}, "each file is logged as not saved"
     assert sorted(harness.deletes) == sorted(meta.id for meta in listing), "and leaves"
     assert harness.uploads == [], "nothing is saved anywhere"
+
+
+async def test_an_unsaved_image_whose_download_fails_is_still_logged_and_dropped(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The preview is an extra: nothing counts as posted, and a failed one changes nothing."""
+    shown, broken = _png("file_shown", "shown.png"), _png("file_broken", "broken.png")
+    listing = [shown[0], broken[0], _csv()]
+    contents = {"file_shown": shown[1], "file_broken": broken[1]}
+    harness = _harness(
+        db_session_factory, listing, contents=contents, unreadable=frozenset({"file_broken"})
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(make_inbound(kind="channel", conversation=THREAD_ID), "sesn_1")
+
+    [(_, message, _)] = harness.sender.sent
+    assert [a.name for a in message.attachments or []] == ["shown.png"], "the readable one shows"
+    skipped = [e["file_id"] for e in logs if e["event"] == "teams.channel_output.skipped"]
+    assert skipped == [meta.id for meta in listing], "every file is logged as not saved"
+    assert sorted(harness.deletes) == sorted(meta.id for meta in listing), "and every one leaves"
+    assert not [e for e in logs if e["event"] == "output_delivery.posted"], "none was posted"
 
 
 async def test_an_unprompted_turn_without_file_access_previews_nothing(
