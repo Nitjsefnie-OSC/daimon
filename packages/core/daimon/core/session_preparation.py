@@ -48,6 +48,7 @@ from daimon.core.confirmation import backend_switch_tools_for_turn
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import legacy_call
 from daimon.core.session_compat import (
@@ -768,7 +769,7 @@ async def _prepare_session_for_turn_locked(
         return prepared(
             ma_session_id=fresh.ma_session_id,
             mapping_id=fresh.mapping_id,
-            model_id=fresh.snapshot.model_id,
+            model_id=fresh.snapshot.pricing_id,
             watermark=None,
             reused=False,
             continuity=continuity,
@@ -874,7 +875,7 @@ async def _prepare_session_for_turn_locked(
                 return prepared(
                     ma_session_id=row.ma_session_id,
                     mapping_id=row.id,
-                    model_id=admission.agent.model.id,
+                    model_id=model_choice_id(admission.agent.model),
                     watermark=row.watermark_message_id,
                     reused=True,
                     continuity=CONTINUED,
@@ -1196,7 +1197,7 @@ async def _prepare_session_for_turn_locked(
         continuity = ContinuityOutcome(state=outcome_state, applied=applied, pending=pending)
         if isinstance(result, SessionBusy):
             return PreparationDeferred(
-                prepared=await on_current(continuity, result.snapshot.model_id, result.snapshot),
+                prepared=await on_current(continuity, result.snapshot.pricing_id, result.snapshot),
                 pending_reasons=pending,
             )
         log.info(
@@ -1204,4 +1205,4 @@ async def _prepare_session_for_turn_locked(
             session_id=row.ma_session_id,
             applied=list(applied),
         )
-        return await on_current(continuity, result.snapshot.model_id, result.snapshot)
+        return await on_current(continuity, result.snapshot.pricing_id, result.snapshot)

@@ -21,7 +21,6 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
 from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_managed_agents_agent import Tool as MATool
-from anthropic.types.beta.beta_managed_agents_model_param import BetaManagedAgentsModelParam
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
@@ -80,6 +79,7 @@ from daimon.core.mcp_attach import (
     replaced_server_url,
 )
 from daimon.core.memory_resource import archive_memory_store_for_agent
+from daimon.core.model_presets import ModelSelection, model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
 from daimon.core.routing_facts import build_unrouted_note
@@ -159,7 +159,7 @@ class AgentInfo(BaseModel):
             name=agent.name,
             id=agent.id,
             description=agent.description,
-            model=agent.model.id,
+            model=model_choice_id(agent.model),
             created_at=agent.created_at,
             mcp_servers=[AgentMcpServerInfo(name=s.name, url=s.url) for s in agent.mcp_servers],
             skills=[
@@ -423,7 +423,7 @@ async def _get_agent_impl(
     return info
 
 
-def _reject_unknown_model(model: str) -> None:
+def _reject_unknown_model(model: ModelSelection) -> None:
     """Raise unless ``model`` is one this deployment meters and allows.
 
     The panel paths have validated free-text model input against
@@ -433,7 +433,7 @@ def _reject_unknown_model(model: str) -> None:
     ``pricing.cost_of`` returns None for a model it has no rates for, so the
     turn is billed by Anthropic and recorded as free by us.
     """
-    if model not in ALLOWED_MODEL_IDS:
+    if model_choice_id(model) not in ALLOWED_MODEL_IDS:
         allowed = ", ".join(ALLOWED_MODEL_IDS)
         raise ToolError(f"Model '{model}' is not available. Choose one of: {allowed}")
 
@@ -441,7 +441,7 @@ def _reject_unknown_model(model: str) -> None:
 def _build_create_spec(
     *,
     name: str,
-    model: BetaManagedAgentsModelParam,
+    model: ModelSelection,
     description: str | None,
     system: str | None,
     tools: list[Tool] | None,
@@ -587,7 +587,7 @@ async def _update_agent_impl(
     auth: AuthIdentity,
     name: str,
     *,
-    model: BetaManagedAgentsModelParam | None,
+    model: ModelSelection | None,
     description: str | None,
     system: str | None,
     tools: list[Tool] | None,
@@ -1306,7 +1306,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def create_agent(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         name: str,
-        model: BetaManagedAgentsModelParam,
+        model: ModelSelection,
         *,
         description: str | None = None,
         system: str | None = None,
@@ -1349,7 +1349,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         name: str,
         *,
-        model: BetaManagedAgentsModelParam | None = None,
+        model: ModelSelection | None = None,
         description: str | None = None,
         system: str | None = None,
         tools: list[Tool] | None = None,
