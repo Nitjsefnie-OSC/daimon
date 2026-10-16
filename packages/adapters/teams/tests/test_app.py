@@ -411,7 +411,7 @@ class _Direct:
     async def open_chat(self, member_id: str) -> str:
         return "a:direct"
 
-    async def post(self, conversation_id: str, text: str) -> None:
+    async def post(self, conversation_id: str, text: str) -> str:
         raise AssertionError("commands answer through the sender")
 
 

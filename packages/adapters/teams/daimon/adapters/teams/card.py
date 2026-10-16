@@ -3,8 +3,8 @@
 The status card says what Discord's and Slack's say, in the words of
 `daimon.core.turn.status_lines`: a Thinking or Working headline with the
 elapsed time, the turn's tool lines, the latest draft, and a Cancel button.
-The answer replaces the card as plain markdown messages: a card TextBlock
-renders no code blocks, a message does. A card follows it with the
+The answer replaces the card as Extended Markdown messages: a card TextBlock
+renders no code blocks or math, a message does. A card follows it with the
 summary line, 👍/👎 buttons (`vote_actions`, answered by `feedback`) and
 Ask a human's when support is on: Teams refuses an edit carrying both text
 and a card. A tool-only or failed turn's notice card carries them itself.
@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from daimon.core.support_escalation import ASK_THE_TEAM, ESCALATE
+from daimon.core.teams_markdown import escape_dollars
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
@@ -206,11 +207,18 @@ def controls_card(summary: str, *, ask_human: bool) -> MessageActivityInput:
 
 
 def answer_message(text: str, *, mention: Account | None = None) -> MessageActivityInput:
-    """One chunk of the answer, text only. A completion ping leads with
-    `mention` (an AAD object id is enough)."""
+    """One chunk of the answer, text only, in Extended Markdown (math, tables, code).
+
+    A completion ping leads with `mention` (an AAD object id is enough) and
+    stays plain markdown: whether Extended Markdown keeps an `<at>` mention is
+    undocumented.
+    """
+    if mention is None:
+        return MessageActivityInput(
+            text=escape_dollars(text), text_format="extendedmarkdown"
+        ).add_ai_generated()
     message = MessageActivityInput(text=text, text_format="markdown").add_ai_generated()
-    if mention is not None:
-        tag = f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
-        message.text = f"{tag}\n\n{text}"
-        message.add_entity(MentionEntity(mentioned=mention, text=tag))
+    tag = f"<at>{(mention.name or 'you').replace('<', '').replace('>', '')}</at>"
+    message.text = f"{tag}\n\n{text}"
+    message.add_entity(MentionEntity(mentioned=mention, text=tag))
     return message
