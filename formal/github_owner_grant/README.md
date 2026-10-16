@@ -1,0 +1,70 @@
+# GitHub `owner/*` grant model
+
+This bounded TLA+ model asks whether a minted token can contain a repo outside
+the tenant-associated installation's current coverage, a repo explicitly
+removed from an active `owner/*` grant, or a repo with no grant. It also checks
+that newly covered repos can join an existing `owner/*` grant. The source of
+intended behavior is the private linked-grants `CONTRACT.md`, section 5. Code
+for this grant flow does not exist yet, so these results are **provisional**.
+
+Run `python3 formal/github_owner_grant/run_models.py` from the repository root.
+Set `TLA2TOOLS_JAR` to override the default jar path. The runner uses one TLC
+worker, a 45-second timeout, a 64 MiB metadir cap, and deletes each metadir.
+`expected.tsv` pins both verdict and distinct-state count. This registry is
+local to the owned directory; it is not registered in `formal/expected.tsv`.
+
+## Model and contract mapping
+
+| Action | Intended behavior and implementation status |
+| --- | --- |
+| `GrantSingle(r)` | `CONTRACT.md` §4: add an agent grant for a covered repo after authority checks; **to implement**. The model starts after those checks. |
+| `GrantOwner` | `CONTRACT.md` §5: store one agent-scoped wildcard grant; **to implement**. The model starts after the caller's owner/org authority check. |
+| `RemoveSingle(r)` | `CONTRACT.md` §5: remove a single grant and record a per-repo exclusion while `owner/*` is active; **to implement**. |
+| `RemoveOwner` | `CONTRACT.md` §5: revoke the wildcard grant; **to implement**. The model retains explicit repo exclusions until a later `GrantSingle(r)`. |
+| `CoverRepo(r)` / `UncoverRepo(r)` | `CONTRACT.md` §§2, 5: installation coverage may gain or lose a repo; **to implement** for this flow. |
+| `Suspend` / `Unsuspend` / `DeleteInstallation` | `CONTRACT.md` §5: suspension or deletion removes effective coverage at mint; **to implement** for this flow. |
+| `Mint` | `CONTRACT.md` §5: resolve grants against current tenant-associated installation coverage and mint for that set; **to implement**. |
+
+One owner, one agent, one installation, and three repos stand in for arbitrary
+names. `alpha` and `beta` start covered; `future` starts uncovered. A single
+grant can only be made while its repo is covered. Revoking a single grant under
+`owner/*` records a durable removal intent; `GrantSingle(r)` explicitly clears
+that intent. Removing the owner grant leaves exclusions in place so a later
+wildcard grant cannot silently restore an explicitly removed repo. `token` is
+the latest minted repo set. The three safety monitors are set during `Mint`,
+using the coverage and grant state **at that mint**; later installation changes
+cannot retroactively invalidate an earlier token. No liveness claim is made.
+
+| Config | Verdict | Distinct states | Meaning |
+| --- | --- | ---: | --- |
+| `clean` | clean | 66,096 | Every mint respects current coverage, removal intent, and grants. |
+| `no_exclusion` | violates `ExcludedNeverMinted` | 114 | Dropping only the single row under `owner/*` reintroduces the repo. |
+| `mint_from_cache` | violates `MintedSubsetCovered` | 133 | A grant-time coverage snapshot mints a repo after installation coverage drops it. |
+| `future_repo_witness` | violates `FutureRepoNeverMinted` | 139 | Positive witness: `owner/*` mints a newly covered repo that was absent at grant time and has no single grant. |
+
+Counterexamples in plain words:
+
+1. `no_exclusion`: grant `owner/*`; explicitly remove `alpha`; mint. Without an
+   exclusion, `alpha` is in the token even though its removal intent is active.
+2. `mint_from_cache`: grant `owner/*` while `alpha` is covered; drop `alpha`
+   from installation coverage; mint. The cached grant-time set still puts
+   `alpha` in the token. Suspension or deletion can cause the same class of
+   stale-coverage error.
+3. `future_repo_witness`: grant `owner/*` while `future` is uncovered; cover
+   `future`; mint. The token contains `future` without a single-repo grant.
+
+## Assumptions and limits
+
+| Assumption | Basis |
+| --- | --- |
+| A grant action starts after the caller's identity, manager, GitHub permission, and commit-time checks have passed. | `CONTRACT.md` §§4–6; those checks belong to the spike grant model. |
+| Installation coverage at `Mint` is current and tenant-associated. | Intended contract §5; unsupported by a real token-mint implementation or staging trace yet. |
+| A single mint returns exactly the resolved set for one installation. | Intended contract §5; the 500-repo cap, token splitting, and GitHub API behavior are outside this three-repo model. |
+| Exclusions survive owner-grant removal and regrant until explicit single-repo regrant. | Conservative interpretation of §5; implementation policy still needs confirmation. |
+| Mint, grant, exclusion, and coverage transitions are atomic here. | Abstraction; actual interleaving boundaries must be checked against code when implemented. |
+
+The model does not cover multiple installations, access levels, grantor
+authorization, token expiry, commit-time authority, or GitHub's API response.
+Counterexample tests: 0 replayed. Upstream contract tests: 0 run. Real traces:
+0 validated. The clean verdict is therefore a design check within these
+bounds, not evidence that production code satisfies them.
