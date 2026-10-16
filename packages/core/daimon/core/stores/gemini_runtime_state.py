@@ -44,24 +44,31 @@ class PostgresPayloadDatabase:
             "kind": kind,
         }
 
+    async def _require_account(self, session: AsyncSession) -> None:
+        actor = await session.scalar(
+            select(Account.id)
+            .where(
+                Account.id == self._key["account_id"],
+                Account.tenant_id == self._key["tenant_id"],
+            )
+            .with_for_update(read=True, key_share=True)
+        )
+        if actor is None:
+            raise ValueError("Gemini state account is unavailable")
+
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Payload]:
+        # Commit row initialization separately: its tenant FK lock must never
+        # survive across provider I/O and block the financial owner's fence.
         async with self._sessions.begin() as session:
-            actor = await session.scalar(
-                select(Account.id)
-                .where(
-                    Account.id == self._key["account_id"],
-                    Account.tenant_id == self._key["tenant_id"],
-                )
-                .with_for_update(read=True, key_share=True)
-            )
-            if actor is None:
-                raise ValueError("Gemini state account is unavailable")
-            # ON CONFLICT serializes initial insertion too; the row lock below
-            # covers the entire decode/edit/encode transaction across processes.
+            await self._require_account(session)
             await session.execute(
                 insert(GeminiRuntimeState).values(**self._key).on_conflict_do_nothing()
             )
+        async with self._sessions.begin() as session:
+            await self._require_account(session)
+            # This row lock serializes the complete payload update, including
+            # writers racing immediately after the initial empty-row commit.
             predicates = (
                 GeminiRuntimeState.tenant_id == self._key["tenant_id"],
                 GeminiRuntimeState.account_id == self._key["account_id"],
