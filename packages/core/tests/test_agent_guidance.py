@@ -167,7 +167,7 @@ def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
         "Teams send_message refuses files; the agent must not reach for the Discord path"
     )
     assert "follow the `files` attribute on `<channel>`" in teams, (
-        "whether a channel takes files depends on the team's SharePoint grant"
+        "whether a channel takes files depends on what Graph allows there"
     )
     assert "saves each output to the channel's Files and links it" in teams, (
         "with access, outputs are delivered as links, so the agent may reference them"
@@ -181,9 +181,10 @@ def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
     assert "Say so once in your reply" in teams, (
         "the adapter no longer posts a note per file, so the reply carries the message"
     )
-    assert "Follow the channel's `files_hint` first" in teams and "enable_channel_files" in teams, (
-        "the per-turn hint, which asks an admin's agent to post the Enable files card, comes first"
+    assert "Follow the channel's `files_hint`: it says what an admin must grant" in teams, (
+        "the per-turn hint names the permission an admin must grant"
     )
+    assert "enable_channel_files" not in teams, "no card or tool turns files on any more"
     assert "separate conversation, so the file would be made again there" in teams, (
         "a 1:1 chat does not share the channel thread's workspace"
     )

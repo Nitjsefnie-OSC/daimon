@@ -15,8 +15,8 @@ privately in the thread, and a Connect GitHub link goes to the requester's 1:1
 chat rather than the thread; the 1:1 chat has no threads, so a setup conversation is keyed inside it, and since panels live
 there a channel admin picks which of their channels a coding-tool token is
 bound to rather than pressing the button inside it; files in a channel work
-only once a tenant admin grants the app the team's SharePoint site (`Sites.Selected`), because no team-scoped
-permission reaches it; a dialog has no file input, so a `.env` file is pasted
+only once a tenant admin consents to the application permission `Files.ReadWrite.All`, because no
+team-scoped permission reaches SharePoint; a dialog has no file input, so a `.env` file is pasted
 rather than uploaded; and once a dialog closes nothing private reaches the
 requester, so a GitHub token is checked against its repo before the request is
 spent (Discord and Slack spend it first, then say so privately; the Teams
@@ -230,7 +230,7 @@ def test_a_teams_setup_conversation_lives_inside_its_chat() -> None:
     )
 
 
-def test_teams_channel_files_need_a_site_grant_not_a_manifest_permission() -> None:
+def test_teams_channel_files_need_a_tenant_permission_not_a_manifest_permission() -> None:
     manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
     granted = manifest["authorization"]["permissions"]["resourceSpecific"]
     assert [p["name"] for p in granted] == [
@@ -239,10 +239,10 @@ def test_teams_channel_files_need_a_site_grant_not_a_manifest_permission() -> No
         "ChannelMember.Read.Group",
         "ChatMessage.Read.Chat",
         "TeamsActivity.Send.Group",
-    ], "no team permission reaches SharePoint, so files need an admin's Sites.Selected grant"
+    ], "no team permission reaches SharePoint, so files need admin consent to Files.ReadWrite.All"
 
 
-async def test_a_teams_channel_file_without_a_site_grant_is_named_never_fetched() -> None:
+async def test_a_teams_channel_file_without_the_files_permission_is_named_never_fetched() -> None:
     def refuse(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"no request for a channel file: {request.url.host}")
 
@@ -259,7 +259,7 @@ async def test_a_teams_channel_file_without_a_site_grant_is_named_never_fetched(
             graph_token=token,
         )
     assert "`q3.xlsx` was shared but can't be opened: daimon has no access" in prepared.prefix, (
-        "unresolved (no site grant), a channel file is only named; Discord and Slack fetch it"
+        "unresolved (no Files.ReadWrite.All), a channel file is only named; Discord and Slack fetch it"
     )
 
 

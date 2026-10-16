@@ -88,7 +88,7 @@ class InboundFile:
 class SharedFile:
     """A file shared in a channel: its SharePoint URL, and a download URL once resolved.
 
-    `refused` when Graph denied daimon the team's files."""
+    `refused` when Graph denied daimon the channel's files."""
 
     name: str
     content_url: str | None = None
@@ -339,7 +339,8 @@ async def prepare_attachments(
         if file.kind == "refused":
             lines.append(
                 f"[attachment] `{file.name}` was shared but can't be opened: daimon has no "
-                "access to this team's files until a Microsoft 365 admin grants it."
+                "access to this channel's files until a Microsoft 365 admin grants it "
+                "Files.ReadWrite.All."
             )
             continue
         if file.kind == "unreachable":

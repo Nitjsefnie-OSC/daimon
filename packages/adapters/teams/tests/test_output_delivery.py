@@ -448,16 +448,7 @@ def _channel_files(
         raise AssertionError("the activity's group id is used")
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    async def nothing_stored(_: str) -> None:
-        return None
-
-    return ChannelFiles(
-        SharePoint(GraphClient(http, token), http),
-        TeamGroups(no_lookup),
-        no_lookup,
-        stored_site=nothing_stored,
-    )
+    return ChannelFiles(SharePoint(GraphClient(http, token)), TeamGroups(no_lookup))
 
 
 def _uploaded(request: httpx.Request) -> httpx.Response:

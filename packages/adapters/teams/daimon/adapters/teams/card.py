@@ -37,7 +37,6 @@ from microsoft_teams.cards import (
     CardElement,
     ExecuteAction,
     OpenDialogData,
-    OpenUrlAction,
     SubmitAction,
     TextBlock,
 )
@@ -84,21 +83,6 @@ def on_activity(state: CardState, turn: TurnState) -> CardState:
 
 def _card(body: list[CardElement], *, fallback: str) -> MessageActivityInput:
     return MessageActivityInput().add_card(AdaptiveCard(body=body, fallback_text=fallback))
-
-
-ENABLE_FILES = (
-    "I can't use this channel's files yet. A Microsoft 365 admin who is a member of this "
-    "channel can turn them on with one sign-in; the first one in the organisation must be "
-    "a global admin."
-)
-
-
-def enable_files_card(url: str) -> MessageActivityInput:
-    """Offers the sign-in that grants daimon the SharePoint site of this channel's files."""
-    body: list[CardElement] = [TextBlock(text=ENABLE_FILES, wrap=True)]
-    action = OpenUrlAction(title="Enable files", url=url)
-    card = AdaptiveCard(body=body, actions=[action], fallback_text=ENABLE_FILES)
-    return MessageActivityInput().add_card(card)
 
 
 def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActivityInput:

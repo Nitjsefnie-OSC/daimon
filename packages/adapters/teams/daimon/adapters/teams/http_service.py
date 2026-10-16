@@ -56,12 +56,6 @@ from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
-from daimon.adapters.teams.site_grant import (
-    CALLBACK_PATH,
-    GrantedSite,
-    GrantTarget,
-    callback_route,
-)
 from daimon.adapters.teams.support import VERB as SUPPORT_VERB
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support import enabled as support_enabled
@@ -72,15 +66,7 @@ from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.domain import (
-    TeamsChannelSiteRow,
-    TeamsChannelSubscriptionRow,
-    TeamsInstallationRow,
-)
-from daimon.core.stores.teams_channel_sites import (
-    get_teams_channel_site,
-    upsert_teams_channel_site,
-)
+from daimon.core.stores.domain import TeamsChannelSubscriptionRow, TeamsInstallationRow
 from daimon.core.stores.teams_channel_subscriptions import get_teams_channel_subscription
 from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
@@ -273,7 +259,7 @@ def create_teams_http_service(
         except TEAMS_SEND_ERRORS as err:
             log.warning("teams.channel_lookup.failed", error=type(err).__name__)
             return {}
-        # Private and shared channels keep files in a site of their own: none here.
+        # Standard channels only: the settings picker leaves private and shared ones out.
         standard = (c for c in channels if c.id and c.type in (None, "standard"))
         return {channel.id: channel.name for channel in standard if channel.id}
 
@@ -356,15 +342,7 @@ def create_teams_http_service(
         alert_url=runtime.settings.ops.alert_webhook_url,
     )
 
-    async def stored_site(channel_id: str) -> TeamsChannelSiteRow | None:
-        async with runtime.sessionmaker() as session:
-            return await get_teams_channel_site(
-                session, tenant_id=teams_tenant, channel_id=channel_id
-            )
-
-    files = ChannelFiles(
-        SharePoint(graph, runtime.http_client), groups, channel_names, stored_site=stored_site
-    )
+    files = ChannelFiles(SharePoint(graph), groups)
     reader = ThreadReader(graph, groups, bot_app_id=settings.client_id, files=files)
     routines = RoutinesPanel(runtime)
 
@@ -423,17 +401,12 @@ def create_teams_http_service(
 
     async def stored_group(channel_id: str) -> str | None:
         # A private or shared channel may be missing from the bot's channel list:
-        # its Files site or its message subscription records the team.
+        # its message subscription records the team.
         async with runtime.sessionmaker() as session:
-            site = await get_teams_channel_site(
-                session, tenant_id=teams_tenant, channel_id=channel_id
-            )
-            if site is not None:
-                return site.group_id
             watched = await get_teams_channel_subscription(
                 session, tenant_id=teams_tenant, channel_id=channel_id
             )
-            return None if watched is None else watched.group_id
+        return None if watched is None else watched.group_id
 
     homes = ChannelHomes(
         installed_teams, billing_panel.sdk_team_channels(teams_app), stored_group=stored_group
@@ -517,23 +490,6 @@ def create_teams_http_service(
     teams_app.on_dialog_submit(FEEDBACK_DIALOG, feedback.on_submit)
     teams_app.on_message_submit_feedback(feedback.on_builtin)
     teams_app.on_file_consent(turns.outputs.handle_consent)
-    if settings.public_url is not None:
-
-        async def files_granted(target: GrantTarget, site: GrantedSite) -> None:
-            async with runtime.sessionmaker.begin() as session:
-                await upsert_teams_channel_site(
-                    session,
-                    tenant_id=teams_tenant,
-                    channel_id=target.channel_id,
-                    group_id=target.group_id,
-                    site_id=site.site_id,
-                    drive_id=site.folder.drive_id,
-                    folder_id=site.folder.item_id,
-                )
-            files.forget(target.group_id)
-
-        grant = callback_route(settings, runtime.http_client, on_granted=files_granted)
-        fastapi_app.add_api_route(CALLBACK_PATH, grant, methods=["GET"])
     return TeamsHttpService(
         app=fastapi_app,
         teams_app=teams_app,
