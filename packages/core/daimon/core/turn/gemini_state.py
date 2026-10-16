@@ -123,7 +123,7 @@ class _Database:
             raise
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Payload]:
+    async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Payload]:
         opening = asyncio.create_task(asyncio.to_thread(self._open))
         try:
             connection, body = await asyncio.shield(opening)
@@ -160,8 +160,8 @@ class _GeminiStorage:
         self._database = database
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Records]:
-        async with self._database.transaction() as payload:
+    async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Records]:
+        async with self._database.transaction(after_dispatch=after_dispatch) as payload:
             body = payload.body
             records = (
                 Records()

@@ -1680,8 +1680,10 @@ present, before credential discovery. A PostgreSQL plan with SQLite paths refuse
 rather than silently abandoning the original state.
 
 PostgreSQL writers use the existing nonblocking fence retries, release pooled
-connections between acquisition attempts, and return retryable session busy after
-five seconds. Only the active record writer keeps a connection during provider
+connections between acquisition attempts. Pre-dispatch acquisition returns
+retryable session busy after five seconds; recording accepted results or definite
+refusals after dispatch uses the existing turn ceiling instead. Only the active
+record writer keeps a connection during provider
 I/O; its account lineage locks are released beforehand. Records and holds commit
 independently, and commits finish before cancellation propagates. Unchanged record
 payloads are not rewritten. Account privacy purge previews and removes conversation

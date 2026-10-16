@@ -293,7 +293,10 @@ async def test_open_records_do_not_block_account_update_fence(postgres_state):
 
 
 @pytest.mark.parametrize("kind", ["records", "holds"])
-async def test_pg_commit_finishes_before_cancellation_propagates(postgres_state, monkeypatch, kind):
+@pytest.mark.parametrize("cancellations", [1, 2])
+async def test_pg_commit_finishes_before_cancellation_propagates(
+    postgres_state, monkeypatch, kind, cancellations
+):
     from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
     from sqlalchemy.sql.dml import Update
 
@@ -337,9 +340,10 @@ async def test_pg_commit_finishes_before_cancellation_propagates(postgres_state,
     task = asyncio.create_task(writer())
     try:
         await asyncio.wait_for(started.wait(), 3)
-        task.cancel()
-        await asyncio.sleep(0)
-        assert not task.done()
+        for _ in range(cancellations):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -411,3 +415,104 @@ async def test_account_purge_previews_and_deletes_records_but_retains_financial_
     assert (UUID(scope.account_id), "records") not in rows
     assert (UUID(scope.account_id), "holds") in rows
     assert (UUID(other.account_id), "records") in rows
+
+
+@pytest.mark.parametrize("refused", [False, True])
+async def test_post_dispatch_outcome_waits_past_busy_bound_without_wedging_session(
+    postgres_state, refused
+):
+    from daimon.testing.drivers.gemini.fake import FakeTransport
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.ids import ChannelRef, ThreadRef
+    from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
+    from mux.drivers.gemini import GeminiManagedAgents
+    from mux.errors import ProviderError
+    from mux.state.memory import MemoryStateStore
+
+    from .test_gemini_codec import interaction
+
+    sessions, scope, _, _ = postgres_state
+    dispatched, release_response = asyncio.Event(), asyncio.Event()
+
+    class PausedResponse(FakeTransport):
+        async def create(self, request):
+            try:
+                return await super().create(request)
+            finally:
+                dispatched.set()
+                await release_response.wait()
+
+    transport, state = PausedResponse(), MemoryStateStore()
+    storage = PostgresGeminiStorage(sessions, scope=scope, project="project")
+    backend = GeminiManagedAgents(
+        transport, storage=storage, state_store=state, account_scope_id="project"
+    )
+    agent = await backend.agents.create(
+        scope,
+        AgentSpec(name="inline", model=ModelRef(provider="gemini", id=FLASH_PRIMARY)),
+        key="agent",
+    )
+    environment = await backend.environments.create(
+        scope, EnvironmentSpec(name="inline"), key="env"
+    )
+    thread = ThreadRef(
+        channel=ChannelRef(tenant_id=scope.tenant_id, platform="test", channel_id="channel"),
+        thread_id="thread",
+    )
+    session = await backend.sessions.create(
+        scope,
+        SessionSpec(
+            agent=agent.ref,
+            agent_revision=agent.revision,
+            environment=environment.ref,
+            config_revision=1,
+            extensions={
+                "gemini.session": ExtensionConfig(
+                    namespace="gemini.session",
+                    version=1,
+                    value={"binding_id": "binding", "thread": thread.model_dump(mode="json")},
+                )
+            },
+        ),
+        key="session",
+    )
+    failure = ProviderError("permission", retryable=False)
+    transport.responses.append(failure if refused else interaction("accepted"))
+    message = (UserMessage(content=(TextPart(text="hello"),)),)
+    task = asyncio.create_task(backend.events.send(scope, session.ref, message, key="first"))
+    try:
+        await asyncio.wait_for(dispatched.wait(), 3)
+        # The POST has completed, but another session's provider I/O holds the
+        # account/project Records row while this outcome needs to be committed.
+        async with storage.transaction() as records:
+            assert records.sessions[session.ref.id].unknown_delivery
+            release_response.set()
+            await asyncio.sleep(5.5)
+            assert not task.done()
+        if refused:
+            with pytest.raises(ProviderError) as error:
+                await asyncio.wait_for(task, 3)
+            assert error.value is failure
+        else:
+            receipt = await asyncio.wait_for(task, 3)
+            assert receipt.status == "queued"
+            assert await backend.events.send(scope, session.ref, message, key="first") == receipt
+        async with storage.transaction() as records:
+            assert not records.sessions[session.ref.id].unknown_delivery
+        operation = await state.get_operation(scope, "first")
+        assert operation is not None
+        assert operation.operation.status == ("failed" if refused else "accepted")
+        # Both a definite refusal and a persisted acknowledgement permit a new
+        # operation, without re-POSTing the accepted idempotency key.
+        transport.responses.append(interaction("next"))
+        assert (
+            await backend.events.send(scope, session.ref, message, key="second")
+        ).status == "queued"
+        assert len(transport.requests) == 2
+    finally:
+        release_response.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

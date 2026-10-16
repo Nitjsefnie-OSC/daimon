@@ -22,11 +22,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 async def complete(operation: Awaitable[None]) -> None:
     """Finish an already-started commit/close before propagating cancellation."""
     task = asyncio.ensure_future(operation)
-    try:
-        await asyncio.shield(task)
-    except BaseException:
-        await task
-        raise
+    cancelled = False
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 @dataclass(frozen=True)
@@ -36,7 +42,9 @@ class Payload:
 
 
 class PayloadDatabase(Protocol):
-    def transaction(self) -> AbstractAsyncContextManager[Payload]: ...
+    def transaction(
+        self, *, after_dispatch: bool = False
+    ) -> AbstractAsyncContextManager[Payload]: ...
 
 
 class PostgresPayloadDatabase:
@@ -80,7 +88,12 @@ class PostgresPayloadDatabase:
                     session = await stack.enter_async_context(self._sessions())
                     transaction = await session.begin()
                     await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
-                    await try_fence(session, key, timeout_s=5, schema_scoped=True)
+                    await try_fence(
+                        session,
+                        key,
+                        timeout_s=max(0, deadline - asyncio.get_running_loop().time()),
+                        schema_scoped=True,
+                    )
                     await self._require_account(session, locking=initialize)
                     predicates = (
                         GeminiRuntimeState.tenant_id == self._key["tenant_id"],
@@ -134,8 +147,12 @@ class PostgresPayloadDatabase:
             await complete(stack.aclose())
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Payload]:
-        deadline = asyncio.get_running_loop().time() + 5
+    async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Payload]:
+        from daimon.core.turn.ceiling import TURN_CEILING_S
+
+        # Before dispatch, busy is safely retryable. After dispatch, retain the
+        # turn budget to durably resolve the already-sent operation instead.
+        deadline = asyncio.get_running_loop().time() + (TURN_CEILING_S if after_dispatch else 5)
         # Initialization commits its FK/account locks before any provider I/O.
         async with self._locked(deadline, initialize=True):
             pass
