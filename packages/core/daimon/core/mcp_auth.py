@@ -101,7 +101,11 @@ def mint_jwt(
 # One hour covers the existing 45-minute turn ceiling plus vault propagation.
 CHAT_TOKEN_TTL = dt.timedelta(hours=1)
 CHAT_TOKEN_REFRESH_MARGIN = dt.timedelta(minutes=50)
-CHAT_TOKEN_LABEL = "vault-chat"
+
+
+def chat_token_label(jti: uuid.UUID) -> str:
+    """Bind the registry discriminator to a generated id, leaving user labels free."""
+    return f"vault-chat:{jti}"
 
 
 async def mint_chat_mcp_token(
@@ -134,7 +138,7 @@ async def mint_chat_mcp_token(
         account_id=account_id,
         tenant_id=identity.tenant_id,
         agent_id=str(agent_id),
-        label=CHAT_TOKEN_LABEL,
+        label=chat_token_label(jti),
         created_at=now,
         expires_at=expires_at,
     )

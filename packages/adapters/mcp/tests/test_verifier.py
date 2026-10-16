@@ -817,3 +817,23 @@ async def test_vault_chat_jwt_requires_its_live_bound_registry_row(sessionmaker,
         assert result.claims["chat_agent_id"] == claims["chat_agent_id"]
         assert "agent_id" not in result.claims
         assert result.claims["daimon_token_jti"] == str(jti)
+
+
+async def test_external_agent_key_label_does_not_select_chat_authentication(sessionmaker):
+    """A person's existing human label is not a token-kind discriminator."""
+    now = dt.datetime.now(dt.UTC)
+    agent_id = uuid.uuid4()
+    async with sessionmaker() as db, db.begin():
+        tenant_id, account_id = await seed_tenant_and_account(db)
+        token = await mint_agent_mcp_token(
+            db,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            label="vault-chat",
+            secret=SECRET,
+            now=now,
+        )
+    result = await DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker).verify_token(token)
+    assert result is not None and result.claims["agent_id"] == str(agent_id)
+    assert "chat_agent_id" not in result.claims

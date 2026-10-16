@@ -28,7 +28,7 @@ from anthropic.types.beta import BetaManagedAgentsVault
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
-from daimon.core.mcp_auth import CHAT_TOKEN_LABEL, CHAT_TOKEN_REFRESH_MARGIN, mint_chat_mcp_token
+from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
 from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.mux_compat import (
     create_vault,
@@ -211,7 +211,7 @@ async def _refresh_chat_credential_locked(
             identity is not None
             and row is not None
             and row.kind == "agent"
-            and row.label == CHAT_TOKEN_LABEL
+            and row.label == chat_token_label(row.jti)
             and row.account_id == account_id
             and row.tenant_id == identity.tenant_id
             and row.agent_id == str(agent_id)

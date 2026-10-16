@@ -34,7 +34,7 @@ from daimon.core.channel_admins import (
     grant_group_ids,
 )
 from daimon.core.channel_admins import administered_channel_ids as administered_channel_ids_for
-from daimon.core.mcp_auth import CHAT_TOKEN_LABEL, CHAT_TOKEN_TTL
+from daimon.core.mcp_auth import CHAT_TOKEN_TTL, chat_token_label
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
@@ -81,10 +81,10 @@ def token_row_refusal(
         if row.account_id != identity.account_id or row.tenant_id != identity.tenant_id:
             return "account_mismatch"
         chat = claims.get("chat_agent_id")
-        if chat is not None or row.label == CHAT_TOKEN_LABEL:
+        if chat is not None or row.label == chat_token_label(row.jti):
             expiry, issued = claims.get("exp"), claims.get("iat")
             if (
-                row.label != CHAT_TOKEN_LABEL
+                row.label != chat_token_label(row.jti)
                 or chat != row.agent_id
                 or claims.get("agent_id") is not None
                 or claims.get("internal") is not None
