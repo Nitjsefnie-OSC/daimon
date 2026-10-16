@@ -119,6 +119,7 @@ from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
+from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
@@ -161,6 +162,7 @@ class PurgeReport(BaseModel):
     github_connect_click_intents: int = 0
     github_user_links: int = 0
     mcp_tokens: int = 0
+    gemini_records: int = 0
     slack_user_tokens: int = 0
     slack_turn_contexts: int = 0
     direct_message_conversations: int = 0
@@ -188,6 +190,7 @@ class PurgeReport(BaseModel):
             ),
             github_user_links=self.github_user_links + other.github_user_links,
             mcp_tokens=self.mcp_tokens + other.mcp_tokens,
+            gemini_records=self.gemini_records + other.gemini_records,
             slack_user_tokens=self.slack_user_tokens + other.slack_user_tokens,
             slack_turn_contexts=self.slack_turn_contexts + other.slack_turn_contexts,
             direct_message_conversations=(
@@ -491,6 +494,12 @@ async def purge_account(
             sub = await _purge_principal_in_session(session, principal=principal)
             report = report.merge(sub)
 
+        # Conversation/artifact records are purged. Conservative holds contain
+        # financial attempt metadata, not conversation payload; retain them as
+        # audit evidence rather than replenishing a cap when an account is erased.
+        gemini_records_count = await gemini_state_store.delete_records_for_account(
+            session, account_id=account_id
+        )
         # Account-scoped (keyed by account_id, not principal): delete the
         # per-agent MCP token rows BEFORE delete_account — they reference
         # accounts.id, so leaving them trips the FK and rolls back the purge.
@@ -551,6 +560,7 @@ async def purge_account(
         db_report = report.merge(
             PurgeReport(
                 mcp_tokens=mcp_tokens_count,
+                gemini_records=gemini_records_count,
                 github_connect_requests=github_connect_requests_count,
                 github_connect_click_intents=github_connect_click_intents_count,
                 message_feedback=message_feedback_count,
