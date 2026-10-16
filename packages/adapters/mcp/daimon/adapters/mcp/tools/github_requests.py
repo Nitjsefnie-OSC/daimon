@@ -177,7 +177,7 @@ async def request_github_access_impl(
                     for row in await list_agent_grants(
                         session, tenant_id=origin.tenant_id, agent_id=agent_id
                     )
-                    if row.repo_id == connected.repo_id and not row.staged
+                    if row.repo_id == connected.repo_id
                 ),
                 None,
             )

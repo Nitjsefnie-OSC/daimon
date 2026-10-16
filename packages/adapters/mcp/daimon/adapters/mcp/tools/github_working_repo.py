@@ -15,7 +15,7 @@ from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
-from daimon.core.stores.github_access import list_agent_repos, set_working_repo
+from daimon.core.stores.github_access import set_working_repo
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
@@ -26,7 +26,6 @@ class WorkingRepoResult(BaseModel):
 
     message: str
     working_repo: str | None
-    pending: bool = False
 
 
 async def set_working_repo_impl(
@@ -99,21 +98,14 @@ async def set_working_repo_impl(
             )
         except ValueError as error:
             raise ToolError(str(error)) from error
-        pending = saved is not None and any(
-            repo.full_name.casefold() == saved.casefold() and repo.staged
-            for repo in await list_agent_repos(session, tenant_id=auth.tenant_id, agent_id=agent_id)
-        )
     return WorkingRepoResult(
         message=(
-            f"{agent.name} will use {saved} as its working repo when GitHub setup finishes."
-            if pending
-            else f"{agent.name}'s working repo is now {saved}. "
+            f"{agent.name}'s working repo is now {saved}. "
             "To switch back, ask me for another repo or none."
             if saved is not None
             else f"{agent.name} has no working repo now. To set one, ask me for a repo."
         ),
         working_repo=saved,
-        pending=pending,
     )
 
 

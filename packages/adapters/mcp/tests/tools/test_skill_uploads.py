@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import anthropic
 import httpx
@@ -1082,16 +1082,18 @@ async def test_a_member_cannot_change_an_agent_only_a_thread_uses(
         )
 
 
-async def test_a_repo_skill_uses_stored_github_access_only_for_an_admin(
+async def test_a_repo_skill_uses_the_agents_app_grant_for_member_and_admin(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     world = await _world(db_session_factory)
-    resolved: list[str] = []
+    resolved: list[tuple[str, uuid.UUID | None]] = []
     tokens: list[str | None] = []
 
-    async def fake_resolve(_rt: object, _auth: object, url: str, _http: object) -> str:
-        resolved.append(url)
-        return "stored-token"
+    async def fake_resolve(
+        _rt: object, _auth: object, url: str, _http: object, *, agent_id: uuid.UUID | None
+    ) -> str:
+        resolved.append((url, agent_id))
+        return "app-token"
 
     async def fake_fetch(_http: object, *, token: str | None, **_kwargs: object):
         tokens.append(token)
@@ -1099,7 +1101,7 @@ async def test_a_repo_skill_uses_stored_github_access_only_for_an_admin(
 
     monkeypatch.setattr(skill_uploads, "_resolve_sync_token", fake_resolve)
     monkeypatch.setattr(skill_uploads, "fetch_repo_skill", fake_fetch)
-    url = "https://someone:ghp_secret@github.com/o/r.git?x=1"
+    url = "https://github.com/example/widgets.git"
     source = {"repo_url": url, "path": "skills/notes"}
 
     await _grant_team_member(world)
@@ -1112,10 +1114,12 @@ async def test_a_repo_skill_uses_stored_github_access_only_for_an_admin(
         origin_context_id=origin,
         **source,
     )
-    assert (resolved, tokens) == ([], [None]), "a member fetches without the stored access"
+    expected_agent_id = derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_helper")
+    assert resolved == [(url, expected_agent_id)]
+    assert tokens == ["app-token"]
 
     await _preview_then_confirm(world, **source)
-    assert tokens[1:] == ["stored-token", "stored-token"]
+    assert tokens[1:] == ["app-token", "app-token"]
     async with db_session_factory() as session:
         row = await load_user_skill(
             session,
@@ -1124,7 +1128,42 @@ async def test_a_repo_skill_uses_stored_github_access_only_for_an_admin(
             agent_name="helper",
             name="notes",
         )
-    assert row is not None and row.origin == "o/r/skills/notes@main", "no credentials stored"
+    assert row is not None and row.origin == "example/widgets/skills/notes@main"
+
+
+async def test_private_repo_without_app_grant_posts_connect_github(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.skills.fetch import GitHubFetchError
+
+    world = await _world(db_session_factory)
+    connect = AsyncMock()
+    monkeypatch.setattr(skill_uploads, "_github_connect_impl", connect)
+    monkeypatch.setattr(skill_uploads, "_resolve_sync_token", AsyncMock(return_value=None))
+
+    async def private_repo(*_args: object, **_kwargs: object) -> None:
+        raise GitHubFetchError("HTTP 404", status_code=404)
+
+    monkeypatch.setattr(skill_uploads, "fetch_repo_skill", private_repo)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(599))
+    ) as http:
+        with pytest.raises(ToolError, match="Connect GitHub button was posted"):
+            await skill_uploads._load_bundle(  # pyright: ignore[reportPrivateUsage]
+                world.runtime,
+                world.auth(admin=False, platform="discord"),
+                http,
+                skill_md=None,
+                attachment_url=None,
+                repo_url="https://github.com/example/widgets",
+                branch="main",
+                path="skills",
+                origin_context_id="origin-a",
+                agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_helper"),
+                agent_name="helper",
+                expected_ma_agent_id="agent_helper",
+            )
+    connect.assert_awaited_once()
 
 
 async def test_an_upstream_failure_is_a_tool_error(

@@ -23,7 +23,7 @@ from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
     DatabaseSettings,
-    GithubSettings,
+    GithubAppSettings,
     McpSettings,
     Settings,
 )
@@ -69,9 +69,9 @@ def _build_app(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
             mcp=McpSettings(jwt_secret=SecretStr("a" * 32), public_url=HttpUrl("https://x/mcp")),
-            github=GithubSettings(
+            github_app=GithubAppSettings(
                 app_id="123456",
-                app_private_key=SecretStr("stub-pem-not-used-in-these-tests"),
+                private_key=SecretStr("stub-pem-not-used-in-these-tests"),
                 webhook_secret=SecretStr(_WEBHOOK_SECRET),
             ),
             crypto=CryptoSettings(keys=(SecretStr(_FERNET_KEY),)),
@@ -166,16 +166,16 @@ def _installation_api_transport(
     return httpx.MockTransport(handler)
 
 
-def _installation_reconcile_settings() -> GithubSettings:
+def _installation_reconcile_settings() -> GithubAppSettings:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     private_key_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    return GithubSettings(
+    return GithubAppSettings(
         app_id="123456",
-        app_private_key=SecretStr(private_key_pem.decode()),
+        private_key=SecretStr(private_key_pem.decode()),
     )
 
 
@@ -191,7 +191,7 @@ async def _drain_installation_reconciliation(
         await drain_github_installation_reconciliations(
             sessionmaker=sessionmaker,
             http_client=client,
-            github_settings=_installation_reconcile_settings(),
+            github_app=_installation_reconcile_settings(),
         )
 
 
@@ -604,7 +604,7 @@ async def test_reconciliation_page_failure_keeps_previous_complete_snapshot(
         await drain_github_installation_reconciliations(
             sessionmaker=sessionmaker,
             http_client=client,
-            github_settings=_installation_reconcile_settings(),
+            github_app=_installation_reconcile_settings(),
         )
 
     async with db_session_factory() as session:

@@ -761,6 +761,7 @@ async def _prepare_session_for_turn_locked(
             )
             return from_fresh(fresh, CONTINUED)
 
+        fresh_start = row.fresh_start_requested_at is not None
         if admission.is_external and not row.is_external:
             await mark_session_external(db, id=row.id)
             row = row.model_copy(update={"is_external": True})
@@ -802,6 +803,7 @@ async def _prepare_session_for_turn_locked(
                     )
             if (
                 recorded is None
+                and not fresh_start
                 and not admission.memory_read_only
                 and row.budget_channel_id in ("", admission.budget_channel_id)
             ):
@@ -852,8 +854,9 @@ async def _prepare_session_for_turn_locked(
             confirmed_tools=backend_switch_tools_for_turn(deps),
             channel_skills=admission.channel_skills,
         )
-        fresh_start = row.fresh_start_requested_at is not None
-        if handed_over:
+        if fresh_start:
+            decision = ReplaceSession(reasons=())
+        elif handed_over:
             decision = ReplaceSession(reasons=("agent_identity",))
         elif row.budget_channel_id not in ("", admission.budget_channel_id):
             # The sweep attributes missed events from the immutable MA session
@@ -863,8 +866,6 @@ async def _prepare_session_for_turn_locked(
             # A restricted turn must get a new read-only session when the
             # previous mount cannot be established, never reuse unknown access.
             decision = ReplaceSession(reasons=("memory_access",))
-        elif fresh_start:
-            decision = ReplaceSession(reasons=())
         else:
             assert recorded is not None, "a readable row always has a recorded snapshot here"
             rotate_app_token = (
@@ -914,6 +915,14 @@ async def _prepare_session_for_turn_locked(
             )
             return PreparationBusy(
                 pending_reasons=decision.reasons,
+                retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
+            )
+
+        if fresh_start and turn_is_active(row, now=moment):
+            # A retired key may still be mounted in the old session. Never
+            # hand that session back while its replacement waits for a turn.
+            return PreparationBusy(
+                pending_reasons=(),
                 retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
             )
 

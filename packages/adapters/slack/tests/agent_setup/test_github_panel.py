@@ -145,9 +145,7 @@ def _button_labels(view: dict[str, Any]) -> list[str]:
 
 def test_slack_github_panels_are_read_only() -> None:
     panel = GrantsPanel(
-        mode="app",
         working_repo="example/work",
-        has_pat=False,
         repos=(
             RepoChoice(
                 repo_id=1,
@@ -174,7 +172,7 @@ def test_slack_github_panels_are_read_only() -> None:
     assert " · " not in text
     assert _button_labels(view) == ["Connect GitHub", "◀ Back"]
     assert "https://example.invalid/connect" in str(view)
-    empty = build_view(meta, GrantsPanel(mode="app", repos=(), working_repo=None, has_pat=False))
+    empty = build_view(meta, GrantsPanel(repos=(), working_repo=None))
     assert "No working repo" in _section_text(empty)
     home = build_github_home_view(meta, agent_counts=(("helper", 1),), can_choose_agent=True)
     assert "helper: 1 repo" in _section_text(home)

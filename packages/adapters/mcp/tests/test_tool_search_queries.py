@@ -23,7 +23,7 @@ from daimon.core.config import (
     DatabaseSettings,
     DiscordSettings,
     GeminiSettings,
-    GithubSettings,
+    GithubAppSettings,
     McpSettings,
     NotebookSettings,
     Settings,
@@ -74,25 +74,24 @@ CASES = [
     SearchCase("remove the old Toggl key from research-bot", "remove_agent_key", frozenset([])),
     SearchCase(
         "let research-bot read our private repo github.com/acme/data",
-        # bind_public_repo checks visibility first and points a private repo
-        # at github_connect; the token form is never offered.
-        frozenset(["github_connect", "bind_public_repo"]),
+        # The App connection flow grants private repository access.
+        "github_connect",
         frozenset([]),
     ),
     SearchCase(
         "install the GitHub app",
         "post_github_app_install_link",
-        frozenset(["request_repo_binding"]),
+        frozenset(["github_connect"]),
     ),
     SearchCase(
         "install skills from github.com/acme/skills into research-bot",
         "sync_skills",
-        frozenset(["request_skill_repo_token"]),
+        frozenset(),
     ),
     SearchCase(
         "the skills repo is private",
-        "request_skill_repo_token",
-        frozenset(["request_repo_binding"]),
+        "sync_skills",
+        frozenset(["github_connect"]),
     ),
     SearchCase(
         "add the build-models skill to research-bot", "update_agent", frozenset(["remove_skill"])
@@ -155,9 +154,7 @@ CASES = [
     ),
 ]
 # Teams hides these on purpose; tests/parity/test_teams_deliberate_gaps.py records why.
-_TEAMS_HIDDEN = frozenset(
-    {"request_repo_binding", "request_skill_repo_token", "get_channel_budget"}
-)
+_TEAMS_HIDDEN = frozenset({"get_channel_budget"})
 
 
 def _make_app(
@@ -177,7 +174,7 @@ def _make_app(
             mcp=McpSettings(public_url=HttpUrl("https://example.com/mcp")),
             discord=DiscordSettings(bot_token=SecretStr("test-bot-token")),
             slack=SlackSettings(signing_secret=SecretStr("test"), app_token=SecretStr("xapp-test")),
-            github=GithubSettings(app_slug="test-app"),
+            github_app=GithubAppSettings(app_slug="test-app"),
             crypto=CryptoSettings(keys=crypto_keys),
             gemini=GeminiSettings(api_key=SecretStr("gemini-test")),
             notebook=NotebookSettings(

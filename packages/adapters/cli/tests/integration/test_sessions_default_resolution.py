@@ -20,7 +20,7 @@ from anthropic.types.beta import (
 )
 from daimon.adapters.cli.commands.sessions import sessions_create
 from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import GithubSettings, Settings
+from daimon.core.config import GithubAppSettings, Settings
 from daimon.core.defaults import apply_defaults
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.ma_resolver import new_resolver_cache
@@ -86,7 +86,7 @@ def _build_settings(defaults_root: Path) -> Settings:
         tool_safety = ToolSafetyPolicy()
         cli = _Cli()
         mcp = _Mcp()
-        github = GithubSettings()
+        github_app = GithubAppSettings()
 
     settings = _Settings()
     settings.defaults_root = defaults_root  # type: ignore[attr-defined]

@@ -37,11 +37,10 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.errors import StoreError
-from daimon.core.github_credentials import build_multifernet
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import list_skill_versions
 from daimon.core.operation_policy import TargetFacts, decide_operation
-from daimon.core.skill_sync import PATMissingError, SyncReport, sync_agent_skills
+from daimon.core.skill_sync import SyncReport, sync_agent_skills
 from daimon.core.skills.add import (
     add_agent_skill,
     fetch_repo_skill,
@@ -231,19 +230,7 @@ async def sync_agent(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
 
-    if not rt.settings.crypto.keys:
-        console.print(
-            "[red]settings.crypto.keys is empty -- cannot decrypt GitHub PAT. "
-            "Configure DAIMON_CRYPTO__KEYS and re-bind the PAT with "
-            "request_repo_binding in chat.[/red]"
-        )
-        raise typer.Exit(code=3)
-    fernet = build_multifernet(tuple(k.get_secret_value() for k in rt.settings.crypto.keys))
-    github_fallback_pat = (
-        rt.settings.github.fallback_pat.get_secret_value()
-        if rt.settings.github.fallback_pat is not None
-        else None
-    )
+    fernet = None
 
     async def _run(http: httpx.AsyncClient) -> SyncReport:
         return await sync_agent_skills(
@@ -255,21 +242,15 @@ async def sync_agent(
             fernet=fernet,
             http_client=http,
             anthropic_client=rt.anthropic,
-            github_fallback_pat=github_fallback_pat,
+            app_id=rt.settings.github_app.app_id,
+            app_private_key=rt.settings.github_app.private_key,
         )
 
-    try:
-        if http_client is not None:
-            report = await _run(http_client)
-        else:
-            async with httpx.AsyncClient(timeout=30.0) as http:
-                report = await _run(http)
-    except PATMissingError as err:
-        console.print(
-            "[red]No GitHub PAT bound for principal. Bind one with "
-            f"request_repo_binding in chat first. ({err})[/red]"
-        )
-        raise typer.Exit(code=4) from err
+    if http_client is not None:
+        report = await _run(http_client)
+    else:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            report = await _run(http)
 
     summary = Table(
         title=f"Skill sync for agent '{agent_name}'",

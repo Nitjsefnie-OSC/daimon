@@ -120,17 +120,12 @@ async def test_connected_repo_is_granted_immediately_in_chat(
     )
     delivery.assert_not_awaited()
     async with committing_sessionmaker() as session:
-        assert (
-            await github_access.get_agent_mode(session, tenant_id=tenant.id, agent_id=agent_id)
-            == "app"
-        )
         [grant] = await github_access.list_agent_grants(
             session, tenant_id=tenant.id, agent_id=agent_id
         )
-        assert (grant.baseline_access, grant.ceiling_access, grant.staged) == (
+        assert (grant.baseline_access, grant.ceiling_access) == (
             "write",
             "write",
-            False,
         )
     write = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime,

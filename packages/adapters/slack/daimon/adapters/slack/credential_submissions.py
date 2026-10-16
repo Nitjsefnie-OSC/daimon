@@ -114,7 +114,6 @@ from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
 )
-from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
 from mux.errors import ScopeViolation
 from slack_sdk.errors import SlackApiError
@@ -1698,7 +1697,6 @@ async def run_repo_bind_credential_submission(
                     row=consumed,
                     ma_secret_ref=ma_secret_ref,
                     proof=proof,
-                    write=set_binding,
                 )
         except DaimonError as err:
             log.warning("credential_request.repo_write_failed", err_type=type(err).__name__)

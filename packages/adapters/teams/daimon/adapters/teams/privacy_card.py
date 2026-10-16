@@ -101,21 +101,10 @@ def _will_happen(preview: PurgePreview) -> list[str]:
         n = amount(preview.user_skills.count, "skill")
         ex = preview.user_skills.example or "—"
         lines.append(f"🧰 Forget {n} you synced, for example {ex}")
-    if preview.github_credentials.count:
-        n = amount(preview.github_credentials.count, "saved GitHub key")
-        ex = preview.github_credentials.example or "—"
-        lines.append(f"🔑 Delete {n}, for example the one for {ex}")
     if preview.github_user_links.count:
         lines.append(f"🔗 Unlink {amount(preview.github_user_links.count, 'GitHub account')}")
-    if preview.github_oauth_states.count:
-        lines.append(
-            f"🤝 Delete {amount(preview.github_oauth_states.count, 'GitHub sign-in record')}"
-        )
     if preview.mcp_tokens.count:
         lines.append(f"🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}")
-    if preview.agent_github_binding.count:
-        n = amount(preview.agent_github_binding.count, "link")
-        lines.append(f"🤖 Remove {n} from agents to your GitHub keys")
     if preview.slack_user_tokens.count:
         lines.append(
             f"🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"
@@ -166,9 +155,7 @@ def post_delete_card(result: AccountPurgeResult, *, bot: str) -> AdaptiveCard:
         (db.principal_links, "principal link(s) removed"),
         (db.user_configs, "user config row(s) removed"),
         (db.user_skills, "synced skill ledger row(s) removed"),
-        (db.github_credentials, "stored GitHub token(s) deleted"),
         (db.github_user_links, "GitHub user link(s) removed"),
-        (db.github_oauth_states, "OAuth handshake record(s) removed"),
         (db.accounts, "account row removed"),
         (sessions.deleted, "session transcript(s) deleted from Anthropic"),
     )

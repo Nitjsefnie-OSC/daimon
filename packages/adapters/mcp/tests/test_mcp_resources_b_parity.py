@@ -12,30 +12,25 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from anthropic import APIStatusError, AsyncAnthropic
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp import bundles, hosted_artifacts, resource_ports
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import (
     hub,
-    self_edit,
     sessions,
     skills,
     vault,
-)
-from daimon.adapters.mcp.tools.self_edit import (
-    _set_repo_binding_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core import mux_compat, output_ports_compat
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.notebooks._rate_limit import RateLimiter
-from daimon.core.stores.domain import AgentRepoBindingRow, Role
+from daimon.core.stores.domain import Role
 from daimon.testing.ma_models import ma_agent, ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
-from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic.credential_schemas import CredentialCreate
@@ -298,172 +293,6 @@ async def test_public_vault_summary_keeps_oldest_matching_vault_and_legacy_url(
         ]
         actual = await vault._list_credentials_impl(after, AUTH)  # pyright: ignore[reportPrivateUsage]
         assert actual == expected
-    assert host_guards
-    same(old, new)
-
-
-@pytest.mark.parametrize("body", [{"id": "credential"}, CREDENTIAL_BODY])
-async def test_repo_credential_json_keeps_native_key_order_and_partial_id_reply(
-    body: dict[str, Any],
-    host_guards: list[Scope],
-) -> None:
-    token = "single'double\"世界\n"
-    metadata = {"service": "github", "agent_id": str(AUTH.agent_id), "repo_url": "owner/repo"}
-    replies: list[tuple[str, str, int, dict[str, Any]]] = [
-        ("POST", "/v1/vaults/vault/credentials", 200, body)
-    ]
-    old, new = script(replies), script(replies)
-    async with old.client() as before, new.client() as after:
-        expected = await before.beta.vaults.credentials.create(
-            vault_id="vault",
-            auth={"type": "static_bearer", "mcp_server_url": "https://github.com", "token": token},
-            metadata=metadata,
-        )
-        actual = await resource_ports.create_repo_credential(
-            after,
-            "vault",
-            token=token,
-            metadata=metadata,
-            scope=SCOPE,
-        )
-        assert actual.id == expected.id
-        assert token not in repr(actual)
-    assert host_guards
-    same(old, new)
-
-
-@pytest.mark.parametrize("outcome", ["success", "db-failure", "revoke-failure"])
-async def test_public_repo_binding_keeps_vault_write_commit_compensation_and_old_revoke(
-    outcome: str,
-    host_guards: list[Scope],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = dt.datetime(2026, 10, 9, 12, tzinfo=dt.UTC)
-    row = AgentRepoBindingRow(
-        tenant_id=TENANT,
-        agent_id=cast(uuid.UUID, AUTH.agent_id),
-        repo_url="owner/repo",
-        default_branch="main",
-        ma_secret_ref="old",
-        created_at=clock,
-        updated_at=clock,
-    )
-    monkeypatch.setattr(self_edit, "require_pin_write_access", AsyncMock())
-    monkeypatch.setattr(self_edit, "dispatch_mint_token", AsyncMock(return_value="offline-pat"))
-    monkeypatch.setattr(self_edit, "pat_can_access_repo", AsyncMock(return_value=True))
-    monkeypatch.setattr(self_edit, "get_binding", AsyncMock(return_value=row))
-
-    async def write(*args: object, **kwargs: object) -> AgentRepoBindingRow:
-        assert kwargs["ma_secret_ref"] == "credential"
-        assert [r.method for r in new.requests] == ["GET", "POST"]
-        if outcome == "db-failure":
-            raise RuntimeError("write failed")
-        return row.model_copy(update={"ma_secret_ref": "credential"})
-
-    monkeypatch.setattr(self_edit, "set_binding", write)
-    revoked = "credential" if outcome == "db-failure" else "old"
-    replies: list[tuple[str, str, int, dict[str, Any]]] = [
-        ("GET", "/v1/vaults", 200, {"data": [VAULT_BODY], "next_page": None}),
-        ("POST", "/v1/vaults/vault/credentials", 200, {"id": "credential"}),
-        (
-            "DELETE",
-            f"/v1/vaults/vault/credentials/{revoked}",
-            500 if outcome == "revoke-failure" else 200,
-            {"type": "error", "error": {"type": "api_error", "message": "rejected"}}
-            if outcome == "revoke-failure"
-            else {},
-        ),
-    ]
-    old, new = script(replies), script(replies)
-    async with old.client() as before, new.client() as after:
-        _ = [v async for v in before.beta.vaults.list(limit=100) if v.display_name == VAULT_NAME]
-        await before.beta.vaults.credentials.create(
-            vault_id="vault",
-            auth={
-                "type": "static_bearer",
-                "mcp_server_url": "https://github.com",
-                "token": "offline-pat",
-            },
-            metadata={
-                "service": "github",
-                "agent_id": str(AUTH.agent_id),
-                "repo_url": "owner/repo",
-            },
-        )
-        if outcome == "revoke-failure":
-            with pytest.raises(APIStatusError):
-                await before.beta.vaults.credentials.delete(revoked, vault_id="vault")
-        else:
-            await before.beta.vaults.credentials.delete(revoked, vault_id="vault")
-        host = runtime(after)
-        if outcome == "db-failure":
-            with pytest.raises(RuntimeError, match="write failed"):
-                await _set_repo_binding_impl(
-                    host,
-                    AUTH,
-                    repo_url="owner/repo",
-                    default_branch="main",
-                    service="github",
-                    http_client=cast(Any, object()),
-                )  # pyright: ignore[reportPrivateUsage]
-        elif outcome == "revoke-failure":
-            with pytest.raises(
-                ToolError,
-                match="the repo is now bound, but the credential from the previous binding could not be revoked and is still live",
-            ):
-                await _set_repo_binding_impl(
-                    host,
-                    AUTH,
-                    repo_url="owner/repo",
-                    default_branch="main",
-                    service="github",
-                    http_client=cast(Any, object()),
-                )  # pyright: ignore[reportPrivateUsage]
-        else:
-            actual = await _set_repo_binding_impl(
-                host,
-                AUTH,
-                repo_url="owner/repo",
-                default_branch="main",
-                service="github",
-                http_client=cast(Any, object()),
-            )  # pyright: ignore[reportPrivateUsage]
-            assert actual.repo_url == "owner/repo"
-    assert host_guards
-    same(old, new)
-
-
-async def test_public_clear_binding_keeps_vault_delete_before_database_clear(
-    host_guards: list[Scope],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = dt.datetime(2026, 10, 9, 12, tzinfo=dt.UTC)
-    row = AgentRepoBindingRow(
-        tenant_id=TENANT,
-        agent_id=cast(uuid.UUID, AUTH.agent_id),
-        repo_url="owner/repo",
-        default_branch="main",
-        ma_secret_ref="old",
-        created_at=clock,
-        updated_at=clock,
-    )
-    monkeypatch.setattr(self_edit, "require_pin_write_access", AsyncMock())
-    monkeypatch.setattr(self_edit, "get_binding", AsyncMock(return_value=row))
-
-    async def clear(*args: object, **kwargs: object) -> None:
-        assert [r.method for r in new.requests] == ["GET", "DELETE"]
-
-    monkeypatch.setattr(self_edit, "clear_binding", clear)
-    replies: list[tuple[str, str, int, dict[str, Any]]] = [
-        ("GET", "/v1/vaults", 200, {"data": [VAULT_BODY], "next_page": None}),
-        ("DELETE", "/v1/vaults/vault/credentials/old", 200, {}),
-    ]
-    old, new = script(replies), script(replies)
-    async with old.client() as before, new.client() as after:
-        _ = [v async for v in before.beta.vaults.list(limit=100) if v.display_name == VAULT_NAME]
-        await before.beta.vaults.credentials.delete("old", vault_id="vault")
-        actual = await self_edit._clear_repo_binding_impl(runtime(after), AUTH)  # pyright: ignore[reportPrivateUsage]
-        assert actual == {"cleared": True}
     assert host_guards
     same(old, new)
 

@@ -17,31 +17,24 @@ import uuid
 from typing import Any
 
 import pytest
-from cryptography.fernet import Fernet
 from daimon.core._models import AgentGoogleBinding
 from daimon.core.broker import dispatch_mint_token
 from daimon.core.broker.errors import NoBindingError, ProviderConfigError
 from daimon.core.broker.providers import TokenProvider
 from daimon.core.broker.providers.gcloud import GcloudTokenProvider
-from daimon.core.broker.providers.github import GitHubTokenProvider
 from daimon.core.config import (
     AnthropicSettings,
     CredentialsSettings,
-    CryptoSettings,
     DatabaseSettings,
-    GithubSettings,
     Settings,
 )
-from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def _base_settings(
     *,
-    crypto_keys: tuple[SecretStr, ...] = (),
     google_sa_json: SecretStr | None = None,
-    github_fallback_pat: SecretStr | None = None,
 ) -> Settings:
     """Construct a fully-populated Settings for broker tests."""
     return Settings(
@@ -52,20 +45,8 @@ def _base_settings(
             api_key=SecretStr("sk-test"),
             base_url=HttpUrl("https://api.anthropic.com"),
         ),
-        crypto=CryptoSettings(keys=crypto_keys),
         credentials=CredentialsSettings(google_sa_json=google_sa_json),
-        github=GithubSettings(fallback_pat=github_fallback_pat),
     )
-
-
-@pytest.fixture
-def fernet_key() -> SecretStr:
-    return SecretStr(Fernet.generate_key().decode("ascii"))
-
-
-@pytest.fixture
-def github_settings(fernet_key: SecretStr) -> Settings:
-    return _base_settings(crypto_keys=(fernet_key,))
 
 
 @pytest.fixture
@@ -81,108 +62,10 @@ def gcloud_settings_no_sa() -> Settings:
 
 
 def test_protocol_satisfied() -> None:
-    """``GitHubTokenProvider`` and ``GcloudTokenProvider`` must structurally
-    satisfy the ``TokenProvider`` Protocol (runtime_checkable)."""
-    assert isinstance(GitHubTokenProvider(), TokenProvider), (
-        "GitHubTokenProvider must satisfy TokenProvider Protocol structurally"
-    )
+    """The gcloud provider satisfies the token provider protocol."""
     assert isinstance(GcloudTokenProvider(), TokenProvider), (
         "GcloudTokenProvider must satisfy TokenProvider Protocol structurally"
     )
-
-
-@pytest.mark.asyncio
-async def test_github_passthrough_returns_stored_pat(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    github_settings: Settings,
-    fernet_key: SecretStr,
-) -> None:
-    """Dispatch for service='github' returns the decrypted PAT for the
-    account's stored GitHub credential."""
-    account_id = uuid.uuid4()
-    fernet = build_multifernet((fernet_key.get_secret_value(),))
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=account_id,
-        github_login="octocat",
-        plaintext_token="ghp_supersecret",
-        scopes=("repo",),
-    )
-
-    token = await dispatch_mint_token(
-        service="github",
-        account_id=account_id,
-        agent_id=None,
-        sessionmaker=db_session_factory,
-        settings=github_settings,
-    )
-    assert token == "ghp_supersecret", "github passthrough must return the decrypted PAT verbatim"
-
-
-@pytest.mark.asyncio
-async def test_github_passthrough_raises_no_binding_when_unbound(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    github_settings: Settings,
-) -> None:
-    """Dispatch for service='github' with no credential row raises NoBindingError."""
-    account_id = uuid.uuid4()
-    with pytest.raises(NoBindingError, match="operator.*account"):
-        await dispatch_mint_token(
-            service="github",
-            account_id=account_id,
-            agent_id=None,
-            sessionmaker=db_session_factory,
-            settings=github_settings,
-        )
-
-
-@pytest.mark.asyncio
-async def test_github_opt_in_returns_fallback_when_unbound_and_configured(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fernet_key: SecretStr,
-) -> None:
-    """allow_service_default=True + a configured fallback_pat -> the fallback
-    token resolves instead of NoBindingError for an unbound account."""
-    account_id = uuid.uuid4()
-    settings = _base_settings(
-        crypto_keys=(fernet_key,),
-        github_fallback_pat=SecretStr("ghp_operator_fallback"),
-    )
-
-    token = await dispatch_mint_token(
-        service="github",
-        account_id=account_id,
-        agent_id=None,
-        sessionmaker=db_session_factory,
-        settings=settings,
-        allow_service_default=True,
-    )
-    assert token == "ghp_operator_fallback", (
-        "opted-in dispatch with a configured fallback must return it instead of raising"
-    )
-
-
-@pytest.mark.asyncio
-async def test_github_opt_in_raises_no_binding_when_fallback_unset(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fernet_key: SecretStr,
-) -> None:
-    """allow_service_default=True but no configured fallback_pat -> still
-    raises NoBindingError (a deployment that hasn't provisioned the service
-    token gets the same error as before)."""
-    account_id = uuid.uuid4()
-    settings = _base_settings(crypto_keys=(fernet_key,))
-
-    with pytest.raises(NoBindingError):
-        await dispatch_mint_token(
-            service="github",
-            account_id=account_id,
-            agent_id=None,
-            sessionmaker=db_session_factory,
-            settings=settings,
-            allow_service_default=True,
-        )
 
 
 @pytest.mark.asyncio
@@ -217,23 +100,6 @@ async def test_gcloud_opt_in_is_inert(
     assert token == "fake-access-token", (
         "allow_service_default must be inert for the gcloud provider"
     )
-
-
-@pytest.mark.asyncio
-async def test_github_raises_provider_config_when_crypto_keys_unset(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """github provider requires crypto keys to decrypt the at-rest PAT."""
-    account_id = uuid.uuid4()
-    settings = _base_settings(crypto_keys=())
-    with pytest.raises(ProviderConfigError, match="crypto.keys"):
-        await dispatch_mint_token(
-            service="github",
-            account_id=account_id,
-            agent_id=None,
-            sessionmaker=db_session_factory,
-            settings=settings,
-        )
 
 
 async def _insert_google_binding(
@@ -368,7 +234,7 @@ async def test_gcloud_raises_provider_config_when_sa_json_not_service_account(
 @pytest.mark.asyncio
 async def test_dispatch_unknown_service_raises_provider_config_error(
     db_session_factory: async_sessionmaker[AsyncSession],
-    github_settings: Settings,
+    gcloud_settings: Settings,
 ) -> None:
     account_id = uuid.uuid4()
     with pytest.raises(ProviderConfigError, match="unknown service"):
@@ -377,7 +243,7 @@ async def test_dispatch_unknown_service_raises_provider_config_error(
             account_id=account_id,
             agent_id=None,
             sessionmaker=db_session_factory,
-            settings=github_settings,
+            settings=gcloud_settings,
         )
 
 

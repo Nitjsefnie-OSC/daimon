@@ -326,7 +326,7 @@ async def tenants_delete(
             f"tenant_ledger={counts.tenant_ledger}, "
             f"tenant_user_caps={counts.tenant_user_caps}, "
             f"agent_files={counts.agent_files}, "
-            f"agent_repo_binding={counts.agent_repo_binding}, "
+            f"agent_github_grants={counts.agent_github_grants}, "
             f"tenant_config={counts.tenant_config}, "
             f"channel_config={counts.channel_config}"
         )
@@ -340,7 +340,7 @@ async def tenants_delete(
             f"tenant_ledger={counts.tenant_ledger}, "
             f"tenant_user_caps={counts.tenant_user_caps}, "
             f"agent_files={counts.agent_files}, "
-            f"agent_repo_binding={counts.agent_repo_binding}, "
+            f"agent_github_grants={counts.agent_github_grants}, "
             f"tenant_config={counts.tenant_config}, "
             f"channel_config={counts.channel_config}"
         )

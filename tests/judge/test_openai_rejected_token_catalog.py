@@ -10,7 +10,8 @@ from daimon.testing import db as database_fixtures
 from mux.errors import UnsupportedCapability
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import create_async_engine
-from tests.turn import test_openai_credential_requests as a3
+
+from packages.core.tests.turn import test_openai_credential_requests as a3
 
 from .catalog_runner import ScenarioPlan, load_catalog, plan_scenario
 from .openai_rejected_token_catalog import (

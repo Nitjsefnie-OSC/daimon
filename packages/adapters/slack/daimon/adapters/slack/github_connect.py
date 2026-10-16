@@ -19,10 +19,9 @@ from daimon.core.roster import load_roster
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import (
-    CLIENT_AGENT_MESSAGE,
-    ClientAgentConnectionError,
+    PINNED_AGENT_MESSAGE,
+    PinnedAgentConnectionError,
     mint_invitation,
-    pending_update_for_agent,
     require_app_eligible_agent,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -107,19 +106,11 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             target_ma_id = roster.answering.ma_agent_id
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=target_ma_id)
         async with runtime.sessionmaker() as session:
-            pending = await pending_update_for_agent(
-                session, tenant_id=tenant_id, agent_id=agent_id
-            )
-        if pending is not None:
-            await reply(CLIENT_AGENT_MESSAGE)
-            return
-        async with runtime.sessionmaker() as session:
             await require_app_eligible_agent(
                 session,
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 agent_name=target_name,
-                switch_saved_key=True,
             )
         async with runtime.sessionmaker.begin() as session:
             principal = await get_or_create_platform_principal(
@@ -180,7 +171,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             "Connect GitHub",
             attachments=[connect_attachment(f"{root}/oauth/github/connect/{token}", card=card)],
         )
-    except ClientAgentConnectionError as exc:
+    except PinnedAgentConnectionError as exc:
         await reply(str(exc))
     except (anthropic.APIError, SlackApiError, SQLAlchemyError, ValueError):
         log.exception("slack.github_connect.failed")
@@ -197,7 +188,7 @@ async def handle_github_update_click(runtime: SlackRuntime, payload: dict[str, A
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=str(channel.get("id") or ""),
             user=str(user.get("id") or ""),
-            text=CLIENT_AGENT_MESSAGE,
+            text=PINNED_AGENT_MESSAGE,
         )
 
 

@@ -795,55 +795,7 @@ members.
 
 Read from `daimon.core.config.GithubSettings`. Prefix `DAIMON_GITHUB__`.
 
-GitHub repository access config (App-or-PAT; no OAuth flow). All fields are optional so
-deployments without GitHub App or PAT config keep working.
-
-Cloning via the GitHub App requires only app_id + app_private_key. app_slug is needed
-only to construct the App's install link; a deployment that never surfaces that link can
-leave it unset. webhook_secret is optional and required only for the skill-sync push-
-driven resync webhook.
-
-### `DAIMON_GITHUB__OAUTH_SCOPES`
-
-`tuple[str, ...]` · optional · default `repo,read:user,read:org,workflow`
-
-OAuth scopes requested when a GitHub token-broker flow is used. Not consulted for GitHub
-App or PAT authentication.
-
-### `DAIMON_GITHUB__APP_ID`
-
-`str | None` · optional · default unset
-
-GitHub App ID used to mint short-lived installation tokens for repo cloning.
-
-### `DAIMON_GITHUB__APP_PRIVATE_KEY`
-
-`SecretStr | None` · optional · default unset · secret
-
-Private key (PEM) for the GitHub App identified by app_id.
-
-### `DAIMON_GITHUB__APP_SLUG`
-
-`str | None` · optional · default unset
-
-GitHub App's URL name, used to build the App's install link so members can be pointed at
-it from chat and from the setup panel. Cloning does not need it, so a deployment that
-never surfaces the install link can leave it unset.
-
-### `DAIMON_GITHUB__WEBHOOK_SECRET`
-
-`SecretStr | None` · optional · default unset · secret
-
-Secret used to verify GitHub webhook payload signatures. Required only to enable the
-skill-sync push-driven resync webhook.
-
-### `DAIMON_GITHUB__FALLBACK_PAT`
-
-`SecretStr | None` · optional · default unset · secret
-
-Operator-wide personal access token used as the clone credential for public-repo
-bindings that have no per-agent credential. Needs no scopes — any valid token clones a
-public repo.
+Size limits for GitHub skill imports.
 
 ### `DAIMON_GITHUB__MAX_TARBALL_BYTES`
 

@@ -22,7 +22,7 @@ from daimon.core.session_compat import (
     decide_session_compatibility,
 )
 from daimon.core.session_snapshot import SessionSnapshot
-from daimon.core.stores import agent_repo_binding, github_access, github_app_installations
+from daimon.core.stores import github_access, github_app_installations
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -88,22 +88,12 @@ async def test_remove_repo_acts_immediately_and_is_agent_scoped(
                 ceiling_access="read",
                 granted_by_account_id=admin.id,
             )
-            await github_access.activate_agent(session, tenant_id=tenant.id, agent_id=target)
         await github_access.set_working_repo(
             session,
             tenant_id=tenant.id,
             agent_id=agent_id,
             repo_name="owner/repo",
             account_id=admin.id,
-        )
-        await agent_repo_binding.set_binding(
-            session,
-            tenant_id=tenant.id,
-            agent_id=agent_id,
-            repo_url="owner/repo",
-            default_branch="main",
-            ma_secret_ref="legacy",
-            proof=None,
         )
         await session.execute(
             text(
@@ -240,10 +230,6 @@ async def test_remove_repo_acts_immediately_and_is_agent_scoped(
                 {"tenant": tenant.id, "agent": agent_id},
             )
             == 0
-        )
-        assert (
-            await agent_repo_binding.get_binding(session, tenant_id=tenant.id, agent_id=agent_id)
-            is None
         )
         own = await github_access.repo_for_agent(
             session, tenant_id=tenant.id, repo_id=12345, agent_id=agent_id

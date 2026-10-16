@@ -324,7 +324,6 @@ async def test_real_host_refuses_source_obligations_missing_from_installed_count
         "mcp",
         "credentials",
         "files",
-        "repository",
         "memory",
         "environment",
     ],
@@ -335,7 +334,7 @@ async def test_complete_source_obligation_capture_refuses_before_target_io(
     from daimon.core import sessions
     from daimon.core._models import AgentFile
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.stores import agent_mcp_credentials, agent_memory_stores, agent_repo_binding
+    from daimon.core.stores import agent_mcp_credentials, agent_memory_stores
     from mux.errors import UnsupportedCapability
 
     request, _, wire, posts = native_request
@@ -397,16 +396,6 @@ async def test_complete_source_obligation_capture_refuses_before_target_io(
                     encoding="fernet_v1",
                 )
             )
-        elif obligation == "repository":
-            await agent_repo_binding.set_binding(
-                db,
-                tenant_id=request.tenant_id,
-                agent_id=source_id,
-                repo_url="example/source",
-                default_branch="main",
-                ma_secret_ref="opaque-source-credential",
-                proof=None,
-            )
         assert (
             await agent_memory_stores.get_memory_store_id(
                 db,
@@ -452,7 +441,7 @@ async def test_complete_source_obligation_capture_refuses_before_target_io(
     expected = {"memory", "environment", obligation}
     if obligation == "credentials":
         expected.add("mcp")
-    if obligation in ("files", "repository"):
+    if obligation == "files":
         expected.add("credentials")
     assert set(detail.missing) == expected
     assert len(captured) == 1
@@ -480,8 +469,6 @@ async def test_complete_source_obligation_capture_refuses_before_target_io(
         assert source.effective_spec.mcp_servers[0].name == "required-source-mcp"
     elif obligation in ("files", "credentials"):
         assert source.resource_requirements and source.resource_generations
-    elif obligation == "repository":
-        assert source.repository_sources[0].repository_url == "https://github.com/example/source"
     elif obligation == "environment":
         assert source.environment is not None
         assert source.environment.native["config"]["packages"]["pip"] == [
@@ -714,7 +701,6 @@ async def test_complete_declared_worker_proof_consumes_actual_native_counterpart
         "tools",
         "skills",
         "mcp",
-        "repository",
         "ask_without_tools",
         "credentials",
         "files",
@@ -738,20 +724,7 @@ async def test_explicit_drops_do_not_discharge_unproved_obligations(
 
     request, runtime, owned, transport = explicit_worker_request
     worker = request.worker
-    if failure in ("tools", "skills", "mcp", "repository"):
-        if failure == "repository":
-            from daimon.core.stores import agent_repo_binding
-
-            async with request.deps.sessionmaker.begin() as db:
-                await agent_repo_binding.set_binding(
-                    db,
-                    tenant_id=request.tenant_id,
-                    agent_id=worker.permissions.agent_id,
-                    repo_url="example/source",
-                    default_branch="main",
-                    ma_secret_ref="unread",
-                    proof=None,
-                )
+    if failure in ("tools", "skills", "mcp"):
         removed = {failure, "tools"} if failure == "mcp" else {failure}
         spec = worker.spec.model_copy(
             update={"declared_drops": tuple(x for x in worker.declared_drops if x not in removed)}

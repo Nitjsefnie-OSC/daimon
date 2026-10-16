@@ -816,60 +816,8 @@ def validate_github_app_slug(value: str | None) -> str | None:
 
 
 class GithubSettings(BaseModel):
-    """GitHub repository access config (App-or-PAT; no OAuth flow). All fields are
-    optional so deployments without GitHub App or PAT config keep working.
+    """Size limits for GitHub skill imports."""
 
-    Cloning via the GitHub App requires only app_id + app_private_key.
-    app_slug is needed only to construct the App's install link; a
-    deployment that never surfaces that link can leave it unset.
-    webhook_secret is optional and required only for the skill-sync
-    push-driven resync webhook.
-    """
-
-    oauth_scopes: tuple[str, ...] = Field(
-        default=(
-            "repo",
-            "read:user",
-            "read:org",
-            "workflow",
-        ),
-        description=(
-            "OAuth scopes requested when a GitHub token-broker flow is used. "
-            "Not consulted for GitHub App or PAT authentication."
-        ),
-    )
-    app_id: str | None = Field(
-        default=None,
-        description="GitHub App ID used to mint short-lived installation tokens for repo cloning.",
-    )
-    app_private_key: SecretStr | None = Field(
-        default=None,
-        description="Private key (PEM) for the GitHub App identified by app_id.",
-    )
-    app_slug: str | None = Field(
-        default=None,
-        description=(
-            "GitHub App's URL name, used to build the App's install link so "
-            "members can be pointed at it from chat and from the setup "
-            "panel. Cloning does not need it, so a deployment that never "
-            "surfaces the install link can leave it unset."
-        ),
-    )
-    webhook_secret: SecretStr | None = Field(
-        default=None,
-        description=(
-            "Secret used to verify GitHub webhook payload signatures. Required "
-            "only to enable the skill-sync push-driven resync webhook."
-        ),
-    )
-    fallback_pat: SecretStr | None = Field(
-        default=None,
-        description=(
-            "Operator-wide personal access token used as the clone credential "
-            "for public-repo bindings that have no per-agent credential. "
-            "Needs no scopes — any valid token clones a public repo."
-        ),
-    )
     max_tarball_bytes: int = Field(
         default=50 * 1024 * 1024,
         description=(
@@ -889,16 +837,6 @@ class GithubSettings(BaseModel):
             "recommended in production)."
         ),
     )
-
-    @field_validator("app_private_key", mode="before")
-    @classmethod
-    def _decode_base64_private_key(cls, value: object) -> object:
-        return decode_github_app_private_key(value)
-
-    @field_validator("app_slug")
-    @classmethod
-    def _validate_app_slug(cls, value: str | None) -> str | None:
-        return validate_github_app_slug(value)
 
 
 class GithubAppSettings(BaseModel):

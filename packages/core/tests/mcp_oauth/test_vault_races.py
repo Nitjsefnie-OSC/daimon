@@ -42,7 +42,6 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.complete import McpOAuthCompletion, complete_mcp_oauth_flow
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse
 from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
-from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL
 from daimon.core.mcp_vault import ensure_agent_mcp_vault as real_ensure_agent_mcp_vault
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import credential_requests as requests_store
@@ -320,9 +319,6 @@ async def _seed_flow_and_shared_token(
             scope="default",
         )
         assert saved is not None
-    if url == GITHUB_COPILOT_MCP_URL:
-        # The agent's GitHub PAT is what every fresh session writes there.
-        return saved
     # The agent's shared token for the same server: what every turn mirrors.
     await save_agent_mcp_credential(
         sessionmaker=sessionmaker,
@@ -339,9 +335,7 @@ async def _seed_flow_and_shared_token(
 #   remirror       - a reused session's `sync_agent_mcp_credentials` mirrors the
 #                    agent's shared token for the server the grant replaces.
 #   fresh_session  - a new session's `create_session` mirrors that same token.
-#   copilot        - a new session's `create_session` writes the agent's GitHub
-#                    PAT while the person signs in to the GitHub Copilot server.
-_RACER_PATHS = ("remirror", "fresh_session", "copilot")
+_RACER_PATHS = ("remirror", "fresh_session")
 
 
 @pytest.mark.parametrize("path", _RACER_PATHS)
@@ -358,13 +352,13 @@ async def test_a_sign_in_survives_three_turns_mirroring_while_the_grant_is_writt
     reaches its write, so the grant and that write must both hold the lock:
     either one alone leaves the window open. Every racer takes the same
     path, so each lock the paths hold (the remirror's, `create_session`'s
-    mirror, `create_session`'s Copilot write) is the only thing between one
+    mirror) is the only thing between one
     parametrization and the 409.
 
     Separate engines, committed rows: the advisory lock is connection-scoped,
     so the shared single-connection fixture would hide it.
     """
-    url = GITHUB_COPILOT_MCP_URL if path == "copilot" else _URL
+    url = _URL
     dsn = os.environ["DAIMON_DATABASE__TEST_URL"]
     engines = [build_test_engine(dsn, db_schema, poolclass=NullPool) for _ in range(4)]
     factories = [async_sessionmaker(bind=e, expire_on_commit=False) for e in engines]
@@ -375,16 +369,13 @@ async def test_a_sign_in_survives_three_turns_mirroring_while_the_grant_is_writt
         jwt_cred = _static("vcrd_jwt", "v0")
         jwt_cred["auth"] = {"type": "static_bearer", "mcp_server_url": _PUBLIC_URL}
         agent_cred = _static("vcrd_shared", "v0")
-        if path == "copilot":
-            agent_cred["auth"] = {"type": "static_bearer", "mcp_server_url": url}
-        else:
-            (stored,) = await resolve_agent_mcp_credentials(
-                sessionmaker=factories[0],
-                fernet=fernet,
-                tenant_id=flow.tenant_id,
-                agent_id=flow.agent_id,
-            )
-            agent_cred = _static("vcrd_shared", stored.version)
+        (stored,) = await resolve_agent_mcp_credentials(
+            sessionmaker=factories[0],
+            fernet=fernet,
+            tenant_id=flow.tenant_id,
+            agent_id=flow.agent_id,
+        )
+        agent_cred = _static("vcrd_shared", stored.version)
         vault = SlowVault([jwt_cred, agent_cred], display_name=display)
         client = vault.client()
         grant_done = asyncio.Event()
@@ -429,15 +420,11 @@ async def test_a_sign_in_survives_three_turns_mirroring_while_the_grant_is_writt
                 await asyncio.sleep(0.005)
             return vault_id
 
-        async def agent_pat(**_kwargs: Any) -> str | None:
-            return "ghp_agent" if path == "copilot" else None
-
         async def memory_mount(*_args: Any, **_kwargs: Any) -> dict[str, str]:
             return {"type": "memory_store", "memory_store_id": "memstore_test"}
 
         monkeypatch.setattr(agent_mcp_credentials, "ensure_agent_mcp_vault", ensure_then_wait)
         monkeypatch.setattr(sessions, "ensure_agent_mcp_vault", ensure_then_wait)
-        monkeypatch.setattr(sessions, "get_pat", agent_pat)
         monkeypatch.setattr(sessions, "ensure_memory_store_and_mount", memory_mount)
 
         async def turn(nth: int) -> None:

@@ -18,7 +18,6 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, legacy_iter
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic.credential_schemas import CredentialCreate
 from mux.drivers.anthropic.resources.artifacts import Artifacts
 from mux.drivers.anthropic.resources.session_tools import EventQuery, SessionSend, SessionTools
 from mux.drivers.anthropic.resources.skills import NativeSkillVersions
@@ -134,41 +133,6 @@ async def walk_vault_credentials(
         port.credential_walk_native(scope, resource_ref(backend, "vault", vault_id, scope=scope))
     ):
         yield construct_type_unchecked(value=item.native, type_=BetaManagedAgentsCredential)
-
-
-async def create_repo_credential(
-    client: AsyncAnthropic, vault_id: str, *, token: str, metadata: Mapping[str, str], scope: Scope
-) -> BetaManagedAgentsCredential:
-    reference = token_hex(16)
-    materials = {reference: token}
-    try:
-        backend = managed_agents(
-            client,
-            scope=scope,
-            resources=frozenset({("vault", vault_id)}),
-            secrets=lambda _scope, ref: materials[ref],
-        )
-        port = backend.extension(Vaults, namespace="anthropic.vaults", version=1)
-        identity = await legacy_call(
-            port.create_credential_id(
-                scope,
-                resource_ref(backend, "vault", vault_id, scope=scope),
-                CredentialCreate.model_validate(
-                    {
-                        "auth": {
-                            "type": "static_bearer",
-                            "mcp_server_url": "https://github.com",
-                            "token_ref": reference,
-                        },
-                        "metadata": dict(metadata),
-                    }
-                ),
-                key=token_hex(16),
-            )
-        )
-        return construct_type_unchecked(value={"id": identity}, type_=BetaManagedAgentsCredential)
-    finally:
-        materials.clear()
 
 
 async def walk_skill_versions(

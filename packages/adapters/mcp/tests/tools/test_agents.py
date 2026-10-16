@@ -37,23 +37,17 @@ from daimon.adapters.mcp.tools.agents import (
 from daimon.core import agent_fork
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK
-from daimon.core.agent_mcp_credentials import (
-    resolve_agent_mcp_credentials,
-    save_agent_mcp_credential,
-)
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED, tenant_scoped_display_title
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.github_credentials import build_multifernet, get_pat, upsert_credential_encrypted
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routing_facts import UNROUTED_LINE
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.specs import AgentSpec, SkillRef, SkillRepo
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
-from daimon.core.stores.agent_github_binding import set_agent_github_binding
-from daimon.core.stores.agent_repo_binding import get_binding, set_binding
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import upsert_user_skill
@@ -2017,88 +2011,6 @@ def _fork_agent_router(
         ),
     )
     return router
-
-
-async def test_fork_agent_impl_copies_no_credential_binding_or_mcp_token(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A fork starts credential-less: no GitHub PAT, no repo binding or proof and no
-    agent-wide MCP token, so copying an agent never hands out another's access."""
-    tenant_id = uuid.uuid4()
-    account_id = uuid.uuid4()
-    await make_tenant(db_session, platform="discord", workspace_id=str(tenant_id), id=tenant_id)
-    source_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_src_cred")
-    fork_agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_fork_cred")
-
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-    plaintext = "ghp_source_token_xxxx1234"
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=source_agent_uuid,
-        github_login="(inline-pat)",
-        plaintext_token=plaintext,
-        scopes=("repo", "read:user"),
-    )
-    async with db_session_factory() as s, s.begin():
-        await set_agent_github_binding(
-            s, agent_id=source_agent_uuid, principal_id=source_agent_uuid
-        )
-        await set_binding(
-            s,
-            tenant_id=tenant_id,
-            agent_id=source_agent_uuid,
-            repo_url="github.com/acme/repo",
-            default_branch="main",
-            ma_secret_ref=f"inline-pat:{source_agent_uuid}",
-            proof=None,
-        )
-    await save_agent_mcp_credential(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        tenant_id=tenant_id,
-        agent_id=source_agent_uuid,
-        mcp_server_url="https://crm.example.com/mcp",
-        plaintext_token="tok_client_a",
-    )
-
-    router = _fork_agent_router(
-        tenant_id=tenant_id,
-        source_id="ag_src_cred",
-        source_name="source",
-        fork_id="ag_fork_cred",
-        fork_name="myfork",
-    )
-    client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
-
-    await _fork_agent_impl(
-        _runtime(client, session_factory=db_session_factory, fernet=fernet),
-        auth,
-        source_name="source",
-        new_name="myfork",
-    )
-
-    fork_pat = await get_pat(
-        principal_id=fork_agent_uuid,
-        agent_id=fork_agent_uuid,
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-    )
-    assert fork_pat is None, "the fork must not hold the source's GitHub token"
-    async with db_session_factory() as s:
-        assert await get_binding(s, tenant_id=tenant_id, agent_id=fork_agent_uuid) is None, (
-            "the fork must not inherit the source's repo binding or its proof"
-        )
-    forked_tokens = await resolve_agent_mcp_credentials(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        tenant_id=tenant_id,
-        agent_id=fork_agent_uuid,
-    )
-    assert forked_tokens == (), "the fork must not hold the source's MCP tokens"
 
 
 async def test_update_agent_impl_passes_skills_to_ma_when_provided(

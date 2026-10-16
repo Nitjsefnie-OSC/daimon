@@ -200,7 +200,7 @@ class TenantDependentCounts:
     tenant_ledger: int
     tenant_user_caps: int
     agent_files: int
-    agent_repo_binding: int
+    agent_github_grants: int
     tenant_config: int
     channel_config: int
 
@@ -213,7 +213,7 @@ class TenantDependentCounts:
             + self.tenant_ledger
             + self.tenant_user_caps
             + self.agent_files
-            + self.agent_repo_binding
+            + self.agent_github_grants
             + self.tenant_config
             + self.channel_config
         )
@@ -751,7 +751,7 @@ class RepoAccessProof(BaseModel):
 
 
 class AgentRepoBindingRow(BaseModel):
-    """Pydantic row for AgentRepoBinding."""
+    """Pydantic row for AgentGitHubGrant."""
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

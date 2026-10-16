@@ -13,7 +13,7 @@ from daimon.core._models import (
     Account,
     AccountGitHubLink,
     AgentFile,
-    AgentRepoBinding,
+    AgentGitHubGrant,
     ChannelConfig,
     PaymentEvent,
     Routine,
@@ -221,11 +221,14 @@ async def get_tenant_dependent_counts(
             select(func.count()).select_from(AgentFile).where(AgentFile.tenant_id == tenant_id)
         )
     ).scalar_one()
-    agent_repo_binding = (
+    agent_github_grants = (
         await session.execute(
             select(func.count())
-            .select_from(AgentRepoBinding)
-            .where(AgentRepoBinding.tenant_id == tenant_id)
+            .select_from(AgentGitHubGrant)
+            .where(
+                AgentGitHubGrant.tenant_id == tenant_id,
+                AgentGitHubGrant.app_visible.is_(True),
+            )
         )
     ).scalar_one()
     tenant_config = (
@@ -249,7 +252,7 @@ async def get_tenant_dependent_counts(
         tenant_ledger=tenant_ledger,
         tenant_user_caps=tenant_user_caps,
         agent_files=agent_files,
-        agent_repo_binding=agent_repo_binding,
+        agent_github_grants=agent_github_grants,
         tenant_config=tenant_config,
         channel_config=channel_config,
     )

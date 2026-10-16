@@ -20,8 +20,6 @@ def test_teams_details_lists_repos_and_working_repo_without_grant_actions() -> N
         applies_note="Changes apply next turn.",
     )
     panel = GrantsPanel(
-        mode="app",
-        has_pat=False,
         working_repo="owner/work",
         repos=(
             RepoChoice(
@@ -50,6 +48,6 @@ def test_teams_details_lists_repos_and_working_repo_without_grant_actions() -> N
         here="channel",
         page=0,
         coding_tools=False,
-        github_panel=GrantsPanel(mode="app", has_pat=False, working_repo=None, repos=()),
+        github_panel=GrantsPanel(repos=(), working_repo=None),
     )
     assert "No working repo" in str(empty.model_dump())

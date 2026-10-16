@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- GitHub repository access now uses the GitHub App for every agent. Migration deletes staged grants, keeps live App grants, carries a matching working repo, and retires saved GitHub keys. `daimon github retirement-preview` reports staged rows and saved-key coverage before migration. Private skill imports use an active App grant; missing access posts Connect GitHub. Operators can preview and delete retired Managed Agents vault credentials with `daimon github cleanup-legacy-vault` (`--apply` deletes them).
+
 ### Fixed
 
 - Require fleet reviewers to use a different backend from the primary, including retained reviews checked before summary delivery.

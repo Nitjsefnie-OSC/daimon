@@ -15,9 +15,7 @@ from decimal import Decimal
 import httpx
 import pytest
 from daimon.core import channel_backend, mux_backend
-from daimon.core._models import AgentGitHubMode
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.shared_threads import shared_slot
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.mux_state import PostgresStateStore
@@ -77,13 +75,6 @@ async def test_c14_anthropic_thread_retains_a_new_thread_runs_b_and_missing_a_re
             db,
             tenant_id=TENANT,
             policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai")),
-        )
-        db.add(
-            AgentGitHubMode(
-                tenant_id=TENANT,
-                agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id="ag_parity_test"),
-                mode="app",
-            )
         )
         original = await channel_backend.set_channel_backend(
             db, REVISION.channel, BackendConfig(thread_mode="shared")

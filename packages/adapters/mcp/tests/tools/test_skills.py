@@ -14,20 +14,21 @@ from anthropic.types.beta import (
     BetaManagedAgentsCustomSkill,
     SkillListResponse,
 )
-from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.skills import (
     SkillDetail,
     SkillInfo,
-    _delete_impl,
-    _get_impl,
-    _list_impl,
-    _sync_impl,
+    _delete_impl,  # pyright: ignore[reportPrivateUsage]
+    _get_impl,  # pyright: ignore[reportPrivateUsage]
+    _list_impl,  # pyright: ignore[reportPrivateUsage]
+    _sync_impl,  # pyright: ignore[reportPrivateUsage]
     register_skill_tools,
 )
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.channel_skills import add_channel_skill
+from daimon.core.stores.domain import Role
 from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
@@ -791,34 +792,9 @@ class _SeedAuthMiddleware(Middleware):
         context: MiddlewareContext[Any],
         call_next: Any,
     ) -> Any:
+        assert context.fastmcp_context is not None
         await context.fastmcp_context.set_state("auth", self._auth, serializable=False)
         return await call_next(context)
-
-
-_DISPATCH_TEST_TENANT_ID = uuid.UUID("00000000-0001-0001-0001-000000000001")
-
-
-def _skills_one_router() -> MARouter:
-    """Router with one own-namespace skill for dispatch identity tests."""
-    router = MARouter()
-    router.add(
-        "GET",
-        r"/v1/skills",
-        lambda _req, _m: list_response(
-            [
-                SkillListResponse(
-                    id="sk_1",
-                    display_title=f"{str(_DISPATCH_TEST_TENANT_ID)[:8]}-my-skill",
-                    source="custom",
-                    type="custom",
-                    created_at="2026-01-01T00:00:00Z",
-                    updated_at="2026-01-01T00:00:00Z",
-                    latest_version="v1",
-                ).model_dump(mode="json")
-            ]
-        ),
-    )
-    return router
 
 
 def _registered_mcp(client: AsyncAnthropic, auth: AuthIdentity) -> FastMCP:
@@ -838,6 +814,7 @@ async def test_register_skill_tools_uses_only_canonical_names() -> None:
         f"the skill catalogue must expose exactly the four canonical names: {names}"
     )
     delete_skill = await mcp.get_tool("delete_skill")
+    assert delete_skill is not None
     assert "admin" in delete_skill.tags, "shared skill deletion remains admin-only"
 
 
@@ -990,7 +967,7 @@ async def test_sync_impl_anonymous_404_names_the_credential_remedy(
         auth = AuthIdentity(
             account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
         )
-        with pytest.raises(ToolError, match="request_skill_repo_token") as excinfo:
+        with pytest.raises(ToolError, match="github_connect") as excinfo:
             await _sync_impl(
                 _runtime(build_fake_anthropic(MARouter().dispatch), sessionmaker),
                 auth,
@@ -1009,7 +986,7 @@ async def test_sync_impl_404_with_a_token_does_not_blame_credentials(
     from daimon.core.skills.fetch import GitHubFetchError
 
     with (
-        patch("daimon.adapters.mcp.tools.skills._resolve_sync_token", return_value="ghp_x"),
+        patch("daimon.adapters.mcp.tools.skills._resolve_sync_token", return_value="app_token"),
         patch("daimon.core.skills.pipeline.fetch_repo") as mock_fetch,
     ):
         mock_fetch.side_effect = GitHubFetchError("HTTP 404", status_code=404)
@@ -1026,9 +1003,46 @@ async def test_sync_impl_404_with_a_token_does_not_blame_credentials(
                 path="",
             )
 
-    assert "request_skill_repo_token" not in str(excinfo.value), (
+    assert "github_connect" not in str(excinfo.value), (
         "a 404 on an authenticated fetch is a bad url/branch, not a missing credential"
     )
+
+
+async def test_private_skill_import_posts_connect_button_without_grant(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from daimon.core.skills.fetch import GitHubFetchError
+
+    connect = AsyncMock()
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.skills.resolve_setup_agent",
+            return_value=SimpleNamespace(
+                id="ma_1", name="agent", metadata={"daimon_account": "user"}
+            ),
+        ),
+        patch("daimon.adapters.mcp.tools.skills._resolve_sync_token", return_value=None),
+        patch("daimon.adapters.mcp.tools.skills._github_connect_impl", connect),
+        patch("daimon.core.skills.pipeline.fetch_repo") as fetch,
+    ):
+        fetch.side_effect = GitHubFetchError("HTTP 404", status_code=404)
+        auth = AuthIdentity(
+            account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
+        )
+        with pytest.raises(ToolError, match="Connect GitHub button was posted"):
+            await _sync_impl(
+                _runtime(build_fake_anthropic(MARouter().dispatch), sessionmaker),
+                auth,
+                url="https://github.com/org/private-repo",
+                branch="main",
+                path="",
+                agent_name="agent",
+                origin_context_id=str(uuid.uuid4()),
+            )
+    connect.assert_awaited_once()
 
 
 async def test_sync_impl_refuses_attach_when_registry_skill_collides_with_scoped_mount(

@@ -94,15 +94,11 @@ async def sessions_create(
         mcp_settings=rt.settings.mcp,
         agent_uuid=agent_uuid,
         session_factory=rt.sessionmaker,
-        github_fallback_pat=(
-            rt.settings.github.fallback_pat.get_secret_value()
-            if rt.settings.github.fallback_pat is not None
-            else None
-        ),
-        github_app_id=rt.settings.github.app_id,
+        github_fallback_pat=None,
+        github_app_id=rt.settings.github_app.app_id,
         github_app_private_key=(
-            rt.settings.github.app_private_key.get_secret_value()
-            if rt.settings.github.app_private_key is not None
+            rt.settings.github_app.private_key.get_secret_value()
+            if rt.settings.github_app.private_key is not None
             else None
         ),
         agent_github_app=getattr(rt.settings, "github_app", None),

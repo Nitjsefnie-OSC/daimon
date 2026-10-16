@@ -119,13 +119,15 @@ def install_host(
         assert kwargs["account_id"] == ADMIN
         return account
 
-    async def deactivate(*args: object, **kwargs: object) -> None:
+    async def change_grant(*args: object, **kwargs: object) -> object:
         assert kwargs["tenant_id"] == TENANT
         assert kwargs["agent_id"] == AGENT
-        assert kwargs["changed_by_account_id"] == ADMIN
+        assert kwargs["repo_id"] == 101
+        assert kwargs.get("changed_by_account_id", kwargs.get("granted_by_account_id")) == ADMIN
+        return SimpleNamespace(repo_id=101)
 
-    async def mode(*args: object, **kwargs: object) -> str:
-        return "app"
+    async def urls(*args: object, **kwargs: object) -> tuple[str, ...]:
+        return ()
 
     async def sessions(*args: object, **kwargs: object) -> list[ThreadSessionRow]:
         assert kwargs["tenant_id"] == TENANT
@@ -165,6 +167,7 @@ def install_host(
             anthropic=SimpleNamespace(
                 api_key=SecretStr("offline-test"), base_url="https://api.anthropic.com"
             ),
+            github_app=SimpleNamespace(),
         ),
     )
     monkeypatch.setattr(command, "Console", console_factory)
@@ -174,9 +177,9 @@ def install_host(
     monkeypatch.setattr(command, "AsyncAnthropic", client_factory)
     monkeypatch.setattr(command, "cli_account_id", lookup_admin)
     monkeypatch.setattr(command, "get_account_with_tenant", lookup_account)
-    monkeypatch.setattr(command, "activate_agent", deactivate)
-    monkeypatch.setattr(command, "deactivate_agent", deactivate)
-    monkeypatch.setattr(command, "get_agent_mode", mode)
+    monkeypatch.setattr(command, "stage_grant", change_grant)
+    monkeypatch.setattr(command, "remove_grant", change_grant)
+    monkeypatch.setattr(command, "effective_repo_urls", urls)
     monkeypatch.setattr(command, "list_live_sessions_for_agent", sessions)
     monkeypatch.setattr(command, "revoke_session_tokens", revoke)
     monkeypatch.setattr(command, "mark_dead", mark)
@@ -184,7 +187,7 @@ def install_host(
     return tasks, output, engine
 
 
-@pytest.mark.parametrize("action", ["activate", "deactivate"])
+@pytest.mark.parametrize("action", ["add", "remove"])
 @pytest.mark.parametrize(
     ("status", "message"),
     [
@@ -252,7 +255,7 @@ async def test_grant_cleanup_callsite_preserves_requests_errors_and_order(
 
     monkeypatch.setattr(command, "archive_session", session_archive)
     monkeypatch.setattr(command, "archive_app_vault", vault_archive)
-    command._run_grant_command(TENANT, action, AGENT)
+    command._run_grant_command(TENANT, action, AGENT, repo=101)
     assert len(tasks) == 1
     if expected_error is None:
         await tasks[0]
@@ -271,9 +274,7 @@ async def test_grant_cleanup_callsite_preserves_requests_errors_and_order(
     assert scopes[0][1].account_id == str(ADMIN)
     assert not scopes[0][1].is_platform
     assert not scopes[0][1].is_legacy_host_authorized
-    assert output.getvalue() == (
-        "app mode active\n" if action == "activate" else "legacy mode active\n"
-    )
+    assert output.getvalue() == ("updated 101\n" if action == "add" else "removed\n")
     assert engine.disposed
 
 
@@ -311,7 +312,7 @@ async def test_session_archive_error_keeps_type_and_stops_cleanup(
             platform_user_id="operator",
         ),
     )
-    command._run_grant_command(TENANT, "deactivate", AGENT)
+    command._run_grant_command(TENANT, "remove", AGENT, repo=101)
     with pytest.raises(type(expected.value)) as actual:
         await tasks[0]
     assert str(actual.value) == str(expected.value)
@@ -319,7 +320,7 @@ async def test_session_archive_error_keeps_type_and_stops_cleanup(
         transport.assert_consumed()
     assert [r.to_dict() for r in after.requests] == [r.to_dict() for r in before.requests]
     assert after_effects == before_effects == ["/v1/sessions/session1/archive"]
-    assert output.getvalue() == "legacy mode active\n"
+    assert output.getvalue() == "removed\n"
     assert engine.disposed
 
 
@@ -343,7 +344,7 @@ async def test_grant_cleanup_keeps_admin_gate_before_provider_io(
     transport = ScriptedTransport()
     effects: list[str] = []
     tasks, output, engine = install_host(monkeypatch, transport, effects, account=account)
-    command._run_grant_command(TENANT, "deactivate", AGENT)
+    command._run_grant_command(TENANT, "remove", AGENT, repo=101)
     with pytest.raises(ValueError, match="current CLI user is not a workspace admin"):
         await tasks[0]
     transport.assert_consumed()

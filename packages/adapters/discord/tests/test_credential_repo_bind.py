@@ -29,7 +29,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from cryptography.fernet import Fernet
 from daimon.adapters.discord.agent_setup import authz as panel_authz
 from daimon.adapters.discord.agent_setup.state import RosterEntry
-from daimon.adapters.discord.agent_setup.write import load_agent_inline_pat, store_inline_pat
+from daimon.adapters.discord.agent_setup.write import load_agent_inline_pat
 from daimon.adapters.discord.credential_repo_bind import (
     _AGENT_GONE_MESSAGE,
     _SHARED_AGENT_MESSAGE,
@@ -517,43 +517,6 @@ async def test_decision_table_parity_with_the_panel_gate(
 # httpx.MockTransport -- no Discord interaction is needed at all.
 
 
-async def test_pasted_pat_that_github_accepts_returns_inline_pat_ref_and_is_readable_back(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    agent_id = uuid.uuid4()
-    account_id = uuid.uuid4()
-    now = datetime.now(UTC)
-    calls: list[httpx.Request] = []
-    transport = _repo_probe_transport(calls=calls, accepted_pats=frozenset({"ghp_good"}))
-    runtime = _runtime(
-        sessionmaker=db_session_factory,
-        anthropic=build_stub_anthropic(),
-        crypto_keys=(Fernet.generate_key().decode(),),
-    )
-
-    async with httpx.AsyncClient(transport=transport) as http_client:
-        ref, proof = await resolve_repo_binding_credential(
-            runtime,
-            http_client,
-            agent_id=agent_id,
-            account_id=account_id,
-            repo_url="github.com/o/r",
-            pasted_pat="ghp_good",
-            now=now,
-        )
-
-    assert ref == f"inline-pat:{agent_id}", (
-        "a pasted, GitHub-accepted PAT must resolve to the inline-pat ref"
-    )
-    assert proof.kind == "pat"
-    assert proof.at == now
-    assert proof.account_id == account_id
-    stored = await load_agent_inline_pat(runtime, agent_id=agent_id)
-    assert stored == "ghp_good", (
-        "the accepted PAT must be readable back through load_agent_inline_pat"
-    )
-
-
 async def test_pasted_pat_that_github_refuses_raises_and_writes_no_credential(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -641,78 +604,3 @@ async def test_blank_pat_no_stored_pat_private_repo_raises_and_writes_nothing(
 
     stored = await load_agent_inline_pat(runtime, agent_id=agent_id)
     assert stored is None, "a private repo with no token must never write a credential"
-
-
-async def test_blank_pat_stored_pat_covers_repo_returns_inline_pat_ref_skipping_public_probe(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    agent_id = uuid.uuid4()
-    account_id = uuid.uuid4()
-    now = datetime.now(UTC)
-    runtime = _runtime(
-        sessionmaker=db_session_factory,
-        anthropic=build_stub_anthropic(),
-        crypto_keys=(Fernet.generate_key().decode(),),
-    )
-    await store_inline_pat(
-        runtime, account_id=account_id, agent_id=agent_id, plaintext_pat="ghp_stored_ok"
-    )
-    calls: list[httpx.Request] = []
-    transport = _repo_probe_transport(calls=calls, accepted_pats=frozenset({"ghp_stored_ok"}))
-
-    async with httpx.AsyncClient(transport=transport) as http_client:
-        ref, proof = await resolve_repo_binding_credential(
-            runtime,
-            http_client,
-            agent_id=agent_id,
-            account_id=account_id,
-            repo_url="github.com/o/r",
-            pasted_pat=None,
-            now=now,
-        )
-
-    assert ref == f"inline-pat:{agent_id}", (
-        "an existing stored PAT that covers the repo must win over any public probe"
-    )
-    assert proof.kind == "pat"
-    assert len(calls) >= 1
-    assert all(call.headers.get("authorization") is not None for call in calls), (
-        "a stored PAT that covers the repo must skip the unauthenticated public probe entirely"
-    )
-
-
-async def test_blank_pat_stored_pat_does_not_cover_repo_raises_without_falling_through(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    agent_id = uuid.uuid4()
-    account_id = uuid.uuid4()
-    runtime = _runtime(
-        sessionmaker=db_session_factory,
-        anthropic=build_stub_anthropic(),
-        crypto_keys=(Fernet.generate_key().decode(),),
-    )
-    await store_inline_pat(
-        runtime, account_id=account_id, agent_id=agent_id, plaintext_pat="ghp_stored_stale"
-    )
-    calls: list[httpx.Request] = []
-    # accepted_pats is empty AND public=True: if the code wrongly fell
-    # through to the public probe on a mismatch, this would return anon:
-    # instead of raising -- exactly what this test pins against.
-    transport = _repo_probe_transport(calls=calls, accepted_pats=frozenset(), public=True)
-
-    async with httpx.AsyncClient(transport=transport) as http_client:
-        with pytest.raises(DaimonError, match="already has a stored GitHub token"):
-            await resolve_repo_binding_credential(
-                runtime,
-                http_client,
-                agent_id=agent_id,
-                account_id=account_id,
-                repo_url="github.com/o/r",
-                pasted_pat=None,
-                now=datetime.now(UTC),
-            )
-
-    assert len(calls) >= 1
-    assert all(call.headers.get("authorization") is not None for call in calls), (
-        "a stored PAT that fails re-verification must never fall through to the public probe"
-    )

@@ -120,7 +120,6 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
         visible_ids = await _visible_channel_ids(client, user_id)
         visible_ids.add(channel_id)
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-        github = runtime.settings.github
         async with runtime.sessionmaker() as session:
             principal = await find_platform_principal(
                 session, tenant_id=tenant_id, platform="slack", external_id=user_id
@@ -135,8 +134,8 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 channel_level_only=True,
                 default=runtime.deployment_default,
                 github=GitHubDeploymentFacts(
-                    has_fallback_pat=github.fallback_pat is not None,
-                    app_configured=github.app_id is not None and github.app_private_key is not None,
+                    app_configured=runtime.settings.github_app.app_id is not None
+                    and runtime.settings.github_app.private_key is not None,
                 ),
                 public_mcp_url=str(runtime.settings.mcp.public_url)
                 if runtime.settings.mcp.public_url is not None

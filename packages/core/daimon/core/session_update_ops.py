@@ -27,7 +27,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
 
-import httpx
 import structlog
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -51,16 +50,12 @@ from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import assemble_env_bytes, upload_env_file
 from daimon.core.errors import DaimonError
 from daimon.core.github_app_session import rotate_live_app_tokens
-from daimon.core.github_credentials import get_pat
-from daimon.core.github_repo_auth import resolve_clone_token
-from daimon.core.mux_compat import rotate_session_repo_token
 from daimon.core.session_compat import (
     ChangeReason,
     RemirrorVaultCredentials,
     ReplaceEnvFile,
     ReplaceToolsAndMcpServers,
     RotateAppTokens,
-    RotateRepoToken,
     UpdateOp,
 )
 from daimon.core.session_ports_compat import (
@@ -80,10 +75,8 @@ from daimon.core.session_snapshot import (
     session_tools,
 )
 from daimon.core.stores.agent_files import list_agent_files
-from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.tool_safety import ToolSafetyPolicy
 from mux.contracts.ids import Revision, Scope
-from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -224,50 +217,6 @@ async def _replace_env_file(
     )
 
 
-async def _rotate_repo_token(
-    anthropic: AsyncAnthropic,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    op: RotateRepoToken,
-    session_id: str,
-    tenant_id: uuid.UUID,
-    agent_uuid: uuid.UUID,
-    fernet: MultiFernet | None,
-    github_fallback_pat: str | None,
-    github_app_id: str | None,
-    github_app_private_key: str | None,
-    now: dt.datetime,
-    scope: Scope,
-) -> bool:
-    """Mint a fresh clone credential and hand it to the mounted repo resource."""
-    async with sessionmaker() as session:
-        binding = await get_binding(session, tenant_id=tenant_id, agent_id=agent_uuid)
-    if binding is None:
-        return False
-
-    per_agent_pat = (
-        None
-        if fernet is None
-        else await get_pat(
-            principal_id=agent_uuid, agent_id=agent_uuid, sessionmaker=sessionmaker, fernet=fernet
-        )
-    )
-    async with httpx.AsyncClient() as client:
-        token = await resolve_clone_token(
-            client,
-            binding=binding,
-            per_agent_pat=per_agent_pat,
-            fallback_pat=github_fallback_pat,
-            app_id=github_app_id,
-            app_private_key=(
-                None if github_app_private_key is None else SecretStr(github_app_private_key)
-            ),
-            now=int(now.timestamp()),
-        )
-    await rotate_session_repo_token(anthropic, session_id, op.resource_id, token, scope=scope)
-    return True
-
-
 async def apply_update_ops(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -367,26 +316,6 @@ async def apply_update_ops(
                     }
                 )
                 applied.extend(("tools", "mcp_servers"))
-            case RotateRepoToken():
-                rotated = await _rotate_repo_token(
-                    anthropic,
-                    sessionmaker,
-                    op=op,
-                    session_id=session_id,
-                    tenant_id=tenant_id,
-                    agent_uuid=agent_uuid,
-                    fernet=fernet,
-                    github_fallback_pat=github_fallback_pat,
-                    github_app_id=github_app_id,
-                    github_app_private_key=github_app_private_key,
-                    now=now,
-                    scope=scope,
-                )
-                if rotated:
-                    snapshot = snapshot.model_copy(
-                        update={"repo_token_issued_at": int(now.timestamp())}
-                    )
-                    applied.append("repo_token_age")
             case RotateAppTokens():
                 if snapshot.vault_id is None or fernet is None:
                     raise ValueError("App session has no vault or encryption")

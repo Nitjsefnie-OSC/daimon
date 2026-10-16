@@ -313,16 +313,13 @@ async def test_on_submit_logs_purge_completion_with_upstream_counts_and_without_
         "routines",
         "links",
         "user_skills",
-        "github_credentials",
-        "oauth_states",
         "mcp_tokens",
-        "agent_github_binding",
         "sessions_deleted",
         "sessions_failed",
     }, (
         "D-AUDIT-02: log kwargs must be EXACTLY "
-        "{account_id, principals, routines, links, user_skills, github_credentials, oauth_states, "
-        "mcp_tokens, agent_github_binding, sessions_deleted, sessions_failed}; "
+        "{account_id, principals, routines, links, user_skills, "
+        "mcp_tokens, sessions_deleted, sessions_failed}; "
         f"got {log_keys}. Extra/missing keys break the no-PII contract."
     )
     # Explicit PII-key absence checks:

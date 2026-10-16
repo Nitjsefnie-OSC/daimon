@@ -100,6 +100,7 @@ def _snapshot(*, ma_agent_id: str, model_id: str, environment_id: str = "env_1")
         system_sha256=None,
         skills_sha256=hash_skills([]),
         environment_id=environment_id,
+        github_mode="app",
         repo_url=None,
         repo_branch=None,
         memory_store_id=None,

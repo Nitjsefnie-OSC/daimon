@@ -100,24 +100,6 @@ async def test_set_working_repo_admin_none_and_member_refusal(
     assert allowed.message == "Agent has no working repo now. To set one, ask me for a repo."
     manage_check.assert_awaited_once()
     monkeypatch.setattr(working_tool, "set_working_repo", AsyncMock(return_value="owner/repo"))
-    monkeypatch.setattr(
-        working_tool,
-        "list_agent_repos",
-        AsyncMock(return_value=[SimpleNamespace(full_name="owner/repo", staged=True)]),
-    )
-    pending = await working_tool.set_working_repo_impl(
-        runtime,  # type: ignore[arg-type]
-        admin,
-        origin_context_id=str(uuid.uuid4()),
-        repo_name="owner/repo",
-    )
-    assert pending.pending
-    assert pending.message == (
-        "Agent will use owner/repo as its working repo when GitHub setup finishes."
-    )
-    working_tool.list_agent_repos.return_value = [  # type: ignore[attr-defined]
-        SimpleNamespace(full_name="owner/repo", staged=False)
-    ]
     active = await working_tool.set_working_repo_impl(
         runtime,  # type: ignore[arg-type]
         admin,
@@ -204,10 +186,10 @@ async def test_working_repo_real_manager_and_foreign_scope(
     )
     with pytest.raises(ToolError, match="Ask a server admin"):
         await working_tool.set_working_repo_impl(
-            runtime,
+            runtime,  # type: ignore[arg-type]
             auth,
             origin_context_id=str(uuid.uuid4()),
-            repo_name="none",  # type: ignore[arg-type]
+            repo_name="none",
         )
     async with committing_sessionmaker.begin() as session:
         await set_access_policy(
@@ -220,18 +202,18 @@ async def test_working_repo_real_manager_and_foreign_scope(
     agent.metadata = {"daimon_managed": "true"}
     with pytest.raises(ToolError, match="Ask a server admin"):
         await working_tool.set_working_repo_impl(
-            runtime,
+            runtime,  # type: ignore[arg-type]
             auth,
             origin_context_id=str(uuid.uuid4()),
-            repo_name="none",  # type: ignore[arg-type]
+            repo_name="none",
         )
     agent.metadata = {}
     with pytest.raises(ToolError, match="Connect GitHub"):
         await working_tool.set_working_repo_impl(
-            runtime,
+            runtime,  # type: ignore[arg-type]
             auth,
             origin_context_id=str(uuid.uuid4()),
-            repo_name="owner/foreign",  # type: ignore[arg-type]
+            repo_name="owner/foreign",
         )
 
 

@@ -21,7 +21,7 @@ from daimon.adapters.cli.commands.sessions import (
     sessions_get,
 )
 from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import GithubSettings, Settings
+from daimon.core.config import GithubAppSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -55,7 +55,7 @@ class _FakeSettings:
     tool_safety = ToolSafetyPolicy()
     cli = _FakeCli()
     mcp = _FakeMcp()
-    github = GithubSettings()
+    github_app = GithubAppSettings()
     defaults_root = Path("defaults")
 
 
@@ -334,7 +334,7 @@ class _ConfiguredSettings:
     tool_safety = ToolSafetyPolicy()
     cli = _FakeCli()
     mcp = _ConfiguredMcp()
-    github = GithubSettings()
+    github_app = GithubAppSettings()
     defaults_root = Path("defaults")
 
 

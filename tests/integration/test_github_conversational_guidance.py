@@ -16,7 +16,7 @@ def test_seeded_guidance_describes_one_working_repo_and_token_repos() -> None:
     for body in (setup, CREDENTIAL_GUIDANCE_BLOCK):
         assert "one working repo" in body
         assert "/workspace/<owner>/<repo>" in body
-        assert "by token" in body
+        assert "GitHub App" in body
     assert 'GitHub rules are under "Your credentials & capabilities" above' in prompt
     assert "Your credentials & capabilities" in CREDENTIAL_GUIDANCE_BLOCK
     assert "set_working_repo" in setup
@@ -30,8 +30,7 @@ def test_seeded_guidance_describes_one_working_repo_and_token_repos() -> None:
     assert "the page shows whether it is on this agent's list" in flat
     assert "the GitHub account they signed in with can't open it" in flat
     assert "none" in setup
-    assert "gh repo clone owner/repo" in cli_auth
-    assert "Other repos granted to this agent" in cli_auth
+    assert "GH_TOKEN" in cli_auth
 
 
 def test_tool_catalogue_describes_working_repo_separately() -> None:

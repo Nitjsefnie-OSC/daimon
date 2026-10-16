@@ -28,7 +28,6 @@ from anthropic.types.beta import (
     SkillListResponse,
 )
 from anthropic.types.beta.skills import VersionCreateResponse
-from cryptography.fernet import MultiFernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core.defaults.ma_index import (
@@ -36,16 +35,11 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.errors import DaimonError
-from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.skill_sync import orchestrator as orch_mod
 from daimon.core.skill_sync.orchestrator import sync_agent_skills
 from daimon.core.skill_zip import canonical_zip_bytes
 from daimon.core.specs import SkillRepo
-from daimon.core.stores.agent_repo_binding import set_binding
-from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
-from daimon.core.stores.domain import RepoAccessProof
-from daimon.core.stores.github_credentials import upsert_credential
 from daimon.core.stores.user_skills import (
     list_user_skills_for_agent,
     load_user_skill,
@@ -61,7 +55,6 @@ from daimon.testing.ma import (
     not_found_response,
 )
 from daimon.testing.ma_models import ma_agent
-from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -126,23 +119,6 @@ async def test_bound_sync_target_does_not_fall_back_when_exact_agent_is_missing(
 # ---------------------------------------------------------------------------
 
 
-async def _seed_pat(
-    *,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    fernet: MultiFernet,
-    principal_id: uuid.UUID,
-    plaintext: str = "test-pat",
-) -> None:
-    async with sessionmaker() as session, session.begin():
-        await upsert_credential(
-            session,
-            principal_id=principal_id,
-            github_login="tester",
-            encrypted_token=encrypt_token(fernet, plaintext),
-            scopes=("repo",),
-        )
-
-
 def _generate_rsa_keypair() -> str:
     """Return a PEM-encoded RSA private key string for App-JWT tests.
 
@@ -198,518 +174,9 @@ def test_tenant_scoped_display_title_accepts_exact_64_char_boundary() -> None:
     assert "~" in mangled, "mangle marker must appear when over 64 chars"
 
 
-async def test_pat_missing_falls_back_to_unauthenticated_fetch(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """No credential row → fetcher proceeds without Authorization header.
-
-    Public repos must work without a PAT (matches the chat path's
-    daimon.core.skills.fetch behavior). Private repos return 404 from GitHub
-    without a PAT, which the per-repo loop already records as `skipped_repos`.
-    """
-    cli = await make_cli_principal(db_session, os_user="alice")
-    await db_session.commit()
-
-    fernet = make_fernet()
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
-    anthropic_client = build_fake_anthropic(router.dispatch)
-
-    captured_requests: list[httpx.Request] = []
-
-    def tarball_handler(request: httpx.Request) -> httpx.Response:
-        captured_requests.append(request)
-        return httpx.Response(404)  # treat as private/missing; orchestrator should skip
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(tarball_handler))
-
-    report = await sync_agent_skills(
-        principal_id=cli.id,
-        tenant_id=cli.tenant_id,
-        agent_name="agent",
-        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        http_client=http_client,
-        anthropic_client=anthropic_client,
-    )
-
-    assert len(captured_requests) == 1, "fetcher should be invoked even with no PAT"
-    assert "Authorization" not in captured_requests[0].headers, (
-        "missing PAT must NOT produce an Authorization header — that would 401 on public repos"
-    )
-    assert len(report.skipped_repos) == 1, "404-without-PAT should record skipped_repos"
-    assert report.synced == 0, "no skill should be created when fetch fails"
-
-
-async def test_github_fallback_pat_used_when_no_overlay_and_no_override(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """No per-agent overlay PAT, no credential_override, but github_fallback_pat
-    is threaded -> the fetch carries the fallback as its Authorization header
-    instead of falling back to an anonymous (unauthenticated) fetch."""
-    cli = await make_cli_principal(db_session, os_user="alice")
-    await db_session.commit()
-
-    fernet = make_fernet()
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
-    anthropic_client = build_fake_anthropic(router.dispatch)
-
-    captured_requests: list[httpx.Request] = []
-
-    def tarball_handler(request: httpx.Request) -> httpx.Response:
-        captured_requests.append(request)
-        return httpx.Response(404)
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(tarball_handler))
-
-    await sync_agent_skills(
-        principal_id=cli.id,
-        tenant_id=cli.tenant_id,
-        agent_name="agent",
-        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        http_client=http_client,
-        anthropic_client=anthropic_client,
-        github_fallback_pat="ghp_operator_fallback",
-    )
-
-    assert len(captured_requests) == 1, "fetcher should be invoked exactly once"
-    assert captured_requests[0].headers.get("Authorization") == "token ghp_operator_fallback", (
-        "github_fallback_pat must be used as the fetch credential when no overlay PAT resolves"
-    )
-
-
-async def test_github_fallback_pat_omitted_behaves_as_before(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Callers that don't pass github_fallback_pat keep the pre-existing
-    anonymous-fetch behavior — the new kwarg is source-compatible."""
-    cli = await make_cli_principal(db_session, os_user="alice")
-    await db_session.commit()
-
-    fernet = make_fernet()
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
-    anthropic_client = build_fake_anthropic(router.dispatch)
-
-    captured_requests: list[httpx.Request] = []
-
-    def tarball_handler(request: httpx.Request) -> httpx.Response:
-        captured_requests.append(request)
-        return httpx.Response(404)
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(tarball_handler))
-
-    await sync_agent_skills(
-        principal_id=cli.id,
-        tenant_id=cli.tenant_id,
-        agent_name="agent",
-        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        http_client=http_client,
-        anthropic_client=anthropic_client,
-    )
-
-    assert len(captured_requests) == 1, "fetcher should be invoked exactly once"
-    assert "Authorization" not in captured_requests[0].headers, (
-        "omitting github_fallback_pat must keep the pre-existing anonymous fetch behavior"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Shared skill-sync credential seam (daimon.core.github_repo_auth) — non-override path
 # ---------------------------------------------------------------------------
-
-
-async def test_no_per_agent_token_with_recorded_proof_reaches_app_tier(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """No per-agent token + a tenant-owned binding that recorded proof of
-    access to this repo + an injected lookup resolving an installation ->
-    the fetch carries the minted installation token. This is the App tier,
-    reachable from the non-override (agent-creation) path once this tenant
-    has demonstrated access to the repo."""
-    cli = await make_cli_principal(db_session, os_user="alice")
-    await db_session.commit()
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=cli.tenant_id,
-            agent_id=uuid.uuid4(),
-            repo_url="o/r",
-            default_branch="main",
-            ma_secret_ref="anon:",
-            proof=RepoAccessProof(kind="pat", at=datetime.now(UTC), account_id=cli.account_id),
-        )
-    fernet = make_fernet()
-    # No PAT seeded.
-
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
-    anthropic_client = build_fake_anthropic(router.dispatch)
-
-    captured: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        if request.url.path == "/app/installations/777/access_tokens":
-            return httpx.Response(201, json={"token": "ghs_installation_token"})
-        return httpx.Response(404)  # tarball fetch — content doesn't matter for this test
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    lookup_calls = 0
-
-    async def lookup(owner: str, repo: str) -> int | None:
-        nonlocal lookup_calls
-        lookup_calls += 1
-        assert (owner, repo) == ("o", "r")
-        return 777
-
-    report = await sync_agent_skills(
-        principal_id=cli.id,
-        tenant_id=cli.tenant_id,
-        agent_name="agent",
-        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        http_client=http_client,
-        anthropic_client=anthropic_client,
-        app_id="12345",
-        app_private_key=SecretStr(_generate_rsa_keypair()),
-        installation_lookup=lookup,
-    )
-
-    assert lookup_calls == 1, (
-        "the injected lookup must be consulted when no per-agent token resolves"
-    )
-    tarball_requests = [r for r in captured if "tarball" in r.url.path]
-    assert len(tarball_requests) == 1, "the fetcher must have attempted the tarball download"
-    assert tarball_requests[0].headers.get("Authorization") == "token ghs_installation_token", (
-        "the minted installation token must reach the fetch, since this tenant recorded "
-        "proof of access to the repo"
-    )
-    assert report.skipped_repos == [("https://github.com/o/r", "GitHubUnreachable")], (
-        "the tarball 404 must still be recorded normally; only the credential is under test"
-    )
-
-
-async def test_skill_repo_credential_proof_is_preferred_over_the_binding_proof(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """The proof gate reads the skill-repo credential first: a credential
-    recording proof of access opens the App tier even though the tenant's
-    binding for the same repo records none. The binding is the legacy home
-    for this proof, so reading only it would deny the App tier to every
-    tenant enrolled through the credential table."""
-    cli = await make_cli_principal(db_session, os_user="alice")
-    await db_session.commit()
-    async with db_session_factory() as s, s.begin():
-        await set_binding(
-            s,
-            tenant_id=cli.tenant_id,
-            agent_id=uuid.uuid4(),
-            repo_url="o/r",
-            default_branch="main",
-            ma_secret_ref="anon:",
-            proof=None,
-        )
-        await set_skill_repo_credential(
-            s,
-            tenant_id=cli.tenant_id,
-            agent_id=uuid.uuid4(),
-            repo_url="o/r",
-            default_branch="main",
-            path="skills",
-            ma_secret_ref="anon:",
-            proof=RepoAccessProof(kind="pat", at=datetime.now(UTC), account_id=cli.account_id),
-        )
-    fernet = make_fernet()
-    # No PAT seeded — the per-agent tier must not short-circuit the proof read.
-
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
-    anthropic_client = build_fake_anthropic(router.dispatch)
-
-    captured: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        if request.url.path == "/app/installations/777/access_tokens":
-            return httpx.Response(201, json={"token": "ghs_installation_token"})
-        return httpx.Response(404)  # tarball fetch — content doesn't matter for this test
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    async def lookup(owner: str, repo: str) -> int | None:
-        assert (owner, repo) == ("o", "r"), "the lookup must target the repo under sync"
-        return 777
-
-    await sync_agent_skills(
-        principal_id=cli.id,
-        tenant_id=cli.tenant_id,
-        agent_name="agent",
-        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        http_client=http_client,
-        anthropic_client=anthropic_client,
-        app_id="12345",
-        app_private_key=SecretStr(_generate_rsa_keypair()),
-        installation_lookup=lookup,
-    )
-
-    tarball_requests = [r for r in captured if "tarball" in r.url.path]
-    assert len(tarball_requests) == 1, "the fetcher must have attempted the tarball download"
-    assert tarball_requests[0].headers.get("Authorization") == "token ghs_installation_token", (
-        "the proof recorded on the skill-repo credential must open the App tier, even "
-        "though the binding for the same repo records no proof"
-    )
-
-
-async def test_no_recorded_proof_never_reaches_app_tier_even_when_app_covers_repo(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """No per-agent token, no binding at all for this repo (so no recorded
-    proof of access) -> even though the deployment's App genuinely covers
-    the repo (the injected lookup would resolve an installation), the App
-    tier must never be attempted: zero installation-lookup invocations and
-    zero installation-token requests. A tenant admin naming an arbitrary
-    repo the App happens to cover (installed by some OTHER tenant for their
-    own use) must not receive a minted installation token for it.
-
-    This reproduces the exact failure path: before the App-tier proof gate,
-    this exact call (no binding, live installation lookup resolving an id)
-    would have returned the minted installation token and fetched the repo's
-    tarball with it. Confirmed failing prior to the proof_kind gate."""
-    cli = await make_cli_principal(db_session, os_user="alice")
-    await db_session.commit()
-    fernet = make_fernet()
-    # No PAT seeded, no agent_repo_binding row for this repo at all.
-
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
-    anthropic_client = build_fake_anthropic(router.dispatch)
-
-    captured: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "installation" in request.url.path or "access_tokens" in request.url.path:
-            raise AssertionError(
-                f"App tier must not be consulted without a recorded proof of access; "
-                f"got {request.url}"
-            )
-        captured.append(request)
-        return httpx.Response(404)  # tarball fetch — content doesn't matter for this test
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    lookup_calls = 0
-
-    async def lookup(owner: str, repo: str) -> int | None:
-        nonlocal lookup_calls
-        lookup_calls += 1
-        # If this were ever invoked, it WOULD resolve an installation —
-        # proving the repo really is App-covered, just not by this tenant.
-        return 777
-
-    report = await sync_agent_skills(
-        principal_id=cli.id,
-        tenant_id=cli.tenant_id,
-        agent_name="agent",
-        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        http_client=http_client,
-        anthropic_client=anthropic_client,
-        app_id="12345",
-        app_private_key=SecretStr(_generate_rsa_keypair()),
-        installation_lookup=lookup,
-    )
-
-    assert lookup_calls == 0, (
-        "no recorded proof for this repo -> the installation lookup must never be invoked, "
-        "not just its result discarded"
-    )
-    tarball_requests = [r for r in captured if "tarball" in r.url.path]
-    assert len(tarball_requests) == 1, "the fetcher must still attempt an anonymous fetch"
-    assert "Authorization" not in tarball_requests[0].headers, (
-        "with no proof, no fallback PAT, and the App tier never attempted, the fetch must "
-        "be anonymous -- never carry a minted installation token for an unproven repo"
-    )
-    assert report.skipped_repos == [("https://github.com/o/r", "GitHubUnreachable")], (
-        "the tarball 404 must still be recorded normally; only the credential is under test"
-    )
-
-
-async def test_per_agent_token_short_circuits_before_installation_lookup(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """BOTH a per-agent token and an installation covering the repo -> the
-    per-agent token reaches the fetch and the installation lookup is invoked
-    ZERO times (the ordering short-circuit, checked behaviorally)."""
-    cli = await make_cli_principal(db_session, os_user="alice")
-    await db_session.commit()
-    fernet = make_fernet()
-    await _seed_pat(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=cli.id,
-        plaintext="ghp_per_agent_token",
-    )
-
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
-    anthropic_client = build_fake_anthropic(router.dispatch)
-
-    captured: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(404)
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    lookup_calls = 0
-
-    async def lookup(owner: str, repo: str) -> int | None:
-        nonlocal lookup_calls
-        lookup_calls += 1
-        return 999  # an installation DOES cover this repo — must not matter
-
-    await sync_agent_skills(
-        principal_id=cli.id,
-        tenant_id=cli.tenant_id,
-        agent_name="agent",
-        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        http_client=http_client,
-        anthropic_client=anthropic_client,
-        app_id="12345",
-        app_private_key=SecretStr(_generate_rsa_keypair()),
-        installation_lookup=lookup,
-    )
-
-    assert lookup_calls == 0, (
-        "a per-agent token must short-circuit before the installation lookup is ever invoked"
-    )
-    tarball_requests = [r for r in captured if "tarball" in r.url.path]
-    assert len(tarball_requests) == 1
-    assert tarball_requests[0].headers.get("Authorization") == "token ghp_per_agent_token", (
-        "the per-agent token must win over the covering installation"
-    )
-
-
-async def test_credential_override_wins_with_zero_installation_lookup_invocations(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """An override still wins with zero installation-lookup invocations — pinned
-    with a counting async function, never a mock, per guideline:testing."""
-    cli = await make_cli_principal(db_session, os_user="alice")
-    await db_session.commit()
-    fernet = make_fernet()
-    # No PAT seeded — proves the override wins, not an internal resolution.
-
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
-    anthropic_client = build_fake_anthropic(router.dispatch)
-
-    captured: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(404)
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    lookup_calls = 0
-
-    async def lookup(owner: str, repo: str) -> int | None:
-        nonlocal lookup_calls
-        lookup_calls += 1
-        return 111
-
-    await sync_agent_skills(
-        principal_id=cli.id,
-        tenant_id=cli.tenant_id,
-        agent_name="agent",
-        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        http_client=http_client,
-        anthropic_client=anthropic_client,
-        credential_override="ghs_override_token",
-        app_id="12345",
-        app_private_key=SecretStr(_generate_rsa_keypair()),
-        installation_lookup=lookup,
-    )
-
-    assert lookup_calls == 0, "an override must win with zero installation-lookup invocations"
-    tarball_requests = [r for r in captured if "tarball" in r.url.path]
-    assert len(tarball_requests) == 1
-    assert tarball_requests[0].headers.get("Authorization") == "token ghs_override_token"
-
-
-async def test_installation_lookup_none_skips_app_tier_and_uses_fallback(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """installation_lookup=None must skip the App tier entirely — even with
-    app_id/app_private_key configured — and reach the fallback token exactly
-    as before this change, with zero App HTTP calls."""
-    cli = await make_cli_principal(db_session, os_user="alice")
-    await db_session.commit()
-    fernet = make_fernet()
-
-    router = MARouter()
-    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
-    anthropic_client = build_fake_anthropic(router.dispatch)
-
-    captured: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "access_tokens" in request.url.path or "installation" in request.url.path:
-            raise AssertionError(
-                f"App tier must not be consulted when installation_lookup=None; got {request.url}"
-            )
-        captured.append(request)
-        return httpx.Response(404)
-
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    await sync_agent_skills(
-        principal_id=cli.id,
-        tenant_id=cli.tenant_id,
-        agent_name="agent",
-        repos=[SkillRepo(url="https://github.com/o/r", branch="main", split=False)],
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        http_client=http_client,
-        anthropic_client=anthropic_client,
-        github_fallback_pat="ghp_operator_fallback",
-        app_id="12345",
-        app_private_key=SecretStr(_generate_rsa_keypair()),
-        installation_lookup=None,
-    )
-
-    tarball_requests = [r for r in captured if "tarball" in r.url.path]
-    assert len(tarball_requests) == 1
-    assert tarball_requests[0].headers.get("Authorization") == "token ghp_operator_fallback", (
-        "installation_lookup=None must still reach the fallback tier, unchanged"
-    )
 
 
 async def test_first_sync_creates_new_skill(
@@ -720,7 +187,6 @@ async def test_first_sync_creates_new_skill(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     http_client = httpx.AsyncClient(
@@ -787,7 +253,6 @@ async def test_subsequent_sync_with_changed_content_uploads_new_version(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     # Seed an existing row with a stale content_hash.
     # Bundled name is owner-qualified: github.com/o/r → "o-r".
@@ -870,7 +335,6 @@ async def test_dedup_skips_upload_when_content_hash_matches(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     # Build the tarball + compute the resulting bundled-zip hash that the
     # orchestrator will see. We mirror what bundler.extract_and_bundle does for
@@ -957,7 +421,6 @@ async def test_re_run_no_changes_yields_zero_synced_zero_updated(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
 
@@ -1027,7 +490,6 @@ async def test_upload_concurrency_capped_at_six(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     # 12 skills via split-mode tarball — one SKILL.md per directory.
     files: dict[str, bytes] = {}
@@ -1117,7 +579,6 @@ async def test_per_skill_timeout_isolates_failure(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     monkeypatch.setattr(orch_mod, "_PER_SKILL_TIMEOUT_S", 0.05)
 
@@ -1230,7 +691,6 @@ async def test_duplicate_display_title_recovery_lands_a_new_version(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     http_client = httpx.AsyncClient(
@@ -1333,7 +793,6 @@ async def test_recovery_raises_skills_list_truncated_error_on_full_page(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     http_client = httpx.AsyncClient(
@@ -1398,7 +857,6 @@ async def test_non_duplicate_api_status_error_re_raises_to_failed_uploads(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     http_client = httpx.AsyncClient(
@@ -1467,7 +925,6 @@ async def test_400_with_display_title_substring_does_not_trigger_recovery(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     http_client = httpx.AsyncClient(
@@ -1528,7 +985,6 @@ async def test_orphan_delete_only_fires_for_successfully_fetched_repos(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     # Seed two existing rows: one for r1 (will be orphaned), one for r2 (untouched).
     async with db_session_factory() as s, s.begin():
@@ -1623,7 +1079,6 @@ async def test_orphan_delete_skipped_when_repo_fetch_failed(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     async with db_session_factory() as s, s.begin():
         await upsert_user_skill(
@@ -1696,7 +1151,6 @@ async def test_orphan_delete_local_row_survives_when_ma_delete_fails(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     async with db_session_factory() as s, s.begin():
         await upsert_user_skill(
@@ -1779,7 +1233,6 @@ async def test_orphan_delete_retries_and_succeeds_on_second_sync(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     async with db_session_factory() as s, s.begin():
         await upsert_user_skill(
@@ -1881,7 +1334,6 @@ async def test_orphan_delete_404_treated_as_already_deleted(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     async with db_session_factory() as s, s.begin():
         await upsert_user_skill(
@@ -1967,7 +1419,6 @@ async def test_orphan_delete_transient_failure_retains_row_without_poisoning_att
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_transient")
 
@@ -2097,7 +1548,6 @@ async def test_orphan_delete_lingering_row_dedups_readded_skill(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     async with db_session_factory() as s, s.begin():
         await upsert_user_skill(
@@ -2171,7 +1621,6 @@ async def test_sync_agent_skills_attaches_uploaded_skills_to_ma_agent(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     http_client = httpx.AsyncClient(
@@ -2271,7 +1720,6 @@ async def test_sync_agent_skills_attach_is_noop_when_skill_already_attached(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     # CR-01: the agent ("ag_target") is present on MA, so the user_skills ledger is
     # keyed on the agent's stable derived identity (NOT the caller principal). Seed the
@@ -2379,7 +1827,6 @@ async def test_sync_agent_skills_skips_attach_when_agent_not_found(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     http_client = httpx.AsyncClient(
@@ -2467,7 +1914,6 @@ async def test_bundled_sync_two_repos_same_trailing_segment_keeps_both_skills(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     url_a = "https://github.com/orgA/skills"
     url_b = "https://github.com/orgB/skills"
@@ -2648,8 +2094,6 @@ async def test_sync_creates_two_distinct_skills_when_two_tenants_sync_same_named
     await db_session.commit()
 
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli_a.id)
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli_b.id)
 
     # Both tenants have the same agent name and same skill in their repo.
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
@@ -2784,7 +2228,6 @@ async def test_recovery_refuses_to_push_version_onto_foreign_tenant_skill(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     http_client = httpx.AsyncClient(
@@ -2884,7 +2327,6 @@ async def test_attach_adds_base_toolset_when_agent_lacks_it(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     # CR-01: the orchestrator keys the ledger on the agent's derived UUID when the agent
     # is found on MA. Seed the row under that key so list_user_skills_for_agent finds it.
@@ -2975,7 +2417,6 @@ async def test_attach_sends_skills_only_when_agent_has_base_toolset(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_with_toolset")
 
@@ -3088,7 +2529,6 @@ async def test_attach_retries_once_on_version_conflict(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_conflict")
 
@@ -3310,7 +2750,6 @@ async def test_first_sync_refuses_create_when_registry_skill_takes_the_mount_nam
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
     http_client = httpx.AsyncClient(
@@ -3481,7 +2920,6 @@ async def test_sync_duplicate_name_across_repos_still_uploads_every_other_skill(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
 
     url_a = "https://github.com/orgA/skills"
     url_b = "https://github.com/orgB/skills"
@@ -3583,7 +3021,6 @@ async def test_sync_never_replaces_a_skill_added_by_hand(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
     async with db_session_factory() as s, s.begin():
         await upsert_user_skill(
             s,
@@ -3634,7 +3071,6 @@ async def test_sync_never_reattaches_a_detached_upload(
     cli = await make_cli_principal(db_session, os_user="alice")
     await db_session.commit()
     fernet = make_fernet()
-    await _seed_pat(sessionmaker=db_session_factory, fernet=fernet, principal_id=cli.id)
     async with db_session_factory() as s, s.begin():
         await upsert_user_skill(
             s,

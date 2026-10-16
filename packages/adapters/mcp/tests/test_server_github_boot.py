@@ -1,9 +1,9 @@
-"""create_mcp_app GitHub repo-auth boot (App-or-PAT).
+"""create_mcp_app GitHub App boot.
 
-The OAuth web flow + CLI-auth-status route are gone — no
-`/oauth/github/*` route should ever be mounted.
+The legacy OAuth start/callback and CLI auth status routes are gone.
+The GitHub App connection routes remain available.
 
-App-clone boots with only `app_id` + `app_private_key` — no
+App-clone boots with only `app_id` + `private_key` — no
 `webhook_secret` required. The `/webhooks/github` mount (skill-sync's
 push-driven resync trigger) is gated separately on `webhook_secret is not
 None`, and fails loud on partial config (webhook_secret without App creds,
@@ -18,7 +18,7 @@ from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
     DatabaseSettings,
-    GithubSettings,
+    GithubAppSettings,
     McpSettings,
     Settings,
 )
@@ -32,12 +32,12 @@ from starlette.routing import Route
 _FERNET_KEY = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
 
 
-def _settings(*, github: GithubSettings, crypto: CryptoSettings | None = None) -> Settings:
+def _settings(*, github: GithubAppSettings, crypto: CryptoSettings | None = None) -> Settings:
     return Settings(
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
         mcp=McpSettings(jwt_secret=SecretStr("a" * 32), public_url=HttpUrl("https://x/mcp")),
-        github=github,
+        github_app=github,
         crypto=crypto or CryptoSettings(),
     )
 
@@ -49,9 +49,9 @@ def _route_paths(app: object) -> list[str]:
 async def test_oauth_github_routes_absent(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """No /oauth/github/* or /cli/auth/status route is ever mounted."""
+    """Legacy OAuth and CLI auth status routes are never mounted."""
     app = create_mcp_app(
-        settings=_settings(github=GithubSettings()),
+        settings=_settings(github=GithubAppSettings()),
         sessionmaker=sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
     )
@@ -64,12 +64,12 @@ async def test_oauth_github_routes_absent(
 async def test_app_clone_boots_with_only_app_id_and_private_key(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """App-clone requires only app_id + app_private_key — no webhook_secret."""
+    """App-clone requires only app_id + private_key — no webhook_secret."""
     app = create_mcp_app(
         settings=_settings(
-            github=GithubSettings(
+            github=GithubAppSettings(
                 app_id="123456",
-                app_private_key=SecretStr("stub-pem-not-parsed-at-boot"),
+                private_key=SecretStr("stub-pem-not-parsed-at-boot"),
             )
         ),
         sessionmaker=sessionmaker,
@@ -83,16 +83,16 @@ async def test_app_clone_boots_with_only_app_id_and_private_key(
 
 
 def test_partial_app_config_missing_private_key_raises() -> None:
-    """app_id set but app_private_key missing must fail loud, not boot silently degraded."""
-    settings = _settings(github=GithubSettings(app_id="123456"))
-    with pytest.raises(BootstrapError, match="app_private_key"):
+    """app_id set but private_key missing must fail loud, not boot silently degraded."""
+    settings = _settings(github=GithubAppSettings(app_id="123456"))
+    with pytest.raises(BootstrapError, match="private_key"):
         create_mcp_app(settings=settings, auth=StaticTokenVerifier(tokens={}))
 
 
 def test_webhook_secret_without_app_creds_raises() -> None:
     """webhook_secret alone (no App creds) must fail loud — the webhook needs the App."""
     settings = _settings(
-        github=GithubSettings(webhook_secret=SecretStr("test-webhook-secret")),
+        github=GithubAppSettings(webhook_secret=SecretStr("test-webhook-secret")),
     )
     with pytest.raises(BootstrapError, match="app_id"):
         create_mcp_app(settings=settings, auth=StaticTokenVerifier(tokens={}))
@@ -101,9 +101,9 @@ def test_webhook_secret_without_app_creds_raises() -> None:
 def test_webhook_secret_without_fernet_raises() -> None:
     """webhook_secret + App creds but no crypto keys must fail loud (can't decrypt)."""
     settings = _settings(
-        github=GithubSettings(
+        github=GithubAppSettings(
             app_id="123456",
-            app_private_key=SecretStr("stub-pem-not-parsed-at-boot"),
+            private_key=SecretStr("stub-pem-not-parsed-at-boot"),
             webhook_secret=SecretStr("test-webhook-secret"),
         ),
         crypto=CryptoSettings(),
@@ -118,9 +118,9 @@ async def test_webhook_mounts_when_fully_configured(
     """Full App + webhook_secret + fernet config mounts /webhooks/github."""
     app = create_mcp_app(
         settings=_settings(
-            github=GithubSettings(
+            github=GithubAppSettings(
                 app_id="123456",
-                app_private_key=SecretStr("stub-pem-not-parsed-at-boot"),
+                private_key=SecretStr("stub-pem-not-parsed-at-boot"),
                 webhook_secret=SecretStr("test-webhook-secret"),
             ),
             crypto=CryptoSettings(keys=(SecretStr(_FERNET_KEY),)),

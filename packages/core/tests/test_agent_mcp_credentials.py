@@ -205,14 +205,12 @@ async def test_owned_credential_metadata_omits_token_columns_and_foreign_refs(
     db_preflight, db_nullpool_engine
 ):
     from daimon.core.stores import agent_mcp_credentials as credentials
-    from daimon.core.stores import github_credentials
     from daimon.testing.db import require_owned_sessionmaker
     from sqlalchemy import event
 
     sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     agent_id = uuid.uuid4()
-    principal = uuid.uuid4()
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
         foreign = await make_tenant(db)
@@ -230,13 +228,6 @@ async def test_owned_credential_metadata_omits_token_columns_and_foreign_refs(
             mcp_server_url="https://foreign.example.test",
             encrypted_token=b"ciphertext-foreign",
         )
-        await github_credentials.upsert_credential(
-            db,
-            principal_id=principal,
-            github_login="source",
-            encrypted_token=b"github-ciphertext",
-            scopes=("repo",),
-        )
     queries = []
 
     def capture(connection, cursor, statement, parameters, context, many):
@@ -248,12 +239,8 @@ async def test_owned_credential_metadata_omits_token_columns_and_foreign_refs(
             refs = await credentials.list_credential_revisions(
                 db, tenant_id=tenant.id, agent_id=agent_id
             )
-            generation = await github_credentials.get_credential_revision(
-                db, principal_id=principal
-            )
     finally:
         event.remove(db_nullpool_engine.sync_engine, "before_cursor_execute", capture)
     assert refs == ((owned.id, _SERVER_URL, owned.updated_at),)
-    assert generation is not None
     assert all("encrypted_token" not in sql for sql in queries)
     assert "ciphertext" not in repr(refs)

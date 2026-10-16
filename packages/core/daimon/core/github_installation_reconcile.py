@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import structlog
-from daimon.core.config import GithubSettings
+from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     build_app_jwt,
     get_app_installation_account,
@@ -34,11 +34,11 @@ async def drain_github_installation_reconciliations(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
     http_client: httpx.AsyncClient,
-    github_settings: GithubSettings,
+    github_app: GithubAppSettings,
     now: datetime | None = None,
 ) -> int:
     """Refresh due installations; each refresh writes only its claimed generation."""
-    if github_settings.app_id is None or github_settings.app_private_key is None:
+    if github_app.app_id is None or github_app.private_key is None:
         return 0
 
     jobs_processed = 0
@@ -66,8 +66,8 @@ async def drain_github_installation_reconciliations(
         )
         try:
             app_jwt = build_app_jwt(
-                github_settings.app_private_key.get_secret_value(),
-                github_settings.app_id,
+                github_app.private_key.get_secret_value(),
+                github_app.app_id,
                 now=int(current_time.timestamp()),
             )
             account_login = await get_app_installation_account(

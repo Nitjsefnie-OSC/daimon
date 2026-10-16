@@ -168,9 +168,7 @@ async def load_home(state: PanelState, *, runtime: DiscordRuntime, user_id: int)
                 tenant_id=tenant_id,
                 agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.ma_agent_id),
             )
-            counts.append(
-                (agent, sum(1 for repo in repos if not repo.staged and repo.status == "active"))
-            )
+            counts.append((agent, sum(1 for repo in repos if repo.status == "active")))
         linked_login = await account_link_status(session, account_id=state.account_id)
         own_waiting = await list_asker_requests(
             session, tenant_id=tenant_id, account_id=state.account_id

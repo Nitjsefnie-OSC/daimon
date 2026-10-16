@@ -60,6 +60,14 @@ def _modules(platform):
     source = subprocess.check_output(
         ["git", "show", f"{BASE}:{path}"], cwd=Path(__file__).resolve().parents[3], text=True
     )
+    # The historical module still imports retired GitHub credential writers.
+    # Ordinary environment submissions never call them.
+    source = source.replace(
+        "from daimon.core.stores.agent_repo_binding import set_binding", "set_binding = None"
+    ).replace(
+        "from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential",
+        "set_skill_repo_credential = None",
+    )
     old = types.ModuleType(f"{module_name}_base")
     old.__package__ = current.__package__
     sys.modules[old.__name__] = old
@@ -76,14 +84,13 @@ async def _seed(
         if is_admin:
             await set_role(session, account_id=account.id, role=Role.ADMIN)
         agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_test")
-        held_name = "GITHUB_TOKEN" if collision == "alias" else target
         held = None
-        if collision in ("same", "alias", "stale"):
+        if collision in ("same", "stale"):
             held = await put_agent_file(
                 session,
                 tenant_id=tenant.id,
                 agent_id=agent_id,
-                key=held_name,
+                key=target,
                 content="held",
                 set_by_account_id=account.id,
             )
@@ -99,7 +106,7 @@ async def _seed(
             ),
         )
         expected = None
-        if kind == "env" and held is not None and collision != "alias":
+        if kind == "env" and held is not None:
             expected = held.updated_at
             if collision == "stale":
                 expected -= timedelta(seconds=1)
@@ -147,7 +154,7 @@ async def _run(db, module, row, agent, is_admin, collision, monkeypatch):
         settings=SimpleNamespace(mcp=SimpleNamespace()),
         turn_deps=replace(deps_for(None, None), turn_path=None),
     )
-    target = "GH_TOKEN" if collision == "alias" else "API_KEY"
+    target = "API_KEY"
     value = f"ALPHA_KEY=first\n{target}=submitted\n" if row.kind == "env_file" else "submitted"
 
     async def edit(*args, row=None, state=None, outcome=None, **kwargs):
@@ -321,7 +328,7 @@ async def _run(db, module, row, agent, is_admin, collision, monkeypatch):
 @pytest.mark.parametrize(
     "policy", ("open", "pinned_inside", "pinned_outside", "sealed", "pinned_sealed")
 )
-@pytest.mark.parametrize("collision", ("none", "same", "alias", "stale", "late"))
+@pytest.mark.parametrize("collision", ("none", "same", "stale", "late"))
 @pytest.mark.parametrize("shared", (False, True), ids=("private", "shared"))
 async def test_old_and_new_env_paths(
     db_session_factory,
@@ -343,7 +350,7 @@ async def test_old_and_new_env_paths(
             policy,
             collision,
             shared,
-            target="GH_TOKEN" if collision == "alias" else "API_KEY",
+            target="API_KEY",
         )
         results.append(
             await _run(db_session_factory, module, row, agent, is_admin, collision, monkeypatch)

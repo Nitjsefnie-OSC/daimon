@@ -54,6 +54,35 @@ async def list_user_skills_for_agent(
     return [UserSkillRow.model_validate(row) for row in result.scalars()]
 
 
+async def list_repo_skill_sources(
+    session: AsyncSession,
+) -> list[tuple[uuid.UUID, uuid.UUID, str, str, str, str]]:
+    """Distinct imported repository sources across tenants for push resync."""
+    result = await session.execute(
+        select(
+            UserSkill.tenant_id,
+            UserSkill.principal_id,
+            UserSkill.agent_name,
+            UserSkill.source_repo_url,
+            UserSkill.source_repo_branch,
+            UserSkill.source_path,
+        )
+        .where(UserSkill.source == "repo")
+        .distinct()
+    )
+    return [
+        (
+            row.tenant_id,
+            row.principal_id,
+            row.agent_name,
+            row.source_repo_url,
+            row.source_repo_branch,
+            row.source_path,
+        )
+        for row in result
+    ]
+
+
 async def upsert_user_skill(
     session: AsyncSession,
     *,

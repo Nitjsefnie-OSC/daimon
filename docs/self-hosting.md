@@ -204,14 +204,11 @@ tokens. Run it alongside the MCP service.
 Ask an agent to connect GitHub, or run `/github connect` in Discord or Slack.
 A server admin, or a channel admin of the channels an agent is limited to,
 gets a private link bound to that agent; the selected repos are for that agent
-only and activate for it when confirmed. If the agent has a saved GitHub key,
-the key is retired once its working repo and private skill repos are among
-its repos; until then the repos wait in the agent's GitHub panel. An
+only and activate for it when confirmed. The migration retires any saved
+GitHub key. An
 operator can issue an agent-bound link with `daimon github connect-link --tenant <workspace-uuid>
 --requester <platform-user-id> --agent <agent-uuid> --agent-name <agent-name>`.
-That link stages an update. After the recipient confirms repos on the web, run
-`daimon github finish-update --tenant <workspace-uuid> --agent <agent-uuid>`
-as the operator to switch the agent and restart its open chats.
+The selected grants become live when the recipient confirms them on the web.
 Members can request setup; their request is recorded for an admin. For an
 operator fallback, print a seven-day, single-use invitation with
 `daimon github connect-link --tenant <workspace-uuid> --requester <platform-user-id>`.
@@ -231,15 +228,107 @@ GitHub link, and waiting requests. An admin can also open GitHub from
 keeps Save changes visible until confirmation. Admins can review requests and
 disconnect the server connection.
 
-Operator-issued links without an agent target only connect repos to the
-workspace. In that fallback, agents remain in legacy GitHub mode until an
-admin stages grants with
-`daimon github grants stage --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id>` (add `--working` to make it the working repo)
-and runs `daimon github grants activate --tenant <workspace-uuid> --agent <agent-uuid>`.
-Use `grants list`, `remove`, and `deactivate` with the same tenant and agent options.
-While app mode is active, `grants stage` updates access immediately. Existing
+Operator-issued links without an agent target connect repos to the workspace.
+An admin grants one to an agent with
+`daimon github grants add --tenant <workspace-uuid> --agent <agent-uuid> --repo <repository-id> --baseline read --ceiling read`.
+Use `grants list` and `remove` with the same tenant and agent options. Existing
 sessions rotate tokens in place when the repository set is unchanged; a changed
 repository set closes the sessions so the next turn mounts the new checkouts.
+
+Before upgrading, run `daimon github retirement-preview`. It lists staged grants
+the migration will delete, and every agent losing a saved key or binding with
+its working repo and whether a live App grant covers it. An uncovered agent
+loses GitHub access until an App grant is connected. The preview also reports
+App token evidence for live sessions and stops if an unapproved agent lacks
+working or private skill repo coverage. Set
+`DAIMON_GITHUB_APP_ONLY_ACCEPTED_LOSS` to a comma-separated list of agent UUIDs
+whose loss is explicitly accepted by the operator. Set the same value for the
+preview and the Alembic migration. With no value, the migration stops before
+deleting rows if any agent would lose access. After upgrading, run
+`daimon github cleanup-legacy-vault` to preview retired
+Managed Agents vault credentials. Run it with `--apply` to delete them. Repeated
+runs skip credentials already deleted. This command leaves GitHub Copilot MCP
+credentials configured for `https://api.githubcopilot.com/mcp` alone.
+The migration asks live sessions of agents with retired GitHub credentials to
+start fresh on their next turn; other sessions keep their workspace. Run
+`cleanup-legacy-vault --apply` even after those sessions restart: the migration
+does not revoke vault-side credentials.
+During the rollout window, an old-image process may reuse a marked session if
+it cannot read legacy session metadata, or return a marked active session for
+reuse. Repeated metadata failures can cause repeated reuse until that process
+refreshes. The marker persists, and new code replaces the session on its next
+turn.
+
+**GitHub retirement release gate.** After the migrate job, wait for the MCP
+update and worker refresh. Set `REGION`, `ZONE`, `AR_REPO` and
+`EXPECTED_DAIMON_IMAGE` to that deploy's values on the deploy runner. Check
+every traffic-bearing or tagged MCP revision, then connect to the worker VM:
+
+```bash
+set -e
+mcp_revisions=$(gcloud run services describe "${AR_REPO}-mcp" --region "$REGION" --format=json |
+  jq -r '.status.traffic[] | select((.percent // 0) > 0 or .tag != null) | .revisionName')
+test -n "$mcp_revisions"
+while IFS= read -r revision; do
+  image=$(gcloud run revisions describe "$revision" --region "$REGION" \
+    --format='value(spec.containers[0].image)')
+  printf '%s %s\n' "$revision" "$image"
+  test "$image" = "$EXPECTED_DAIMON_IMAGE" || exit 1
+done <<< "$mcp_revisions"
+gcloud compute ssh "${AR_REPO}-workers" --zone "$ZONE" --tunnel-through-iap
+```
+
+In that SSH shell, set `EXPECTED_DAIMON_IMAGE` to the same image and check
+every running worker container:
+
+```bash
+set -e
+cd /etc/daimon
+expected_id=$(sudo docker image inspect "$EXPECTED_DAIMON_IMAGE" --format '{{.Id}}')
+containers=$(sudo docker compose -f compose.worker.yml ps -q)
+test -n "$containers"
+for container in $containers; do
+  image_id=$(sudo docker inspect "$container" --format '{{.Image}}')
+  name=$(sudo docker inspect "$container" --format '{{.Name}}')
+  printf '%s %s\n' "$name" "$image_id"
+  test "$image_id" = "$expected_id" || exit 1
+done
+```
+
+Every printed MCP revision must show `EXPECTED_DAIMON_IMAGE`; every printed
+worker must show `expected_id`. Migration 0105 records each marked session's
+original `ma_session_id` and marking time in
+`github_retirement_session_audit`. After in-flight turns drain, run both
+read-only queries. The first finds any recorded turn outcome, regardless of
+reason, that started on the original session after the mark:
+
+```sql
+SELECT a.thread_session_id, a.ma_session_id, a.marked_at,
+       o.id AS turn_outcome_id, o.started_at, o.reason
+FROM github_retirement_session_audit AS a
+JOIN turn_outcomes AS o
+  ON o.session_id = a.ma_session_id AND o.started_at > a.marked_at
+ORDER BY a.thread_session_id, o.started_at;
+```
+
+The second lists marked original mappings still live on the same session:
+
+```sql
+SELECT a.thread_session_id, a.ma_session_id, a.marked_at
+FROM github_retirement_session_audit AS a
+JOIN thread_sessions AS s ON s.id = a.thread_session_id
+WHERE s.status = 'live' AND s.ma_session_id = a.ma_session_id
+ORDER BY a.thread_session_id;
+```
+
+Expected result for each query: zero rows. A row in the second query means
+replacement is still pending; it does not itself show reuse. `started_at`
+comes from turn creation (`packages/core/daimon/core/turn/outcomes.py:92-94`),
+is copied into the outcome at finish (`:264-276`), and is stored later
+(`:325-330`); it is not the database insertion time. Consider the old-process
+window closed only after the image checks and both queries pass.
+The outcome writer is best effort (`turn/outcomes.py:47-60,325-330`), so an
+empty first query rules out recorded post-mark turns, not unrecorded ones.
 
 ## Microsoft Teams (optional)
 

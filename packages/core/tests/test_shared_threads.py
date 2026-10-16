@@ -25,7 +25,6 @@ from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from daimon.core._models import AgentGitHubMode
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.channel_backend import (
     channel_ref,
@@ -188,8 +187,6 @@ async def _app_agent(
     session: AsyncSession, tenant: TenantRow
 ) -> tuple[BetaManagedAgentsAgent, BetaEnvironment]:
     agent = ma_agent(id="ag_1", tenant_id=tenant.id)
-    agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_1")
-    session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
     return agent, ma_environment(id="env_1", tenant_id=tenant.id)
 
 
@@ -376,32 +373,6 @@ async def test_c01_each_writer_is_charged_for_their_own_turns_in_a_shared_sessio
     by_key = {row.idempotency_key: row.delta_usd for row in ledger}
     # Bob spent more, so his debit is the larger one: each writer's own cost.
     assert by_key[f"turn:{shared_session}:evt_bob"] < by_key[f"turn:{shared_session}:evt_alice"]
-
-
-async def test_a_shared_thread_needs_an_app_mode_agent(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    tenant = await make_tenant(db_session)
-    alice = await make_account(db_session, tenant=tenant)
-    revision = await set_channel_backend(
-        db_session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
-    )
-    await db_session.commit()
-    fake = _Fake()
-    agent, env = (
-        ma_agent(id="ag_1", tenant_id=tenant.id),
-        ma_environment(id="env_1", tenant_id=tenant.id),
-    )
-
-    with pytest.raises(AdmissionDenied) as raised:
-        await _bind(
-            _deps(db_session_factory, fake),
-            tenant,
-            _admission(alice.id, agent, env, revision),
-            user="alice",
-        )
-    assert raised.value.reason == "backend_unsupported"
-    assert fake.requests == []
 
 
 # Legacy history
@@ -858,7 +829,6 @@ async def test_a_shared_session_carries_no_personally_connected_server(
     tenant = await make_tenant(db_session)
     alice = await make_account(db_session, tenant=tenant)
     agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_personal")
-    db_session.add(AgentGitHubMode(tenant_id=tenant.id, agent_id=agent_uuid, mode="app"))
     await _record_personal_sign_in(
         db_session, tenant_id=tenant.id, account_id=alice.id, agent_uuid=agent_uuid
     )

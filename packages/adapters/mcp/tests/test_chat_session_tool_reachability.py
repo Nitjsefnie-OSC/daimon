@@ -14,15 +14,13 @@ CHAT_TURN_TOOL_REACHABILITY below is the source of truth for what the seeded
 prompt may claim a chat turn can do. Adding a tool name to the prompt without
 adding a row here is exactly the drift this file exists to prevent — the
 routines lie (a prompt telling Discord users to press a button that doesn't
-exist) and the ``set_repo_binding``-from-chat gap were both this same class
-of mistake: prompt prose describing mechanism the live tool surface
-contradicts.
+exist). This suite catches prompt prose describing a mechanism the live tool
+surface contradicts.
 
 Chat execution identity uses ``chat_agent_id``, preserving the ordinary chat
 surface. ``agent_id`` remains the restricted external agent-chat credential.
 
-- ``set_repo_binding`` / ``get_repo_binding`` remain tagged ``agent-chat``
-  and invisible to ordinary chat sessions.
+- Retired repository binding tools are absent from both tool sets.
 - ``request_mcp_token`` / ``request_agent_key`` are available on Discord and
   Slack and require a platform-bound caller. This suite exercises Discord;
   the golden-query and authorization journeys cover the platform distinction.
@@ -78,8 +76,6 @@ class ExpectedOutcome(NamedTuple):
 CHAT_TURN_TOOL_REACHABILITY: dict[str, ExpectedOutcome] = {
     # self_edit.py — tagged agent-chat, so a chat-turn session (no agent_id
     # claim) never discovers them at all.
-    "set_repo_binding": ExpectedOutcome(discoverable=False),
-    "get_repo_binding": ExpectedOutcome(discoverable=False),
     # skills.py — reads stay ungated; sync_skills stays admin-only.
     "list_skills": ExpectedOutcome(discoverable=True),
     "sync_skills": ExpectedOutcome(discoverable=False),
@@ -301,9 +297,6 @@ async def test_agent_id_claim_session_discovers_agent_chat_and_self_edit_tools_o
         "self_read_file",
         "self_list_files",
         "self_delete_file",
-        "set_repo_binding",
-        "get_repo_binding",
-        "clear_repo_binding",
         "list_credentials",
     }
     assert tool_names == expected_agent_chat_tools, (

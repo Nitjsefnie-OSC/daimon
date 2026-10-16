@@ -21,7 +21,7 @@ from cryptography.fernet import MultiFernet
 from daimon.core.agent_pins import consume_form_unless_pinned
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
-from daimon.core.credential_requests import CredentialRequestOutcome, split_skill_repo_target
+from daimon.core.credential_requests import CredentialRequestOutcome
 from daimon.core.env_file import (
     MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
@@ -39,15 +39,12 @@ from daimon.core.stores.agent_files import (
     lock_agent_keys,
     put_agent_file_if_unchanged,
 )
-from daimon.core.stores.agent_repo_binding import set_binding
-from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential
 from daimon.core.stores.domain import (
     ChatPlatform,
     CredentialRequestRow,
     McpOAuthFlowRow,
     RepoAccessProof,
 )
-from daimon.core.stores.seeded_skills import list_seeded_skill_names
 from daimon.core.turn_keys import list_turn_key_names
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -343,19 +340,8 @@ async def write_repo_submit(
     row: CredentialRequestRow,
     ma_secret_ref: str,
     proof: RepoAccessProof,
-    write: Callable[..., Awaitable[object]] = set_binding,
 ) -> None:
-    """Write the working repo promised by the card, inside the caller's transaction."""
-    url, branch, _path = split_skill_repo_target(row.target)
-    await write(
-        session,
-        tenant_id=row.tenant_id,
-        agent_id=row.agent_id,
-        repo_url=url,
-        default_branch=branch,
-        ma_secret_ref=ma_secret_ref,
-        proof=proof,
-    )
+    raise ValueError("GitHub repository access requires a GitHub App grant.")
 
 
 async def write_skill_repo_submit(
@@ -365,19 +351,7 @@ async def write_skill_repo_submit(
     ma_secret_ref: str,
     proof: RepoAccessProof,
 ) -> frozenset[str]:
-    """Store the skill repo credential and read the seeded-name fence together."""
-    url, branch, path = split_skill_repo_target(row.target)
-    await set_skill_repo_credential(
-        session,
-        tenant_id=row.tenant_id,
-        agent_id=row.agent_id,
-        repo_url=url,
-        default_branch=branch,
-        path=path,
-        ma_secret_ref=ma_secret_ref,
-        proof=proof,
-    )
-    return await list_seeded_skill_names(session, tenant_id=row.tenant_id)
+    raise ValueError("GitHub repository access requires a GitHub App grant.")
 
 
 async def prepare_mcp_submit(

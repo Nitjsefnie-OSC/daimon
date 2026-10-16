@@ -55,8 +55,7 @@ async def _post_app_install_link_impl(
 ) -> PostAppInstallLinkResult:
     if auth.platform_user_id is None:
         raise ToolError("posting the install link requires a platform-bound identity")
-    # The App that GitHub setup uses wins; the older setting covers deployments without it.
-    slug = runtime.settings.github_app.app_slug or runtime.settings.github.app_slug
+    slug = runtime.settings.github_app.app_slug
     if slug is None:
         raise ToolError(
             "this deployment has no GitHub App install link configured — "

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
 from typing import Final, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -43,8 +42,7 @@ from daimon.core.routing_facts import (
 from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, shared_keys_sentence
 from daimon.core.stores.agent_files import put_agent_file
-from daimon.core.stores.agent_repo_binding import set_binding
-from daimon.core.stores.domain import Platform, RepoAccessProof
+from daimon.core.stores.domain import Platform
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing import ma_agent, tenant_metadata
 from daimon.testing.factories import make_tenant
@@ -431,89 +429,11 @@ async def test_member_roster_does_not_offer_unrouted_agent_details(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    (
-        _roster,
-        router,
-        tenant_id,
-        (workspace_id, channel_id, user_id),
-    ) = await _open_three_agent_roster(driver, db_session, db_session_factory, is_admin=False)
-    assert _UNROUTED not in _roster.body
-    assert _ANSWERING in _roster.body
-
-
-async def test_details_reads_the_same_sections_in_the_same_order_on_both_platforms(
-    driver: PlatformDriver,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Both panels show only present configuration, in one shared order."""
-    workspace_id, channel_id, user_id = _ids(driver)
-    tenant_id = await _seed_tenant(driver, db_session, workspace_id=workspace_id)
-    agent = ma_agent(
-        id=f"ag_{_UNROUTED}",
-        name=_UNROUTED,
-        metadata=tenant_metadata(tenant_id, _UNROUTED),
-        skills=[{"type": "custom", "skill_id": name, "version": "1"} for name in _SKILL_NAMES[:2]],
-        mcp_servers=[
-            {
-                "type": "url",
-                "name": name,
-                "url": f"https://{name}.example.com/mcp",
-            }
-            for name in _CONNECTION_NAMES[:2]
-        ],
+    roster, _, _, _ = await _open_three_agent_roster(
+        driver, db_session, db_session_factory, is_admin=False
     )
-    router = _read_only_router([agent])
-    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
-    async with db_session_factory() as session, session.begin():
-        await set_binding(
-            session,
-            tenant_id=tenant_id,
-            agent_id=agent_uuid,
-            repo_url="https://github.com/example/research",
-            default_branch="main",
-            ma_secret_ref="secret-ref",
-            proof=RepoAccessProof(kind="public", at=datetime.now(UTC), account_id=None),
-        )
-        await put_agent_file(
-            session,
-            tenant_id=tenant_id,
-            agent_id=agent_uuid,
-            key=_KEY_NAMES[0],
-            content="unread",
-            set_by_account_id=None,
-        )
-    await driver.open_setup_panel(
-        sessionmaker=db_session_factory,
-        router=router,
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        channel_id=channel_id,
-        user_id=user_id,
-        is_admin=True,
-    )
-    details = await driver.click_panel_action(
-        sessionmaker=db_session_factory,
-        router=router,
-        tenant_id=tenant_id,
-        workspace_id=workspace_id,
-        channel_id=channel_id,
-        user_id=user_id,
-        action="details",
-        agent_name=_UNROUTED,
-    )
-
-    assert _section_headings(details) == _DETAILS_SECTIONS, (
-        f"{driver.param_id}: Details carries one section per thing the agent is wired to, "
-        "in one shared order"
-    )
-    assert details.action_labels[0] == f"Manage {_UNROUTED}", (
-        f"{driver.param_id}: setup is the primary action before configuration details, "
-        "and it names the agent this screen is about"
-    )
-    assert "claude mcp add" not in details.body, (
-        f"{driver.param_id}: Details does not expose coding-tool commands before the action is used"
-    )
+    assert _UNROUTED not in roster.body
+    assert _ANSWERING in roster.body
 
 
 # ---------------------------------------------------------------------------

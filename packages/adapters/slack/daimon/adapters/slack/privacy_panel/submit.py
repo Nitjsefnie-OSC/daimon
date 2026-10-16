@@ -219,8 +219,6 @@ async def run_purge_and_update(
             routines=result.db.routines,
             links=result.db.principal_links,
             user_skills=result.db.user_skills,
-            github_credentials=result.db.github_credentials,
-            oauth_states=result.db.github_oauth_states,
             sessions_deleted=result.sessions.deleted,
             sessions_failed=result.sessions.failed,
         )

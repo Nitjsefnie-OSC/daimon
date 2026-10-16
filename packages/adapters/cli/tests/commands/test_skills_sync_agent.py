@@ -19,17 +19,15 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
-from cryptography.fernet import Fernet, MultiFernet
+from cryptography.fernet import Fernet
 from daimon.adapters.cli.commands.skills import (
-    _parse_repo_arg,
+    _parse_repo_arg,  # pyright: ignore[reportPrivateUsage]
     skills_app,
     sync_agent,
 )
 from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import Settings
-from daimon.core.github_credentials import encrypt_token
+from daimon.core.config import GithubAppSettings, Settings
 from daimon.core.specs import SkillRepo
-from daimon.core.stores.github_credentials import upsert_credential
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.testing import MARouter, build_fake_anthropic, list_response, make_tarball
 from daimon.testing.factories import make_tenant
@@ -91,15 +89,11 @@ class _FakeCrypto:
         self.keys = keys
 
 
-class _FakeGithub:
-    fallback_pat: SecretStr | None = None
-
-
 class _FakeSettings:
     def __init__(self, fernet_key: bytes) -> None:
         self.cli = _FakeCli()
         self.crypto = _FakeCrypto(keys=(SecretStr(fernet_key.decode("utf-8")),))
-        self.github = _FakeGithub()
+        self.github_app = GithubAppSettings()
 
 
 def _make_rt(
@@ -107,7 +101,7 @@ def _make_rt(
     anthropic_client: AsyncAnthropic,
     fernet_key: bytes,
 ) -> CliRuntime:
-    rt = cast(CliRuntime, object.__new__(CliRuntime))
+    rt = object.__new__(CliRuntime)
     object.__setattr__(rt, "settings", cast(Settings, _FakeSettings(fernet_key)))
     object.__setattr__(rt, "anthropic", anthropic_client)
     object.__setattr__(rt, "sessionmaker", db_session_factory)
@@ -117,75 +111,6 @@ def _make_rt(
 # ---------------------------------------------------------------------------
 # _sync_agent_impl — integration test against real Postgres + fakes
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_sync_agent_impl_renders_report_after_first_create(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """First sync uploads one skill, persists the row, and renders 'synced (new)' = 1."""
-    tenant = await make_tenant(db_session)
-    principal = await get_or_create_cli_principal(
-        db_session, tenant_id=tenant.id, os_user="testuser"
-    )
-    await db_session.commit()
-
-    fernet_key = Fernet.generate_key()
-    fernet = MultiFernet([Fernet(fernet_key)])
-
-    async with db_session_factory() as s, s.begin():
-        await upsert_credential(
-            s,
-            principal_id=principal.account_id,
-            github_login="tester",
-            encrypted_token=encrypt_token(fernet, "test-pat"),
-            scopes=("repo",),
-        )
-
-    tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})
-    github_http = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda _req: httpx.Response(200, content=tarball))
-    )
-
-    router = MARouter()
-    router.add(
-        "POST",
-        r"/v1/skills",
-        lambda _req, _m: httpx.Response(
-            200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title="anything",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
-        ),
-    )
-    # Attach step (fix #40) lists agents to bind synced skills. No daimon-tagged
-    # agent exists in this fake workspace, so the attach short-circuits and the
-    # sync metrics below are unaffected.
-    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
-    anthropic_client = build_fake_anthropic(router.dispatch)
-
-    rt = _make_rt(db_session_factory, anthropic_client, fernet_key)
-    buf = StringIO()
-    console = Console(file=buf, force_terminal=False, highlight=False, width=120)
-
-    await sync_agent(
-        rt=rt,
-        console=console,
-        agent_name="test-agent",
-        repos=[SkillRepo(url="https://github.com/o/r", branch="main")],
-        http_client=github_http,
-    )
-
-    out = buf.getvalue()
-    assert "synced (new)" in out, "rendered table must include the synced metric label"
-    assert "1" in out, "rendered table must include the synced count of 1"
 
 
 @pytest.mark.asyncio

@@ -27,15 +27,12 @@ import uuid
 from typing import Final
 
 from daimon.core.stores import accounts as accounts_store
-from daimon.core.stores import agent_github_binding as agent_github_binding_store
 from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import channel_admins as channel_admins_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import github_connect as github_connect_store
-from daimon.core.stores import github_credentials as github_credentials_store
 from daimon.core.stores import github_links as github_links_store
-from daimon.core.stores import github_oauth_states as github_oauth_states_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
@@ -80,13 +77,10 @@ class PurgePreview(BaseModel):
     user_configs: PurgePreviewRow
     account: PurgePreviewRow  # singular: 1 if row exists else 0
     user_skills: PurgePreviewRow
-    github_credentials: PurgePreviewRow
     github_connect_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_connect_click_intents: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_user_links: PurgePreviewRow
-    github_oauth_states: PurgePreviewRow
     mcp_tokens: PurgePreviewRow
-    agent_github_binding: PurgePreviewRow
     slack_user_tokens: PurgePreviewRow
     slack_turn_contexts: PurgePreviewRow
     direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -107,13 +101,10 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.routines, "routine"),
         (preview.user_configs, "saved settings"),
         (preview.user_skills, "skill you synced"),
-        (preview.github_credentials, "saved GitHub key"),
         (preview.github_connect_requests, "GitHub setup request"),
         (preview.github_connect_click_intents, "GitHub connect button"),
         (preview.github_user_links, "linked GitHub account"),
-        (preview.github_oauth_states, "GitHub sign-in record"),
         (preview.mcp_tokens, "Daimon access token"),
-        (preview.agent_github_binding, "link from an agent to your GitHub keys"),
         (preview.slack_user_tokens, "saved Slack access token"),
         (preview.slack_turn_contexts, "temporary Slack request record"),
         (preview.direct_message_conversations, "private conversation"),
@@ -276,52 +267,11 @@ async def collect_purge_preview(
                     user_skills_example = first_skill.name
         user_skills = PurgePreviewRow(count=user_skills_total, example=user_skills_example)
 
-        # 7. github_credentials — both principal kinds. PK lookup:
-        # count is 0 or 1 per principal; login string is the display example.
-        github_credentials_total = 0
-        github_credentials_example: str | None = None
-        for p in (*cli_list, *pp_list):
-            login = await github_credentials_store.get_credential_login_by_principal(
-                session, principal_id=p.id
-            )
-            if login is not None:
-                github_credentials_total += 1
-                if github_credentials_example is None:
-                    github_credentials_example = login
-        github_credentials = PurgePreviewRow(
-            count=github_credentials_total, example=github_credentials_example
-        )
         github_user_links = PurgePreviewRow(
             count=await github_links_store.count_users_orphaned_by_account_delete(
                 session, account_id=account_id
             ),
             example=None,
-        )
-
-        # 8. github_oauth_states — keyed by (platform, platform_user_id). Build
-        # the DISTINCT set of keys to avoid double-counting when two same-account
-        # CLI principals share an os_user (mirrors the principal_links dedup
-        # rationale). Both CLI and platform keys carry the principal's
-        # tenant_id — mirroring the purge predicate exactly on both paths: an
-        # external id (Slack/Discord user id, or CLI os_user) is not globally
-        # unique across tenants, so both deletes are tenant-scoped.
-        oauth_keys: set[tuple[str, str, uuid.UUID]] = set()
-        for pp in pp_list:
-            oauth_keys.add((pp.platform, pp.external_id, pp.tenant_id))
-        for cli in cli_list:
-            oauth_keys.add(("cli", cli.os_user, cli.tenant_id))
-        github_oauth_states_total = 0
-        for platform, platform_user_id, key_tenant_id in oauth_keys:
-            n = await github_oauth_states_store.count_states_for_platform_user(
-                session,
-                platform=platform,
-                platform_user_id=platform_user_id,
-                tenant_id=key_tenant_id,
-            )
-            github_oauth_states_total += n
-        github_oauth_states = PurgePreviewRow(
-            count=github_oauth_states_total,
-            example=None,  # no human-meaningful label; matches principal_links precedent
         )
 
         # 9. mcp_tokens — account-scoped (keyed by account_id, not principal), so
@@ -330,15 +280,6 @@ async def collect_purge_preview(
             session, account_id=account_id
         )
         mcp_tokens = PurgePreviewRow(count=mcp_tokens_count, example=None)
-
-        # 10. agent_github_binding — principal-scoped; sum a per-principal count
-        # over both kinds, mirroring the user_skills loop.
-        agent_github_binding_total = 0
-        for p in (*cli_list, *pp_list):
-            agent_github_binding_total += await agent_github_binding_store.count_for_principal(
-                session, principal_id=p.id
-            )
-        agent_github_binding = PurgePreviewRow(count=agent_github_binding_total, example=None)
 
         # 11. slack_user_tokens — Slack platform principals only, 0 or 1 per
         # principal (PK is (team_id, slack_user_id)), mirroring the
@@ -506,15 +447,12 @@ async def collect_purge_preview(
         user_configs=user_configs,
         account=account,
         user_skills=user_skills,
-        github_credentials=github_credentials,
         github_connect_requests=PurgePreviewRow(count=github_connect_requests_count, example=None),
         github_connect_click_intents=PurgePreviewRow(
             count=github_connect_click_intents_count, example=None
         ),
         github_user_links=github_user_links,
-        github_oauth_states=github_oauth_states,
         mcp_tokens=mcp_tokens,
-        agent_github_binding=agent_github_binding,
         slack_user_tokens=slack_user_tokens,
         slack_turn_contexts=slack_turn_contexts,
         credential_requests=credential_requests,

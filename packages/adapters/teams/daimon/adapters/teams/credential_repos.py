@@ -20,35 +20,16 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.errors import DaimonError
-from daimon.core.github_credentials import upsert_credential_encrypted
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import update_agent
-from daimon.core.stores.agent_github_binding import set_agent_github_binding
 from mux.errors import ScopeViolation
 
 log = structlog.get_logger()
 
 
 async def store_agent_pat(runtime: TeamsRuntime, *, agent_id: uuid.UUID, pat: str) -> str:
-    """Encrypt `pat` as the agent's own GitHub credential; returns its `ma_secret_ref`.
-
-    Stored under the agent as principal, so no other agent resolves it.
-    """
-    fernet = runtime.turn_deps.fernet
-    if fernet is None:
-        raise DaimonError("no encryption keys configured")
-    await upsert_credential_encrypted(
-        sessionmaker=runtime.sessionmaker,
-        fernet=fernet,
-        principal_id=agent_id,
-        github_login="(inline-pat)",
-        plaintext_token=pat,
-        scopes=tuple(runtime.settings.github.oauth_scopes),
-    )
-    async with runtime.sessionmaker.begin() as session:
-        await set_agent_github_binding(session, agent_id=agent_id, principal_id=agent_id)
-    return f"inline-pat:{agent_id}"
+    raise ValueError("GitHub repository access requires a GitHub App grant.")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

@@ -60,17 +60,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
 from anthropic.types.beta.sessions.beta_managed_agents_unknown_error import (
     BetaManagedAgentsUnknownError,
 )
-from cryptography.fernet import Fernet
 from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.errors import TurnError
-from daimon.core.github_credentials import build_multifernet, upsert_credential_encrypted
 from daimon.core.headless_runner import run_turn
 from daimon.core.rule_views import RoutineOrigin
-from daimon.core.stores import agent_github_binding as github_binding_store
-from daimon.core.stores import agent_repo_binding as repo_binding_store
 from daimon.core.stores.agent_files import put_agent_file
-from daimon.core.stores.domain import RepoAccessProof
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     MARouter,
@@ -119,6 +114,40 @@ def _register_agent_environment_routes(router: MARouter, *, model_id: str = _MOD
     router.add("GET", r"/v1/environments/([^/]+)", handle_environment_retrieve)
 
 
+def _register_session_vault_routes(router: MARouter) -> None:
+    """Serve the App session vault used by turns with stored resources."""
+    router.add(
+        "GET",
+        r"/v1/vaults",
+        lambda _r, _m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+    router.add(
+        "POST",
+        r"/v1/vaults$",
+        lambda _r, _m: httpx.Response(
+            200,
+            json={
+                "id": "vlt_session",
+                "type": "vault",
+                "display_name": "github-session:test",
+                "metadata": None,
+                "archived_at": None,
+                "created_at": "2026-05-20T00:00:00Z",
+            },
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/vaults/[^/]+/archive",
+        lambda _r, _m: httpx.Response(200, json={"id": "vlt_session", "type": "vault"}),
+    )
+    router.add(
+        "GET",
+        r"/v1/vaults/[^/]+/credentials",
+        lambda _r, _m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+
+
 def _build_client(
     events: list[BetaManagedAgentsSessionEvent],
     *,
@@ -165,6 +194,7 @@ def _build_client(
     router.add("POST", r"/v1/sessions", handle_create)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
+    _register_session_vault_routes(router)
     if terminal_less_script:
         router.add(
             "GET",
@@ -698,7 +728,17 @@ async def test_run_turn_attaches_vault_when_mcp_settings(
 
     router.add("GET", r"/v1/vaults", handle_vaults_list)
     router.add("POST", r"/v1/vaults", handle_vaults_create)
+    router.add(
+        "GET",
+        r"/v1/vaults/[^/]+/credentials",
+        lambda _r, _m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
     router.add("POST", r"/v1/vaults/[^/]+/credentials", handle_credentials_create)
+    router.add(
+        "POST",
+        r"/v1/vaults/[^/]+/archive",
+        lambda _r, _m: httpx.Response(200, json={"id": "vlt_new", "type": "vault"}),
+    )
     router.add("POST", r"/v1/sessions", handle_session_create)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
@@ -974,6 +1014,7 @@ def _build_client_with_files(
     router.add("POST", r"/v1/sessions", handle_create)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
+    _register_session_vault_routes(router)
     _register_agent_environment_routes(router)
     return build_fake_anthropic(router.dispatch)
 
@@ -1014,197 +1055,6 @@ async def test_run_turn_mounts_env_resource_when_agent_has_secrets(
     assert bodies[0].get("resources") == [
         {"type": "file", "file_id": "file_env_hr", "mount_path": ".env"}
     ], "session-create must carry the .env resource when the agent has secrets"
-
-
-async def test_run_turn_mounts_repo_resource_when_bound_and_pat_present(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Headless parity with create_session: a bound repo + PAT → clone resource."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await repo_binding_store.set_binding(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        repo_url="https://github.com/example-org/example-repo",
-        default_branch="main",
-        ma_secret_ref="anon:",
-        proof=RepoAccessProof(
-            kind="pat", at=dt.datetime(2026, 5, 1, tzinfo=dt.UTC), account_id=None
-        ),
-    )
-    await github_binding_store.set_agent_github_binding(
-        db_session, agent_id=agent_uuid, principal_id=agent_uuid
-    )
-    await db_session.commit()
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=agent_uuid,
-        github_login="dev-agent",
-        plaintext_token="ghp_dev_agent_token",
-        scopes=("repo",),
-    )
-
-    bodies: list[dict[str, Any]] = []
-    client = _build_client_with_files(
-        _idle_events(), file_id="file_unused", session_create_bodies=bodies
-    )
-
-    tail = await run_turn(
-        anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
-        trigger_message="hi",
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        fernet=fernet,
-    )
-
-    assert tail == "ok"
-    assert len(bodies) == 1, "exactly one session-create call"
-    assert bodies[0].get("resources") == [
-        {
-            "type": "github_repository",
-            "url": "https://github.com/example-org/example-repo",
-            "authorization_token": "ghp_dev_agent_token",
-            "checkout": {"type": "branch", "name": "main"},
-        }
-    ], "headless session-create must carry the github_repository clone resource"
-
-
-async def test_run_turn_provisions_copilot_credential_from_pat(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Headless parity: a bound repo + PAT + ensured vault → Copilot cred on the vault."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    account_id = uuid.uuid4()
-    public_url = "https://mcp.example.local/mcp"
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await repo_binding_store.set_binding(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        repo_url="https://github.com/example-org/example-repo",
-        default_branch="main",
-        ma_secret_ref="anon:",
-        proof=RepoAccessProof(
-            kind="pat", at=dt.datetime(2026, 5, 1, tzinfo=dt.UTC), account_id=None
-        ),
-    )
-    await github_binding_store.set_agent_github_binding(
-        db_session, agent_id=agent_uuid, principal_id=agent_uuid
-    )
-    await db_session.commit()
-    await upsert_credential_encrypted(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        principal_id=agent_uuid,
-        github_login="dev-agent",
-        plaintext_token="ghp_copilot_pat",
-        scopes=("repo",),
-    )
-
-    cred_bodies: list[dict[str, Any]] = []
-    session_bodies: list[dict[str, Any]] = []
-    router = MARouter()
-    session_json = _fake_session_json()
-    event_dicts = [e.model_dump(mode="json") for e in _idle_events()]
-    display = f"daimon-mcp:{account_id}:{agent_uuid}"
-
-    def handle_vaults_list(request: httpx.Request, match: Any) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "id": "vlt_existing",
-                        "type": "vault",
-                        "display_name": display,
-                        "metadata": None,
-                        "archived_at": None,
-                        "created_at": "2026-04-01T00:00:00Z",
-                    }
-                ],
-                "has_more": False,
-            },
-        )
-
-    def handle_creds_list(request: httpx.Request, match: Any) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "id": "vcrd_daimon_mcp",
-                        "metadata": {"daimon_chat_identity": str(agent_uuid)},
-                        "type": "credential",
-                        "vault_id": "vlt_existing",
-                        "auth": {"type": "static_bearer", "mcp_server_url": public_url},
-                    }
-                ],
-                "has_more": False,
-            },
-        )
-
-    def handle_creds_create(request: httpx.Request, match: Any) -> httpx.Response:
-        cred_bodies.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={
-                "id": "vcrd_copilot",
-                "type": "credential",
-                "vault_id": "vlt_existing",
-                "auth": {
-                    "type": "static_bearer",
-                    "mcp_server_url": "https://api.githubcopilot.com/mcp",
-                },
-            },
-        )
-
-    def handle_session_create(request: httpx.Request, match: Any) -> httpx.Response:
-        session_bodies.append(json.loads(request.content))
-        return httpx.Response(200, json=session_json)
-
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        return sse_response(event_dicts)
-
-    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
-        return httpx.Response(200, json={"data": None})
-
-    router.add("GET", r"/v1/vaults", handle_vaults_list)
-    router.add("GET", r"/v1/vaults/[^/]+/credentials", handle_creds_list)
-    router.add("POST", r"/v1/vaults/[^/]+/credentials", handle_creds_create)
-    router.add("POST", r"/v1/sessions", handle_session_create)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
-    _register_agent_environment_routes(router)
-    client = build_fake_anthropic(router.dispatch)
-
-    tail = await run_turn(
-        anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
-        trigger_message="hi",
-        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
-        account_id=account_id,
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        fernet=fernet,
-    )
-
-    assert tail == "ok"
-    assert len(cred_bodies) == 1, "exactly one credential POST (the Copilot cred)"
-    auth = cred_bodies[0]["auth"]
-    assert auth["mcp_server_url"] == "https://api.githubcopilot.com/mcp"
-    assert auth["token"] == "ghp_copilot_pat"
-    assert session_bodies[0].get("vault_ids") == ["vlt_existing"]
 
 
 async def test_run_turn_omits_resources_when_phase51_params_absent() -> None:
@@ -1305,7 +1155,17 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
 
     router.add("GET", r"/v1/vaults", handle_vaults_list)
     router.add("POST", r"/v1/vaults", handle_vaults_create)
+    router.add(
+        "GET",
+        r"/v1/vaults/[^/]+/credentials",
+        lambda _r, _m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
     router.add("POST", r"/v1/vaults/[^/]+/credentials", handle_credentials_create)
+    router.add(
+        "POST",
+        r"/v1/vaults/[^/]+/archive",
+        lambda _r, _m: httpx.Response(200, json={"id": "vlt_new", "type": "vault"}),
+    )
     router.add("POST", r"/v1/files", handle_files)
     router.add("POST", r"/v1/sessions", handle_create)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
@@ -1331,7 +1191,7 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
     assert tail == "ok"
     assert len(bodies) == 1, "exactly one session-create call"
     assert bodies[0].get("vault_ids") == ["vlt_new"], (
-        "vault_ids behavior must be preserved alongside resources"
+        "the MCP caller vault must be mounted alongside resources without an App grant"
     )
     assert bodies[0].get("resources") == [
         {"type": "file", "file_id": "file_both_hr", "mount_path": ".env"}

@@ -160,8 +160,8 @@ def test_parse_env_file_rejects_a_nul_in_a_value() -> None:
         ("TERMINFO", True),
         ("TERMCAP", True),
         ("OPENAI_API_KEY", False),
-        ("GH_TOKEN", False),
-        ("GITHUB_TOKEN", False),
+        ("GH_TOKEN", True),
+        ("GITHUB_TOKEN", True),
         ("PATHWAY_KEY", False),
         ("LANGUAGE_API_KEY", False),
     ],
@@ -543,8 +543,6 @@ def test_every_exec_on_env_name_is_hard_denied_for_everyone(name: str) -> None:
     "name",
     [
         "OPENAI_API_KEY",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
         "GOOGLE_API_KEY",
         "AWS_ACCESS_KEY_ID",
         "ACME_PAT",
@@ -679,13 +677,13 @@ def test_member_suffix_hint_lists_exactly_the_accepted_suffixes() -> None:
 @pytest.mark.parametrize(
     ("adding", "held", "shadowed"),
     [
-        ("GITHUB_TOKEN", ["GH_TOKEN"], "GH_TOKEN"),
-        ("GH_TOKEN", ["GITHUB_TOKEN"], "GITHUB_TOKEN"),
+        ("GITLAB_TOKEN", ["GLAB_TOKEN"], "GLAB_TOKEN"),
+        ("GLAB_TOKEN", ["GITLAB_TOKEN"], "GITLAB_TOKEN"),
         ("ANTHROPIC_AUTH_TOKEN", ["ANTHROPIC_API_KEY"], "ANTHROPIC_API_KEY"),
         ("AWS_SESSION_TOKEN", ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"], "AWS_ACCESS_KEY_ID"),
         ("OPENAI_KEY", ["OPENAI_API_KEY"], "OPENAI_API_KEY"),
-        ("GH_TOKEN", ["OPENAI_API_KEY"], None),
-        ("GH_TOKEN", ["GH_TOKEN"], None),
+        ("GLAB_TOKEN", ["OPENAI_API_KEY"], None),
+        ("GLAB_TOKEN", ["GLAB_TOKEN"], None),
     ],
 )
 def test_env_alias_shadowed(adding: str, held: list[str], shadowed: str | None) -> None:
@@ -693,12 +691,12 @@ def test_env_alias_shadowed(adding: str, held: list[str], shadowed: str | None) 
 
 
 def test_an_import_collides_on_an_alias_and_says_which_key() -> None:
-    entries = parse_env_file("OPENAI_API_KEY=a\nGITHUB_TOKEN=secret-b\n")
-    held = {"GH_TOKEN"}
+    entries = parse_env_file("OPENAI_API_KEY=a\nGITLAB_TOKEN=secret-b\n")
+    held = {"GLAB_TOKEN"}
     collisions = env_import_collisions(entries, held)
-    assert [e.name for e in collisions] == ["GITHUB_TOKEN"]
+    assert [e.name for e in collisions] == ["GITLAB_TOKEN"]
     line = env_collision_line(collisions[0], held)
-    assert "GITHUB_TOKEN would replace GH_TOKEN" in line
+    assert "GITLAB_TOKEN would replace GLAB_TOKEN" in line
     assert "secret-b" not in line, "no value in the line"
 
 
@@ -739,20 +737,20 @@ def test_more_alias_groups(adding: str, held: str) -> None:
 def test_a_file_with_both_names_of_an_alias_pair_is_refused() -> None:
     """Whichever name the tool prefers would silently win: the file is ambiguous."""
     with pytest.raises(EnvFileRejected) as caught:
-        parse_env_file("OPENAI_API_KEY=a\nGH_TOKEN=b\nGITHUB_TOKEN=c\n")
+        parse_env_file("OPENAI_API_KEY=a\nGLAB_TOKEN=b\nGITLAB_TOKEN=c\n")
     assert caught.value.rejection == "alias_pair"
-    assert [(p.name, p.line) for p in caught.value.problems] == [("GITHUB_TOKEN", 3)]
+    assert [(p.name, p.line) for p in caught.value.problems] == [("GITLAB_TOKEN", 3)]
 
 
 def test_alias_pair_refusal_copy_names_the_key_not_the_value() -> None:
     from daimon.core.continuity.messages import render_env_import_rejected
 
     with pytest.raises(EnvFileRejected) as caught:
-        parse_env_file("GH_TOKEN=secret-b\nGITHUB_TOKEN=secret-c\n")
+        parse_env_file("GLAB_TOKEN=secret-b\nGITLAB_TOKEN=secret-c\n")
     text = render_env_import_rejected(
         caught.value.rejection, caught.value.problems, target_name="tester"
     )
-    assert "GITHUB_TOKEN" in text and "same tool" in text
+    assert "GITLAB_TOKEN" in text and "same tool" in text
     assert "secret-" not in text
 
 

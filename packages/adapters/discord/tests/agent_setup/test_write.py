@@ -8,7 +8,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from cryptography.fernet import Fernet
 from daimon.adapters.discord.agent_setup import write as write_mod
 from daimon.adapters.discord.agent_setup.write import (
     create_blank_agent,
@@ -83,40 +82,23 @@ async def test_load_agent_inline_pat_returns_none_when_crypto_unconfigured() -> 
 
 
 @pytest.mark.asyncio
-async def test_load_agent_inline_pat_returns_stored_pat(
+async def test_inline_pat_storage_is_refused(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Round-trips through store_inline_pat -> load_agent_inline_pat, decrypted."""
     await make_tenant(db_session, platform="discord", workspace_id="test-guild-inline-pat-load")
-
-    fernet_key = Fernet.generate_key().decode()
-    plaintext = "ghp_inline_pat_load_xxxx9999"
-
-    settings = MagicMock()
-    settings.crypto.keys = (MagicMock(get_secret_value=lambda: fernet_key),)
-    settings.github.oauth_scopes = ("repo", "read:user")
-    runtime = DiscordRuntime(
-        settings=settings,
-        anthropic=build_stub_anthropic(),
-        sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
+    runtime = _runtime_with_settings(
+        build_stub_anthropic(), tenant_id=uuid.uuid4(), public_url=None
     )
-
     agent_id = uuid.uuid4()
-    await write_mod.store_inline_pat(
-        runtime,
-        account_id=uuid.uuid4(),
-        agent_id=agent_id,
-        plaintext_pat=plaintext,
-    )
-
-    result = await write_mod.load_agent_inline_pat(runtime, agent_id=agent_id)
-    assert result == plaintext, "load_agent_inline_pat must decrypt and return the exact stored PAT"
+    with pytest.raises(ValueError, match="GitHub App grant"):
+        await write_mod.store_inline_pat(
+            runtime,
+            account_id=uuid.uuid4(),
+            agent_id=agent_id,
+            plaintext_pat="sample-token",
+        )
+    assert await write_mod.load_agent_inline_pat(runtime, agent_id=agent_id) is None
 
 
 def _runtime_with_settings(

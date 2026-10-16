@@ -11,6 +11,7 @@ a closure with the config bound. Boot fails fast on misconfig (Pitfall 5).
 
 from __future__ import annotations
 
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -20,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 from daimon.core.billing import BillingConfig
-from daimon.core.config import GithubSettings
+from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import verify_signature
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ops_alerts import alert_ops
@@ -31,6 +32,7 @@ from daimon.core.stores import (
     pending_clawbacks,
     tenant_ledger,
 )
+from daimon.core.stores.domain import TenantLedgerRow
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
@@ -78,7 +80,7 @@ def _get(d: dict[str, Any], key: str) -> object:
 def build_github_webhook(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
-    github_settings: GithubSettings,
+    github_settings: GithubAppSettings,
 ) -> Callable[[Request], Awaitable[Response]]:
     """Construct a GitHub App webhook handler with collaborators bound. SC-3.
 
@@ -98,7 +100,7 @@ def build_github_webhook(
     if webhook_secret is None:
         raise ValueError(
             "GitHub App webhook_secret must be configured to mount /webhooks/github "
-            "(DAIMON_GITHUB__WEBHOOK_SECRET env var)"
+            "(DAIMON_GITHUB_APP__WEBHOOK_SECRET env var)"
         )
 
     async def handler(request: Request) -> Response:
@@ -621,7 +623,7 @@ async def _drain_pending_clawbacks(
     session: AsyncSession,
     *,
     payment_intent: str,
-    credit: tenant_ledger.TenantLedgerRow,
+    credit: TenantLedgerRow,
 ) -> None:
     if credit.payment_event_id is None:
         log.warning(

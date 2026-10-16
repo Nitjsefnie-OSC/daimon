@@ -158,7 +158,6 @@ def build_turn_deps(
     """Derive `TurnDeps` from `settings`, once per adapter runtime."""
     turn_settings = cast(object, settings.turn)
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
-    github = settings.github
     return TurnDeps(
         anthropic=anthropic,
         messages=anthropic,
@@ -181,9 +180,9 @@ def build_turn_deps(
         billing_config=billing_config,
         markup=settings.billing.markup,
         fernet=build_multifernet(crypto_keys) if crypto_keys else None,
-        github_fallback_pat=_reveal(github.fallback_pat),
-        github_app_id=github.app_id,
-        github_app_private_key=_reveal(github.app_private_key),
+        github_fallback_pat=None,
+        github_app_id=settings.github_app.app_id,
+        github_app_private_key=_reveal(settings.github_app.private_key),
         agent_github_app=settings.github_app,
         public_url=str(settings.mcp.public_url) if settings.mcp.public_url is not None else None,
         tool_safety=settings.tool_safety,

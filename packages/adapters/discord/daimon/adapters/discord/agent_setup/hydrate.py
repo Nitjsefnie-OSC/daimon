@@ -239,10 +239,9 @@ def github_facts(runtime: DiscordRuntime) -> GitHubDeploymentFacts:
     The App counts as configured only with both halves of its identity present;
     an app id without a private key mints nothing.
     """
-    github = runtime.settings.github
     return GitHubDeploymentFacts(
-        has_fallback_pat=github.fallback_pat is not None,
-        app_configured=github.app_id is not None and github.app_private_key is not None,
+        app_configured=runtime.settings.github_app.app_id is not None
+        and runtime.settings.github_app.private_key is not None,
     )
 
 

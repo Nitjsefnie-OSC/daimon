@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import time
+import uuid
 
 import anthropic
 import httpx
@@ -28,6 +29,9 @@ from daimon.adapters.mcp.tools._rule_view import CallerView, load_caller_view, l
 from daimon.adapters.mcp.tools.agents import (
     _reject_system_agent,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.github_connect import (
+    _github_connect_impl,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
@@ -44,24 +48,18 @@ from daimon.core.defaults.metadata import strip_tenant_prefix, tenant_scoped_dis
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.errors import DaimonError
-from daimon.core.github_app_auth import build_app_jwt, get_installation_id_for_repo
-from daimon.core.github_credentials import get_pat
-from daimon.core.github_repo_auth import InstallationLookup, resolve_skill_sync_token
+from daimon.core.github_repo_auth import mint_granted_skill_token
 from daimon.core.ma import update_agent_with_version_retry
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import update_agent
 from daimon.core.skills.attachments import delete_skill_unless_attached, still_attached_message
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
-from daimon.core.stores.agent_repo_binding import get_bindings_for_repo
-from daimon.core.stores.agent_skill_repo_credentials import (
-    list_skill_repo_credentials_for_repo,
-)
-from daimon.core.stores.domain import RepoProofKind
 from daimon.core.stores.seeded_skills import list_seeded_skill_names, load_seeded_skill
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel
 
 
 class SkillInfo(BaseModel):
@@ -130,149 +128,21 @@ async def _resolve_sync_token(
     auth: AuthIdentity,
     url: str,
     http_client: httpx.AsyncClient,
+    *,
+    agent_id: uuid.UUID | None,
 ) -> str | None:
-    """Resolve a GitHub token for syncing ``url``, or None (anonymous fetch).
-
-    The session JWT carries no agent_id claim (SC-4), so the credential is
-    resolved from the URL instead, over two storage tiers read in order:
-
-    1. ``agent_skill_repo_credentials`` — the caller-tenant's skill-repo
-       enrollments of this exact repo (one per agent, any number of repos
-       per agent) → that agent's PAT overlay, plus the first recorded proof
-       of access among them. This is where enrolling a skill repo writes
-       today, so it is consulted first.
-    2. ``agent_repo_binding`` — the legacy home, where skill enrollment used
-       to record its PAT because there was nowhere else to put it. Read when
-       tier 1 left the PAT or the proof unresolved, and it supplies only the
-       one(s) still missing — the two are resolved independently, so a
-       skill-repo credential carrying a proof but no usable PAT overlay
-       still picks up a legacy binding's PAT (and vice versa) instead of
-       suppressing it. The fallback is load-bearing, not transitional
-       politeness: every tenant enrolled through the old path keeps syncing
-       with zero data migration, and a binding row is still the only record
-       such a tenant has. Removing it silently drops those tenants to
-       anonymous fetches on private repos.
-
-    Either tier resolves the PAT the same way — ``get_pat`` on the row's
-    agent — and reads the proof independently of it. Other tenants' rows for
-    the same repo never resolve a per-agent PAT and never count as this
-    tenant's proof — no cross-tenant credential bleed (tier 1's store query
-    is tenant-scoped; tier 2 filters the install-agnostic result itself).
-    Because each loop stops on the first non-``None`` overlay PAT, an agent
-    whose overlay resolves short-circuits it — correct, since only one
-    per-agent credential is needed.
-
-    The full precedence decision (per-agent token -> GitHub App installation
-    -> operator fallback -> anonymous) is delegated to
-    ``daimon.core.github_repo_auth.resolve_skill_sync_token``, so this
-    resolver and the per-agent skill-sync pipeline's credential path cannot
-    drift from each other — see that function (and its
-    ``select_skill_sync_auth`` pure decision table) for the ordering itself,
-    not restated here. Critically, the App installation tier is gated on
-    ``proof_kind``: a tenant that has never bound this repo (with proof)
-    itself is never eligible for the App tier, even when the deployment's
-    App happens to cover it for some unrelated tenant's own bound repo —
-    App coverage is installed by repo owners for their own use, not by the
-    tenant requesting this sync, so it cannot stand in for a demonstrated
-    access check. This is the interactive caller, so the installation
-    lookup built below is a LIVE GitHub lookup rather than a cached read of
-    the installations table — that split is deliberate (see
-    ``resolve_skill_sync_token``'s docstring).
-    """
-    if runtime.fernet is None:
-        return None
-    fallback_pat = (
-        runtime.settings.github.fallback_pat.get_secret_value()
-        if runtime.settings.github.fallback_pat is not None
-        else None
-    )
+    """Use an App token only when the target agent has an active repo grant."""
     async with runtime.session_factory() as session:
-        credentials = await list_skill_repo_credentials_for_repo(
-            session, tenant_id=auth.tenant_id, repo_url=url
+        return await mint_granted_skill_token(
+            session,
+            http_client,
+            tenant_id=auth.tenant_id,
+            agent_id=agent_id,
+            repo_url=url,
+            app_id=runtime.settings.github_app.app_id,
+            app_private_key=runtime.settings.github_app.private_key,
+            now=int(time.time()),
         )
-    proof_kind: RepoProofKind | None = next(
-        (credential.proof_kind for credential in credentials if credential.proof_kind is not None),
-        None,
-    )
-    per_agent_pat: str | None = None
-    for credential in credentials:
-        token = await get_pat(
-            principal_id=credential.agent_id,
-            agent_id=credential.agent_id,
-            sessionmaker=runtime.session_factory,
-            fernet=runtime.fernet,
-            allow_service_default=False,
-            fallback_pat=None,
-        )
-        if token is not None:
-            per_agent_pat = token
-            break
-
-    if per_agent_pat is None or proof_kind is None:
-        # Tier 2 — the legacy binding home, filling in only what tier 1 left
-        # unresolved. A tenant that enrolled before the credential table
-        # existed has its PAT and its proof here; one mid-migration may have
-        # each in a different tier, so neither is allowed to suppress the
-        # other.
-        async with runtime.session_factory() as session:
-            bindings = await get_bindings_for_repo(session, repo_url=url)
-        tenant_bindings = [binding for binding in bindings if binding.tenant_id == auth.tenant_id]
-        if proof_kind is None:
-            proof_kind = next(
-                (
-                    binding.proof_kind
-                    for binding in tenant_bindings
-                    if binding.proof_kind is not None
-                ),
-                None,
-            )
-        if per_agent_pat is None:
-            for binding in tenant_bindings:
-                token = await get_pat(
-                    principal_id=binding.agent_id,
-                    agent_id=binding.agent_id,
-                    sessionmaker=runtime.session_factory,
-                    fernet=runtime.fernet,
-                    allow_service_default=False,
-                    fallback_pat=None,
-                )
-                if token is not None:
-                    per_agent_pat = token
-                    break
-
-    github_app_id = runtime.settings.github.app_id
-    github_app_private_key = runtime.settings.github.app_private_key
-    installation_lookup: InstallationLookup | None = None
-    if github_app_id is not None and github_app_private_key is not None:
-        # Interactive path — a live GitHub lookup is the right freshness
-        # choice here (an unattended batch caller would inject a cached read
-        # of the installations table instead).
-        resolved_app_id: str = github_app_id
-        resolved_app_private_key: SecretStr = github_app_private_key
-
-        async def _live_installation_lookup(owner: str, repo: str) -> int | None:
-            app_jwt = build_app_jwt(
-                resolved_app_private_key.get_secret_value(),
-                resolved_app_id,
-                now=int(time.time()),
-            )
-            return await get_installation_id_for_repo(
-                http_client, jwt=app_jwt, owner=owner, repo=repo
-            )
-
-        installation_lookup = _live_installation_lookup
-
-    return await resolve_skill_sync_token(
-        http_client,
-        repo_url=url,
-        per_agent_pat=per_agent_pat,
-        proof_kind=proof_kind,
-        fallback_pat=fallback_pat,
-        app_id=github_app_id,
-        app_private_key=github_app_private_key,
-        installation_lookup=installation_lookup,
-        now=int(time.time()),
-    )
 
 
 async def _attach_synced_skills(
@@ -341,8 +211,10 @@ async def _sync_impl(
     path: str,
     agent_name: str | None = None,
     expected_ma_agent_id: str | None = None,
+    origin_context_id: str | None = None,
 ) -> SkillSyncResult:
     _require_admin(auth)
+    agent_id: uuid.UUID | None = None
     if agent_name is not None:
         agent = await resolve_setup_agent(
             runtime, auth, name=agent_name, expected_ma_agent_id=expected_ma_agent_id
@@ -351,10 +223,17 @@ async def _sync_impl(
         # target leaves nothing half-done behind.
         _reject_system_agent(agent)
         expected_ma_agent_id = agent.id
+        agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     async with runtime.session_factory() as session:
         seeded_skill_names = await list_seeded_skill_names(session, tenant_id=auth.tenant_id)
     async with httpx.AsyncClient(timeout=30.0) as http:
-        token = await _resolve_sync_token(runtime, auth, url, http)
+        token = await _resolve_sync_token(
+            runtime,
+            auth,
+            url,
+            http,
+            agent_id=agent_id,
+        )
         try:
             outcomes = await run_skill_sync(
                 runtime.client,
@@ -382,13 +261,26 @@ async def _sync_impl(
             # is why the agent used to apologize for a typo instead of asking
             # for a credential.
             if exc.status_code == 404 and token is None:
+                if agent_name is not None and origin_context_id is not None:
+                    await _github_connect_impl(
+                        runtime,
+                        auth,
+                        origin_context_id=origin_context_id,
+                        agent_name=agent_name,
+                        expected_ma_agent_id=expected_ma_agent_id,
+                        repo_name=url.removeprefix("https://github.com/").removesuffix(".git"),
+                        required_ability="read",
+                    )
+                    raise ToolError(
+                        f"No active GitHub App grant for {url!r}. "
+                        "The Connect GitHub button was posted."
+                    ) from exc
                 raise ToolError(
                     f"No GitHub credential was available for {url!r}, and an "
                     "unauthenticated fetch got HTTP 404 — which GitHub returns "
                     "for a private repo as well as a missing one. If this repo "
-                    "is private, call `request_skill_repo_token` with this "
-                    "url/branch/path to post a button the user can paste a "
-                    "token into; it syncs on submit. If it is public, re-check "
+                    "is private, call `github_connect` for this agent and repo to post "
+                    "the Connect GitHub button. If it is public, re-check "
                     "the url and branch."
                 ) from exc
             raise ToolError(str(exc)) from exc
@@ -562,12 +454,13 @@ def register_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         path: str = "",
         agent_name: str | None = None,
         expected_ma_agent_id: str | None = None,
+        origin_context_id: str | None = None,
     ) -> SkillSyncResult:
         """Install skills from a GitHub repo into the workspace's shared skill library.
 
         First use ``list_skills`` and prefer existing skills; import only a repository
-        the user requested. If the skills repo is private, use ``request_skill_repo_token``;
-        ``request_repo_binding`` provides working-repo access. Never accept tokens in chat.
+        the user requested. For a private repository, pass ``agent_name`` and
+        ``origin_context_id`` so a missing App grant posts Connect GitHub.
 
         Discovers SKILL.md files and imports or updates skills. Pass ``agent_name`` to
         also attach them, preserving existing skills; omit it only to stock the library.
@@ -575,7 +468,14 @@ def register_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         summary. Inspect the repo to choose ``path`` (empty means root); ``branch``
         defaults to main. Importing is admin-only."""
         return await _sync_impl(
-            runtime, await _auth(ctx), url, branch, path, agent_name, expected_ma_agent_id
+            runtime,
+            await _auth(ctx),
+            url,
+            branch,
+            path,
+            agent_name,
+            expected_ma_agent_id,
+            origin_context_id,
         )
 
     @mcp.tool

@@ -63,16 +63,14 @@ def test_workspace_setup_keys_reply_shape_does_not_duplicate_card_facts() -> Non
         )
 
 
-def test_guidance_names_pending_task_and_bind_public_repo() -> None:
-    """The model must be told to pass pending_task and to use bind_public_repo."""
+def test_guidance_names_pending_task_and_github_connect() -> None:
+    """The model must resume saved-key work and use the App connection flow."""
     combined = _daimon_system() + "\n" + _workspace_setup_body()
     assert "pending_task" in combined, (
         "guidance must tell the model to pass pending_task so a waiting task resumes "
         "on its own after the value is saved"
     )
-    assert "bind_public_repo" in combined, (
-        "guidance must name bind_public_repo for a named agent's public GitHub repo"
-    )
+    assert "github_connect" in combined
 
 
 def test_skill_repo_guidance_no_longer_claims_a_working_repo_change() -> None:

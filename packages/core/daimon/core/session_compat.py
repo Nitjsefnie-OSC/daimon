@@ -93,13 +93,6 @@ class RemirrorVaultCredentials:
 
 
 @dataclass(frozen=True, slots=True)
-class RotateRepoToken:
-    """Mint a fresh clone token for the mounted repository resource."""
-
-    resource_id: str
-
-
-@dataclass(frozen=True, slots=True)
 class RotateAppTokens:
     """Refresh App tokens and swap every mounted repository resource in place."""
 
@@ -116,11 +109,7 @@ class ReplaceEnvFile:
 
 
 type UpdateOp = (
-    ReplaceToolsAndMcpServers
-    | RemirrorVaultCredentials
-    | RotateRepoToken
-    | RotateAppTokens
-    | ReplaceEnvFile
+    ReplaceToolsAndMcpServers | RemirrorVaultCredentials | RotateAppTokens | ReplaceEnvFile
 )
 
 
@@ -245,17 +234,6 @@ def decide_session_compatibility(
                 ops.append(RotateAppTokens(resource_ids=recorded.repo_resource_ids))
             else:
                 must_replace = True
-
-    repo_resource_id = recorded.repo_resource_id if recorded.github_mode == "legacy" else None
-    token_issued_at = recorded.repo_token_issued_at
-    token_age_s = None if token_issued_at is None else now.timestamp() - token_issued_at
-    token_is_stale = token_age_s is not None and token_age_s > repo_token_max_age_s
-    if repo_resource_id is not None and token_is_stale:
-        reasons.append("repo_token_age")
-        if capabilities.repo_token_rotatable:
-            ops.append(RotateRepoToken(resource_id=repo_resource_id))
-        else:
-            must_replace = True
 
     if must_replace:
         return ReplaceSession(reasons=tuple(reasons))

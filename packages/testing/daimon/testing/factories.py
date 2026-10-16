@@ -34,8 +34,6 @@ from daimon.core._models import (
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import TenantConfigRow, TenantScopeRef
 from daimon.core.stores import (
-    agent_github_binding,
-    agent_repo_binding,
     channel_budgets,
     mcp_tokens,
     routines,
@@ -57,9 +55,7 @@ from daimon.core.stores.direct_messages import (
 )
 from daimon.core.stores.domain import (
     AccountRow,
-    AgentGithubBindingRow,
     AgentMemoryStoreRow,
-    AgentRepoBindingRow,
     BudgetWindow,
     ChannelBudgetRow,
     CliPrincipalRow,
@@ -68,7 +64,6 @@ from daimon.core.stores.domain import (
     Platform,
     PlatformPrincipalRow,
     PrincipalLinkRow,
-    RepoAccessProof,
     RoutineRow,
     SlackUserTokenRow,
     TaskContinuationRow,
@@ -505,47 +500,6 @@ async def make_agent_memory_store(
     orm = await session.get(AgentMemoryStore, (tenant.id, agent_id))
     assert orm is not None, "insert_memory_store must leave a resolvable binding row"
     return AgentMemoryStoreRow.model_validate(orm, from_attributes=True)
-
-
-async def make_agent_github_binding(
-    session: AsyncSession,
-    *,
-    agent_id: uuid.UUID | None = None,
-    principal_id: uuid.UUID | None = None,
-) -> AgentGithubBindingRow:
-    """Upsert an agent_github_binding row. Defaults `principal_id=agent_id` per
-    the per-agent credential model (each agent gets its own isolated row).
-    """
-    agent_id = agent_id if agent_id is not None else uuid.uuid4()
-    principal_id = principal_id if principal_id is not None else agent_id
-    return await agent_github_binding.set_agent_github_binding(
-        session, agent_id=agent_id, principal_id=principal_id
-    )
-
-
-async def make_agent_repo_binding(
-    session: AsyncSession,
-    *,
-    tenant: TenantRow | None = None,
-    agent_id: uuid.UUID | None = None,
-    repo_url: str = "owner/repo",
-    default_branch: str = "main",
-    ma_secret_ref: str | None = None,
-    proof: RepoAccessProof | None = None,
-) -> AgentRepoBindingRow:
-    """Upsert an agent_repo_binding row via `agent_repo_binding.set_binding`."""
-    tenant = tenant or await make_tenant(session)
-    agent_id = agent_id if agent_id is not None else uuid.uuid4()
-    ma_secret_ref = ma_secret_ref or f"secret-{uuid.uuid4().hex[:8]}"
-    return await agent_repo_binding.set_binding(
-        session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        repo_url=repo_url,
-        default_branch=default_branch,
-        ma_secret_ref=ma_secret_ref,
-        proof=proof,
-    )
 
 
 async def make_thread_session(

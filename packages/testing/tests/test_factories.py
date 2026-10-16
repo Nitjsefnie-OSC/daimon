@@ -10,13 +10,9 @@ import uuid
 from decimal import Decimal
 
 from daimon.core.stores import mcp_tokens
-from daimon.core.stores.agent_github_binding import get_agent_github_binding
 from daimon.core.stores.agent_memory_stores import get_memory_store_id
-from daimon.core.stores.agent_repo_binding import get_binding as get_repo_binding
 from daimon.core.stores.domain import (
-    AgentGithubBindingRow,
     AgentMemoryStoreRow,
-    AgentRepoBindingRow,
     McpTokenRow,
     RoutineRow,
     SlackUserTokenRow,
@@ -32,9 +28,7 @@ from daimon.core.stores.tenant_user_caps import get_effective_cap
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.testing.factories import (
     make_account,
-    make_agent_github_binding,
     make_agent_memory_store,
-    make_agent_repo_binding,
     make_ledger_entry,
     make_mcp_token,
     make_routine,
@@ -149,33 +143,6 @@ async def test_make_agent_memory_store_persists_and_returns_row(db_session: Asyn
     )
     persisted_id = await get_memory_store_id(db_session, tenant_id=tenant.id, agent_id=agent_id)
     assert persisted_id == binding.memory_store_id, "binding should be queryable back by PK"
-
-
-async def test_make_agent_github_binding_persists_and_returns_row(
-    db_session: AsyncSession,
-) -> None:
-    agent_id = uuid.uuid4()
-    binding = await make_agent_github_binding(db_session, agent_id=agent_id)
-
-    assert isinstance(binding, AgentGithubBindingRow), (
-        "make_agent_github_binding should return a Pydantic row"
-    )
-    assert binding.principal_id == agent_id, "principal_id should default to agent_id"
-    persisted = await get_agent_github_binding(db_session, agent_id=agent_id)
-    assert persisted is not None, "make_agent_github_binding's row should be queryable back"
-
-
-async def test_make_agent_repo_binding_persists_and_returns_row(db_session: AsyncSession) -> None:
-    tenant = await make_tenant(db_session)
-    agent_id = uuid.uuid4()
-
-    binding = await make_agent_repo_binding(db_session, tenant=tenant, agent_id=agent_id)
-
-    assert isinstance(binding, AgentRepoBindingRow), (
-        "make_agent_repo_binding should return a Pydantic row"
-    )
-    persisted = await get_repo_binding(db_session, tenant_id=tenant.id, agent_id=agent_id)
-    assert persisted is not None, "make_agent_repo_binding's row should be queryable back"
 
 
 async def test_make_thread_session_persists_and_returns_row(db_session: AsyncSession) -> None:

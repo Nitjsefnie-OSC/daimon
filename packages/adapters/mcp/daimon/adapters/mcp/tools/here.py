@@ -121,7 +121,6 @@ async def _where_am_i_impl(
         raise ToolError("/here is available for Discord, Slack and Teams channel turns")
     if thread_id is not None:
         await _require_thread_in_channel(runtime, auth, channel_id, thread_id)
-    github = runtime.settings.github
     async with runtime.session_factory() as session:
         return await load_here_card(
             session,
@@ -133,8 +132,8 @@ async def _where_am_i_impl(
             category_id=category_id,
             default=runtime.deployment_default,
             github=GitHubDeploymentFacts(
-                has_fallback_pat=github.fallback_pat is not None,
-                app_configured=github.app_id is not None and github.app_private_key is not None,
+                app_configured=runtime.settings.github_app.app_id is not None
+                and runtime.settings.github_app.private_key is not None,
             ),
             public_mcp_url=str(runtime.settings.mcp.public_url)
             if runtime.settings.mcp.public_url is not None

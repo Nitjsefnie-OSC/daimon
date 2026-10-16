@@ -226,7 +226,6 @@ def test_done_page_names_github_and_discord_with_marks() -> None:
         requester_label="Alex",
         same_person=True,
         agent_name="ResearchBot",
-        update_pending=False,
     )
     body = page.body.decode()
     assert '<h1 class="gh-title-marked"><svg class="web-icon web-icon--github"' in body
@@ -1066,22 +1065,6 @@ def test_editor_stages_remove_undo_and_summarizes_every_change() -> None:
     assert 'data-repo-id="1"' not in body.split('<dialog id="repo-picker"', 1)[1]
 
 
-def test_reopened_done_page_hides_the_missing_repo() -> None:
-    body = oauth_github._already_connected_page(
-        2,
-        agent_name="ResearchBot",
-        update_pending=True,
-        missing_repos=(("lab/work", True),),
-    ).body.decode()
-    assert "Setup is incomplete." in body
-    assert "Ask the requester to finish connecting the required repos." in body
-    assert "lab/work" not in body
-    operator = oauth_github._already_connected_page(
-        2, agent_name="ResearchBot", update_pending=True
-    ).body.decode()
-    assert "Setup is incomplete." in operator
-
-
 def test_pages_only_offer_actions_with_a_route() -> None:
     no_link = oauth_github._no_repos_page("", "https://github.com/apps/sample/installations/new")
     assert 'id="copy-link"' not in no_link.body.decode()
@@ -1109,7 +1092,6 @@ def test_teams_pages_never_send_people_to_slack_or_discord() -> None:
             requester_label="Alex",
             same_person=True,
             agent_name=None,
-            update_pending=False,
         ),
     }
     for name, page in pages.items():
@@ -1127,7 +1109,6 @@ def _agent_done(**changes: object) -> str:
         "requester_label": "Alex",
         "same_person": True,
         "agent_name": "ResearchBot",
-        "update_pending": False,
     }
     args.update(changes)
     return oauth_github._done_page(**args).body.decode()  # type: ignore[arg-type]
@@ -1140,26 +1121,11 @@ def test_agent_done_page_says_connected_and_close_tab() -> None:
     assert "old GitHub token" not in body
 
 
-def test_agent_done_page_keeps_missing_repo_names_private() -> None:
-    assert "old GitHub token" not in _agent_done(retired_saved_key=True)
-    pending = _agent_done(
-        update_pending=True,
-        retired_saved_key=False,
-        missing_repos=(("lab/work", True), ("lab/skills", False)),
-    )
-    assert "2 repos connected to ResearchBot." in pending
-    assert "lab/work" not in pending and "lab/skills" not in pending
-    assert "An operator will finish switching the agent." in pending
-
-
-@pytest.mark.parametrize(
-    ("still_channel_admin", "needs_write"), [(True, False), (False, False), (True, True)]
-)
+@pytest.mark.parametrize("still_channel_admin", [True, False])
 async def test_channel_admin_completes_connect_for_their_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     still_channel_admin: bool,
-    needs_write: bool,
 ) -> None:
     """A channel admin's link for the agent pinned to their channel adds repos for it only."""
     from types import SimpleNamespace
@@ -1260,20 +1226,8 @@ async def test_channel_admin_completes_connect_for_their_agent(
         looked_up.append(agent_id)
         return SimpleNamespace(name="Bot", metadata={})
 
-    async def missing(
-        _session: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
-    ) -> list[github_connect.MissingRepo]:
-        # Its working repo, which it needs to change, listed again as a skill repo:
-        # needing write for either use means it needs write.
-        return [
-            github_connect.MissingRepo(full_name="ana/thesis", needs_write=True),
-            github_connect.MissingRepo(full_name="ana/thesis", needs_write=False),
-        ]
-
     monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
     monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
-    if needs_write:
-        monkeypatch.setattr(oauth_github.github_connect, "missing_required_repos", missing)
     key = Fernet.generate_key().decode()
     connect, callback, setup, confirm = build_oauth_github_routes(
         settings=_settings(key),

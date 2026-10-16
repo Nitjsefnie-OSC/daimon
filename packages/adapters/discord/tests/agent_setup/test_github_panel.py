@@ -220,10 +220,7 @@ def test_discord_waiting_list_pages_after_twenty_requests() -> None:
 
 def _panel() -> GrantsPanel:
     return GrantsPanel(
-        mode="legacy",
         working_repo="example/work",
-        has_pat=True,
-        saved_state=True,
         repos=(
             RepoChoice(
                 repo_id=1,
@@ -256,9 +253,7 @@ def _helper_state(**changes: object) -> PanelState:
 
 def _live_panel(*names: str, ceiling: str = "write") -> GrantsPanel:
     return GrantsPanel(
-        mode="app",
         working_repo=None,
-        has_pat=False,
         repos=tuple(
             RepoChoice(
                 index,
@@ -316,7 +311,7 @@ def test_discord_github_panels_are_read_only() -> None:
         runtime=MagicMock(),
         allowed_user_id=7,
         agent=agent,
-        panel=GrantsPanel(mode="app", repos=(), working_repo=None, has_pat=False),
+        panel=GrantsPanel(repos=(), working_repo=None),
     )
     assert "No working repo" in _embed_text(empty)
     for stale in ("_on_remove", "_on_confirm", "_on_deactivate", "_setter", "_on_activate"):

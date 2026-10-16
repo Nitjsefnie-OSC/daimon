@@ -54,6 +54,11 @@ test_schema_cleanup	SchemaCleanup	SchemaCleanupSafe	clean	9	-	face transaction r
 test_schema_cleanup	SchemaCleanup	SchemaCleanupUnsafe	violates:NoDropDuringFaceTransaction	6	-	old fixture starts table drop while queued face still holds a transaction
 ci_deploy_gate	CiDeployGate	CiDeployGateSafe	clean	10	-	candidate publish may precede tests but SHA tag waits for staging verdict
 ci_deploy_gate	CiDeployGate	CiDeployGateUnsafe	violates:PromotableOnlyAfterStagingPass	7	-	early SHA tag permits promotion while tests are pending
+github_retirement_deploy	RetirementDeploy	CurrentOrder	violates:NoOldSchemaReadFailure	18	-	one-shot migration drops schema while old MCP and workers can still read it
+github_retirement_deploy	RetirementDeploy	PhasedOrder	clean	40	-	additive 0105 backfills all retained grants and upserts App modes for new grants
+github_retirement_deploy	RetirementDeploy	DeletesModes	violates:NoLiveGrantHidden	18	-	deleting App mode rows lets an old worker hide a live grant during rollout
+github_retirement_deploy	RetirementDeploy	NoGrantModeUpsert	violates:NoLiveGrantHidden	33	-	a new grant without a mode upsert is re-staged by an old worker
+github_retirement_deploy	RetirementDeploy	UsableOnlyBackfill	violates:NoLiveGrantHidden	42	-	an initially unusable retained grant recovers without an App mode row
 staging_tag	StagingTag	StagingTagSafe	clean	20	-	atomic create preserves an existing different digest
 staging_tag	StagingTag	StagingTagSame	clean	20	-	identical rerun accepts the published digest
 staging_tag	StagingTag	StagingTagUnsafe	violates:ImmutableTag	20	-	replacement after a concurrent create changes the canonical tag

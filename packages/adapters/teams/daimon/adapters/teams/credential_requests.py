@@ -120,7 +120,6 @@ from daimon.core.stores.agent_files import (
     AgentEnvEncryptionRequiredError,
     agent_env_writes_allowed,
 )
-from daimon.core.stores.agent_repo_binding import set_binding
 from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
 from daimon.core.stores.scoped_config_read import is_agent_shared_for_key_changes
 from daimon.core.teams_threads import conversation_of
@@ -801,9 +800,7 @@ class TeamsCredentialRequests:
                     kind="pat", at=datetime.now(UTC), account_id=consumed.account_id
                 )
                 async with self._runtime.sessionmaker.begin() as session:
-                    await write_repo_submit(
-                        session, row=consumed, ma_secret_ref=ref, proof=proof, write=set_binding
-                    )
+                    await write_repo_submit(session, row=consumed, ma_secret_ref=ref, proof=proof)
                     await store.set_credential_request_outcome(
                         session, token=row.token, outcome="applied"
                     )

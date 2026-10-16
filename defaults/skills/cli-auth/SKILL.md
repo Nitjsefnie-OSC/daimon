@@ -5,44 +5,15 @@ description: Obtain CLI access tokens via the daimon MCP server's get_cli_token 
 
 # cli-auth
 
-Use the daimon MCP server's `get_cli_token(service)` tool to obtain access
-tokens for external CLIs. Export the result under the appropriate name
-before running CLI commands.
+GitHub App access is scoped to the repos granted to this agent. The working
+repo is mounted at `/workspace/<owner>/<repo>` when one is selected. A
+session-scoped `GH_TOKEN` may be available for the other granted repos. Use
+`github_connect` when a requested repo is not granted. Never ask for a
+personal token or use `get_cli_token` for GitHub.
 
-For a GitHub App session, the filesystem has at most one working repo at
-`/workspace/<owner>/<repo>`. Other repos granted to this agent are reached by
-token: clone one with `gh repo clone owner/repo` (gh reads `GH_TOKEN`). If gh
-fails, use `git clone https://x-access-token:${GH_TOKEN}@github.com/owner/repo.git`.
-Plain `git clone` or `git ls-remote` without the token only reaches the
-mounted repo and public repos, so never conclude you have no access from them.
-If a repo is granted but none is the working repo, say how to set one: "To put
-it in my workspace, ask me to make it the working repo." Inspect only this
-agent's granted repos when a list is needed. Do not name a private repo to
-someone who cannot see it.
-The `get_cli_token("github")` tool is unavailable in App mode. Never ask for a
-token in App mode. If `gh` is not
-installed, use `curl` for GitHub API calls or the GitHub Copilot MCP tools for
-repository operations.
+For Google Cloud / Workspace, call `get_cli_token("gcloud")` and export the
+result as `CLOUDSDK_AUTH_ACCESS_TOKEN` before running the CLI.
 
-| Service                  | Tool call                  | Name to export                |
-|--------------------------|----------------------------|-------------------------------|
-| GitHub                   | `get_cli_token("github")`  | `GH_TOKEN` (or `GITHUB_TOKEN`)|
-| Google Cloud / Workspace | `get_cli_token("gcloud")`  | `CLOUDSDK_AUTH_ACCESS_TOKEN`  |
-
-Call the MCP tool first, then pass its result privately to the shell process
-environment before running a command such as `gh repo list`.
-`get_cli_token` is an MCP tool, not a shell command.
-
-The tool requires:
-
-- For `github` in legacy mode: the caller must already have a matching GitHub token binding.
-  An account-only call reads the account's token; an agent-bound call reads
-  that agent's token. Ordinary chat currently uses account-only identity, so
-  `request_repo_binding` saving a target agent's token does not make it
-  available to this tool. A GitHub App installation alone does not supply it
-  either. If access is missing, call `github_connect` to post the Connect
-  GitHub link. Never ask for, suggest or mention a GitHub token, personal
-  access token or pasted credential.
 - For `gcloud`: the operator must configure deployment Google access and bind
   the agent to a Google identity with `daimon agents bind-google <agent>
   <email> --scopes <scope>`, repeating `--scopes` for additional scopes.
@@ -51,5 +22,4 @@ The tool requires:
   currently provide. Binding the Google identity alone cannot fix a missing
   caller `agent_id`; hand that limitation to the operator.
 
-Each call resolves access afresh. GitHub returns the stored personal token;
-Google mints a short-lived impersonated token. Never print either value.
+Google mints a short-lived impersonated token. Never print it.

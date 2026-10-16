@@ -50,14 +50,12 @@ from daimon.core.stores.agent_memory_stores import (
     get_memory_store_id,
     get_personal_memory_store_id,
 )
-from daimon.core.stores.agent_repo_binding import get_binding
 from daimon.core.stores.domain import (
     SessionPreparationRow,
     ThreadSessionRow,
     TransferKind,
     UnsavedWorkChoice,
 )
-from daimon.core.stores.github_access import get_agent_mode
 from daimon.core.stores.thread_sessions import record_snapshot
 from daimon.core.tool_safety import ToolSafetyPolicy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -319,14 +317,7 @@ async def desired_snapshot_for(
     """
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
-        mode = await get_agent_mode(session, tenant_id=tenant_id, agent_id=agent_uuid)
-        if mode == "app":
-            rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
-        binding = (
-            None
-            if mode == "app"
-            else await get_binding(session, tenant_id=tenant_id, agent_id=agent_uuid)
-        )
+        rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
         memory_store_id = await get_memory_store_id(
             session, tenant_id=tenant_id, agent_id=agent_uuid
         )
@@ -335,18 +326,14 @@ async def desired_snapshot_for(
             session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=account_id
         )
 
-    app_urls = (
-        await effective_repo_url_sets(
-            sessionmaker,
-            tenant_id=tenant_id,
-            agent_id=agent_uuid,
-            account_id=account_id,
-            is_external=is_external,
-            config=github_app or GithubAppSettings(),
-            fernet=fernet,
-        )
-        if mode == "app"
-        else ((), ())
+    app_urls = await effective_repo_url_sets(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=agent_uuid,
+        account_id=account_id,
+        is_external=is_external,
+        config=github_app or GithubAppSettings(),
+        fernet=fernet,
     )
     return desired_snapshot(
         agent,
@@ -358,12 +345,12 @@ async def desired_snapshot_for(
             server_urls={server.name: server.url for server in agent.mcp_servers},
         ),
         environment_id=environment_id,
-        github_mode=mode,
+        github_mode="app",
         repo_urls=app_urls[1],
         token_repo_urls=app_urls[0],
         env_sha256=hash_env_bytes(assemble_env_bytes(rows)) if rows else None,
-        repo_url=None if binding is None else f"https://github.com/{binding.repo_url}",
-        repo_branch=None if binding is None else binding.default_branch,
+        repo_url=None,
+        repo_branch=None,
         memory_store_id=memory_store_id,
         memory_read_only=memory_read_only,
         personal_memory_store_id=personal_memory_store_id,

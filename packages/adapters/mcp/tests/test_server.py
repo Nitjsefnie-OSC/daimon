@@ -74,15 +74,12 @@ async def test_create_mcp_app_registers_sessions_and_time_tools(
     missing_routines = expected_routines - registered
     assert not missing_routines, f"routines tools must be registered; missing: {missing_routines}"
 
-    # all 7 self-edit tools wired into create_mcp_app.
+    # The surviving self-edit file tools are wired into create_mcp_app.
     expected_self_edit = {
         "self_write_file",
         "self_read_file",
         "self_list_files",
         "self_delete_file",
-        "set_repo_binding",
-        "get_repo_binding",
-        "clear_repo_binding",
     }
     missing_self_edit = expected_self_edit - registered
     assert not missing_self_edit, (

@@ -35,7 +35,6 @@ from daimon.core.config import (
     DatabaseSettings,
     DiscordSettings,
     GithubAppSettings,
-    GithubSettings,
     Settings,
 )
 from daimon.core.github_app_auth import build_app_install_url
@@ -82,8 +81,7 @@ def _runtime(
         database=DatabaseSettings(url="postgresql+asyncpg://x/y"),  # pyright: ignore[reportArgumentType]
         anthropic=AnthropicSettings(api_key=SecretStr("k")),
         discord=DiscordSettings(bot_token=SecretStr("test-bot-token")) if with_discord else None,
-        github=GithubSettings(app_slug=app_slug),
-        github_app=GithubAppSettings(app_slug=github_app_slug),
+        github_app=GithubAppSettings(app_slug=github_app_slug or app_slug),
     )
     return McpRuntime(
         session_factory=session_factory or MagicMock(),  # type: ignore[arg-type]
