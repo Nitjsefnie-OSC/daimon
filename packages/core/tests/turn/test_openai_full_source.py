@@ -26,6 +26,7 @@ from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevi
 from daimon.core.turn.prepare import admitted_session_scope, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtime_manifest import (
+    capture_preparation_source,
     prepare_source,
     source_preservation_pin,
 )
@@ -46,7 +47,10 @@ from .test_gemini_full_source import DEFAULT, F2_PARAMS, ROOT, archive
 from .test_openai_host import Wire
 from .test_openai_runtime_transport import clients_for
 
-PARAMS = {**F2_PARAMS, "backend": "openai"}
+RECORDED_ENVIRONMENT = json.loads(
+    (ROOT / "packages/core/tests/fixtures/anthropic_live_root.json").read_text()
+)["environment"]
+PARAMS = {**F2_PARAMS, "backend": "openai", "environment": RECORDED_ENVIRONMENT}
 
 
 class FullWire(Wire):
@@ -57,7 +61,18 @@ class FullWire(Wire):
         self.agent = {}
         self.created = None
         self.posts = []
-        self.drift = None
+        config = RECORDED_ENVIRONMENT["config"]
+        self.template = {
+            "id": "native-template",
+            "name": "test-env",
+            "created_at": 0,
+            "network": {"access": "enabled", "allowed_domains": []},
+            "packages": {
+                name: config["packages"][native]
+                for name, native in (("system", "apt"), ("python", "pip"), ("npm", "npm"))
+            },
+            "files": [],
+        }
 
     def session(self):
         if self.created is None:
@@ -107,17 +122,7 @@ class FullWire(Wire):
             return httpx.Response(200, json=self.agent)
         if path == "/agents/environments/templates/native-template":
             self.requests.append(request)
-            return httpx.Response(
-                200,
-                json={
-                    "id": "native-template",
-                    "name": "test-env",
-                    "created_at": 0,
-                    "network": {"access": "enabled", "allowed_domains": []},
-                    "packages": {"system": [], "python": [], "npm": []},
-                    "files": [],
-                },
-            )
+            return httpx.Response(200, json=self.template)
         if path == "/agents/sessions" and request.method == "POST":
             self.requests.append(request)
             self.created = json.loads(request.content)
@@ -153,6 +158,25 @@ async def full_openai(consent_request, monkeypatch, tmp_path):
             turn_runtime_factory=build_channel_runtime,
         ),
     )
+    environment = request.admission.environment.model_copy(
+        update={
+            "metadata": {
+                **request.admission.environment.metadata,
+                "daimon_managed": "true",
+                "daimon_spec_hash": "a" * 64,
+            },
+            "description": "Default hosted execution environment",
+        }
+    )
+    request = replace(request, admission=replace(request.admission, environment=environment))
+    router.add_environment(environment)
+    router.routes.insert(0, router.routes.pop())
+    router.add_environment_list(environment)
+    router.routes.insert(0, router.routes.pop())
+    source = await capture_preparation_source(request, fresh=True)
+    assert source.environment.spec.scope == "organization"
+    assert source.environment.spec.metadata["daimon_managed"] == "true"
+    assert source.environment.spec.description == environment.description
     wire = FullWire(scope.tenant_id)
     clients = clients_for(monkeypatch, wire.handle)
     mcp_calls = []
@@ -417,6 +441,7 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
         "revoked",
         "catalogue",
         "environment",
+        "native_environment",
     ],
 )
 async def test_full_source_drift_refuses_before_session_post(full_openai, defect):
@@ -439,6 +464,8 @@ async def test_full_source_drift_refuses_before_session_post(full_openai, defect
             await revoke_mcp_token(db, jti=token_jti(token), now=request.now())
     elif defect == "catalogue":
         names.append("additional_authority")
+    elif defect == "native_environment":
+        wire.template["network"]["access"] = "disabled"
     else:
         # A different complete operator policy must not become source evidence.
         rows = json.loads(manifest.read_text())

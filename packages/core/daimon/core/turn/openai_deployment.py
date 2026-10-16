@@ -200,17 +200,20 @@ class OpenAIDeployment(BaseModel):
             ),
         )
         if expected is not None:
-            from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
-
-            # Source ownership labels are already checked by source capture;
-            # they carry no execution policy and cannot become native grants.
-            metadata = dict(expected.metadata or {})
-            if set(metadata) - {MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT}:
-                raise AdmissionDenied(reason="backend_unsupported")
+            # A represented source's labels and native visibility do not grant
+            # access to this target. The pinned project, tenant and account do.
+            # Preserve all execution policy; target templates have no source
+            # description, reconciliation metadata or native visibility field.
+            represented = self.source_capabilities is not None
             expected = expected.model_copy(
                 update={
-                    "description": None if expected.description == "" else expected.description,
-                    "metadata": None,
+                    "description": None
+                    if represented or expected.description == ""
+                    else expected.description,
+                    "metadata": None
+                    if represented or expected.metadata == {}
+                    else expected.metadata,
+                    "scope": None if represented else expected.scope,
                 }
             )
         if (
