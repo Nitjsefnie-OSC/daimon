@@ -238,6 +238,7 @@ def test_teams_channel_files_need_a_site_grant_not_a_manifest_permission() -> No
         "TeamMember.Read.Group",
         "ChannelMember.Read.Group",
         "ChatMessage.Read.Chat",
+        "TeamsActivity.Send.Group",
     ], "no team permission reaches SharePoint, so files need an admin's Sites.Selected grant"
 
 
