@@ -722,14 +722,26 @@ class TeamsSettings(BaseModel):
             "a Web redirect URI on the app registration."
         ),
     )
+    admin_team_id: str | None = Field(
+        default=None,
+        description=(
+            "Entra group ID of the team whose owners administer this deployment "
+            "from Teams: admins get the admin role in turns, create routines, "
+            "replace shared keys, top up and see everyone's usage. Adding an "
+            "admin means making them an owner of that team; no redeploy. The "
+            "app must be installed in that team. To find the ID, open the "
+            "team's ⋯ menu in Teams, choose Get link to team and copy the "
+            "groupId parameter. Guests and people from another organisation "
+            "are never admins. Unset with no admin_user_ids: nobody is an admin."
+        ),
+    )
     admin_user_ids: tuple[str, ...] = Field(
         default=(),
         description=(
-            "Entra object IDs of the people who administer this deployment "
-            "from Teams. Teams exposes no admin role to bots, so this list is "
-            "the admin check: admins get the admin role in turns, create "
-            "routines, replace shared keys, top up and see everyone's usage. "
-            "Everyone else is a regular user."
+            "Deprecated in favour of admin_team_id; still honoured, as admins "
+            "on top of that team's owners, and a warning is logged at startup "
+            "while it is set. Entra object IDs of people who administer this "
+            "deployment from Teams."
         ),
     )
     restrict_guests: bool = Field(
@@ -761,6 +773,19 @@ class TeamsSettings(BaseModel):
         except ValueError:
             raise ValueError(
                 "DAIMON_TEAMS__ADMIN_USER_IDS must list Entra object ID UUIDs"
+            ) from None
+
+    @field_validator("admin_team_id")
+    @classmethod
+    def _canonicalize_admin_team_id(cls, value: str | None) -> str | None:
+        """Compare against the canonical lowercase form Graph and activities use."""
+        if value is None or not value.strip():
+            return None
+        try:
+            return str(UUID(value))
+        except ValueError:
+            raise ValueError(
+                "DAIMON_TEAMS__ADMIN_TEAM_ID must be the team's Entra group ID UUID"
             ) from None
 
     @field_validator("tenant_id")
