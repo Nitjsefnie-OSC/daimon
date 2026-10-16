@@ -614,9 +614,7 @@ async def test_a_refusal_that_cannot_be_sent_is_logged(
     teams = _app(db_session_factory, FakeSender())
     reply = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
     with structlog.testing.capture_logs() as logs:
-        await teams.handle_message(
-            _message(make_message_activity(aad_object_id=None), reply)
-        )
+        await teams.handle_message(_message(make_message_activity(aad_object_id=None), reply))
     reply.assert_awaited_once()
     assert {
         "event": "teams.refusal.send_failed",
