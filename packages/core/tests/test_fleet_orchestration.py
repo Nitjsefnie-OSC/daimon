@@ -239,7 +239,7 @@ async def test_spawn_passes_real_resolved_grant_to_atomic_owner(provider):
     assert owner.admit.call_args.kwargs["reviewed_result"] is None
 
 
-def frozen_memory_parent():
+def frozen_memory_parent(*, read_only=True):
     from daimon.core.authz import Surface
     from daimon.core.memory_resource import memory_mount
     from daimon.core.neutral_resources import freeze_root_permissions
@@ -251,7 +251,11 @@ def frozen_memory_parent():
 
     parent, captured = captured_worker_source(permissions())
     captured = captured.model_copy(
-        update={"memory_required": True, "memory_store_id": "retained-root-memory"}
+        update={
+            "memory_required": True,
+            "memory_store_id": "retained-root-memory",
+            "memory_read_only": read_only,
+        }
     )
     binding = ResourceBinding(
         id=captured.memory_store_id,
@@ -262,12 +266,13 @@ def frozen_memory_parent():
         native=ExtensionConfig(
             namespace="anthropic.session_resource_create",
             version=1,
-            value={"resource": memory_mount(captured.memory_store_id, read_only=True)},
+            value={"resource": memory_mount(captured.memory_store_id, read_only=read_only)},
         ),
     )
     parent = replace(
         parent,
         resources=(binding,),
+        memory_read_only=read_only,
         source_agents=(captured.source.ref,),
         source_revisions=((captured.source.ref, captured.source.revision),),
     )
@@ -287,10 +292,15 @@ def frozen_memory_parent():
 
 
 @pytest.mark.parametrize("drop_memory", (False, True))
-async def test_spawn_retains_frozen_source_memory_like_worker_preparation(drop_memory):
+@pytest.mark.parametrize("read_only", (False, True))
+async def test_spawn_retains_frozen_source_memory_like_worker_preparation(drop_memory, read_only):
+    from daimon.core.memory_resource import memory_mount
     from daimon.core.neutral_resources import resolve_worker_spec
 
-    parent, captured, binding = frozen_memory_parent()
+    parent, captured, binding = frozen_memory_parent(read_only=read_only)
+    # Replay a retained writable parent as well as a read-only one.
+    parent = replace(parent, resources=(binding,), memory_read_only=read_only)
+    original = parent.resources
     spec = (
         parent.spec.model_copy(update={"declared_drops": ("memory",)})
         if drop_memory
@@ -313,13 +323,71 @@ async def test_spawn_retains_frozen_source_memory_like_worker_preparation(drop_m
     owner.capture_source.assert_awaited_once_with(parent)
     resolved = owner.admit.call_args.args[1]
     assert resolved.digest == precheck.digest
-    assert resolved.resources == (() if drop_memory else (binding,))
+    assert len(resolved.resources) == (0 if drop_memory else 1)
+    if not drop_memory:
+        assert resolved.resources[0].resource == binding.resource
+        assert resolved.resources[0].native.value == {
+            "resource": memory_mount(captured.memory_store_id, read_only=True)
+        }
+    assert parent.resources == original
+    replay = resolve_worker_spec(
+        parent,
+        spec,
+        policy=POLICY,
+        now=NOW,
+        backend=BackendConfig.model_validate(parent.backend_grants[0].model_dump()),
+        limits=limits,
+        resources=resolved.resources,
+        captured_source=captured,
+    )
+    assert replay.digest == resolved.digest
     assert resolved.permissions.memory_read_only
     assert resolved.permissions.resources == resolved.resources
     assert captured.memory_required is True
 
 
-@pytest.mark.parametrize("defect", ("missing", "other_store", "foreign", "writable"))
+@pytest.mark.parametrize("read_only", (False, True))
+def test_frozen_worker_ceiling_attenuates_root_memory(read_only):
+    from daimon.core.memory_resource import memory_mount
+
+    parent, captured, original = frozen_memory_parent(read_only=read_only)
+    assert original.native.value == {
+        "resource": memory_mount(captured.memory_store_id, read_only=read_only)
+    }
+    assert parent.memory_read_only
+    assert parent.resources[0].native.value == {
+        "resource": memory_mount(captured.memory_store_id, read_only=True)
+    }
+    assert parent.resources[0].resource == original.resource
+
+
+def test_worker_cannot_request_writable_memory_from_readonly_parent():
+    from daimon.core.memory_resource import memory_mount
+    from daimon.core.neutral_resources import resolve_worker_spec
+
+    parent, captured, binding = frozen_memory_parent()
+    writable = binding.model_copy(
+        update={
+            "native": binding.native.model_copy(
+                update={
+                    "value": {"resource": memory_mount(captured.memory_store_id, read_only=False)}
+                }
+            )
+        }
+    )
+    with pytest.raises(WorkerSpecRefused) as refused:
+        resolve_worker_spec(
+            parent,
+            parent.spec,
+            policy=POLICY,
+            now=NOW,
+            resources=(writable,),
+            captured_source=captured,
+        )
+    assert (refused.value.field, refused.value.reason) == ("files", "not_subset")
+
+
+@pytest.mark.parametrize("defect", ("missing", "other_store", "foreign", "instructions"))
 async def test_spawn_cannot_invent_or_widen_source_memory(defect):
     from daimon.core.memory_resource import memory_mount
 
@@ -339,7 +407,10 @@ async def test_spawn_cannot_invent_or_widen_source_memory(defect):
                     "native": binding.native.model_copy(
                         update={
                             "value": {
-                                "resource": memory_mount(captured.memory_store_id, read_only=False)
+                                "resource": {
+                                    **memory_mount(captured.memory_store_id, read_only=False),
+                                    "instructions": "Write despite the worker policy",
+                                }
                             }
                         }
                     )
