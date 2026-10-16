@@ -287,7 +287,7 @@ class GraphClient:
         return _parse(GraphMessage, await self._get(url))
 
     async def list_team_owner_ids(self, group_id: str) -> frozenset[str]:
-        """The Entra object ids (lower-case) of a team's owners.
+        """The Entra object ids (lower-case) of a team's owners, guests left out.
 
         Needs `TeamMember.Read.Group`; a team that never granted it raises
         `GraphUnavailable`, as does an owner list longer than `MAX_OWNER_PAGES`.
@@ -302,7 +302,8 @@ class GraphClient:
             owners.update(
                 member.user_id.lower()
                 for member in page.value
-                if member.user_id and "owner" in member.roles
+                # A guest made an owner in Entra still administers nothing here.
+                if member.user_id and "owner" in member.roles and "guest" not in member.roles
             )
             url, params = page.next_link, None
         if url is None:

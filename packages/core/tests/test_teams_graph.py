@@ -222,6 +222,7 @@ async def test_team_owners_follow_pages_and_keep_only_owners() -> None:
                 "value": [
                     {"userId": owner, "roles": ["owner"]},
                     {"userId": "c3", "roles": []},
+                    {"userId": "g4", "roles": ["owner", "guest"]},
                     {"roles": ["owner"]},
                 ],
                 "@odata.nextLink": next_link,
@@ -230,7 +231,7 @@ async def test_team_owners_follow_pages_and_keep_only_owners() -> None:
 
     owners = await _client(handler, seen).list_team_owner_ids(GROUP)
 
-    assert owners == frozenset({owner.lower(), "b2"}), "owners only, Entra ids lower-cased"
+    assert owners == frozenset({owner.lower(), "b2"}), "owners only, no guests, ids lower-cased"
     assert seen[0].url.params["$filter"] == "roles/any(r:r eq 'owner')", "Graph filters owners"
     assert seen[0].url.path == f"/v1.0/teams/{GROUP}/members"
     assert "$filter" not in seen[1].url.params, "a next link carries its own query"
