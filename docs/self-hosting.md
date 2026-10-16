@@ -244,7 +244,13 @@ working or private skill repo coverage. Set
 `DAIMON_GITHUB_APP_ONLY_ACCEPTED_LOSS` to a comma-separated list of agent UUIDs
 whose loss is explicitly accepted by the operator. Set the same value for the
 preview and the Alembic migration. With no value, the migration stops before
-deleting rows if any agent would lose access. After upgrading, run
+deleting rows if any agent would lose access. Both also stop when a retired
+credential points to more than one workspace. A saved key with no workspace
+at all, such as one left by a deleted agent, can't be matched to an owner
+while any live session has no recorded agent, and that stops them too. Once
+every live session names its agent, such a key is retired without restarting
+any session, provided its exact agent UUID is in the accepted list. After
+upgrading, run
 `daimon github cleanup-legacy-vault` to preview retired
 Managed Agents vault credentials. Run it with `--apply` to delete them. Repeated
 runs skip credentials already deleted. This command leaves GitHub Copilot MCP
