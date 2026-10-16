@@ -46,6 +46,7 @@ class AgentMCPAuthority:
     acknowledged: Callable[[ResourceRef], bool] = field(repr=False)
     redact: Callable[[tuple[str, ...]], None] = field(repr=False)
     canonical_source: ResourceRef | None = None
+    chat_execution: bool = False
 
 
 class AgentMCPBinding:
@@ -154,6 +155,7 @@ class AgentMCPBinding:
                 label="F2-owned-session-boundary",
                 secret=secret.encode(),
                 now=now,
+                chat_execution=binding.chat_execution,
                 ttl_days=ttl / 86400,  # pyright: ignore[reportArgumentType]
             )
             binding.redact((token,))
@@ -179,6 +181,7 @@ class AgentMCPBinding:
                 agent_id=self.agent,
                 now=now,
                 max_ttl_s=ttl,
+                chat_execution=binding.chat_execution,
             )
         except ValueError:
             raise LiveRefused(

@@ -492,6 +492,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 scope=scope,
                 agent_id=plan.source_agent_id,
                 now=request.now(),
+                chat_execution=True,
             )
             catalogue = await list_mcp_tools(destination, token)
             assert plan.source_capabilities is not None

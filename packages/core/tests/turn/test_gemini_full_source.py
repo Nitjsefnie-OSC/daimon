@@ -125,7 +125,53 @@ def archive(files):
 
 
 @pytest.fixture
-async def full(consent_request, monkeypatch, tmp_path):
+async def source_mcp(consent_request):
+    """Actual verifier, identity narrowing and search collapse at the HTTP edge."""
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+    from daimon.adapters.mcp.middleware.mcp_identity import (
+        IdentityMiddleware,
+        production_agent_id_resolver,
+        production_internal_resolver,
+        production_is_admin_resolver,
+        production_role_resolver,
+        production_subject_resolver,
+        production_tenant_resolver,
+    )
+    from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
+    from fastmcp import FastMCP
+
+    request = consent_request[0]
+    mcp = FastMCP(
+        "source-catalogue",
+        auth=DaimonJWTVerifier(
+            secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
+            sessionmaker=request.deps.sessionmaker,
+        ),
+    )
+    mcp.add_middleware(
+        IdentityMiddleware(
+            subject_resolver=production_subject_resolver,
+            tenant_resolver=production_tenant_resolver,
+            role_resolver=production_role_resolver,
+            agent_id_resolver=production_agent_id_resolver,
+            is_admin_resolver=production_is_admin_resolver,
+            internal_resolver=production_internal_resolver,
+            sessionmaker=request.deps.sessionmaker,
+        )
+    )
+    for name in ("describe_agent", "list_my_sessions"):
+
+        async def read_tool() -> str:
+            return "offline"
+
+        mcp.tool(read_tool, name=name, tags={"agent-chat"})
+    mcp.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
+    app = mcp.http_app()
+    yield app
+
+
+@pytest.fixture
+async def full(consent_request, source_mcp, monkeypatch, tmp_path):
     request, service, source, actor, accepted, router, source_reads, *_ = consent_request
     from daimon.core.scope import DeploymentDefault
 
@@ -238,14 +284,14 @@ async def full(consent_request, monkeypatch, tmp_path):
         pass
 
     readback_calls = []
-    catalogue_state = {"names": ["describe_agent", "list_my_sessions"]}
+    catalogue_state = {"names": None}
     storage = {}
     for deployment, bundle in zip(deployments, bundles, strict=True):
         prefix = deployment.source.split("owned-offline/", 1)[1]
         for file in bundle.files:
             storage[prefix + file.path] = file.content
 
-    def readback(call):
+    async def readback(call):
         readback_calls.append(call)
         if call.url.host == "mcp.invalid":
             body = json.loads(call.content)
@@ -257,12 +303,22 @@ async def full(consent_request, monkeypatch, tmp_path):
                 "serverInfo": {"name": "offline", "version": "1"},
             }
             if body["method"] == "tools/list":
-                result = {
-                    "tools": [
-                        {"name": name, "inputSchema": {"type": "object"}}
-                        for name in catalogue_state["names"]
-                    ]
-                }
+                from daimon.testing.asgi import mcp_session
+
+                result = (
+                    await mcp_session(
+                        source_mcp,
+                        token=call.headers["Authorization"].removeprefix("Bearer "),
+                        method="tools/list",
+                    )
+                )["result"]
+                if catalogue_state["names"] is not None:
+                    result = {
+                        "tools": [
+                            {"name": name, "inputSchema": {"type": "object"}}
+                            for name in catalogue_state["names"]
+                        ]
+                    }
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
         assert call.url.host == "storage.googleapis.com" and call.method == "GET"
         if call.url.params.get("alt") == "media":
@@ -290,7 +346,9 @@ async def full(consent_request, monkeypatch, tmp_path):
 
     class RouteClient(sdk_client):
         def __init__(self, **kwargs):
-            if "verify" in kwargs:
+            if "transport" in kwargs:
+                ReadbackClient.__init__(self, **kwargs)
+            elif "verify" in kwargs:
                 # Preserve the real SDK's explicit network-policy assertion.
                 super().__init__(**kwargs)
             else:
@@ -334,7 +392,7 @@ async def full(consent_request, monkeypatch, tmp_path):
         "source_pin": source_preservation_pin(source),
         "model": ModelRef(provider="gemini", id=FLASH_PRIMARY).model_dump(mode="json"),
         "skills": mappings,
-        "mcp_tools": ["describe_agent", "list_my_sessions"],
+        "mcp_tools": ["search_tools", "call_tool"],
     }
     manifest.write_text(
         json.dumps(
@@ -387,7 +445,20 @@ async def full(consent_request, monkeypatch, tmp_path):
     represented = await capture_preparation_source(request, fresh=True)
     assert source_preservation_pin(represented) == source_preservation_pin(source)
     quote = await service.preview(source, "gemini")
-    assert quote.allowed and not {"tools", "skills", "mcp"}.intersection(quote.declared_drops)
+    if not quote.allowed or {"tools", "skills", "mcp"}.intersection(quote.declared_drops):
+        # Full-mode consent never accepts loss of any represented capability.
+        with pytest.raises(AgentBackendRefused):
+            await service.set_backend(
+                source,
+                "gemini",
+                accepted.local,
+                actor,
+                accepted_drops=("memory", "sandbox"),
+                expected_preview_digest=quote.digest,
+            )
+        yield {"quote": quote, "calls": calls, "represented": represented}
+        return
+    assert not {"tools", "skills", "mcp"}.intersection(quote.declared_drops)
     accepted = await service.set_backend(
         source,
         "gemini",
@@ -441,6 +512,7 @@ async def full(consent_request, monkeypatch, tmp_path):
             database_url=os.environ["DAIMON_DATABASE__TEST_URL"],
             mcp_signing_secret_file=signer,
             canonical_source=canonical_ref,
+            chat_execution=True,
             acknowledged=lambda actual: (
                 actual == counterpart.agent.ref
                 and any(
@@ -513,11 +585,12 @@ async def full(consent_request, monkeypatch, tmp_path):
 
 @pytest.mark.parametrize(
     "consent_request",
-    [PARAMS, LATEST_PARAMS, F2_PARAMS],
+    [PARAMS, LATEST_PARAMS],
     indirect=True,
-    ids=["root-concrete", "root-latest", "recorded-f2"],
+    ids=["root-concrete", "root-latest"],
 )
 async def test_full_default_preparation_and_fresh_followup_turns(full):
+    assert isinstance(full, tuple), "full source could not retain its authority"
     request, plan, canonical, native, calls, posts, token, *_ = full
     assert len(canonical.target_spec.skills) == 11
     # Assert the native request carries the complete represented authority.
@@ -573,7 +646,7 @@ async def test_full_default_preparation_and_fresh_followup_turns(full):
         assert body["system_instruction"] == canonical.target_spec.system
         assert token in json.dumps(body["tools"])
         remote = next(tool for tool in body["tools"] if tool["type"] == "mcp_server")
-        assert set(remote["allowed_tools"][0]["tools"]) == {"describe_agent", "list_my_sessions"}
+        assert set(remote["allowed_tools"][0]["tools"]) == {"search_tools", "call_tool"}
     assert token not in json.dumps(native) and token not in plan.model_dump_json()
 
 
@@ -770,6 +843,7 @@ async def test_scoped_mcp_validator_retains_the_shorter_provisioning_deadline(fu
             agent_id=plan.source_agent_id,
             now=request.now(),
             max_ttl_s=30,
+            chat_execution=True,
         )
     await validate_agent_mcp_token(
         request.deps.sessionmaker,
@@ -779,6 +853,7 @@ async def test_scoped_mcp_validator_retains_the_shorter_provisioning_deadline(fu
         agent_id=plan.source_agent_id,
         now=request.now(),
         max_ttl_s=600,
+        chat_execution=True,
     )
 
 
@@ -824,4 +899,131 @@ async def test_optional_skill_proof_outage_does_not_break_native_public_preview(
     assert quote.allowed and "tools" not in quote.declared_drops
     with pytest.raises(AgentBackendRefused, match="re confirm"):
         await prepare_source(request)
+    assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [F2_PARAMS], indirect=True)
+async def test_recorded_restricted_mcp_source_refuses_chat_catalogue_narrowing(full):
+    assert {"tools", "skills", "mcp"}.intersection(full["quote"].declared_drops)
+    assert not full["represented"].representations
+    assert not any(call.method == "POST" for call in full["calls"])
+
+
+@pytest.mark.parametrize(
+    "consent_request",
+    [
+        {**PARAMS, "tools": PARAMS["tools"][:1]},
+        {
+            **PARAMS,
+            "tools": [
+                PARAMS["tools"][0],
+                {
+                    **PARAMS["tools"][1],
+                    "default_config": {
+                        "enabled": False,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                },
+            ],
+        },
+    ],
+    indirect=True,
+    ids=["absent", "disabled"],
+)
+async def test_source_must_have_an_enabled_daimon_mcp_toolset(full):
+    assert {"tools", "skills", "mcp"}.intersection(full["quote"].declared_drops)
+    assert not full["represented"].representations
+    assert not any(call.method == "POST" for call in full["calls"])
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_registered_chat_catalogue_matches_source_without_expanding_agent_keys(
+    full, source_mcp
+):
+    from daimon.core.mcp_auth import mint_agent_mcp_token, mint_jwt, validate_agent_mcp_token
+    from daimon.core.stores.mcp_tokens import list_live_tokens_by_label
+    from daimon.testing.asgi import mcp_session
+
+    request, plan, _, _, _, posts, runtime_token, *_ = full
+    secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
+    now = request.now()
+    async with request.deps.sessionmaker.begin() as db:
+        external = await mint_agent_mcp_token(
+            db,
+            account_id=request.admission.account_id,
+            tenant_id=request.tenant_id,
+            agent_id=plan.source_agent_id,
+            label="test-external",
+            secret=secret,
+            now=now,
+        )
+    ordinary = mint_jwt(
+        account_id=request.admission.account_id,
+        chat_agent_id=plan.source_agent_id,
+        secret=secret,
+        now=now,
+    )
+    try:
+        visible = []
+        for token in (ordinary, runtime_token, external):
+            result = await mcp_session(source_mcp, token=token, method="tools/list")
+            visible.append({tool["name"] for tool in result["result"]["tools"]})
+        assert visible == [
+            {"search_tools", "call_tool"},
+            {"search_tools", "call_tool"},
+            {"describe_agent", "list_my_sessions"},
+        ]
+        with pytest.raises(ValueError, match="invalid scoped agent token"):
+            await validate_agent_mcp_token(
+                request.deps.sessionmaker,
+                token=external,
+                secret=secret,
+                scope=request.scope,
+                agent_id=plan.source_agent_id,
+                now=now,
+                chat_execution=True,
+            )
+        async with request.deps.sessionmaker() as db:
+            assert not await list_live_tokens_by_label(
+                db, tenant_id=request.tenant_id, label="source-catalogue"
+            )
+    finally:
+        async with request.deps.sessionmaker.begin() as db:
+            await revoke_mcp_token(db, jti=token_jti(external), now=request.now())
+    assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize(
+    "defect", ["account", "tenant", "agent", "revoked", "extra_claim", "external_mode"]
+)
+async def test_registered_chat_runtime_refuses_foreign_revoked_or_expanded_authority(full, defect):
+    import uuid
+
+    import jwt
+    from daimon.core.mcp_auth import validate_agent_mcp_token
+
+    request, plan, _, _, _, posts, token, *_ = full
+    scope, agent = request.scope, plan.source_agent_id
+    secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
+    if defect in ("account", "tenant"):
+        scope = scope.model_copy(update={f"{defect}_id": str(uuid.uuid4())})
+    elif defect == "agent":
+        agent = uuid.uuid4()
+    elif defect == "revoked":
+        async with request.deps.sessionmaker.begin() as db:
+            await revoke_mcp_token(db, jti=token_jti(token), now=request.now())
+    elif defect == "extra_claim":
+        claims = jwt.decode(token, secret, algorithms=["HS256"])
+        token = jwt.encode({**claims, "is_admin": True}, secret, algorithm="HS256")
+    with pytest.raises(ValueError, match="invalid scoped agent token"):
+        await validate_agent_mcp_token(
+            request.deps.sessionmaker,
+            token=token,
+            secret=secret,
+            scope=scope,
+            agent_id=agent,
+            now=request.now(),
+            chat_execution=defect != "external_mode",
+        )
     assert not posts
