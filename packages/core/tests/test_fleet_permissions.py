@@ -914,6 +914,44 @@ def test_fresh_worker_supplied_exact_parent_metadata_remains_allowed():
     assert dict(resolve(root, source).spec.metadata) == stamps
 
 
+def test_fresh_worker_inherited_metadata_survives_persisted_spec_reresolution():
+    root = parent()
+    stamps = {
+        "daimon_account": root.fleet.scope.account_id,
+        "daimon_name": "root",
+        "daimon_spec_hash": "retained-source-digest",
+        "daimon_tenant": root.fleet.scope.tenant_id,
+    }
+    root = replace(root, spec=root.spec.model_copy(update={"metadata": stamps}))
+    source = AgentSpec(name="worker", model=root.spec.model, system="Review accounting.")
+    admitted = resolve(root, source)
+    persisted = admitted.spec.model_dump(mode="json")
+    reloaded = AgentSpec.model_validate(persisted)
+    assert "metadata" in reloaded.model_fields_set
+    assert dict(reloaded.metadata) == stamps
+    replay_inputs = {
+        "backend": BackendConfig.model_validate(admitted.backend.model_dump(mode="json")),
+        "resources": admitted.resources,
+        "environment": admitted.environment,
+        "limits": admitted.limits,
+    }
+    replayed = resolve(root, reloaded, **replay_inputs)
+    assert replayed.spec == admitted.spec
+    assert replayed.digest == admitted.digest
+    assert replayed.permissions == admitted.permissions
+    assert source.metadata is None and "metadata" not in source.model_fields_set
+    assert dict(root.spec.metadata) == stamps
+
+    rotated = replace(
+        root,
+        spec=root.spec.model_copy(
+            update={"metadata": {**stamps, "daimon_spec_hash": "rotated-source-digest"}}
+        ),
+    )
+    with pytest.raises(WorkerSpecRefused, match="scope: not_subset"):
+        resolve(rotated, reloaded, **replay_inputs)
+
+
 @pytest.mark.parametrize("metadata", ({}, {"source_only": None}))
 def test_clone_metadata_patch_preserves_unmentioned_root_stamps(metadata):
     root = parent()
