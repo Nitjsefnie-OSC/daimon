@@ -104,9 +104,10 @@ def represented_execution_tools(
     if profile.profile_id != INLINE_REUSE.profile_id:
         raise InvalidConfig("profile has no source execution mapping")
     names = {"bash", "read", "edit", "grep", "glob", "write"}
-    if not tools or any(
-        tool.kind != "builtin" or tool.name not in names or tool.permission != "auto"
-        for tool in tools
+    if (
+        len(tools) != len(names)
+        or {tool.name for tool in tools} != names
+        or any(tool.kind != "builtin" or tool.permission != "auto" for tool in tools)
     ):
         raise InvalidConfig("source execution tools are not representable")
     return (ToolSpec(name=profile.execution_tool, kind="builtin"),)

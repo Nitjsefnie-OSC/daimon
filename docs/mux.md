@@ -3140,3 +3140,51 @@ It does not mint or store a bearer in a catalog or runtime manifest.
 This mode requires agent-origin preparation and all existing source/catalog/
 configuration pins; channel plans and workers cannot activate it. Unconfigured
 turns remain cold and the explicit Gemini worker token envelope is unchanged.
+
+A representation row applies only to its exact agent-origin platform, channel,
+account, source version and backend profile. DMs, routines without that binding,
+workers and other profiles keep their original source capture. Invalid or stale
+representation evidence is discarded; the full deployment independently refuses
+without it. Capture never substitutes a reduced target after that refusal.
+
+The profile's execution mapping requires all six automatic filesystem capabilities
+(`bash`, `read`, `edit`, `grep`, `glob`, `write`). A read-only subset, missing
+capability or permission prompt cannot acquire general `code_execution` authority.
+The native per-toolset schema represents MCP only with an explicitly verified
+catalogue and fully resolved automatic enablement; legacy and worker projections
+still exclude native-only MCP toolsets. Capture authenticates to the configured
+server as the original caller using the existing caller JWT owner, reads
+`tools/list`, and requires the operator allowlist to equal the complete effective
+source set. Any source connection allowlist must name actual server tools. Before
+provider exposure the registered target credential must see the same catalogue.
+Unknown names, silent narrowing, unresolved policies and unexpected toolsets
+therefore cannot count as preserved capabilities.
+
+Full plans additionally require an absolute `gcs_credential_file`, read using the
+same owned regular 0600/no-follow credential reader as MCP. It supplies an explicit
+read-only OAuth access token; there is no ambient credential discovery. On each
+native counterpart read and each provider credential exposure, the runtime lists
+every configured GCS prefix, rejects missing/extra/duplicate objects, requires
+locked object retention through the admitted deadline plus the seven-day inline
+environment lifetime, and downloads each current generation to check SHA-256.
+Receipt metadata alone is insufficient. The storage read path never writes or
+modifies retention. Provisioners must also prevent new objects under published
+prefixes; a readback is a point-in-time observation, not a transactional directory
+mount. Private-bucket mount authentication must be verified separately against the
+provider's documented network credentials before live provisioning.
+
+Capture currently re-downloads the attached source versions and verifies the
+retained archives on every matching capture, including preview and follow-up.
+This deliberately fails closed for full deployments on source unavailability or
+drift, and adds cross-provider latency and rate-limit dependency. There is no
+process-global success cache that could outlive a changed pin or credential.
+Storage verification likewise incurs listing and download operations on every
+use; quote these separately from model tokens.
+
+The existing MCP token is bound to tenant/account/canonical agent and registry
+JTI, with expiry at most 900 seconds (or the provisioning deadline when shorter),
+not to a provider session ID. This mode does not assert session isolation between
+threads sharing that caller/agent binding. A single-session live fixture must use
+its isolated account/channel and revoke the exact JTI at cleanup. No automatic
+refresh exists: expiry or revocation refuses further exposure, and continuing
+requires a newly authorized credential through the existing mint owner.
