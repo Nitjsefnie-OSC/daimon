@@ -1,4 +1,6 @@
-"""Post-publish content reads tolerate the provider's brief read-after-write 404."""
+"""Post-publish version-metadata and content reads tolerate the provider's
+brief read-after-write 404 — confirmed live against the QA OpenAI key: both
+endpoints 404 immediately after publish, then succeed within seconds."""
 
 import io
 import zipfile
@@ -54,6 +56,33 @@ async def test_two_transient_404s_on_content_are_retried_and_succeed(monkeypatch
     assert content_calls == 3
 
 
+async def test_two_transient_404s_on_version_metadata_are_retried_and_succeed(monkeypatch):
+    """The version-metadata GET 404s on the same post-publish window as content —
+    reproduced live against the QA OpenAI key independently of the content path."""
+    monkeypatch.setattr("mux.drivers.openai.skills.asyncio.sleep", _no_sleep)
+    metadata_calls = 0
+
+    def handle(request):
+        nonlocal metadata_calls
+        if request.url.path.endswith("/content"):
+            return httpx.Response(200, content=packed())
+        metadata_calls += 1
+        if metadata_calls <= 2:
+            return httpx.Response(404, json={"error": {"message": "not found"}})
+        return httpx.Response(200, json={"skill_id": "native", "version": "7"})
+
+    async with build_async_openai(transport=httpx.MockTransport(handle)) as sdk:
+        context = Context(
+            SDKTransport(sdk),
+            "project",
+            "openai.persistent_workspace",
+            lambda actual, *_: actual == SCOPE,
+        )
+        pins = (SkillRef(id="native", version="7", digest=bundle_digest(BUNDLE)),)
+        assert await resolve_pins(pins, SCOPE, context) == pins
+    assert metadata_calls == 3
+
+
 async def test_persistent_404_on_content_still_raises(monkeypatch):
     monkeypatch.setattr("mux.drivers.openai.skills.asyncio.sleep", _no_sleep)
     content_calls = 0
@@ -78,6 +107,32 @@ async def test_persistent_404_on_content_still_raises(monkeypatch):
     assert excinfo.value.category == "not_found"
     # 5 retries (0.5, 1, 2, 4, 8s) + the final unguarded attempt.
     assert content_calls == 6
+
+
+async def test_persistent_404_on_version_metadata_still_raises(monkeypatch):
+    monkeypatch.setattr("mux.drivers.openai.skills.asyncio.sleep", _no_sleep)
+    metadata_calls = 0
+
+    def handle(request):
+        nonlocal metadata_calls
+        if request.url.path.endswith("/content"):
+            return httpx.Response(200, content=packed())
+        metadata_calls += 1
+        return httpx.Response(404, json={"error": {"message": "not found"}})
+
+    async with build_async_openai(transport=httpx.MockTransport(handle)) as sdk:
+        context = Context(
+            SDKTransport(sdk),
+            "project",
+            "openai.persistent_workspace",
+            lambda actual, *_: actual == SCOPE,
+        )
+        pins = (SkillRef(id="native", version="7", digest=bundle_digest(BUNDLE)),)
+        with pytest.raises(ProviderError) as excinfo:
+            await resolve_pins(pins, SCOPE, context)
+    assert excinfo.value.category == "not_found"
+    # 5 retries (0.5, 1, 2, 4, 8s) + the final unguarded attempt.
+    assert metadata_calls == 6
 
 
 async def _no_sleep(_delay: float) -> None:

@@ -296,9 +296,10 @@ def openai_smoke_command(
             files=(SkillUploadFile(path="SKILL.md", content=_SMOKE_SKILL_CONTENT),)
         )
         skill = await skills.create(scope, bundle, key=f"daimon-openai-smoke-skill:{tenant_id}")
-        version = await skills.publish_version(
-            scope, skill.id, bundle, key=f"daimon-openai-smoke-skill-version:{tenant_id}"
-        )
+        # `create` already establishes version 1; a separate `publish_version`
+        # call would be redundant and double the post-publish read-lag window.
+        assert skill.latest_version is not None
+        version = skill.latest_version.version
         digest = bundle_digest(bundle)
 
         console.print("smoke: creating agent")
@@ -324,7 +325,7 @@ def openai_smoke_command(
                         },
                     ),
                 ),
-                skills=(SkillRef(id=skill.id, version=version.version, digest=digest),),
+                skills=(SkillRef(id=skill.id, version=version, digest=digest),),
             ),
             key=f"daimon-openai-smoke-agent:{tenant_id}",
         )

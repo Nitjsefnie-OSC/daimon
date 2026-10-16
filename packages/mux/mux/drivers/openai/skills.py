@@ -8,6 +8,7 @@ import stat
 import struct
 import zipfile
 import zlib
+from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
 
 from mux.contracts.errors import ProviderError
@@ -18,17 +19,36 @@ from mux.drivers.openai._common import Context, owned, page_of, query, text, tim
 from mux.drivers.openai.transport import Object, segment
 from mux.state.operations import request_digest
 
-_VERIFY_CONTENT_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
-"""Bounded ~15.5s backoff for the post-publish content read only.
+_POST_PUBLISH_READ_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
+"""Bounded ~15.5s backoff for reads of a just-published skill version only.
 
-Root-caused live against the QA OpenAI key (neutral-core F2-O probe): a
-freshly published version's content GET 404s immediately after `POST
-.../versions` returns 200, then reads 200 from ~2s on — provider-side
-read-after-write lag, not a wrong or deleted skill, and not a path bug.
-Retrying any other 404 here would hide a real error, so this bounded retry
-applies only to this one download, never to `retrieve`/`list`/`delete` or
-any other skill call. A 404 that survives the whole backoff is final.
+Root-caused live against the QA OpenAI key (neutral-core F2-O probe, then
+confirmed independently against the same key): BOTH the version-metadata GET
+(`/skills/{id}/versions/{version}`) and its content GET
+(`.../content`) 404 immediately after `POST .../versions` (or the create
+call's own first version) returns 200, then read 200 within single-digit
+seconds — provider-side read-after-write lag, not a wrong or deleted skill,
+and not a path bug. Retrying any other 404 here would hide a real error, so
+this bounded retry applies only to these two post-publish reads, never to
+`retrieve`/`list`/`delete` or any other skill call. A 404 that survives the
+whole backoff is final.
 """
+
+
+async def retry_not_found[T](call: Callable[[], Awaitable[T]]) -> T:
+    """Retry `call` on a `not_found` ProviderError with the post-publish backoff.
+
+    Any other exception, including a `not_found` that survives every delay,
+    propagates unchanged.
+    """
+    for delay in _POST_PUBLISH_READ_RETRY_DELAYS_S:
+        try:
+            return await call()
+        except ProviderError as error:
+            if error.category != "not_found":
+                raise
+            await asyncio.sleep(delay)
+    return await call()
 
 
 def bundle_digest(bundle: SkillUpload) -> str:
@@ -56,20 +76,9 @@ async def _download_content(context: Context, skill_id: str, version: str) -> by
     return data
 
 
-async def _download_content_with_retry(context: Context, skill_id: str, version: str) -> bytearray:
-    for delay in _VERIFY_CONTENT_RETRY_DELAYS_S:
-        try:
-            return await _download_content(context, skill_id, version)
-        except ProviderError as error:
-            if error.category != "not_found":
-                raise
-            await asyncio.sleep(delay)
-    return await _download_content(context, skill_id, version)
-
-
 async def verify_content(context: Context, skill_id: str, version: str, digest: str) -> None:
     """Read the selected native version's complete bounded archive, never latest."""
-    data = await _download_content_with_retry(context, skill_id, version)
+    data = await retry_not_found(lambda: _download_content(context, skill_id, version))
     try:
         bundle = _downloaded_bundle(data)
     except (zipfile.BadZipFile, NotImplementedError, zlib.error, EOFError) as error:
