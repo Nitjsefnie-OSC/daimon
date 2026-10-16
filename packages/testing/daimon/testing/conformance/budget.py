@@ -366,13 +366,20 @@ class SessionPrice(ProbeModel):
             raise ValueError("invalid session price interval")
         return self
 
-    def cost(self, seconds: int | Decimal) -> Decimal:
+    def chargeable_seconds(self, seconds: int | Decimal) -> Decimal:
         with localcontext() as context:
             context.prec = 80
             units = Decimal(max(seconds, self.minimum_seconds)) / self.unit_seconds
             if self.billing == "quantum":
                 units = units.to_integral_value(rounding=ROUND_CEILING)
-            return (units * self.usd_per_unit).quantize(Decimal(".000000000000000001"))
+            return units * self.unit_seconds
+
+    def cost(self, seconds: int | Decimal) -> Decimal:
+        with localcontext() as context:
+            context.prec = 80
+            return (
+                self.chargeable_seconds(seconds) / self.unit_seconds * self.usd_per_unit
+            ).quantize(Decimal(".000000000000000001"))
 
 
 class ContainerAllowance(ProbeModel):
@@ -388,6 +395,10 @@ class ContainerUsage(ProbeModel):
     memory_gb: Literal[1, 4, 16, 64] | None = None
     seconds: Annotated[Decimal, Field(ge=0, max_digits=16, decimal_places=3)]
     started_at: datetime
+    # A verified wall-clock lifetime bound is distinct from billed quanta.
+    active_seconds_upper_bound: (
+        Annotated[Decimal, Field(ge=0, max_digits=16, decimal_places=3)] | None
+    ) = None
 
 
 class MeasuredRequest(ProbeModel):
@@ -1621,17 +1632,45 @@ class BudgetGuard:
         lower_tokens: TokenUsage | None,
         known_cost: Decimal,
     ) -> bool:
+        def container_exceeds(container: ContainerUsage) -> bool:
+            allowance = original.container_allowance
+            assert allowance is not None
+            if container.memory_gb != allowance.memory_gb or container.meter != allowance.meter:
+                return True
+            active_limit = allowance.seconds_per_session
+            active = container.active_seconds_upper_bound
+            # Ordinary lifetime measurements retain their original meaning. A
+            # larger billed duration needs separate verified lifetime evidence.
+            if active is None:
+                active = container.seconds
+            if active > active_limit:
+                return True
+            price = next(
+                (
+                    p
+                    for p in original.session_prices
+                    if p.meter == container.meter
+                    and p.memory_gb == container.memory_gb
+                    and BudgetGuard._price_current(p, container.started_at)
+                    and BudgetGuard._price_current(
+                        p,
+                        container.started_at
+                        + timedelta(milliseconds=int(container.seconds * 1000)),
+                    )
+                ),
+                None,
+            )
+            billed_limit = (
+                price.chargeable_seconds(active_limit) if price is not None else active_limit
+            )
+            return container.seconds > billed_limit
+
         container_exceeded = (
             actual is not None
             and original.container_allowance is not None
             and (
                 len(actual.containers or ()) > original.container_allowance.sessions
-                or any(
-                    c.seconds > original.container_allowance.seconds_per_session
-                    or c.memory_gb != original.container_allowance.memory_gb
-                    or c.meter != original.container_allowance.meter
-                    for c in actual.containers or ()
-                )
+                or any(container_exceeds(c) for c in actual.containers or ())
             )
         )
         return (

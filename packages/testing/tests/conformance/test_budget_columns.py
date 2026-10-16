@@ -964,3 +964,130 @@ def test_generated_column_receipts_require_schema_validation(
     with pytest.raises(ValidationError):
         BudgetGuard._column_receipt(state, AT)
     assert tuple(p.read_bytes() for p in paths) == before
+
+
+def quantum_guard(root: Path) -> BudgetGuard:
+    guard = guard_at(root)
+    config = json.loads(guard.config_path.read_text())
+    config["providers"]["openai"]["session_prices"][0].update(
+        unit_seconds=1200, minimum_seconds=1200, usd_per_unit=".03"
+    )
+    guard.config_path.write_text(json.dumps(config))
+    return guard
+
+
+def quantum_actual(
+    *, active: str | None = "40", billed: str = "1200", incoming: int = 0
+) -> ActualSpend:
+    return ActualSpend(
+        requests=(
+            MeasuredRequest(
+                id="request",
+                observed_at=AT,
+                tokens=TokenUsage(
+                    input_tokens=incoming,
+                    output_tokens=0,
+                    input_cached_tokens=0,
+                    input_cache_write_tokens=0,
+                ),
+            ),
+        )
+        if incoming
+        else (),
+        containers=(
+            ContainerUsage(
+                id="container",
+                memory_gb=1,
+                started_at=AT,
+                seconds=Decimal(billed),
+                active_seconds_upper_bound=Decimal(active) if active is not None else None,
+            ),
+        ),
+        usage_complete=True,
+    )
+
+
+@pytest.mark.parametrize("allowance", [40, 180, 1200, 1201])
+def test_billed_quantum_settles_and_next_paid_column_admits(tmp_path: Path, allowance: int) -> None:
+    guard = quantum_guard(tmp_path)
+    plan = ProbePlan.create_only(
+        provider="openai",
+        model=MODELS["openai"],
+        fixture_id="F1",
+        container_allowance=ContainerAllowance(seconds_per_session=allowance),
+    )
+    held = guard.reserve(plan)
+    billed = "2400" if allowance == 1201 else "1200"
+    actual = quantum_actual(active=str(allowance), billed=billed)
+    row = guard.settle(held, status="completed", limits=plan.limits, actual=actual)
+    assert row.status == "completed" and not row.admission_blocked
+    assert row.actual_usd == Decimal(".06" if allowance == 1201 else ".03")
+    assert row.held_usd == 0
+    assert actual.containers[0].seconds == Decimal(billed)
+    assert actual.containers[0].active_seconds_upper_bound == allowance
+    approval = guard.propose_column_hold(column(count=1))
+    sign(guard, approval)
+    assert guard.reserve_column(approval).status == "reserved"
+
+
+@pytest.mark.parametrize(
+    ("allowance", "active", "billed"),
+    [(40, "41", "1200"), (180, "181", "1200"), (40, None, "1200"), (40, "40", "1200.001")],
+)
+def test_quantum_does_not_hide_active_missing_proof_or_billed_overrun(
+    tmp_path: Path, allowance: int, active: str | None, billed: str
+) -> None:
+    guard = quantum_guard(tmp_path)
+    plan = ProbePlan.create_only(
+        provider="openai",
+        model=MODELS["openai"],
+        fixture_id="F1",
+        container_allowance=ContainerAllowance(seconds_per_session=allowance),
+    )
+    held = guard.reserve(plan)
+    row = guard.settle(
+        held,
+        status="completed",
+        limits=plan.limits,
+        actual=quantum_actual(active=active, billed=billed),
+    )
+    assert row.status == "overrun" and row.admission_blocked
+    with pytest.raises(BudgetRefused):
+        guard.reserve(plan)
+
+
+def test_quantum_rounding_does_not_round_the_reserved_cash(tmp_path: Path) -> None:
+    guard = quantum_guard(tmp_path)
+    plan = ProbePlan.create_only(
+        provider="openai",
+        model=MODELS["openai"],
+        fixture_id="F1",
+        container_allowance=ContainerAllowance(seconds_per_session=40),
+    )
+    held = guard.reserve(plan)
+    assert held.receipt.reserved_usd == Decimal(".03")
+    actual = quantum_actual()
+    assert not BudgetGuard._exceeded(held.receipt, plan.limits, actual, None, Decimal(".03"))
+    assert BudgetGuard._exceeded(held.receipt, plan.limits, actual, None, Decimal(".030001"))
+
+
+@pytest.mark.parametrize(
+    "billing,minimum,expected",
+    [("quantum", 1200, "1200"), ("proportional", 0, "40"), ("proportional", 1200, "1200")],
+)
+def test_session_price_chargeable_seconds_uses_existing_tariff(
+    billing: Literal["quantum", "proportional"], minimum: int, expected: str
+) -> None:
+    price = SessionPrice(
+        memory_gb=1,
+        billing=billing,
+        unit_seconds=1200,
+        minimum_seconds=minimum,
+        usd_per_unit=Decimal(".03"),
+        effective_from=AT.date(),
+        source=SOURCE,
+    )
+    assert price.chargeable_seconds(40) == Decimal(expected)
+    assert price.cost(40) == (Decimal(expected) / 1200 * Decimal(".03")).quantize(
+        Decimal(".000000000000000001")
+    )
