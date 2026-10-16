@@ -1119,6 +1119,11 @@ async def read_frozen_preparation(
         ):
             raise WorkerSpecRefused("scope", "stale")
         request = replace(request, admission=replace(request.admission, environment=actual_env))
+        # Refresh the captured resources from the verified native readback while
+        # preserving the source-first refusal order above.
+        request = replace(
+            request, source=await capture_preparation_source(replace(request, source=None))
+        )
         policy = await _root_context(deps, root, now=now())
         resolve_worker_spec(
             parent,

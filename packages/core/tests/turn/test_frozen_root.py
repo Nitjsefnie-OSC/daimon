@@ -1794,6 +1794,67 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
             assert request.admission.grant.turn_place == request.admission.grant.run_place
             assert parent.fleet.place.category_id == category_id
             assert parent.fleet.place.category_unresolved == category_unresolved
+            assert request.admission.grant == replace(
+                admission.grant,
+                thread_id=thread_id,
+                turn_place=replace(
+                    admission.grant.turn_place,
+                    channel_id=thread_id,
+                    parent_channel_id=channel_id,
+                ),
+                run_place=replace(
+                    admission.grant.run_place,
+                    channel_id=thread_id,
+                    parent_channel_id=channel_id,
+                ),
+            )
+            assert request.admission.account_id == admission.account_id
+            assert request.admission.origin_channel_id == admission.origin_channel_id
+            assert request.admission.origin_thread_id == admission.origin_thread_id
+            assert request.admission.origin_seal_ids == admission.origin_seal_ids
+            assert request.session_account_id == admission.account_id
+            assert request.tenant_id == tenant_id
+            assert request.thread_id == thread_id
+
+            from daimon.core.fleet_orchestration import HostFleetPorts
+            from daimon.core.neutral_resources import resolve_worker_spec
+            from daimon.core.stores.fleet import WorkerPool
+            from daimon.core.turn.runtime_manifest import prepare_source
+
+            ports = HostFleetPorts(
+                deps.sessionmaker,
+                deps=deps,
+                prices={},
+                markup=Decimal("1"),
+                pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+            )
+            try:
+                async with ports._load_preparation(parent) as retained:
+                    _, policy = await read_frozen_root(
+                        deps, scope, origin_id=origin.id, now=datetime.now(UTC)
+                    )
+                    resolved = resolve_worker_spec(
+                        parent,
+                        parent.spec,
+                        policy=policy,
+                        now=datetime.now(UTC),
+                        resources=parent.resources,
+                        environment=parent.environment,
+                        limits=parent.limits.for_provider(parent.spec.model.provider),
+                        captured_source=retained.source,
+                    )
+                    worker_request = await retained.for_worker(parent, resolved)
+                    selected = await prepare_source(worker_request)
+                    assert selected.target_spec == resolved.spec
+                    assert selected.admission.grant == request.admission.grant
+                    assert selected.scope == resolved.permissions.fleet.scope
+                    assert resolved.permissions.fleet.place == parent.fleet.place
+                    assert resolved.permissions.fleet.root == parent.fleet.root
+                    assert resolved.permissions.fleet.origin_id == origin.id
+                    assert resolved.permissions.fleet.account_id == admission.account_id
+                    assert resolved.spec.extensions == parent.spec.extensions
+            finally:
+                await ports.close()
 
 
 @pytest.mark.parametrize("fault", ["missing", "digest", "origin"])
