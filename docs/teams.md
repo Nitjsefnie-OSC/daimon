@@ -409,14 +409,16 @@ setting off the routes answer 404 and nothing is subscribed.
   same edit as the file links (not after an unprompted answer), in a 1:1 chat
   above the consent cards. When the answer cannot take them (a closing notice
   card, or Teams refuses the edit, as it may when the message gets too large),
-  they come in a message of their own after it. A channel without file access
-  shows no previews. Animated GIFs get no preview, and a preview Teams refuses
-  is only logged (`teams.output_preview.send_failed`).
+  they come in a message of their own after it; in a 1:1 chat, one message
+  each below the consent cards, as do any beyond four. A channel without file
+  access shows no previews. Animated GIFs get no preview, and a preview Teams
+  refuses is only logged (`teams.output_preview.send_failed`).
 - **Document previews.** Up to four Word, PowerPoint, Excel or PDF outputs
   saved to a channel's files show their first page, in delivery order, added
   to the answer in a second edit after the image previews, which never wait
-  for them or give up a place to them; refused, they come in a message of
-  their own. Each is Graph's thumbnail of the uploaded file, asked for up to
+  for them or give up a place to them. When the answer would then hold more
+  than four previews, or the edit is refused, they come in a message of their
+  own. Each is Graph's thumbnail of the uploaded file, asked for up to
   three times while Graph renders it (ten seconds at most for them all),
   fetched without a token and re-encoded like an image. One that does not come
   is logged (`teams.output_thumbnail.skipped`, no name) and left out.

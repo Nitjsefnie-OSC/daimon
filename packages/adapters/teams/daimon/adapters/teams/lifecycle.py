@@ -30,6 +30,7 @@ import httpx
 import structlog
 from anthropic.types import RawMessageStreamEvent
 from daimon.adapters.teams import card
+from daimon.adapters.teams.image_preview import MAX_PREVIEWS
 from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
@@ -501,8 +502,9 @@ class TeamsTurnLifecycle:
         """Edit `text` and `attachments` in below the answer's last message.
 
         The attachments follow any already there. False if they cannot go
-        there: no answer shown, a notice card given attachments, too long, or
-        the edit refused; the caller then sends them on their own.
+        there: no answer shown, a notice card given attachments, too long, more
+        than MAX_PREVIEWS in all, or the edit refused; the caller then sends
+        them on their own.
         """
         return await self._amend(
             self.final_message_id,
@@ -528,6 +530,8 @@ class TeamsTurnLifecycle:
             if len(updated) > card.TEAMS_LIMIT:
                 return False
             attached = (*self._attached.get(message_id, ()), *attachments)
+            if len(attached) > MAX_PREVIEWS:
+                return False  # image_preview's size budget is MAX_PREVIEWS per message.
             if message_id in self._notices:
                 actions, summary = self._notices[message_id]
                 rendered = card.notice_card(updated, actions=actions, summary=summary)

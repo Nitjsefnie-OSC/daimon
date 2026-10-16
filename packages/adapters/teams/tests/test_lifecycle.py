@@ -25,6 +25,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_usage import (
 )
 from daimon.adapters.teams import card
 from daimon.adapters.teams import lifecycle as lifecycle_module
+from daimon.adapters.teams.image_preview import MAX_PREVIEWS
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsTurnLifecycle, TimedSender
 from daimon.core.errors import TurnError
 from daimon.core.message_split import split_fenced
@@ -597,6 +598,21 @@ async def test_previews_the_answer_cannot_take_are_refused() -> None:
     assert not await lifecycle.append_to_answer(attachments=[_image("a.png")]), "a 413"
     assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
     assert not sender.activities[-1].attachments, "a refused preview is not sent again"
+
+
+async def test_an_answer_holds_no_more_previews_than_one_preview_message() -> None:
+    """Thumbnails that would take the answer past MAX_PREVIEWS images are refused whole."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+    charts = [_image(f"c{n}.png") for n in range(MAX_PREVIEWS - 1)]
+    assert await lifecycle.append_to_answer(attachments=charts)
+    edits = len(sender.sent)
+
+    assert not await lifecycle.append_to_answer(attachments=[_image("a.pdf"), _image("b.pdf")])
+    assert len(sender.sent) == edits, "no edit was tried"
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert _names(sender.activities[-1]) == [a.name for a in charts], "the charts stay, alone"
 
 
 async def test_no_answer_reads_as_cancelled_or_done() -> None:
