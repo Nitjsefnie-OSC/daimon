@@ -1028,3 +1028,26 @@ def test_discord_credential_expiry_requires_explicit_opt_in(monkeypatch, configu
     )
     actual = load_settings(_env_file=None).discord
     assert actual is not None and actual.credential_form_expiry is (configured == "true")
+
+
+@pytest.mark.parametrize(
+    "cutoff", ["1970-01-01T00:00:00Z", "2026-10-15T23:59:59Z", "garbage", "2026-10-16T00:00:00"]
+)
+def test_mcp_legacy_cutoff_rejects_unsafe_or_naive_dates(cutoff: str) -> None:
+    with pytest.raises(ValidationError):
+        McpSettings.model_validate({"legacy_token_cutoff": cutoff})
+
+
+def test_mcp_legacy_window_is_explicit_bounded_and_expired_windows_boot_strict() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    assert not McpSettings().allow_legacy_tokens
+    with pytest.raises(ValidationError):
+        McpSettings(allow_legacy_tokens=True)
+    with pytest.raises(ValidationError):
+        McpSettings(
+            allow_legacy_tokens=True, legacy_token_cutoff=datetime.now(UTC) + timedelta(hours=7)
+        )
+    assert McpSettings(
+        allow_legacy_tokens=True, legacy_token_cutoff=datetime.now(UTC) - timedelta(minutes=1)
+    )

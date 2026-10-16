@@ -45,7 +45,7 @@ from daimon.core.defaults.loader import (
     load_skill_paths,
     load_skill_spec,
 )
-from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_auth import mint_panel_mcp_token
 from daimon.core.stores import accounts
 from daimon.core.stores.domain import Role
 from daimon.testing import INIT_BODY, INIT_HEADERS, asgi_lifespan, parse_jsonrpc_response
@@ -198,7 +198,12 @@ async def _seed_admin_token(sessionmaker: async_sessionmaker[AsyncSession]) -> s
         )
         await accounts.set_role(s, account.id, Role.ADMIN)
         account_id = account.id
-    return mint_jwt(account_id=account_id, secret=SECRET.encode(), now=_NOW)
+        return await mint_panel_mcp_token(
+            s,
+            account_id=account_id,
+            secret=SECRET.encode(),
+            now=dt.datetime.now(dt.UTC),
+        )
 
 
 async def _seed_chat_turn_token(sessionmaker: async_sessionmaker[AsyncSession]) -> str:
@@ -216,7 +221,12 @@ async def _seed_chat_turn_token(sessionmaker: async_sessionmaker[AsyncSession]) 
             account=account,
         )
         account_id = account.id
-    return mint_jwt(account_id=account_id, secret=SECRET.encode(), now=_NOW)
+        return await mint_panel_mcp_token(
+            s,
+            account_id=account_id,
+            secret=SECRET.encode(),
+            now=dt.datetime.now(dt.UTC),
+        )
 
 
 async def test_seeded_prompt_and_skill_tool_claims_are_chat_turn_reachable(

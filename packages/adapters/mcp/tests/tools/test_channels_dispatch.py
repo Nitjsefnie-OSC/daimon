@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import uuid
 from unittest.mock import MagicMock
 
@@ -20,7 +19,6 @@ from daimon.core.config import (
     Settings,
     SlackSettings,
 )
-from daimon.core.mcp_auth import mint_jwt
 from daimon.core.scope import DeploymentDefault
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -29,6 +27,8 @@ from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
+
+from ..harness import registered_account_token
 
 _SECRET = b"a" * 32
 
@@ -142,7 +142,7 @@ async def test_slack_caller_tools_list_omits_list_threads(
     ``tools/call`` returns the registry's own unknown-tool error, not the
     gate copy."""
     account_id = await _seed_slack_bound_account(db_session, workspace_id="slack-list-threads")
-    token = mint_jwt(account_id=account_id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account_id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     tool_names = await _list_tool_names(app, token=token)
@@ -175,7 +175,7 @@ async def test_parse_link_slack_caller_routes_to_slack_branch(
     parse_link tool: a Slack permalink in, a SlackParsedLink-shaped result
     out (channel_id + message_ts, no guild_id)."""
     account_id = await _seed_slack_bound_account(db_session, workspace_id="slack-parse-link")
-    token = mint_jwt(account_id=account_id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account_id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -223,7 +223,7 @@ async def test_search_messages_slack_caller_no_longer_hits_unsupported_branch(
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -263,7 +263,7 @@ async def test_send_message_slack_caller_no_longer_hits_unsupported_branch(
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -307,7 +307,7 @@ async def test_read_channel_slack_caller_routes_to_slack_impl_and_fails_on_missi
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -340,7 +340,7 @@ async def test_read_channel_discord_caller_routes_to_discord_impl_and_fails_on_m
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -371,7 +371,7 @@ async def test_read_channel_slack_caller_rejects_discord_before_param(
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -405,7 +405,7 @@ async def test_read_channel_discord_caller_rejects_slack_cursor_param(
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -439,7 +439,7 @@ async def test_read_thread_slack_caller_rejects_discord_before_param(
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -473,7 +473,7 @@ async def test_read_thread_discord_caller_rejects_slack_cursor_param(
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -511,7 +511,7 @@ async def test_read_channel_slack_caller_treats_empty_pagination_params_as_absen
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -544,7 +544,7 @@ async def test_read_channel_discord_caller_treats_empty_cursor_as_absent(
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -579,7 +579,7 @@ async def test_read_thread_slack_caller_treats_empty_before_as_absent(
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -618,7 +618,7 @@ async def test_create_thread_slack_caller_routes_to_slack_impl_and_fails_on_miss
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(
@@ -658,7 +658,7 @@ async def test_create_thread_discord_caller_routes_to_discord_impl_and_fails_on_
         account=account,
     )
     await db_session.commit()
-    token = mint_jwt(account_id=account.id, secret=_SECRET, now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(sessionmaker, account_id=account.id, secret=_SECRET)
     app = _make_app(sessionmaker)
 
     call_result = await _call_tool(

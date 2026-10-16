@@ -272,6 +272,24 @@ Both fields are optional so deployments that don't run the MCP adapter keep work
 
 Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter.
 
+### `DAIMON_MCP__LEGACY_TOKEN_CUTOFF`
+
+`AwareDatetime | None` · optional · default unset
+
+UTC deadline for a temporary legacy-token deployment window. Dates before 2026-10-16 or
+over six hours in the future are refused. At/after the deadline all unregistered tokens
+are rejected, regardless of issuance time. Internal tokens are always rejected without a
+registry row.
+
+### `DAIMON_MCP__ALLOW_LEGACY_TOKENS`
+
+`bool` · optional · default `False`
+
+Temporary minters-first deployment compatibility only. Requires a bounded
+legacy_token_cutoff; only non-internal legacy tokens qualify and stop working at that
+deadline even if the deployment is interrupted. Default false requires registered tokens
+immediately.
+
 ### `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION`
 
 `bool` · optional · default `False`

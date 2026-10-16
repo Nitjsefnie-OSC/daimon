@@ -663,6 +663,10 @@ async def test_create_session_calls_ensure_agent_mcp_vault_when_public_url_set(
     display = f"daimon-mcp:{account_id}:{agent_uuid}"
     requests: list[httpx.Request] = []
 
+    registered_metadata = await _registered_vault_metadata(
+        db_session_factory, account_id, agent_uuid
+    )
+
     def _handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.method == "GET" and request.url.path == "/v1/vaults":
@@ -689,7 +693,7 @@ async def test_create_session_calls_ensure_agent_mcp_vault_when_public_url_set(
                     "data": [
                         {
                             "id": "vcrd_existing",
-                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
+                            "metadata": registered_metadata,
                             "type": "credential",
                             "vault_id": "vlt_existing",
                             "auth": {
@@ -1201,6 +1205,10 @@ async def test_create_session_composes_resources_alongside_vault_ids(
     bodies: list[dict[str, Any]] = []
     memory_handler = make_fake_memory_store_handler()
 
+    registered_metadata = await _registered_vault_metadata(
+        db_session_factory, account_id, agent_uuid, tenant_id=tenant.id
+    )
+
     def _handler(request: httpx.Request) -> httpx.Response:
         try:
             return memory_handler(request)
@@ -1230,7 +1238,7 @@ async def test_create_session_composes_resources_alongside_vault_ids(
                     "data": [
                         {
                             "id": "vcrd_existing",
-                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
+                            "metadata": registered_metadata,
                             "type": "credential",
                             "vault_id": "vlt_existing",
                             "auth": {
@@ -1954,8 +1962,31 @@ async def test_a_personal_store_outage_degrades_to_shared_only(
 # --- Agent-scoped external MCP credentials mirror into the caller's vault ----
 
 
+async def _registered_vault_metadata(factory, account_id, agent_id, tenant_id=None):
+    from daimon.core._models import Account
+    from daimon.core.mcp_vault import chat_mcp_credential
+
+    async with factory() as db, db.begin():
+        if await db.get(Account, account_id) is None:
+            if tenant_id is None:
+                tenant = await make_tenant(db)
+                tenant_id = tenant.id
+            db.add(Account(id=account_id, tenant_id=tenant_id))
+            await db.flush()
+        payload = await chat_mcp_credential(
+            db,
+            account_id=account_id,
+            agent_id=agent_id,
+            jwt_secret=b"x" * 32,
+            public_url="https://mcp.example.com/mcp",
+            now=datetime.now(UTC),
+        )
+    return payload["metadata"]
+
+
 def _warm_vault_mirror_handler(
     *,
+    chat_metadata: dict[str, str],
     account_id: uuid.UUID,
     agent_uuid: uuid.UUID,
     public_url: str,
@@ -2001,7 +2032,7 @@ def _warm_vault_mirror_handler(
                     "data": [
                         {
                             "id": "vcrd_daimon_mcp",
-                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
+                            "metadata": chat_metadata,
                             "type": "credential",
                             "vault_id": "vlt_caller",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -2078,6 +2109,9 @@ async def test_create_session_mirrors_agent_mcp_credential_for_a_caller_who_did_
     session_bodies: list[dict[str, Any]] = []
     client = build_fake_anthropic_http(
         _warm_vault_mirror_handler(
+            chat_metadata=await _registered_vault_metadata(
+                db_session_factory, other_account_id, agent_uuid, tenant_id=tenant.id
+            ),
             account_id=other_account_id,
             agent_uuid=agent_uuid,
             public_url=public_url,
@@ -2133,6 +2167,9 @@ async def test_create_session_mirrors_nothing_when_agent_has_no_stored_mcp_crede
     session_bodies: list[dict[str, Any]] = []
     client = build_fake_anthropic_http(
         _warm_vault_mirror_handler(
+            chat_metadata=await _registered_vault_metadata(
+                db_session_factory, account_id, agent_uuid, tenant_id=tenant.id
+            ),
             account_id=account_id,
             agent_uuid=agent_uuid,
             public_url=public_url,
@@ -2246,6 +2283,9 @@ async def test_create_session_leaves_off_a_server_only_another_member_signed_in_
     session_bodies: list[dict[str, Any]] = []
     client = build_fake_anthropic_http(
         _warm_vault_mirror_handler(
+            chat_metadata=await _registered_vault_metadata(
+                db_session_factory, bystander_account_id, agent_uuid, tenant_id=tenant.id
+            ),
             account_id=bystander_account_id,
             agent_uuid=agent_uuid,
             public_url=public_url,
@@ -2304,6 +2344,9 @@ async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
     session_bodies: list[dict[str, Any]] = []
     client = build_fake_anthropic_http(
         _warm_vault_mirror_handler(
+            chat_metadata=await _registered_vault_metadata(
+                db_session_factory, connected_account_id, agent_uuid, tenant_id=tenant.id
+            ),
             account_id=connected_account_id,
             agent_uuid=agent_uuid,
             public_url=public_url,

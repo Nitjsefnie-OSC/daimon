@@ -26,7 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 
-from .harness import make_jwt, seed_server_admin
+from .harness import registered_account_token, seed_server_admin
 
 SECRET = "a" * 32
 
@@ -231,7 +231,7 @@ async def test_promo_create_tools_are_hidden_from_server_admins(
     async with sessionmaker() as s, s.begin():
         _tenant_id, account_id = await seed_server_admin(s)
     app = _make_app(sessionmaker)
-    admin_token = make_jwt(account_id=account_id)
+    admin_token = await registered_account_token(sessionmaker, account_id=account_id)
 
     search = await call_mcp_tool(
         app, token=admin_token, name="search_tools", arguments={"query": "create promo code"}

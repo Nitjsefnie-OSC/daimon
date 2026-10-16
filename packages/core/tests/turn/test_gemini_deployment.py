@@ -1929,6 +1929,38 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
     )
 
 
+@pytest.mark.parametrize("explicit_worker_request", [False, True], indirect=True)
+async def test_worker_cancelled_before_binding_records_preparation_refusal_without_native_io(
+    materialization_worker_request,
+    monkeypatch,
+):
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.stores import fleet
+
+    (selected, root, worker, prices, owned, calls), _ = materialization_worker_request
+    # Missing runtime cannot be the binding error if cancellation wins first.
+    monkeypatch.delenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", raising=False)
+    cancelled = asyncio.Event()
+    cancelled.set()
+    before = len(calls), len(owned.wire.requests)
+    with pytest.raises(asyncio.CancelledError):
+        await run_worker(
+            selected,
+            parent=root,
+            worker=worker,
+            prices=prices,
+            trigger_message="Complete the assigned task",
+            cancel=cancelled,
+        )
+    _, rows = await fleet.run_status(
+        selected.deps.sessionmaker, tenant_id=worker.tenant_id, run_id=worker.run_id
+    )
+    ended = next(row for row in rows if row.id == worker.id)
+    assert ended.status == "failed" and ended.error_code == "preparation_refused"
+    assert ended.binding_id is None and ended.turns_used == 0 and ended.attempts == 0
+    assert (len(calls), len(owned.wire.requests)) == before
+
+
 async def test_postgres_plan_is_explicit_and_refuses_ambiguous_storage(selected, tmp_path):
     from pydantic import ValidationError
 

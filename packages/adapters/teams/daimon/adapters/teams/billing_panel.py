@@ -675,6 +675,7 @@ class BillingPanel:
             url = await create_checkout(
                 self._runtime.http_client,
                 settings=self._runtime.settings.mcp,
+                session_factory=self._runtime.sessionmaker,
                 account_id=account_id,
                 amount=amount,
             )

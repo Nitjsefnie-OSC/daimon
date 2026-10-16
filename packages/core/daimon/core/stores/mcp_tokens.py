@@ -25,7 +25,7 @@ from typing import Any, cast
 
 from daimon.core._models import McpToken
 from daimon.core.stores.domain import McpTokenKind, McpTokenRow
-from sqlalchemy import CursorResult, delete, func, or_, select, update
+from sqlalchemy import CursorResult, String, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -239,3 +239,30 @@ async def update_mcp_token_scopes(
     )
     orm = (await session.execute(stmt)).scalar_one_or_none()
     return None if orm is None else McpTokenRow.model_validate(orm)
+
+
+async def prune_expired_ephemeral_tokens(
+    session: AsyncSession,
+    *,
+    expires_before: datetime,
+    chat_label_prefix: str,
+    panel_label: str,
+) -> int:
+    """Delete bounded system tokens after expiry plus the caller's retention grace.
+
+    Match the exact label/jti discriminator, never an external key's free label.
+    Revocation alone does not remove a still-valid token's audit history.
+    """
+    result = await session.execute(
+        delete(McpToken).where(
+            McpToken.expires_at <= expires_before,
+            or_(
+                and_(
+                    McpToken.kind == "agent",
+                    McpToken.label == chat_label_prefix + McpToken.jti.cast(String),
+                ),
+                and_(McpToken.kind == "cli", McpToken.label == panel_label),
+            ),
+        )
+    )
+    return cast(CursorResult[Any], result).rowcount

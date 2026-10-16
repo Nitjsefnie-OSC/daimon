@@ -43,7 +43,7 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
-from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_auth import mint_chat_mcp_token, mint_jwt
 from daimon.core.tool_safety import backend_switch_tools
 from daimon.testing import ma_agent
 from daimon.testing.asgi import mcp_session
@@ -152,7 +152,12 @@ def _make_app(sessionmaker: async_sessionmaker[AsyncSession], anthropic: AsyncAn
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
-            mcp=McpSettings(jwt_secret=SecretStr(SECRET), public_url=HttpUrl("https://x/mcp")),
+            mcp=McpSettings(
+                legacy_token_cutoff=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
+                allow_legacy_tokens=True,
+                jwt_secret=SecretStr(SECRET),
+                public_url=HttpUrl("https://x/mcp"),
+            ),
         ),
         sessionmaker=sessionmaker,
         anthropic=anthropic,
@@ -200,9 +205,15 @@ async def _seed_chat_turn_session(sessionmaker: async_sessionmaker[AsyncSession]
             tenant=tenant,
             account=account,
         )
-    return mint_jwt(
-        account_id=account.id, secret=SECRET.encode(), now=_NOW, chat_agent_id=uuid.uuid4()
-    )
+    async with sessionmaker() as session, session.begin():
+        token, _, _ = await mint_chat_mcp_token(
+            session,
+            account_id=account.id,
+            agent_id=uuid.uuid4(),
+            secret=SECRET.encode(),
+            now=dt.datetime.now(dt.UTC),
+        )
+    return token
 
 
 @pytest.mark.parametrize("tool_name,expected", sorted(CHAT_TURN_TOOL_REACHABILITY.items()))
@@ -273,7 +284,6 @@ async def test_agent_id_claim_session_discovers_agent_chat_and_self_edit_tools_o
         secret=SECRET.encode(),
         now=_NOW,
         agent_id=uuid.uuid4(),
-        chat_agent_id=uuid.uuid4(),
     )
     app = _make_app(sessionmaker, _build_client())
 
@@ -324,9 +334,14 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
         account = await make_account(session, tenant=tenant)
     app = _make_app(sessionmaker, _build_client())
     plain_token = mint_jwt(account_id=account.id, secret=SECRET.encode(), now=_NOW)
-    chat_token = mint_jwt(
-        account_id=account.id, secret=SECRET.encode(), now=_NOW, chat_agent_id=uuid.uuid4()
-    )
+    async with sessionmaker() as session, session.begin():
+        chat_token, _, _ = await mint_chat_mcp_token(
+            session,
+            account_id=account.id,
+            agent_id=uuid.uuid4(),
+            secret=SECRET.encode(),
+            now=dt.datetime.now(dt.UTC),
+        )
     plain = await mcp_session(app, token=plain_token, method="tools/list")
     chat = await mcp_session(app, token=chat_token, method="tools/list")
     # Compare serialized full schemas, not just tool names or callability.
