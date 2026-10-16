@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from daimon.core.teams_markdown import escape_dollars
+from daimon.core.teams_markdown import escape_dollars, has_math
 
 
 @pytest.mark.parametrize(
@@ -115,3 +115,19 @@ def test_escape_dollars_a_fence_with_an_info_string_does_not_close() -> None:
     expected = "```\ncode $a\n```python\n$5 still code\n```\nafter \\$5\n"
     assert escape_dollars(text) == expected, "the fence closes at the bare line only"
     assert escape_dollars("~~~\n$x\n~~~  \n$5") == "~~~\n$x\n~~~  \n\\$5", "trailing spaces close"
+
+
+@pytest.mark.parametrize(
+    ("text", "math"),
+    [
+        ("costs $5 and $10", False),
+        ("`$x$` and\n```\n$$y$$\n```\n", False),
+        (r"an escaped \$x\$", False),
+        ("the mean is $\\mu$", True),
+        ("$$\nE = mc^2\n$$", True),
+        ("`code` then $x^2$", True),
+    ],
+)
+def test_has_math_matches_what_escape_dollars_keeps(text: str, math: bool) -> None:
+    """Math is a span escape_dollars leaves as is; prices, code and escapes are not."""
+    assert has_math(text) is math, f"{text!r} should {'' if math else 'not '}hold math"
