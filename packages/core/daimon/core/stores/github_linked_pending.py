@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from daimon.core._models import GitHubLinkedConnectPending
 from pydantic import BaseModel, ConfigDict
@@ -20,6 +21,7 @@ class PendingGrant(BaseModel):
     ma_agent_id: str
     agent_name: str
     repo_name: str
+    requested_access: Literal["read", "write"]
     platform: str
     platform_user_id: str
     workspace_id: str
@@ -37,6 +39,7 @@ async def save(
     ma_agent_id: str,
     agent_name: str,
     repo_name: str,
+    requested_access: Literal["read", "write"] = "read",
     platform: str,
     platform_user_id: str,
     workspace_id: str,
@@ -51,6 +54,7 @@ async def save(
             ma_agent_id=ma_agent_id,
             agent_name=agent_name,
             repo_name=repo_name,
+            requested_access=requested_access,
             platform=platform,
             platform_user_id=platform_user_id,
             workspace_id=workspace_id,

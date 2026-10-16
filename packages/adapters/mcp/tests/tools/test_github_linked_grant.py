@@ -35,6 +35,7 @@ from daimon.core.stores.github_access import list_agent_grants, list_authorized_
 from daimon.core.stores.github_app_installations import get as get_installation
 from daimon.core.stores.github_installation_reconciliation import get as get_reconciliation
 from daimon.core.stores.github_links import get_account_link, save_verified_link, unlink_account
+from daimon.core.stores.github_owner_grants import exclude_repo, list_owner_grants
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
@@ -320,6 +321,153 @@ async def test_linked_manager_grants_without_browser(setup_linked, github_http) 
         reconciliation = await get_reconciliation(session, installation_id=201)
         assert reconciliation is not None
         assert (reconciliation.state, reconciliation.generation) == ("pending", 2)
+
+
+@pytest.mark.asyncio
+async def test_explicit_single_grant_clears_owner_exclusion(setup_linked, github_http) -> None:
+    async with setup_linked.sessionmaker.begin() as session:
+        await exclude_repo(
+            session,
+            tenant_id=setup_linked.tenant.id,
+            agent_id=setup_linked.agent_id,
+            repo_full_name="acme/widgets",
+        )
+    assert (await setup_linked.grant()).status == "granted"
+    async with setup_linked.sessionmaker() as session:
+        excluded = await session.scalar(
+            text(
+                "SELECT count(*) FROM agent_github_owner_exclusions WHERE tenant_id = :tenant "
+                "AND agent_id = :agent AND repo_full_name = 'acme/widgets'"
+            ),
+            {"tenant": setup_linked.tenant.id, "agent": setup_linked.agent_id},
+        )
+        assert excluded == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "owner_type,login,second_permission,access,expected",
+    [
+        ("User", "acme", "none", "read", "granted_read_only"),
+        ("Organization", "person", "pull", "read", "granted_read_only"),
+        ("Organization", "person", "none", "read", "no_github_access"),
+        ("Organization", "person", "pull", "write", "no_github_access"),
+        ("Organization", "person", "push", "write", "granted"),
+    ],
+)
+async def test_owner_grant_requires_full_owner_authority(
+    setup_linked,
+    github_http,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_type: str,
+    login: str,
+    second_permission: str,
+    access: str,
+    expected: str,
+) -> None:
+    async with setup_linked.sessionmaker.begin() as session:
+        await session.execute(
+            text("UPDATE github_user_links SET login = :login WHERE github_user_id = 300"),
+            {"login": login},
+        )
+    original = github_http.original_client
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        response = github_http.respond(request)
+        if request.url.path == "/user/installations":
+            body = response.json()
+            body["installations"][0]["account"]["type"] = owner_type
+            return httpx.Response(200, json=body)
+        if request.url.path.endswith("/repositories"):
+            body = response.json()
+            permissions = {
+                key: key == second_permission
+                for key in ("admin", "maintain", "push", "triage", "pull")
+            }
+            body["repositories"].append(
+                {
+                    "id": 100,
+                    "full_name": "acme/base",
+                    "owner": {"id": 12, "login": "acme"},
+                    "permissions": permissions,
+                }
+            )
+            return httpx.Response(200, json=body)
+        return response
+
+    monkeypatch.setattr(
+        linked.httpx,
+        "AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(respond)),
+    )
+
+    async def manages(session: AsyncSession) -> bool:
+        account = await get_account(session, setup_linked.account.id)
+        return account is not None and account.role == Role.ADMIN
+
+    result = await linked.linked_grant(
+        setup_linked.sessionmaker,
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        agent_id=setup_linked.agent_id,
+        agent_name="Agent",
+        repo_name="acme/*",
+        fernet=setup_linked.fernet,
+        client_id="synthetic",
+        client_secret="synthetic",
+        app_id="42",
+        private_key="synthetic",
+        manages_now=manages,
+        requested_access=access,
+    )
+    assert result.status == expected
+    if expected == "no_github_access":
+        assert result.message == "You need access to every acme repo the GitHub App covers."
+    async with setup_linked.sessionmaker() as session:
+        grants = await list_owner_grants(
+            session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+        )
+        assert [grant.access for grant in grants] == (
+            [access] if expected.startswith("granted") else []
+        )
+
+
+@pytest.mark.asyncio
+async def test_owner_grant_manager_revoked_before_commit(
+    setup_linked, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with setup_linked.sessionmaker.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE github_app_installations SET repo_full_names = ARRAY['acme/widgets'] WHERE installation_id = 201"
+            )
+        )
+
+    async def revoke() -> None:
+        async with setup_linked.sessionmaker.begin() as session:
+            await set_role(session, setup_linked.account.id, Role.USER)
+
+    monkeypatch.setattr(linked, "_before_commit", revoke)
+
+    async def manages(session: AsyncSession) -> bool:
+        account = await get_account(session, setup_linked.account.id)
+        return account is not None and account.role == Role.ADMIN
+
+    result = await linked.linked_grant(
+        setup_linked.sessionmaker,
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        agent_id=setup_linked.agent_id,
+        agent_name="Agent",
+        repo_name="acme/*",
+        fernet=setup_linked.fernet,
+        client_id="synthetic",
+        client_secret="synthetic",
+        app_id="42",
+        private_key="synthetic",
+        manages_now=manages,
+    )
+    assert result.status == "changed_try_again"
 
 
 @pytest.mark.asyncio

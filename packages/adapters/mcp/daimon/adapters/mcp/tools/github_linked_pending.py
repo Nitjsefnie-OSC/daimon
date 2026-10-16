@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 import discord
 import httpx
@@ -34,6 +35,7 @@ async def save_pending(
     ma_agent_id: str,
     agent_name: str,
     repo_name: str,
+    requested_access: Literal["read", "write"] = "read",
     platform: str,
     platform_user_id: str,
     workspace_id: str,
@@ -48,6 +50,7 @@ async def save_pending(
         ma_agent_id=ma_agent_id,
         agent_name=agent_name,
         repo_name=repo_name,
+        requested_access=requested_access,
         platform=platform,
         platform_user_id=platform_user_id,
         workspace_id=workspace_id,
@@ -174,6 +177,7 @@ async def resume_pending(
                         if config.private_key
                         else "",
                         manages_now=manages_now,
+                        requested_access=row.requested_access,
                     )
                     message = outcome.message
                 except DBAPIError as exc:

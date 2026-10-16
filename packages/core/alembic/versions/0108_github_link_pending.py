@@ -1,4 +1,7 @@
-"""Pending agent-scoped grant after personal GitHub linking."""
+"""Pending agent-scoped grant after personal GitHub linking.
+
+downgrade: destructive
+"""
 
 from __future__ import annotations
 

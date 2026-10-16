@@ -3086,12 +3086,44 @@ class GitHubLinkedConnectPending(Base):
     ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
     repo_name: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_access: Mapped[str] = mapped_column(Text, nullable=False, server_default="read")
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
     workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
     parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentGitHubOwnerGrant(Base):
+    __tablename__ = "agent_github_owner_grants"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "installation_id"),
+        CheckConstraint("access IN ('read', 'write')", name="ck_agent_github_owner_grants_access"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    installation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("github_app_installations.installation_id", ondelete="CASCADE")
+    )
+    owner_login: Mapped[str] = mapped_column(Text)
+    access: Mapped[str] = mapped_column(Text)
+    granted_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentGitHubOwnerExclusion(Base):
+    __tablename__ = "agent_github_owner_exclusions"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id", "repo_full_name"),)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    repo_full_name: Mapped[str] = mapped_column(Text)
 
 
 class GitHubIssuedToken(Base):
@@ -3108,6 +3140,7 @@ class GitHubIssuedToken(Base):
     session_id: Mapped[str] = mapped_column(Text)
     installation_id: Mapped[int] = mapped_column(BigInteger)
     repo_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger))
+    repo_names: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
     permissions: Mapped[dict[str, str]] = mapped_column(JSONB)
     grant_versions: Mapped[dict[str, int]] = mapped_column(JSONB)
     requester_account_id: Mapped[uuid.UUID | None] = mapped_column(

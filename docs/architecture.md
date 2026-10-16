@@ -1785,6 +1785,19 @@ admission before any of this runs.
   A clear request in chat gives an agent access to an already connected repo:
   `github_connect` grants read and write access if the caller
   may grant it. Otherwise it posts the Connect GitHub browser link for that repo.
+  A linked manager can also grant `owner/*`: a personal owner must match the
+  linked GitHub login, while an organization grant requires access to every
+  repository its tenant-associated App installation currently covers. Read is
+  the default; write requires write access to every covered repository. At
+  token mint, the grant resolves against the installation's latest GitHub
+  snapshot (or confirmed names before the first snapshot), so later covered
+  repositories join automatically and removed ones leave. The App mints scoped
+  name-based tokens in groups of at most 500 repositories, exposing further
+  groups as `GH_TOKEN_2`, `GH_TOKEN_3`, and so on. A single-repo grant
+  can coexist and the higher access wins; only an explicit single grant can
+  select the working repo. Removing one repo under `owner/*` keeps it excluded
+  across owner-grant removal and regrant until an explicit single grant clears
+  the exclusion.
   Chat changes need no separate confirmation turn; the agent says what changed
   and how to undo it. Browser edits apply only after **Save changes**.
   When the `DAIMON_GITHUB_APP__*`
