@@ -338,3 +338,20 @@ def test_native_disabled_capability_cannot_acquire_general_execution(disabled):
     )
     with pytest.raises(InvalidConfig):
         represented_execution_tools(INLINE_REUSE, source.intent(exact=True))
+
+
+@pytest.mark.parametrize("web", [("web_fetch",), ("web_search",), ("web_fetch", "web_search")])
+def test_enabled_native_web_authority_is_preserved_by_execution_mapping(web):
+    from mux.profiles import represented_execution_tools
+
+    tools = tuple(
+        ToolSpec(name=name, kind="builtin")
+        for name in ("bash", "read", "edit", "grep", "glob", "write", *web)
+    )
+    mapped = represented_execution_tools(INLINE_REUSE, tools)
+    expected = (
+        {"code_execution"}
+        | ({"url_context"} if "web_fetch" in web else set())
+        | ({"google_search"} if "web_search" in web else set())
+    )
+    assert {tool.name for tool in mapped} == expected

@@ -104,13 +104,23 @@ def represented_execution_tools(
     if profile.profile_id != INLINE_REUSE.profile_id:
         raise InvalidConfig("profile has no source execution mapping")
     names = {"bash", "read", "edit", "grep", "glob", "write"}
+    web_tools = {"web_fetch": "url_context", "web_search": "google_search"}
+    actual = {tool.name for tool in tools}
     if (
-        len(tools) != len(names)
-        or {tool.name for tool in tools} != names
+        len(tools) != len(actual)
+        or not names.issubset(actual)
+        or not actual.issubset(names | web_tools.keys())
         or any(tool.kind != "builtin" or tool.permission != "auto" for tool in tools)
     ):
         raise InvalidConfig("source execution tools are not representable")
-    return (ToolSpec(name=profile.execution_tool, kind="builtin"),)
+    return (
+        ToolSpec(name=profile.execution_tool, kind="builtin"),
+        *(
+            ToolSpec(name=target, kind="builtin")
+            for source, target in web_tools.items()
+            if source in actual
+        ),
+    )
 
 
 def native_agent_tools(profile: Profile, spec: AgentSpec) -> tuple[ToolSpec, ...]:

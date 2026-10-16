@@ -3150,6 +3150,10 @@ without it. Capture never substitutes a reduced target after that refusal.
 The profile's execution mapping requires all six automatic filesystem capabilities
 (`bash`, `read`, `edit`, `grep`, `glob`, `write`). A read-only subset, missing
 capability or permission prompt cannot acquire general `code_execution` authority.
+When the source also enables `web_fetch` or `web_search` (including native
+enabled defaults), the same profile mapping retains them as `url_context` and
+`google_search`. They are never silently omitted to fit a token-only quote;
+provider web-tool fees need their own finance terms before a live attempt.
 The native per-toolset schema represents MCP only with an explicitly verified
 catalogue and fully resolved automatic enablement; legacy and worker projections
 still exclude native-only MCP toolsets. Capture authenticates to the configured

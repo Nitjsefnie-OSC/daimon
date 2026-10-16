@@ -13,6 +13,7 @@ from mux.drivers.gemini.bundles import owned_skill, skill_sources, validate_bund
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
 from mux.drivers.gemini.core import GeminiAgents, compile_agent, now, page_values, refuse
 from mux.drivers.gemini.mcp_auth import MCPSecretResolver
+from mux.drivers.gemini.skill_deployment import GCSBundleDeployment
 from mux.drivers.gemini.storage import Records, Storage, owner
 from mux.drivers.gemini.transport import Object, Transport, object_value
 from mux.errors import ProviderError, ScopeViolation
@@ -276,6 +277,31 @@ class GeminiCatalogAdapter(GeminiAgents):
                 )
         verify_definition(await self._catalog_transport.get_agent(ref.id), expected)
         return agent
+
+    async def skill_deployments(
+        self, scope: Scope, retained: Agent
+    ) -> tuple[GCSBundleDeployment, ...]:
+        """Read the owned deployments actually mounted by this verified agent.
+
+        The host's storage readback must check these directories, rather than
+        accepting an unrelated operator receipt with the same version label.
+        """
+        self._admit_catalog(scope)
+        self._owned(retained, scope)
+        async with self._storage.transaction() as records:
+            if records.agents.get(retained.ref.id) != retained:
+                raise ScopeViolation(retained.ref.id, "skill deployment agent differs")
+            skill_sources(records, scope, self._account, retained.spec.skills)
+            deployments: list[GCSBundleDeployment] = []
+            for pin in retained.spec.skills or ():
+                record = owned_skill(records, scope, self._account, pin.id)
+                deployment = record.deployments.get(pin.version or "")
+                if deployment is None:
+                    raise ProviderError(
+                        "conflict", retryable=False, native_code="skill_deployment_missing"
+                    )
+                deployments.append(deployment)
+            return tuple(deployments)
 
     async def verify(self, scope: Scope, retained: Agent) -> Agent:
         """The host edge compares its separate authored row with native readback."""
