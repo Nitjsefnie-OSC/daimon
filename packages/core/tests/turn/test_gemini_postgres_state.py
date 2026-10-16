@@ -232,3 +232,182 @@ async def test_open_records_do_not_hold_the_financial_tenant_fence(postgres_stat
     # remain open across provider I/O, even with an independent hold in flight.
     async with PostgresGeminiStorage(sessions, scope=scope, project="new-project").transaction():
         await asyncio.wait_for(financial_admission(), timeout=1)
+
+
+async def test_bounded_pool_contenders_release_connections_for_nested_holds(
+    postgres_state, db_preflight, db_schema
+):
+    from daimon.core.turn.errors import SessionBusyError
+    from daimon.testing.db import build_test_engine
+    from sqlalchemy import text
+
+    _, scope, _, _ = postgres_state
+    engine = build_test_engine(
+        db_preflight.url, db_schema, pool_size=2, max_overflow=0, pool_timeout=0.5
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    storage = PostgresGeminiStorage(sessions, scope=scope, project="contended")
+
+    async def contend():
+        async with PostgresGeminiStorage(sessions, scope=scope, project="contended").transaction():
+            pytest.fail("contender passed an active writer")
+
+    tasks = []
+    try:
+        async with storage.transaction():
+            tasks = [asyncio.create_task(contend()) for _ in range(8)]
+            await asyncio.sleep(0.15)
+            await asyncio.wait_for(
+                holds(sessions, scope, project="independent").before_attempt(
+                    model=ModelRef(provider="gemini", id=FLASH_PRIMARY), attempt=1
+                ),
+                timeout=2,
+            )
+            async with sessions() as db:
+                assert await asyncio.wait_for(db.scalar(text("SELECT 1")), 2) == 1
+            results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 7)
+            assert all(isinstance(value, SessionBusyError) for value in results)
+        assert engine.pool.checkedout() == 0
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await engine.dispose()
+
+
+async def test_open_records_do_not_block_account_update_fence(postgres_state):
+    from uuid import UUID
+
+    from daimon.core._models import Account
+
+    sessions, scope, _, _ = postgres_state
+    async with (
+        PostgresGeminiStorage(sessions, scope=scope, project="project").transaction(),
+        sessions.begin() as db,
+    ):
+        assert await db.scalar(
+            select(Account.id)
+            .where(Account.id == UUID(scope.account_id))
+            .with_for_update(nowait=True)
+        ) == UUID(scope.account_id)
+
+
+@pytest.mark.parametrize("kind", ["records", "holds"])
+async def test_pg_commit_finishes_before_cancellation_propagates(postgres_state, monkeypatch, kind):
+    from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
+    from sqlalchemy.sql.dml import Update
+
+    original_sessions, scope, _, _ = postgres_state
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class ObservedSession(AsyncSession):
+        async def execute(self, statement, *args, **kwargs):
+            result = await super().execute(statement, *args, **kwargs)
+            if isinstance(statement, Update) and statement.table.name == "gemini_runtime_state":
+                self.info["payload_updated"] = True
+            return result
+
+    sessions = async_sessionmaker(
+        original_sessions.kw["bind"], class_=ObservedSession, expire_on_commit=False
+    )
+    original = AsyncSessionTransaction.commit
+    paused = False
+
+    async def delayed_commit(transaction):
+        nonlocal paused
+        if transaction.session.info.get("payload_updated") and not paused:
+            paused = True
+            started.set()
+            await release.wait()
+        await original(transaction)
+
+    monkeypatch.setattr(AsyncSessionTransaction, "commit", delayed_commit)
+
+    async def writer():
+        if kind == "holds":
+            await holds(sessions, scope).before_attempt(
+                model=ModelRef(provider="gemini", id=FLASH_PRIMARY), attempt=1
+            )
+        else:
+            async with PostgresGeminiStorage(
+                sessions, scope=scope, project="project"
+            ).transaction() as records:
+                records.creations[("t", "a", "committed")] = ("p", "d", "agent")
+
+    task = asyncio.create_task(writer())
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    if kind == "holds":
+        with pytest.raises(AdmissionDenied):
+            await holds(sessions, scope).before_attempt(
+                model=ModelRef(provider="gemini", id=FLASH_PRIMARY), attempt=1
+            )
+    else:
+        async with PostgresGeminiStorage(
+            sessions, scope=scope, project="project"
+        ).transaction() as records:
+            assert records.creations[("t", "a", "committed")] == ("p", "d", "agent")
+
+
+async def test_read_only_records_do_not_rewrite_payload(postgres_state):
+    from sqlalchemy import event
+
+    sessions, scope, _, _ = postgres_state
+    storage = PostgresGeminiStorage(sessions, scope=scope, project="project")
+    async with storage.transaction() as records:
+        records.creations[("t", "a", "key")] = ("p", "d", "agent")
+    updates = []
+
+    def observe(_conn, _cursor, statement, _parameters, _context, _many):
+        if statement.startswith("UPDATE gemini_runtime_state"):
+            updates.append(statement)
+
+    engine = sessions.kw["bind"]
+    event.listen(engine.sync_engine, "before_cursor_execute", observe)
+    try:
+        async with storage.transaction() as records:
+            assert len(records.creations) == 1
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", observe)
+    assert updates == []
+
+
+async def test_account_purge_previews_and_deletes_records_but_retains_financial_holds(
+    postgres_state,
+):
+    from uuid import UUID
+
+    from daimon.core.privacy import collect_purge_preview
+    from daimon.core.purge import purge_account
+
+    sessions, scope, other, _ = postgres_state
+    for selected in (scope, other):
+        async with PostgresGeminiStorage(
+            sessions, scope=selected, project="project"
+        ).transaction() as records:
+            records.creations[("t", "a", "private")] = ("p", "d", "agent")
+        await holds(sessions, selected).before_attempt(
+            model=ModelRef(provider="gemini", id=FLASH_PRIMARY), attempt=1
+        )
+    preview = await collect_purge_preview(sm=sessions, account_id=UUID(scope.account_id))
+    assert preview.gemini_records.count == 1
+    result = await purge_account(sm=sessions, account_id=UUID(scope.account_id))
+    assert result.db.gemini_records == preview.gemini_records.count
+    async with sessions() as db:
+        rows = (
+            await db.execute(select(GeminiRuntimeState.account_id, GeminiRuntimeState.kind))
+        ).all()
+    assert (UUID(scope.account_id), "records") not in rows
+    assert (UUID(scope.account_id), "holds") in rows
+    assert (UUID(other.account_id), "records") in rows

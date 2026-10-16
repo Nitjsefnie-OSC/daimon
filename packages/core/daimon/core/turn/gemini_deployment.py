@@ -428,6 +428,10 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     plan = load_gemini_deployment(request)
+    if plan.storage_backend == "sqlite" and (
+        os.environ.get("K_SERVICE") or os.environ.get("CLOUD_RUN_JOB")
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
     if plan.max_output_tokens is not None and (
         request.worker is not None
         or request.admission.backend_revision_origin == "agent"
