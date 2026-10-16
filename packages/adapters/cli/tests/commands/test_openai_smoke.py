@@ -40,11 +40,19 @@ def packed_skill() -> bytes:
 
 
 class FakeOpenAI:
-    def __init__(self, *, tool_called_eventually: bool = True, content_404_once: bool = False):
+    def __init__(
+        self,
+        *,
+        tool_called_eventually: bool = True,
+        content_404_once: bool = False,
+        create_returns_idle_placeholder: bool = False,
+    ):
         self.calls: list[httpx.Request] = []
         self.tool_called_eventually = tool_called_eventually
         self.content_404_once = content_404_once
+        self.create_returns_idle_placeholder = create_returns_idle_placeholder
         self._content_calls = 0
+        self._retrieve_calls = 0
         self._events_posted = False
         self._digest = _DIGEST
 
@@ -118,6 +126,17 @@ class FakeOpenAI:
                 200, json={"id": "env-123", "name": body.get("name", ""), "created_at": 1700000000}
             )
         if path == "/v1/agents/sessions":
+            if self.create_returns_idle_placeholder:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "session-1",
+                        "status": "idle",
+                        "agent": {"id": "agent-123"},
+                        "environment": {"id": "env-123", "type": "openai_hosted"},
+                        "metadata": {"mux_tenant": "any"},
+                    },
+                )
             return httpx.Response(
                 200,
                 json={
@@ -132,6 +151,7 @@ class FakeOpenAI:
                 },
             )
         if path == "/v1/agents/sessions/session-1":
+            self._retrieve_calls += 1
             if self._events_posted and self.tool_called_eventually:
                 return httpx.Response(
                     200,
@@ -206,6 +226,28 @@ def test_smoke_completes_one_tool_call_and_reports_ok(
     assert "smoke: OK" in out
     assert "tool_calls=1" in out
     assert "sk-test-not-a-real-key" not in out
+
+
+def test_smoke_ignores_the_misleading_idle_status_on_session_create(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression check: live against the real OpenAI API, `sessions.create`'s
+    own response can read status="idle" with no required actions even though
+    the initial message was just queued — the turn hasn't started yet. A
+    smoke command that trusted this immediately would report a false "0 tool
+    calls" pass/fail a fraction of a second before the real work started."""
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "sk-test-not-a-real-key")
+    fake = FakeOpenAI(create_returns_idle_placeholder=True)
+    monkeypatch.setattr(
+        "daimon.adapters.cli.commands.openai.configured_transport", fake.transport_factory()
+    )
+
+    openai_smoke_command(project="proj_123", model="gpt-6-luna")
+
+    out = capsys.readouterr().out
+    assert "smoke: OK" in out
+    assert "tool_calls=1" in out
+    assert fake._retrieve_calls >= 1
 
 
 def test_smoke_never_called_times_out_and_exits_nonzero(

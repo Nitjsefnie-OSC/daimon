@@ -353,7 +353,16 @@ def openai_smoke_command(
         console.print("smoke: waiting for the turn")
         deadline = time.monotonic() + timeout
         answered: set[str] = set()
-        while session.state not in ("idle", "terminated"):
+        # Observed live: `create`'s own response can read "idle" with no
+        # required actions even though the initial message was just queued —
+        # the turn hasn't started processing yet. Never treat "idle" as
+        # terminal until we've first observed the turn actually in flight
+        # (running or requires_action), or a fast turn can look like zero
+        # tool calls happened before it ever started.
+        seen_in_flight = False
+        while not (seen_in_flight and session.state in ("idle", "terminated")):
+            if session.state not in ("idle", "terminated"):
+                seen_in_flight = True
             pending = [
                 action
                 for action in session.required_actions
