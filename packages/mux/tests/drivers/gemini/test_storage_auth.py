@@ -27,6 +27,7 @@ PREFIX = "skills/run/immutable/"
         "wrong_bucket",
         "wrong_prefix",
         "root_prefix",
+        "broader_prefix",
     ],
 )
 def test_storage_exchange_has_one_exact_read_only_cab_and_no_broad_fallback(
@@ -77,7 +78,7 @@ def test_storage_exchange_has_one_exact_read_only_cab_and_no_broad_fallback(
     monkeypatch.setattr(httpx, "Client", Client)
     caplog.set_level(logging.DEBUG)
     current = datetime.now(UTC)
-    sources = (f"gs://{BUCKET}/{PREFIX}skill/version/",)
+    sources = (f"gs://{BUCKET}/{PREFIX}skill/version/", f"gs://{BUCKET}/{PREFIX}other/version/")
     if defect == "wrong_bucket":
         sources = (f"gs://another-tenant/{PREFIX}skill/version/",)
     elif defect == "wrong_prefix":
@@ -87,7 +88,11 @@ def test_storage_exchange_has_one_exact_read_only_cab_and_no_broad_fallback(
         expires_at=current + timedelta(minutes=55),
         retained_until=current + timedelta(minutes=45),
         bucket=BUCKET,
-        prefix="/" if defect == "root_prefix" else PREFIX,
+        prefix="/"
+        if defect == "root_prefix"
+        else "skills/"
+        if defect == "broader_prefix"
+        else PREFIX,
         sources=sources,
     )
     if defect:
@@ -96,5 +101,7 @@ def test_storage_exchange_has_one_exact_read_only_cab_and_no_broad_fallback(
         assert SOURCE not in str(error.value) and RESTRICTED not in str(error.value)
     else:
         assert downscoped_storage_token(**kwargs) == RESTRICTED
-    assert len(calls) == (0 if defect in ("wrong_bucket", "wrong_prefix", "root_prefix") else 1)
+    assert len(calls) == (
+        0 if defect in ("wrong_bucket", "wrong_prefix", "root_prefix", "broader_prefix") else 1
+    )
     assert SOURCE not in caplog.text and RESTRICTED not in caplog.text

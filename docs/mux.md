@@ -3187,6 +3187,8 @@ unknown field, missing file or expired/insufficient lifetime refuses. The owner
 rotates the protected file explicitly; there is no ambient credential discovery
 or source-token minting. Full plans also require explicit `gcs_mount_bucket` and
 `gcs_mount_prefix`; every verified deployment must lie inside that exact boundary.
+The prefix must equal the complete component-wise common directory of the
+verified deployment sources; an operator cannot widen it to an ancestor prefix.
 The private transport uses `google.auth.downscoped.Credentials` to exchange the
 source token at Google's STS for a token with exactly one Credential Access
 Boundary rule: `inRole:roles/storage.objectViewer` on that bucket, conditioned on

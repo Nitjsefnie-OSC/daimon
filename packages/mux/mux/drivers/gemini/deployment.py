@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol, cast
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import JsonValue
@@ -232,6 +234,8 @@ def downscoped_storage_token(
             or any(part in ("", ".", "..") for part in prefix[:-1].split("/"))
             or not sources
             or any(not source.startswith(f"gs://{bucket}/{prefix}") for source in sources)
+            or prefix
+            != posixpath.commonpath([urlsplit(source).path.strip("/") for source in sources]) + "/"
         ):
             raise ValueError("invalid storage credential boundary")
         expression = (
