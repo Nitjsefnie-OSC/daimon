@@ -127,7 +127,10 @@ def archive(files):
 @pytest.fixture
 async def full(consent_request, monkeypatch, tmp_path):
     request, service, source, actor, accepted, router, source_reads, *_ = consent_request
+    from daimon.core.scope import DeploymentDefault
+
     sessions = request.deps.sessionmaker
+    router.add_environment_list(request.admission.environment)
     scope = admitted_session_scope(
         request.admission, tenant_id=request.tenant_id, session_id="preparation"
     )
@@ -142,6 +145,9 @@ async def full(consent_request, monkeypatch, tmp_path):
         deadline=datetime.now(UTC) + timedelta(seconds=30),
         deps=replace(
             request.deps,
+            deployment_default=DeploymentDefault(
+                agent_name=source.name, environment_name="test-env"
+            ),
             turn_runtimes={},
             turn_runtime_factory=build_channel_runtime,
             state_store=PostgresStateStore(sessions),
@@ -349,8 +355,32 @@ async def full(consent_request, monkeypatch, tmp_path):
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
     from daimon.core.channel_backend import AgentBackendService
 
-    async def capture_bound_source(_):
-        return await capture_preparation_source(request, fresh=True)
+    async def capture_bound_source(actual_source):
+        # Drive the actual public preview owner: it intentionally has no
+        # selected backend revision before the caller confirms a target.
+        from daimon.core.authz import Place
+        from daimon.core.scope import ScopeContext
+        from daimon.core.turn.admission import capture_backend_source
+
+        return await capture_backend_source(
+            request.deps,
+            actual_source,
+            context=ScopeContext(
+                tenant_id=request.tenant_id,
+                account_id=request.admission.account_id,
+                platform=request.platform,
+                channel_id=request.admission.origin_channel_id,
+                thread_id=request.thread_id,
+            ),
+            subject=actor.subject,
+            place=Place(
+                channel_id=request.thread_id, parent_channel_id=request.admission.origin_channel_id
+            ),
+            is_dm=False,
+            slack_turn_context_id=None,
+            private_dm_id=None,
+            external_user_id=request.external_user_id,
+        )
 
     service = AgentBackendService(sessions, enabled=True, capture_source=capture_bound_source)
     # This is the same fresh owner capture used by both preview and preparation.

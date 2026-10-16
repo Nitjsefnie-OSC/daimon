@@ -1270,7 +1270,7 @@ def fixed_plan_origin_allowed(origin: str | None) -> bool:
 
 
 async def capture_preparation_source(
-    request: ProviderPreparationRequest, *, fresh: bool = False
+    request: ProviderPreparationRequest, *, fresh: bool = False, capability_preview: bool = False
 ) -> BackendAgent:
     """Capture source facts; the existing proof and materializer validate them."""
     from daimon.core.channel_backend import load_backend_agent
@@ -1327,11 +1327,13 @@ async def capture_preparation_source(
         private_dm_id=request.admission.private_dm_id,
         origin_seal_ids=request.admission.origin_seal_ids,
     )
-    return await _capture_source_capabilities(request, captured)
+    return await _capture_source_capabilities(
+        request, captured, capability_preview=capability_preview
+    )
 
 
 async def _capture_source_capabilities(
-    request: ProviderPreparationRequest, source: BackendAgent
+    request: ProviderPreparationRequest, source: BackendAgent, *, capability_preview: bool = False
 ) -> BackendAgent:
     """Verify configured representations at the common preview/preparation capture edge.
 
@@ -1369,8 +1371,9 @@ async def _capture_source_capabilities(
         request.worker is not None
         or request.admission.private_dm_id is not None
         or request.admission.slack_turn_context_id is not None
-        or revision is None
-        or request.admission.backend_revision_origin != "agent"
+        or request.admission.origin_channel_id is None
+        or not capability_preview
+        and (revision is None or request.admission.backend_revision_origin != "agent")
     ):
         return source
     try:
@@ -1379,9 +1382,13 @@ async def _capture_source_capabilities(
             for row in rows
             if row.get("source_capabilities") is not None
             and row.get("platform") == request.platform
-            and row.get("channel_id") == revision.channel.channel_id
-            and row.get("profile") == revision.profile
-            and request.admission.origin_channel_id == revision.channel.channel_id
+            and row.get("channel_id") == request.admission.origin_channel_id
+            and (
+                capability_preview
+                or revision is not None
+                and row.get("channel_id") == revision.channel.channel_id
+                and row.get("profile") == revision.profile
+            )
             and row.get("tenant_id") == str(source.tenant_id)
             and row.get("account_id") == request.scope.account_id
             and row.get("source_agent_id") == str(source.agent_id)
