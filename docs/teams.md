@@ -340,14 +340,22 @@ setting off the routes answer 404 and nothing is subscribed.
   images themselves are logged and dropped like any other output there.
   Animated GIFs get no preview, and a preview Teams refuses is only logged
   (`teams.output_preview.send_failed`).
+- **Document previews.** A Word, PowerPoint, Excel or PDF output saved to a
+  channel's files takes one of those four places with its first page:
+  Graph's thumbnail of the uploaded file, asked for up to three times while
+  Graph renders it (ten seconds at most in all), fetched without a token and
+  re-encoded like an image. One that does not come is logged
+  (`teams.output_thumbnail.skipped`, no name) and left out.
   Where they are unavailable, `files_hint` tells the agent, asked for a file or
   to turn files on, to call `enable_channel_files` first rather than offer an
   artifact, report or notebook; the bot posts the Enable files card (below)
   after that answer, for a Daimon admin who asked.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
-`graph.microsoft.com`, downloads and uploads only go to SharePoint hosts, and
-every redirect hop is re-checked (Graph reads follow none).
+`graph.microsoft.com`, downloads and uploads only go to SharePoint hosts (a
+thumbnail also to Microsoft's media service on `*.svc.ms`, where Graph serves
+SharePoint thumbnails from), and every redirect hop is re-checked (Graph
+reads follow none).
 
 A shared `.md` or `.zip` can become a skill: `add_skill(attachment_url=…)`
 takes its download link only over https from a SharePoint, OneDrive or Graph

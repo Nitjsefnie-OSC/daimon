@@ -75,9 +75,11 @@ def _harness(
     channel_files: ChannelFiles | None = None,
     contents: dict[str, bytes] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    served: dict[str, bytes] | None = None,
 ) -> _Harness:
     """MA serves `listing` (a small CSV by default) minus deleted entries;
-    a file's bytes come from `contents` by id, else a small CSV."""
+    a file's bytes come from `contents` by id, else a small CSV. Other plain
+    HTTP is recorded in `uploads`; a URL in `served` answers with its bytes."""
     files = listing if listing is not None else [_csv()]
     deletes: list[str] = []
     uploads: list[httpx.Request] = []
@@ -92,6 +94,8 @@ def _harness(
 
     def on_upload(request: httpx.Request) -> httpx.Response:
         uploads.append(request)
+        if (body := (served or {}).get(str(request.url))) is not None:
+            return httpx.Response(200, content=body)
         return httpx.Response(201, json={"id": "item-1"})
 
     def spawn(coro: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
@@ -400,8 +404,12 @@ async def test_an_unprompted_turn_without_file_access_previews_nothing(
     assert harness.deletes == ["file_png"], "the image is still dropped"
 
 
-def _channel_files(put: Callable[[httpx.Request], httpx.Response]) -> ChannelFiles:
-    """A team whose channel folder Graph finds; `put` answers each simple upload."""
+def _channel_files(
+    put: Callable[[httpx.Request], httpx.Response],
+    thumbnails: Callable[[httpx.Request], httpx.Response] | None = None,
+) -> ChannelFiles:
+    """A team whose channel folder Graph finds; `put` answers each simple upload,
+    `thumbnails` each thumbnail lookup (404 without it)."""
     folder = {"id": "01FOLDER", "parentReference": {"driveId": "b!drive-1"}}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -409,6 +417,8 @@ def _channel_files(put: Callable[[httpx.Request], httpx.Response]) -> ChannelFil
             return httpx.Response(200, json=folder)
         if request.method == "PUT" and request.url.path.endswith(":/content"):
             return put(request)
+        if thumbnails is not None and request.url.path.endswith("/thumbnails"):
+            return thumbnails(request)
         return httpx.Response(404)
 
     async def token() -> str:
@@ -973,3 +983,81 @@ async def test_an_unprompted_channel_turn_posts_no_previews(
 
     assert harness.sender.sent == [], "no preview message after an unprompted answer"
     assert harness.deletes == ["file_png"], "the file was still saved"
+
+
+THUMBNAIL_URL = "https://eus1-mediap.svc.ms/transform/thumbnail?provider=spo&tempauth=x"
+
+
+def _thumbnail_sets(*answers: object) -> Callable[[httpx.Request], httpx.Response]:
+    """Graph's thumbnail replies in turn, the last one repeated; a number is a status."""
+    replies = list(answers)
+
+    def reply(_: httpx.Request) -> httpx.Response:
+        answer = replies.pop(0) if len(replies) > 1 else replies[0]
+        if isinstance(answer, int):
+            return httpx.Response(answer, json={"error": {"code": "itemNotFound"}})
+        return httpx.Response(
+            200, json={"value": [{"large": {"url": answer}}]} if answer else {"value": []}
+        )
+
+    return reply
+
+
+def _deck_listing() -> tuple[list[FileMetadata], dict[str, bytes]]:
+    chart, chart_bytes = _png("file_chart", "chart.png")
+    deck = _csv("file_deck", filename="deck.pptx").model_copy(
+        update={
+            "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        }
+    )
+    return [deck, _csv(), chart], {"file_chart": chart_bytes}
+
+
+async def _append(_: str) -> bool:
+    return True
+
+
+async def test_an_uploaded_document_previews_its_first_page_in_delivery_order(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Graph renders the thumbnail late: a missing one is asked for again, then fetched tokenless."""
+    listing, contents = _deck_listing()
+    _, page = _png("page")
+    thumbnails = _thumbnail_sets(404, None, THUMBNAIL_URL)
+    files = _channel_files(_uploaded, thumbnails)
+    harness = _harness(db_session_factory, listing, files, contents, served={THUMBNAIL_URL: page})
+
+    await harness.delivery.sweep(_in_channel(), "sesn_1", append=_append)
+
+    [(_, message, _)] = harness.sender.sent
+    names = [a.name for a in message.attachments or []]
+    assert names == ["deck.pptx", "chart.png"], "the deck's first page keeps its place"
+    [fetch] = [r for r in harness.uploads if r.url.host.endswith(".svc.ms")]
+    assert "Authorization" not in fetch.headers, "the pre-authorised URL gets no token"
+
+
+@pytest.mark.parametrize(
+    ("answers", "reason"),
+    [
+        ((None,), "not_ready"),
+        ((500,), "http error"),
+        (("https://evil.example/thumbnail",), "FetchRefused"),
+    ],
+)
+async def test_a_document_thumbnail_that_fails_is_logged_once_and_skipped(
+    db_session_factory: async_sessionmaker[AsyncSession], answers: tuple[object, ...], reason: str
+) -> None:
+    listing, contents = _deck_listing()
+    harness = _harness(
+        db_session_factory, listing, _channel_files(_uploaded, _thumbnail_sets(*answers)), contents
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(_in_channel(), "sesn_1", append=_append)
+
+    [(_, message, _)] = harness.sender.sent
+    assert [a.name for a in message.attachments or []] == ["chart.png"], "the chart still shows"
+    skips = [e for e in logs if e["event"] == "teams.output_thumbnail.skipped"]
+    assert [e["reason"] for e in skips] == [reason], "one line, with no name or URL"
+    assert all(r.url.host != "evil.example" for r in harness.uploads), "nothing left for it"
+    assert len(harness.deletes) == 3, "every file was still saved and leaves the listing"

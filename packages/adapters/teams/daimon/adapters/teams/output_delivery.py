@@ -18,7 +18,9 @@ reply.
 Image outputs also travel as inline previews (`image_preview`): in a channel,
 up to MAX_PREVIEWS in delivery order in one message after the links, also
 where files cannot be saved (a data URI needs no SharePoint); in a 1:1 chat,
-each just before its first consent card. A failed preview is only logged.
+each just before its first consent card. An uploaded Office file or PDF takes
+one of those places with its first page, Graph's thumbnail of it. A failed
+preview is only logged.
 Transient channel upload failures leave the listing entry for a later sweep,
 and an oversize file stays listed on every path, including a channel without
 file access. Otherwise the listing entry, the delivery
@@ -42,7 +44,7 @@ from typing import Any, Protocol
 import anthropic
 import httpx
 import structlog
-from daimon.adapters.teams.attachments import FetchRefused
+from daimon.adapters.teams.attachments import FetchRefused, fetch_bytes
 from daimon.adapters.teams.card_actions import Actor, card_actor, submitted_fields
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.identity import TeamsInbound
@@ -54,6 +56,7 @@ from daimon.adapters.teams.image_preview import (
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.media.filenames import display_filename_for, sanitize_title
+from daimon.core.media.vision import sniff_image_media_type
 from daimon.core.output_delivery import (
     MAX_BYTES_PER_FILE,
     DeliverableFile,
@@ -66,7 +69,7 @@ from daimon.core.output_delivery import (
 from daimon.core.stores.file_uploads import get_upload
 from daimon.core.teams_file_offers import FILE_CONSENT_CONTENT_TYPE, UPLOAD_KEY, verify_offer
 from daimon.core.teams_graph import GraphUnavailable, is_sharepoint_host
-from daimon.core.teams_sharepoint import file_link
+from daimon.core.teams_sharepoint import DriveItem, file_link
 from microsoft_teams.api import (
     Attachment,
     FileConsentCard,
@@ -87,6 +90,24 @@ _SAVED = "Saved to this channel's files:"
 
 # Edits a line in below the answer on screen; False if it cannot go there.
 AppendToAnswer = Callable[[str], Awaitable[bool]]
+
+# Graph renders a first-page thumbnail of these, often seconds after the upload.
+THUMBNAIL_SUFFIXES = (".docx", ".pptx", ".xlsx", ".pdf", ".doc", ".ppt", ".xls")
+THUMBNAIL_ATTEMPTS = 3
+THUMBNAIL_RETRY_S = 3.0
+# All thumbnails together: the previews they join wait at most this long.
+THUMBNAIL_BUDGET_S = 10.0
+THUMBNAIL_MAX_BYTES = 4 * 1024 * 1024
+# Graph serves SharePoint thumbnails from SharePoint or from Microsoft's media
+# service on `svc.ms`. The URL is pre-authorised and short-lived, so it gets no
+# token; the host check keeps a URL in a Graph reply from sending us anywhere else.
+_THUMBNAIL_HOST_SUFFIX = ".svc.ms"
+
+
+def _is_thumbnail_host(url: httpx.URL) -> bool:
+    return is_sharepoint_host(url) or (
+        url.scheme == "https" and url.host.endswith(_THUMBNAIL_HOST_SUFFIX)
+    )
 
 
 async def _log_channel_skip(file: SkippedFile) -> None:
@@ -254,12 +275,14 @@ class TeamsOutputDelivery:
             await self._sweep_unsaved(inbound, session_id)
             return
         links: list[str] = []
-        previews: list[Attachment] = []
+        # An image's preview, or an uploaded document whose thumbnail is fetched last.
+        previews: list[Attachment | DriveItem] = []
 
         async def upload(file: DeliverableFile) -> None:
             name = display_filename_for(file.filename, file.mime_type)
             preview = None
-            if not inbound.unprompted and len(previews) < MAX_PREVIEWS:
+            wanted = not inbound.unprompted and len(previews) < MAX_PREVIEWS
+            if wanted:
                 # Before the upload: a preview error must never re-upload a saved file.
                 preview = await self._preview(name, file.content, file.mime_type)
             try:
@@ -281,6 +304,8 @@ class TeamsOutputDelivery:
             links.append(file_link(sanitize_title(item.name or name), item.web_url))
             if preview is not None:
                 previews.append(preview)
+            elif wanted and (item.name or name).lower().endswith(THUMBNAIL_SUFFIXES):
+                previews.append(item)
 
         await sweep_session_outputs(
             self._runtime.anthropic,
@@ -291,7 +316,7 @@ class TeamsOutputDelivery:
         )
         if links:
             await self._post_links(inbound, links, append)
-        await self._send_previews(inbound, previews)
+        await self._send_previews(inbound, await self._with_thumbnails(files, previews))
 
     async def _sweep_unsaved(self, inbound: TeamsInbound, session_id: str) -> None:
         """A channel whose files cannot be saved: every file is skipped, images still preview.
@@ -323,6 +348,66 @@ class TeamsOutputDelivery:
             discard_skipped_up_to=MAX_BYTES_PER_FILE,
         )
         await self._send_previews(inbound, previews)
+
+    async def _with_thumbnails(
+        self, files: ChannelFiles, previews: list[Attachment | DriveItem]
+    ) -> list[Attachment]:
+        """`previews` with each document's first-page thumbnail in its place, if it came."""
+        documents = [item for item in previews if isinstance(item, DriveItem)]
+        thumbnails: dict[str, Attachment] = {}
+
+        async def fetch(item: DriveItem) -> None:
+            if (thumbnail := await self._thumbnail(files, item)) is not None:
+                thumbnails[item.id] = thumbnail
+
+        if documents:
+            try:
+                async with asyncio.timeout(THUMBNAIL_BUDGET_S):
+                    await asyncio.gather(*(fetch(item) for item in documents))
+            except TimeoutError:
+                log.info("teams.output_thumbnail.skipped", reason="timed_out")
+        return [
+            preview
+            for item in previews
+            if (preview := thumbnails.get(item.id) if isinstance(item, DriveItem) else item)
+        ]
+
+    async def _thumbnail(self, files: ChannelFiles, item: DriveItem) -> Attachment | None:
+        """Graph's first-page thumbnail of an uploaded document, re-encoded as a preview.
+
+        Graph may not have rendered one yet, so a missing thumbnail is asked
+        for again a few times; any other failure is logged once and skipped.
+        """
+        for attempt in range(THUMBNAIL_ATTEMPTS):
+            if attempt:
+                await self._sleep(THUMBNAIL_RETRY_S)
+            try:
+                url = await files.thumbnail_url(item)
+            except GraphUnavailable as err:
+                if err.status == 404:  # The item's thumbnails are not there yet.
+                    continue
+                log.info("teams.output_thumbnail.skipped", reason=err.reason, status=err.status)
+                return None
+            if url is None:
+                continue
+            try:
+                content = await fetch_bytes(
+                    self._runtime.http_client,
+                    url,
+                    is_allowed=_is_thumbnail_host,
+                    token=None,
+                    max_bytes=THUMBNAIL_MAX_BYTES,
+                )
+            except (FetchRefused, httpx.HTTPError, httpx.InvalidURL) as err:
+                log.info("teams.output_thumbnail.skipped", reason=type(err).__name__)
+                return None
+            mime_type = sniff_image_media_type(content) or "application/octet-stream"
+            preview = await self._preview(item.name or "preview", content, mime_type)
+            if preview is None:
+                log.info("teams.output_thumbnail.skipped", reason="not_an_image")
+            return preview
+        log.info("teams.output_thumbnail.skipped", reason="not_ready")
+        return None
 
     async def _post_links(
         self, inbound: TeamsInbound, links: list[str], append: AppendToAnswer | None
