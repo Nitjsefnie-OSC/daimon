@@ -23,12 +23,15 @@ from typing import Any
 
 import httpx
 import jwt as pyjwt
+import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
 from daimon.core.mcp_credential_sweep import (
     partition_daimon_mcp_vault_ids,
     sweep_stale_admin_credentials,
 )
+from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.testing.factories import make_account, make_tenant
 
 # asyncio_mode = "auto" in pyproject.toml — no pytestmark needed; async tests run automatically.
 
@@ -126,11 +129,21 @@ def test_partition_handles_empty_vault_list() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_sweep_apply_deletes_and_recreates_public_url_cred_without_is_admin() -> None:
+@pytest.mark.parametrize("private", [False, True])
+async def test_sweep_apply_deletes_and_recreates_public_url_cred_without_is_admin(
+    db_session_factory,
+    private,
+) -> None:
     """dry_run=False: the static_bearer at public_url is deleted then recreated;
     the recreated token decodes WITHOUT is_admin; the Copilot cred is untouched."""
-    account_id = uuid.uuid4()
+    async with db_session_factory() as db, db.begin():
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    account_id = account.id
     display = f"daimon-mcp:{account_id}:{uuid.uuid4()}"
+    context_id = uuid.uuid4() if private else None
+    if context_id is not None:
+        display += f":slack-turn:{context_id}"
 
     deleted_cred_ids: list[str] = []
     created_bodies: list[dict[str, Any]] = []
@@ -189,6 +202,7 @@ async def test_sweep_apply_deletes_and_recreates_public_url_cred_without_is_admi
     client = _make_client(httpx.MockTransport(handler))
     report = await sweep_stale_admin_credentials(
         client,
+        session_factory=db_session_factory,
         jwt_secret=_SECRET,
         public_url=_PUBLIC_URL,
         now=_NOW,
@@ -204,7 +218,15 @@ async def test_sweep_apply_deletes_and_recreates_public_url_cred_without_is_admi
     # A fresh credential was created.
     assert len(created_bodies) == 1, "must POST exactly one new credential"
     token: str = created_bodies[0]["auth"]["token"]
-    claims: dict[str, Any] = pyjwt.decode(token, _SECRET, algorithms=["HS256"])
+    claims: dict[str, Any] = pyjwt.decode(
+        token, _SECRET, algorithms=["HS256"], options={"verify_exp": False}
+    )
+    async with db_session_factory() as db:
+        row = await get_mcp_token(db, jti=uuid.UUID(claims["jti"]))
+    assert row is not None and row.account_id == account_id
+    assert claims["exp"] - claims["iat"] == 3600
+    assert claims["chat_agent_id"] == display.split(":")[2]
+    assert claims.get("slack_turn_context_id") == (None if context_id is None else str(context_id))
     assert "is_admin" not in claims, (
         "recreated credential must NOT carry is_admin claim (defense-in-depth invariant)"
     )
@@ -224,7 +246,7 @@ async def test_sweep_apply_deletes_and_recreates_public_url_cred_without_is_admi
     assert report.unparseable_vault_ids == [], "no unparseable vaults in this scenario"
 
 
-async def test_sweep_apply_copilot_cred_never_matched() -> None:
+async def test_sweep_apply_copilot_cred_never_matched(db_session_factory) -> None:
     """Copilot URL cred in a daimon-mcp vault is never deleted or recreated."""
     account_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{uuid.uuid4()}"
@@ -266,6 +288,7 @@ async def test_sweep_apply_copilot_cred_never_matched() -> None:
     client = _make_client(httpx.MockTransport(handler))
     report = await sweep_stale_admin_credentials(
         client,
+        session_factory=db_session_factory,
         jwt_secret=_SECRET,
         public_url=_PUBLIC_URL,
         now=_NOW,
@@ -283,7 +306,7 @@ async def test_sweep_apply_copilot_cred_never_matched() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_sweep_dry_run_no_writes_but_report_lists_target() -> None:
+async def test_sweep_dry_run_no_writes_but_report_lists_target(db_session_factory) -> None:
     """dry_run=True (default): report lists the planned target but NO delete/create
     hits the transport."""
     account_id = uuid.uuid4()
@@ -319,6 +342,7 @@ async def test_sweep_dry_run_no_writes_but_report_lists_target() -> None:
     # dry_run is the default, but be explicit for clarity.
     report = await sweep_stale_admin_credentials(
         client,
+        session_factory=db_session_factory,
         jwt_secret=_SECRET,
         public_url=_PUBLIC_URL,
         now=_NOW,
@@ -334,7 +358,7 @@ async def test_sweep_dry_run_no_writes_but_report_lists_target() -> None:
     )
 
 
-async def test_sweep_dry_run_is_the_default() -> None:
+async def test_sweep_dry_run_is_the_default(db_session_factory) -> None:
     """Calling sweep_stale_admin_credentials without dry_run= defaults to dry_run=True."""
     account_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{uuid.uuid4()}"
@@ -368,6 +392,7 @@ async def test_sweep_dry_run_is_the_default() -> None:
     # Omit dry_run — should default to True.
     report = await sweep_stale_admin_credentials(
         client,
+        session_factory=db_session_factory,
         jwt_secret=_SECRET,
         public_url=_PUBLIC_URL,
         now=_NOW,
@@ -384,7 +409,7 @@ async def test_sweep_dry_run_is_the_default() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_sweep_skips_unparseable_suffix_vault() -> None:
+async def test_sweep_skips_unparseable_suffix_vault(db_session_factory) -> None:
     """A daimon-mcp vault with a non-UUID first suffix segment is skipped and
     recorded in unparseable_vault_ids — never deleted or recreated."""
     bad_display = "daimon-mcp:not-a-uuid:whatever"
@@ -404,6 +429,7 @@ async def test_sweep_skips_unparseable_suffix_vault() -> None:
     client = _make_client(httpx.MockTransport(handler))
     report = await sweep_stale_admin_credentials(
         client,
+        session_factory=db_session_factory,
         jwt_secret=_SECRET,
         public_url=_PUBLIC_URL,
         now=_NOW,
@@ -422,10 +448,13 @@ async def test_sweep_skips_unparseable_suffix_vault() -> None:
     )
 
 
-async def test_sweep_mixed_vault_list_applies_to_correct_vaults() -> None:
+async def test_sweep_mixed_vault_list_applies_to_correct_vaults(db_session_factory) -> None:
     """Mixed vault list: daimon-mcp, non-daimon, and unparseable.
     Only the valid daimon-mcp vault's public_url cred is swept."""
-    valid_account_id = uuid.uuid4()
+    async with db_session_factory() as db, db.begin():
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    valid_account_id = account.id
     valid_display = f"daimon-mcp:{valid_account_id}:{uuid.uuid4()}"
 
     deleted_cred_ids: list[str] = []
@@ -482,6 +511,7 @@ async def test_sweep_mixed_vault_list_applies_to_correct_vaults() -> None:
     client = _make_client(httpx.MockTransport(handler))
     report = await sweep_stale_admin_credentials(
         client,
+        session_factory=db_session_factory,
         jwt_secret=_SECRET,
         public_url=_PUBLIC_URL,
         now=_NOW,
@@ -492,3 +522,35 @@ async def test_sweep_mixed_vault_list_applies_to_correct_vaults() -> None:
     assert len(created_bodies) == 1, "exactly one new credential POSTed"
     assert report.unparseable_vault_ids == ["vlt_bad"], "bad vault recorded as unparseable"
     assert len(report.swept_pairs) == 1
+
+
+@pytest.mark.parametrize("suffix", ["legacy", "malformed-context"])
+async def test_sweep_never_recreates_an_unbound_or_malformed_vault(db_session_factory, suffix):
+    account_id = uuid.uuid4()
+    display = f"daimon-mcp:{account_id}"
+    if suffix == "malformed-context":
+        display += f":{uuid.uuid4()}:slack-turn:invalid"
+    requests = []
+
+    def handler(req):
+        requests.append((req.method, req.url.path))
+        assert (req.method, req.url.path) == ("GET", "/v1/vaults")
+        return httpx.Response(
+            200, json={"data": [_vault_wire("vlt_retired", display)], "has_more": False}
+        )
+
+    client = _make_client(httpx.MockTransport(handler))
+    try:
+        report = await sweep_stale_admin_credentials(
+            client,
+            session_factory=db_session_factory,
+            jwt_secret=_SECRET,
+            public_url=_PUBLIC_URL,
+            now=_NOW,
+            dry_run=False,
+        )
+        assert report.unparseable_vault_ids == ["vlt_retired"]
+        assert report.swept_pairs == [] and report.recreated_cred_ids == []
+        assert requests == [("GET", "/v1/vaults")]
+    finally:
+        await client.close()

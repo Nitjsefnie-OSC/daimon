@@ -293,6 +293,7 @@ async def mcp_sweep_credentials(*, rt: CliRuntime, console: Console, apply: bool
 
     report = await sweep_stale_admin_credentials(
         rt.anthropic,
+        session_factory=rt.sessionmaker,
         jwt_secret=jwt_secret,
         public_url=public_url,
         now=dt.datetime.now(dt.UTC),
