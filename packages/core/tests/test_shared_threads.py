@@ -973,19 +973,30 @@ async def test_shared_app_repo_session_reuse_never_refreshes_a_caller_identity(
     )
     fake = _Fake()
     # The real admission/preparation path creates the App workspace offline.
-    fake.router.add(
-        "POST",
-        r"/v1/vaults/[^/]+/credentials",
-        lambda request, _m: httpx.Response(
-            200,
-            json={
-                "id": "cred_github",
-                "type": "credential",
-                **json.loads(request.content),
-                "created_at": "2026-10-10T00:00:00Z",
-            },
-        ),
+    from anthropic.types.beta.vaults.beta_managed_agents_credential import (
+        BetaManagedAgentsCredential,
     )
+
+    def credential(request: httpx.Request, _match: object) -> httpx.Response:
+        body = json.loads(request.content)
+        wire = BetaManagedAgentsCredential.model_validate(
+            {
+                "id": f"cred_github_{len(fake.requests)}",
+                "type": "vault_credential",
+                "vault_id": request.url.path.split("/")[3],
+                "auth": {
+                    key: value
+                    for key, value in body["auth"].items()
+                    if key not in {"token", "secret_value"}
+                },
+                "metadata": body.get("metadata", {}),
+                "created_at": "2026-10-10T00:00:00Z",
+                "updated_at": "2026-10-10T00:00:00Z",
+            }
+        )
+        return httpx.Response(200, json=wire.model_dump(mode="json"))
+
+    fake.router.add("POST", r"/v1/vaults/[^/]+/credentials", credential)
     deps = replace(
         _deps(db_session_factory, fake),
         fernet=MultiFernet([Fernet(Fernet.generate_key())]),

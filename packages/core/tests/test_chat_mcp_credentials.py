@@ -10,6 +10,7 @@ import httpx
 import jwt
 import pytest
 from anthropic import AsyncAnthropic
+from anthropic.types.beta.vaults.beta_managed_agents_credential import BetaManagedAgentsCredential
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.core.mcp_auth import CHAT_TOKEN_TTL
 from daimon.core.mcp_vault import ensure_agent_mcp_vault
@@ -66,7 +67,16 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(
                 },
             )
         if req.method == "GET" and req.url.path == "/v1/vaults/vlt_chat/credentials":
-            return httpx.Response(200, json={"data": slots, "has_more": False})
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        BetaManagedAgentsCredential.model_validate(slot).model_dump(mode="json")
+                        for slot in slots
+                    ],
+                    "has_more": False,
+                },
+            )
         if req.method == "POST" and req.url.path in (
             "/v1/vaults/vlt_chat/credentials",
             "/v1/vaults/vlt_chat/credentials/cred_chat",
@@ -88,13 +98,17 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(
             writes.append(req.url.path)
             slot = {
                 "id": "cred_chat",
-                "type": "credential",
+                "type": "vault_credential",
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
                 "vault_id": "vlt_chat",
                 "auth": {"type": "static_bearer", "mcp_server_url": "https://mcp.example.com/mcp"},
                 "metadata": body["metadata"],
             }
             slots[:] = [slot]
-            return httpx.Response(200, json=slot)
+            return httpx.Response(
+                200, json=BetaManagedAgentsCredential.model_validate(slot).model_dump(mode="json")
+            )
         raise AssertionError(f"unexpected request:{req.method}:{req.url.path}")
 
     client = AsyncAnthropic(
@@ -227,7 +241,9 @@ async def test_reuse_refreshes_both_app_vaults_but_never_injects_an_external_slo
         name: [
             {
                 "id": f"cred_{name}",
-                "type": "credential",
+                "type": "vault_credential",
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
                 "vault_id": name,
                 "auth": {"type": "static_bearer", "mcp_server_url": "https://mcp.example.com/mcp"},
                 "metadata": payload["metadata"],
@@ -238,7 +254,9 @@ async def test_reuse_refreshes_both_app_vaults_but_never_injects_an_external_slo
     slots["external"] = [
         {
             "id": "cred_external",
-            "type": "credential",
+            "type": "vault_credential",
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
             "vault_id": "external",
             "auth": {"type": "static_bearer", "mcp_server_url": "https://external.example/mcp"},
             "metadata": {},
@@ -252,7 +270,16 @@ async def test_reuse_refreshes_both_app_vaults_but_never_injects_an_external_slo
             return httpx.Response(200, json=live.model_dump(mode="json"))
         name = req.url.path.split("/")[3]
         if req.method == "GET":
-            return httpx.Response(200, json={"data": slots[name], "has_more": False})
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        BetaManagedAgentsCredential.model_validate(slot).model_dump(mode="json")
+                        for slot in slots[name]
+                    ],
+                    "has_more": False,
+                },
+            )
         assert req.method == "POST" and name in ("caller", "github")
         payload = json.loads(req.content)
         verifier = DaimonJWTVerifier(secret=secret, sessionmaker=factory)
@@ -260,7 +287,10 @@ async def test_reuse_refreshes_both_app_vaults_but_never_injects_an_external_slo
         writes.append(name)
         payloads[name] = payload
         slots[name][0]["metadata"] = payload["metadata"]
-        return httpx.Response(200, json=slots[name][0])
+        return httpx.Response(
+            200,
+            json=BetaManagedAgentsCredential.model_validate(slots[name][0]).model_dump(mode="json"),
+        )
 
     recorded = snapshot_from_created_session(
         live,
