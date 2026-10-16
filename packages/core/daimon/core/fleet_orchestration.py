@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, Protocol
 
+import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.security_audit import record_authz_denial
 from mux.contracts.config import BackendConfig
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
 
 
 type Control = Literal["kill", "resume"]
+
+log = structlog.get_logger(__name__)
 
 
 def _unique_object(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
@@ -838,8 +841,14 @@ class HostFleetPorts:
             def completed(done: asyncio.Task[None]) -> None:
                 if self._tasks.get(worker.id) is done:
                     self._tasks.pop(worker.id)
-                if not done.cancelled():
-                    done.exception()
+                error = asyncio.CancelledError() if done.cancelled() else done.exception()
+                if error is not None:
+                    log.warning(
+                        "fleet.worker_task_failed",
+                        run_id=str(worker.run_id),
+                        worker_id=str(worker.id),
+                        error_class=type(error).__name__,
+                    )
 
             task.add_done_callback(completed)
 
