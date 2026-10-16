@@ -148,17 +148,16 @@ async def source_mcp(consent_request):
             sessionmaker=request.deps.sessionmaker,
         ),
     )
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=request.deps.sessionmaker,
-        )
+    identity = IdentityMiddleware(
+        subject_resolver=production_subject_resolver,
+        tenant_resolver=production_tenant_resolver,
+        role_resolver=production_role_resolver,
+        agent_id_resolver=production_agent_id_resolver,
+        is_admin_resolver=production_is_admin_resolver,
+        internal_resolver=production_internal_resolver,
+        sessionmaker=request.deps.sessionmaker,
     )
+    mcp.add_middleware(identity)
     for name in ("describe_agent", "list_my_sessions"):
 
         async def read_tool() -> str:
@@ -167,7 +166,10 @@ async def source_mcp(consent_request):
         mcp.tool(read_tool, name=name, tags={"agent-chat"})
     mcp.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
     app = mcp.http_app()
-    yield app
+    try:
+        yield app
+    finally:
+        await identity.drain_audit()
 
 
 @pytest.fixture
