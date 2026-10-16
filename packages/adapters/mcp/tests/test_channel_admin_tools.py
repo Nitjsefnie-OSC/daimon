@@ -11,6 +11,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import agents as agent_tools
 from daimon.adapters.mcp.tools import propagation
 from daimon.adapters.mcp.tools.agents import (
     _require_mcp_replace_allowed,  # pyright: ignore[reportPrivateUsage]
@@ -22,6 +23,7 @@ from daimon.adapters.mcp.tools.channel_admins import (
 )
 from daimon.adapters.mcp.tools.reachability import require_admin_for_reachable_agent
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.config import reset_channel_admins_enabled
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores import accounts
@@ -534,3 +536,69 @@ async def test_channel_admin_repoints_a_server_only_on_an_agent_local_to_them(
     assert await _require_mcp_replace_allowed(runtime, member, agent, servers), (
         "the admin of the only channel it answers in repoints its server"
     )
+
+
+async def test_disabled_former_holder_cannot_attach_to_the_channel_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
+    tenant_id = await _tenant(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    async with committing_sessionmaker.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL),
+            tenant_id=tenant_id,
+            agent_name="helper",
+            mode="agent",
+            set_by_admin=True,
+        )
+        await set_access_policy(
+            session,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy.model_validate(
+                {"agent_channel_pins": {"helper": (CHANNEL,)}}
+            ),
+        )
+    await _set_channel_admins_impl(
+        runtime, _auth(tenant_id, admin=True), channel_id=CHANNEL, role_ids=[], user_ids=[USER]
+    )
+    agent = ma_agent(
+        id="agent_helper",
+        name="helper",
+        metadata={
+            "daimon_tenant": str(tenant_id),
+            "daimon_name": "helper",
+            "daimon_account": str(_ACCOUNTS[tenant_id]),
+        },
+        mcp_servers=[{"name": "linear", "type": "url", "url": "https://mcp.example.com/a"}],
+    )
+    try:
+        reset_channel_admins_enabled()
+        monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
+        runtime.settings.mcp.public_url = None
+        monkeypatch.setattr(agent_tools, "get_chat_origin", AsyncMock(return_value=None))
+        monkeypatch.setattr(agent_tools, "resolve_setup_agent", AsyncMock(return_value=agent))
+        monkeypatch.setattr(agent_tools, "require_pin_write_access", AsyncMock())
+        attach = AsyncMock()
+        monkeypatch.setattr(agent_tools, "attach_mcp_server_to_agent", attach)
+        with pytest.raises(ToolError, match="an admin must change its setup"):
+            await agent_tools._attach_mcp_server_impl(  # pyright: ignore[reportPrivateUsage]
+                runtime,
+                _auth(tenant_id),
+                agent_name="helper",
+                server_name="linear",
+                url="https://mcp.example.com/b",
+            )
+        attach.assert_not_awaited()
+        with pytest.raises(ToolError, match="repointing it needs a server or workspace admin"):
+            await _require_mcp_replace_allowed(
+                runtime, _auth(tenant_id), agent, [("linear", "https://mcp.example.com/b")]
+            )
+        assert [(server.name, server.url) for server in agent.mcp_servers] == [
+            ("linear", "https://mcp.example.com/a")
+        ]
+    finally:
+        reset_channel_admins_enabled()

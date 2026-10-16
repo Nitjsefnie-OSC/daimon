@@ -52,6 +52,10 @@ BUILT_IN: Final = (
 
 
 def needs_admin(agent_name: str) -> str:
+    from daimon.core.config import channel_admins_enabled
+
+    if not channel_admins_enabled():
+        return f"Others use {agent_name}, so adding a skill needs a server admin."
     return (
         f"Others use {agent_name} (a default, a thread, or someone else's routine or "
         "conversation), so adding a skill needs an admin or an admin of every channel "

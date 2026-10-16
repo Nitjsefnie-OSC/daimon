@@ -23,6 +23,7 @@ from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
     Settings,
+    reset_channel_admins_enabled,
 )
 from daimon.core.github_connect_delivery import claim_next, settle
 from daimon.core.github_credentials import build_multifernet
@@ -1124,11 +1125,11 @@ def test_agent_done_page_says_connected_and_close_tab() -> None:
     assert "old GitHub token" not in body
 
 
-@pytest.mark.parametrize("still_channel_admin", [True, False])
+@pytest.mark.parametrize("grant_state", ["kept", "revoked", "disabled"])
 async def test_channel_admin_completes_connect_for_their_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-    still_channel_admin: bool,
+    grant_state: str,
 ) -> None:
     """A channel admin's link for the agent pinned to their channel adds repos for it only."""
     from types import SimpleNamespace
@@ -1139,6 +1140,8 @@ async def test_channel_admin_completes_connect_for_their_agent(
     from daimon.core.stores.access_policy import set_access_policy
     from daimon.core.stores.channel_admins import delete_channel_admins, set_channel_admins
 
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
     sessionmaker = committing_sessionmaker
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_bot")
@@ -1262,7 +1265,7 @@ async def test_channel_admin_completes_connect_for_their_agent(
         fields = dict(
             re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', picker.text)
         )
-        if not still_channel_admin:
+        if grant_state == "revoked":
             async with sessionmaker.begin() as session:
                 await delete_channel_admins(
                     session,
@@ -1270,6 +1273,10 @@ async def test_channel_admin_completes_connect_for_their_agent(
                     platform="discord",
                     channel_id="team-a",
                 )
+        elif grant_state == "disabled":
+            # The picker was opened before a process restart with the switch off.
+            reset_channel_admins_enabled()
+            monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
         done = await browser.post(
             "/oauth/github/confirm",
             data={
@@ -1279,7 +1286,7 @@ async def test_channel_admin_completes_connect_for_their_agent(
                 "working": "keep",
             },
         )
-        if still_channel_admin:
+        if grant_state == "kept":
             used_link = await browser.get(f"/oauth/github/connect/{invitation_token}")
             assert used_link.status_code == 200
             assert "ana/thesis" not in used_link.text
@@ -1300,7 +1307,7 @@ async def test_channel_admin_completes_connect_for_their_agent(
         )
         shared = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
     assert shared == []
-    if still_channel_admin:
+    if grant_state == "kept":
         assert done.status_code == 200
         assert "Repos saved" in done.text
         assert [(repo.repo_id, repo.scope_agent_id, repo.max_access) for repo in own] == [
@@ -1309,6 +1316,7 @@ async def test_channel_admin_completes_connect_for_their_agent(
     else:
         assert "Added" not in done.text
         assert own == []
+    reset_channel_admins_enabled()
 
 
 @pytest.mark.asyncio

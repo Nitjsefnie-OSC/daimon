@@ -21,7 +21,7 @@ from daimon.adapters.teams.group_chats import GroupChatRoster
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_admins import GroupMembers, GroupMembersCache
 from daimon.core.channel_budget_notice import drain_budget_notices
-from daimon.core.config import Settings
+from daimon.core.config import Settings, prime_channel_admins_enabled
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
@@ -160,6 +160,7 @@ async def hold_owner_key(
 @asynccontextmanager
 async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
     """Build the Teams runtime: DB, MA client and turn deps."""
+    prime_channel_admins_enabled(settings)
     if settings.teams is None:
         raise ValueError("Teams runtime requires configured Teams settings")
     engine = build_engine(

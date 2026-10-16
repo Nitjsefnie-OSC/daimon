@@ -159,9 +159,16 @@ def build_environment_resolution_note(
 ) -> str:
     """Which environment a turn in `channel_id` runs in, and the tier that chose it."""
     if environment_name is None:
+        from daimon.core.config import channel_admins_enabled
+
+        who = (
+            "A server admin, or an admin of that channel,"
+            if channel_admins_enabled()
+            else "A server admin"
+        )
         return (
             f"No environment resolves for channel {channel_id}, so a mention there cannot "
-            "start. A server admin, or an admin of that channel, can pick one."
+            f"start. {who} can pick one."
         )
     where = {
         "channel": "this channel's own setting",

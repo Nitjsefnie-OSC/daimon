@@ -62,6 +62,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.channel_admins import fit_lines
 from daimon.core.channel_environments import EnvironmentPicker
+from daimon.core.config import channel_admins_enabled
 from daimon.core.errors import DaimonError
 from daimon.core.roster import Page, paginate
 from daimon.core.routing_facts import PRECEDENCE_LINE, build_routing_request
@@ -418,11 +419,12 @@ class RoutingView(PanelViewBase):
         back_button.callback = self._on_back  # type: ignore[method-assign]  # per-instance callback
         nav_row.add_item(back_button)
         if state.is_admin:
-            admins_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-                label=CHANNEL_ADMINS_LABEL, style=discord.ButtonStyle.secondary
-            )
-            admins_button.callback = self._on_channel_admins  # type: ignore[method-assign]  # per-instance callback
-            nav_row.add_item(admins_button)
+            if channel_admins_enabled():
+                admins_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                    label=CHANNEL_ADMINS_LABEL, style=discord.ButtonStyle.secondary
+                )
+                admins_button.callback = self._on_channel_admins  # type: ignore[method-assign]  # per-instance callback
+                nav_row.add_item(admins_button)
             if state.channel_id:
                 permissions_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                     label=PERMISSIONS_LABEL, style=discord.ButtonStyle.secondary
@@ -471,6 +473,11 @@ class RoutingView(PanelViewBase):
 
     async def _on_channel_admins(self, interaction: discord.Interaction) -> None:
         """Open the channel admins screen; Manage Server is re-checked live."""
+        if not channel_admins_enabled():
+            await interaction.response.send_message(
+                "Channel admins are disabled. Nothing changed.", ephemeral=True
+            )
+            return
         if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             return
         await interaction.response.defer()

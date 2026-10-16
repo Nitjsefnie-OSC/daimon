@@ -30,6 +30,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails
 from daimon.core.agent_pins import PIN_WRITE_REFUSAL
+from daimon.core.config import reset_channel_admins_enabled
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
@@ -298,6 +299,33 @@ async def test_a_channel_admin_may_add_to_an_agent_local_to_their_channel(
     channel_admin = _interaction()
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(channel_admin)
     channel_admin.response.send_modal.assert_awaited_once()
+
+
+async def test_disabled_former_holder_cannot_open_or_submit_add_skill(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
+    world = await _world(db_session_factory)
+    agent = world.put_agent()
+    await _route(
+        world, ChannelScopeRef(tenant_id=world.tenant_id, channel_id=str(CHANNEL_ID)), by_admin=True
+    )
+    await _pin(world, CHANNEL_ID)
+    await _make_channel_admin(world, CHANNEL_ID)
+    try:
+        reset_channel_admins_enabled()
+        monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
+        opener = _interaction()
+        await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(opener)
+        opener.response.send_modal.assert_not_awaited()
+        submitter = _interaction()
+        await _modal(_details_view(world, agent), agent, paste=_MD).on_submit(submitter)
+        assert _followups(submitter)
+        assert submitter.edit_original_response.await_count == 0
+        assert world.created == []
+    finally:
+        reset_channel_admins_enabled()
 
 
 def _modal(view: DetailsView, agent: RosterAgent, *, paste: str = "", upload: Any = None) -> Any:

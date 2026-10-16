@@ -96,7 +96,7 @@ from daimon.adapters.mcp.uploads import build_upload_route
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.billing import BillingConfig, load_billing_config
-from daimon.core.config import Settings, load_settings
+from daimon.core.config import Settings, load_settings, prime_channel_admins_enabled
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
@@ -267,6 +267,7 @@ def create_mcp_app(
     `ensure_mcp_vault` needs it on the session-create side.
     """
     effective_settings = settings or load_settings()
+    prime_channel_admins_enabled(effective_settings)
     # The JSON chain and stdlib redaction before the first log line (uvicorn
     # has configured its loggers by the time it calls this factory); without
     # it structlog's dev renderer prints rich tracebacks with frame locals.

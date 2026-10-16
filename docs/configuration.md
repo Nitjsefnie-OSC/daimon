@@ -16,6 +16,7 @@ typo is silent — check the spelling here.
 ## Contents
 
 - [Core](#core)
+- [Channel Admins](#channel-admins)
 - [Database](#database)
 - [Anthropic](#anthropic)
 - [Privacy](#privacy)
@@ -122,6 +123,18 @@ process cwd — works for in-repo dev (repo root) and the deployed container lay
 (working dir contains defaults/ at root). Single source of truth shared by the
 scheduler, Discord/Slack adapters, CLI session bootstrap, and MCP routine tools. Do NOT
 add adapter-local defaults_root fields — they invite drift.
+
+## Channel Admins
+
+Read from `daimon.core.config.ChannelAdminsSettings`. Prefix `DAIMON_CHANNEL_ADMINS__`.
+
+### `DAIMON_CHANNEL_ADMINS__ENABLED`
+
+`bool` · optional · default `True`
+
+Enable channel admin grants. When false, only server or workspace admins administer
+channels; grant rows are kept but ignored. Defaults to true for self-hosted
+compatibility this release.
 
 ## Database
 

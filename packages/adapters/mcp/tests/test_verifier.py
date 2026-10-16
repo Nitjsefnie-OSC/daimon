@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from decimal import Decimal
 
 import jwt as pyjwt
 import pytest
@@ -24,11 +25,13 @@ from daimon.adapters.mcp.auth.verifier import (
     TOKEN_JTI_CLAIM,
     TOKEN_KIND_CLAIM,
     DaimonJWTVerifier,
+    token_row_refusal,
 )
+from daimon.core.config import reset_channel_admins_enabled
 from daimon.core.mcp_auth import mint_agent_mcp_token, mint_cli_mcp_token, mint_operator_mcp_token
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
 from daimon.core.stores.security_audit import list_events
 from sqlalchemy import text
@@ -38,6 +41,52 @@ from .harness import seed_server_admin, seed_tenant_and_account
 
 SECRET = b"a" * 32
 LEGACY_CUTOFF = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
+
+
+def test_switch_refuses_former_holders_bound_token_without_a_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = dt.datetime(2026, 10, 16, tzinfo=dt.UTC)
+    account_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
+    identity = AccountIdentityRow(
+        account_id=account_id,
+        tenant_id=tenant_id,
+        role=Role.USER,
+        platform="discord",
+        external_id="guild",
+        platform_user_id="user",
+    )
+    row = McpTokenRow(
+        jti=uuid.uuid4(),
+        account_id=account_id,
+        tenant_id=tenant_id,
+        kind="agent",
+        agent_id=str(uuid.uuid4()),
+        scopes=(),
+        label=None,
+        created_at=now,
+        expires_at=None,
+        revoked_at=None,
+        max_issued_usd=None,
+        issued_usd=Decimal(0),
+        platform="discord",
+        channel_id="channel",
+    )
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
+    try:
+        assert token_row_refusal(row, claims={}, identity=identity, now=now) == (
+            "channel_admins_disabled"
+        )
+        assert (
+            token_row_refusal(
+                row, claims={}, identity=identity.model_copy(update={"role": Role.ADMIN}), now=now
+            )
+            is None
+        )
+    finally:
+        reset_channel_admins_enabled()
 
 
 async def test_verifier_accepts_known_account(
@@ -777,6 +826,20 @@ async def test_verifier_reads_the_bound_channel_from_the_token_row(
     ).verify_token(token)
     assert result is not None
     assert result.claims["bound_channel_id"] == "c-1"
+
+
+async def test_channel_admins_switch_revokes_a_former_holders_bound_coding_token(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = await _agent_token(sessionmaker, platform="discord", channel_id="c-1")
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    assert await verifier.verify_token(token) is not None
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
+    try:
+        assert await verifier.verify_token(token) is None
+    finally:
+        reset_channel_admins_enabled()
 
 
 async def test_verifier_drops_a_bound_channel_claimed_in_the_jwt(

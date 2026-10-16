@@ -73,6 +73,10 @@ _PATH_CHARS: Final = 80
 
 
 def needs_admin_message(agent_name: str) -> str:
+    from daimon.core.config import channel_admins_enabled
+
+    if not channel_admins_enabled():
+        return f"Others use {agent_name}, so adding a skill needs {ADMIN_NOUN}."
     return (
         f"Others use {agent_name} (a default, a thread, or someone else's routine or "
         f"conversation), so adding a skill needs {ADMIN_NOUN} or an admin of every channel "

@@ -356,7 +356,13 @@ def refusal_message(operation: OperationKind, outcome: PolicyOutcome) -> str:
     if operation == "agent_spec_edit":
         return MANAGED_AGENT_MESSAGE if outcome == "managed_agent" else NEEDS_ADMIN_SPEC_MESSAGE
     if operation in ("skill_add", "skill_remove"):
-        return MANAGED_AGENT_MESSAGE if outcome == "managed_agent" else NEEDS_ADMIN_SKILL_MESSAGE
+        if outcome == "managed_agent":
+            return MANAGED_AGENT_MESSAGE
+        from daimon.core.config import channel_admins_enabled
+
+        if not channel_admins_enabled():
+            return f"Others use this agent, so changing its skills needs {ADMIN_NOUN}."
+        return NEEDS_ADMIN_SKILL_MESSAGE
     if operation == "skill_repo_connect":
         return SHARED_AGENT_SKILLS_MESSAGE
     return SHARED_AGENT_MESSAGE

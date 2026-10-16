@@ -26,6 +26,7 @@ from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_panel_
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
+from daimon.core.config import channel_admins_enabled
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.panel_audit import record_panel_write
 from daimon.core.stores.channel_admins import (
@@ -91,6 +92,11 @@ async def run_channel_admins_submission(
 
     async def refuse(text: str) -> None:
         await post_ephemeral(client, channel_id=meta.channel_id, user_id=user_id, text=text)
+
+    if not channel_admins_enabled():
+        await audit(outcome="denied", reason="disabled")
+        await refuse("Channel admins are disabled. Nothing changed.")
+        return
 
     if not await resolve_is_admin(client, user_id=user_id):
         await audit(outcome="denied", reason="needs_admin")

@@ -688,6 +688,10 @@ def channel_admin_holds(
     (`daimon.core.agent_reach`). Never for an agent key or a token with no
     person behind it.
     """
+    from daimon.core.config import channel_admins_enabled
+
+    if not channel_admins_enabled():
+        return False
     administered = subject.administered_channel_ids
     if subject.via_agent_key or subject.platform_user_id is None:
         return False
@@ -1061,7 +1065,9 @@ def build_subject(
     admin grants name; an agent key or a token with no person behind it holds
     none, whatever its account's grants.
     """
-    holds_grants = platform_user_id is not None and not via_agent_key
+    from daimon.core.config import channel_admins_enabled
+
+    holds_grants = platform_user_id is not None and not via_agent_key and channel_admins_enabled()
     return Subject(
         is_admin=is_admin,
         platform_user_id=platform_user_id,
