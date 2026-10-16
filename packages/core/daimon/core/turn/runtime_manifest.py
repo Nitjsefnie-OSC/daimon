@@ -1231,11 +1231,16 @@ class SourceCapabilities(BaseModel):
 
     @model_validator(mode="after")
     def _unique(self) -> Self:
+        profile = get_profile(backend_selection(self.model.provider).profile)
         if (
             len({item.source.id for item in self.skills}) != len(self.skills)
             or len({item.target.id for item in self.skills}) != len(self.skills)
             or len(set(self.mcp_tools)) != len(self.mcp_tools)
             or self.model.options
+            or (
+                profile.skill_digest == "version"
+                and any(item.target.digest != item.target.version for item in self.skills)
+            )
         ):
             raise ValueError("source capability representation must be complete and unambiguous")
         return self
@@ -1424,10 +1429,6 @@ async def _capture_source_capabilities(
                 )
             ):
                 raise ValueError("representation differs from captured source")
-            if profile.skill_digest == "version" and any(
-                item.target.digest != item.target.version for item in inputs.skills
-            ):
-                raise ValueError("target skill version must pin its digest")
             if inputs.environment is not None and (
                 not profile.implicit_execution
                 or source.environment is None

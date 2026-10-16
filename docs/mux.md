@@ -3195,3 +3195,47 @@ threads sharing that caller/agent binding. A single-session live fixture must us
 its isolated account/channel and revoke the exact JTI at cleanup. No automatic
 refresh exists: expiry or revocation refuses further exposure, and continuing
 requires a newly authorized credential through the existing mint owner.
+
+### Preserving source capabilities in an OpenAI hosted workspace
+
+An agent-origin `openai.persistent_workspace` deployment can use the same
+`source_capabilities` proof as the inline profile. This is explicit operator
+configuration; unconfigured channels and conversation-only workers keep their
+existing paths. Preview and preparation capture the actual source again and
+check the same source pin, account, agent version, channel and exact MCP
+catalogue. All six automatic filesystem builtins map through the profile's
+hosted bash capability. Unknown tools, confirmation policies and unrepresented
+web capabilities refuse instead of acquiring an implicit mapping.
+
+Each skill mapping contains its concrete source version, an absolute retained
+archive path, and the native OpenAI skill ID and numeric version. The target's
+`digest` is the hash of the canonical `SkillUpload` (files sorted by path),
+independent of the native version number and ZIP timestamps. Capture compares
+all retained archive bytes with the actual source version. The OpenAI driver
+independently downloads `/skills/{id}/versions/{version}/content` and verifies
+every file against that digest before publishing the agent or attaching skills
+to a session. Existing pins without a digest keep their request shape.
+
+Optional `source_capabilities.environment` must exactly equal the captured
+canonical hosted environment policy, including explicit network and packages.
+This evidence lets the existing preview/classifier retain that sandbox rather
+than declare its removal. Preparation reads the operator's actual native
+`environment_id` and checks that policy; source ownership labels are checked
+by capture and do not become execution authority. Unrepresentable environment
+configuration still refuses.
+
+The deployment also needs all target `skill_ids`, normal counterpart catalogue
+pins and an absolute `mcp_credential_file`. The credential file must be a regular
+file, owned by the runtime user, mode 0600. Provisioners use the existing
+provider-neutral after-ACK credential binding against the retained canonical
+source; they must not mint a token before the native agent has been acknowledged
+and read back. The real host factory passes the scoped resolver into the OpenAI
+driver. Only session creation receives the bearer: its registered identity,
+account/tenant, expiry, revocation and exact authenticated catalogue are checked
+before exposure to the captured destination. Agent metadata and runtime
+manifests contain the credential reference, never the bearer itself.
+
+Memory has no native preservation mapping in this profile and remains an
+explicit preview/consent loss. Model controls, repositories and any other source
+obligations retain their existing classification. Preserving skills, filesystem
+tools and authenticated MCP does not discharge those separate obligations.

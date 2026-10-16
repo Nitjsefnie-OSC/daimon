@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import stat
+import struct
 import zipfile
+import zlib
 from pathlib import PurePosixPath
 
 from mux.contracts.ids import Page, PageRequest, Scope, SkillRef
@@ -38,6 +40,19 @@ async def verify_content(context: Context, skill_id: str, version: str, digest: 
         closer = getattr(source, "aclose", None)
         if closer is not None:
             await closer()
+    try:
+        bundle = _downloaded_bundle(data)
+    except (zipfile.BadZipFile, NotImplementedError, zlib.error, EOFError) as error:
+        raise ValueError("invalid native skill archive") from error
+    if bundle_digest(bundle) != digest:
+        raise ValueError("native skill content differs from pinned source bytes")
+
+
+def _downloaded_bundle(data: bytearray) -> SkillUpload:
+    # Refuse an oversized central directory before ZipFile allocates its entries.
+    end = data.rfind(b"PK\x05\x06", max(0, len(data) - 22 - 65535))
+    if end < 0 or len(data) - end < 22 or struct.unpack_from("<H", data, end + 10)[0] > 1000:
+        raise ValueError("invalid or oversized skill archive directory")
     files: list[SkillUploadFile] = []
     budget = 28 * 1024 * 1024
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -79,8 +94,7 @@ async def verify_content(context: Context, skill_id: str, version: str, digest: 
             files.append(SkillUploadFile(path=entry.filename.removeprefix(wrapper), content=body))
     bundle = SkillUpload(files=tuple(files))
     bundle_zip(bundle)  # Reuse upload path, uniqueness and root-manifest validation.
-    if bundle_digest(bundle) != digest:
-        raise ValueError("native skill content differs from pinned source bytes")
+    return bundle
 
 
 def bundle_zip(bundle: SkillUpload) -> bytes:
