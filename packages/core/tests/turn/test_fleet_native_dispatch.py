@@ -1143,6 +1143,10 @@ async def test_dispatch_failure_terminalizes_claim_and_run_without_waiting_for_s
             ]
         )
         assert row["causes"] == expected and private not in json.dumps(row)
+        from daimon.core.observability import redact_log_event
+
+        scrubbed = redact_log_event(None, "warning", row)
+        assert scrubbed["causes"] == expected and private not in json.dumps(scrubbed)
     finally:
         await ports.close()
 
