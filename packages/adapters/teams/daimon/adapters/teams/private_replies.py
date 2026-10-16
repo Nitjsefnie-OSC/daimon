@@ -127,7 +127,9 @@ def reply_privately(ctx: ActivityContext[MessageActivity]) -> Callable[[str], Aw
             raise
         except TEAMS_SEND_ERRORS as exc:
             _refused("teams.refusal.targeted_refused", exc)
-            return await ctx.reply(text)
+            # A plain reply to a targeted message is targeted by the SDK: name the sender openly.
+            public = MessageActivityInput(text=text).with_recipient(activity.from_)
+            return await ctx.reply(public)
 
     return reply
 

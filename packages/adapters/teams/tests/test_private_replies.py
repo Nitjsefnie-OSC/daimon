@@ -26,17 +26,25 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
 from microsoft_teams.api import (
     Account,
+    ApiClient,
+    ConversationAccount,
+    ConversationReference,
     MessageActivity,
     MessageActivityInput,
     TargetedMessageInfoEntity,
 )
+from microsoft_teams.apps import ActivityContext
+from microsoft_teams.common import Client, ClientOptions
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     CHANNEL_ID,
     ENTRA_TENANT_ID,
+    GROUP_CHAT_ID,
+    SERVICE_URL,
     THREAD_ID,
     FakeSender,
+    TeamsApiFake,
     bot_token,
     build_teams_runtime,
     make_channel_activity,
@@ -273,7 +281,46 @@ async def test_a_refused_channel_refusal_is_replied_as_before() -> None:
     )
     ctx = _ctx(make_channel_activity(), AsyncMock(side_effect=refused))
     await reply_privately(ctx)("no")
-    ctx.reply.assert_awaited_once_with("no")
+    (public,) = ctx.reply.await_args.args
+    assert public.text == "no" and not _is_private(public)
+
+
+class _RefusesTargeted(TeamsApiFake):
+    """Bot Framework refusing every targeted activity, as for a sender it cannot reach."""
+
+    async def send(self, context: Any, next: Any) -> httpx.Response:
+        response = await super().send(context, next)
+        if "isTargetedActivity=true" in context.url:
+            request = httpx.Request("POST", context.url)
+            refused = httpx.Response(403, json={}, request=request)
+            raise httpx.HTTPStatusError("refused", request=request, response=refused)
+        return response
+
+
+@pytest.mark.parametrize("kind", ["channel", "groupChat"])
+async def test_a_refused_refusal_to_a_targeted_message_is_posted_for_everyone(kind: str) -> None:
+    """The SDK targets a plain reply to a targeted message: the fallback must not be one."""
+    wire = _RefusesTargeted()
+    client = Client(ClientOptions(token="offline-token", headers={}))
+    client.use(wire)
+    payload = make_message_activity(
+        conversation_id=THREAD_ID if kind == "channel" else GROUP_CHAT_ID,
+        conversation_type=kind,
+        targeted=True,
+    )
+    ctx = ActivityContext.__new__(ActivityContext)
+    ctx.activity = MessageActivity.model_validate(payload)
+    ctx.api = ApiClient(SERVICE_URL, client)
+    ctx.conversation_ref = ConversationReference(
+        channel_id="msteams",
+        service_url=SERVICE_URL,
+        bot=Account(id="offline-bot"),
+        conversation=ConversationAccount(id=ctx.activity.conversation.id),
+    )
+    await reply_privately(ctx)("no")
+    targeted_try, public = wire.activity_requests
+    assert "isTargetedActivity=true" in targeted_try.url, "the sender alone first"
+    assert "isTargetedActivity" not in public.url and public.body["text"].endswith("no")
 
 
 async def test_a_1_1_refusal_is_replied_as_before() -> None:
