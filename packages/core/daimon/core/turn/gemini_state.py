@@ -27,6 +27,7 @@ from daimon.core.stores.gemini_runtime_state import (
     Payload,
     PayloadDatabase,
     PostgresPayloadDatabase,
+    complete,
 )
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.ids import ModelRef, Scope
@@ -92,12 +93,7 @@ def _decode(value: JsonValue) -> object:
 
 
 async def _finish(operation: Callable[[], None]) -> None:
-    task = asyncio.create_task(asyncio.to_thread(operation))
-    try:
-        await asyncio.shield(task)
-    except BaseException:
-        await task
-        raise
+    await complete(asyncio.to_thread(operation))
 
 
 class _Database:

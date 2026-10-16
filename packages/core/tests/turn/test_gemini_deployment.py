@@ -1881,6 +1881,7 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
 async def test_capped_worker_materialization_runs_through_headless_preparation_and_sdk(
     materialization_worker_request,
     storage_backend,
+    monkeypatch,
 ):
     from daimon.core.headless_runner import run_worker
 
@@ -1890,6 +1891,7 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
         values.pop("records_path")
         values.pop("holds_path")
         values["storage_backend"] = "postgres"
+        monkeypatch.setenv("K_SERVICE", "configured-mcp-host")
         owned.manifest_path.write_text(json.dumps([values]))
     assert selected.worker.limits.max_input_tokens == 262144
     result = await run_worker(
@@ -1945,3 +1947,22 @@ async def test_postgres_plan_is_explicit_and_refuses_ambiguous_storage(selected,
     for changes in ({"storage_backend": "unknown"}, {"storage_backend": "sqlite"}):
         with pytest.raises(ValidationError):
             GeminiPlan.model_validate(postgres | changes)
+
+
+@pytest.mark.parametrize("marker", ["K_SERVICE", "CLOUD_RUN_JOB"])
+async def test_cloud_run_sqlite_refuses_before_key_discovery(
+    selected, tmp_path, monkeypatch, marker
+):
+    values = entry(selected, tmp_path)
+    manifest(monkeypatch, tmp_path / "runtime.json", [values])
+    monkeypatch.setenv(marker, "configured-host")
+    original = os.environ.get
+
+    def protected(name, default=None):
+        if name == values["api_key_env"]:
+            pytest.fail("ephemeral SQLite deployment discovered provider credential")
+        return original(name, default)
+
+    monkeypatch.setattr(os.environ, "get", protected)
+    with pytest.raises(AdmissionDenied):
+        build_gemini_runtime(selected)

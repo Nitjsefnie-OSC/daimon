@@ -1,16 +1,32 @@
 """Transactional Gemini payload persistence on the existing application state DB."""
 
+import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 from uuid import UUID
 
 from daimon.core._models import Account, GeminiRuntimeState
+from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
 from mux.contracts.ids import Scope
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+async def complete(operation: Awaitable[None]) -> None:
+    """Finish an already-started commit/close before propagating cancellation."""
+    task = asyncio.ensure_future(operation)
+    try:
+        await asyncio.shield(task)
+    except BaseException:
+        await task
+        raise
 
 
 @dataclass(frozen=True)
@@ -44,46 +60,106 @@ class PostgresPayloadDatabase:
             "kind": kind,
         }
 
-    async def _require_account(self, session: AsyncSession) -> None:
-        actor = await session.scalar(
-            select(Account.id)
-            .where(
-                Account.id == self._key["account_id"],
-                Account.tenant_id == self._key["tenant_id"],
-            )
-            .with_for_update(read=True, key_share=True)
+    async def _require_account(self, session: AsyncSession, *, locking: bool) -> None:
+        statement = select(Account.id).where(
+            Account.id == self._key["account_id"], Account.tenant_id == self._key["tenant_id"]
         )
-        if actor is None:
+        if locking:
+            statement = statement.with_for_update(read=True, key_share=True)
+        if await session.scalar(statement) is None:
             raise ValueError("Gemini state account is unavailable")
 
     @asynccontextmanager
+    async def _locked(self, deadline: float, *, initialize: bool) -> AsyncIterator[Payload]:
+        key = "gemini_state:" + json.dumps([str(value) for value in self._key.values()])
+
+        async def acquire():
+            stack = AsyncExitStack()
+            try:
+                async with asyncio.timeout_at(deadline):
+                    session = await stack.enter_async_context(self._sessions())
+                    transaction = await session.begin()
+                    await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                    await try_fence(session, key, timeout_s=5, schema_scoped=True)
+                    await self._require_account(session, locking=initialize)
+                    predicates = (
+                        GeminiRuntimeState.tenant_id == self._key["tenant_id"],
+                        GeminiRuntimeState.account_id == self._key["account_id"],
+                        GeminiRuntimeState.project == self._key["project"],
+                        GeminiRuntimeState.kind == self._key["kind"],
+                    )
+                    body = None
+                    if initialize:
+                        await session.execute(
+                            insert(GeminiRuntimeState).values(**self._key).on_conflict_do_nothing()
+                        )
+                    else:
+                        row = (
+                            await session.execute(
+                                select(GeminiRuntimeState.body)
+                                .where(*predicates)
+                                .with_for_update(nowait=True)
+                            )
+                        ).one_or_none()
+                        if row is None:
+                            raise ValueError("Gemini state is unavailable")
+                        body = row.body
+                    return stack, session, transaction, predicates, body
+            except BaseException as error:
+                await complete(stack.aclose())
+                if isinstance(error, (FenceUnavailable, TimeoutError, PoolTimeoutError)) or (
+                    isinstance(error, DBAPIError)
+                    and getattr(error.orig, "sqlstate", None) == "55P03"
+                ):
+                    raise FenceUnavailable(deadline) from None
+                raise
+
+        stack, session, transaction, predicates, body = await retry_fences(acquire)
+        try:
+
+            async def save(value: str) -> None:
+                # Read-only retrieval/polling must not rewrite the entire blob.
+                if value != body:
+                    await session.execute(
+                        update(GeminiRuntimeState).where(*predicates).values(body=value)
+                    )
+
+            yield Payload(body, save)
+            await complete(transaction.commit())
+        except BaseException:
+            if transaction.is_active:
+                await complete(transaction.rollback())
+            raise
+        finally:
+            await complete(stack.aclose())
+
+    @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Payload]:
-        # Commit row initialization separately: its tenant FK lock must never
-        # survive across provider I/O and block the financial owner's fence.
-        async with self._sessions.begin() as session:
-            await self._require_account(session)
-            await session.execute(
-                insert(GeminiRuntimeState).values(**self._key).on_conflict_do_nothing()
-            )
-        async with self._sessions.begin() as session:
-            await self._require_account(session)
-            # This row lock serializes the complete payload update, including
-            # writers racing immediately after the initial empty-row commit.
-            predicates = (
-                GeminiRuntimeState.tenant_id == self._key["tenant_id"],
-                GeminiRuntimeState.account_id == self._key["account_id"],
-                GeminiRuntimeState.project == self._key["project"],
-                GeminiRuntimeState.kind == self._key["kind"],
-            )
-            row = (
-                await session.execute(
-                    select(GeminiRuntimeState.body).where(*predicates).with_for_update()
-                )
-            ).one()
+        deadline = asyncio.get_running_loop().time() + 5
+        # Initialization commits its FK/account locks before any provider I/O.
+        async with self._locked(deadline, initialize=True):
+            pass
+        async with self._locked(deadline, initialize=False) as payload:
+            yield payload
 
-            async def save(body: str) -> None:
-                await session.execute(
-                    update(GeminiRuntimeState).where(*predicates).values(body=body)
-                )
 
-            yield Payload(row.body, save)
+async def count_records_for_account(session: AsyncSession, *, account_id: UUID) -> int:
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(GeminiRuntimeState)
+            .where(
+                GeminiRuntimeState.account_id == account_id, GeminiRuntimeState.kind == "records"
+            )
+        )
+        or 0
+    )
+
+
+async def delete_records_for_account(session: AsyncSession, *, account_id: UUID) -> int:
+    result = await session.execute(
+        delete(GeminiRuntimeState).where(
+            GeminiRuntimeState.account_id == account_id, GeminiRuntimeState.kind == "records"
+        )
+    )
+    return cast(CursorResult[object], result).rowcount
