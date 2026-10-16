@@ -386,6 +386,12 @@ def test_a_group_chat_sender_naming_a_foreign_tenant_is_denied() -> None:
     assert _parse(payload) == Refusal(DENIED), "a group chat sender is ours, as in a 1:1 chat"
 
 
+@pytest.mark.parametrize("chat", ["19:meeting_abc@thread.skype", "a:not-a-group"])
+def test_a_group_chat_whose_id_is_not_one_is_denied(chat: str) -> None:
+    """A stored turn resumes by its id's kind, so a group chat must look like one."""
+    assert _parse(make_group_activity(conversation_id=chat)) == Refusal(DENIED)
+
+
 def test_a_stored_turn_knows_its_kind_from_its_ids() -> None:
     assert kind_of(GROUP_CHAT_ID, GROUP_CHAT_ID) == "group", "a group chat keys on itself"
     assert kind_of(CONVERSATION_ID, CONVERSATION_ID) == "dm"

@@ -357,6 +357,8 @@ def parse_inbound(
         and activity.channel_id == "msteams"
         and bool(conversation.id.strip())
         and bool(activity.id.strip())
+        # A stored turn's kind comes from its id (`kind_of`): a group chat must read as one.
+        and (kind != "groupChat" or is_group_chat(conversation.id))
     )
     if not verified or tenant is None or user_id is None:
         return Refusal(DENIED if addressed else None)
