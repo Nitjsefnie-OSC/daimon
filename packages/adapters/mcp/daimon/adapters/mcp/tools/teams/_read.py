@@ -216,7 +216,7 @@ async def _teams_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
     kept = [
         m for m in page.value if read_policy.allows(thread_id(ref.channel_id, m.id), ref.channel_id)
     ]
-    links = await file_links(runtime, auth, client, ref, (x for m in kept for x in (m, *m.replies)))
+    links = await file_links(client, ref, (x for m in kept for x in (m, *m.replies)))
     posts = [p for m in kept if (p := _post(m, channel_id=ref.channel_id, links=links)) is not None]
     posts.reverse()
     next_cursor = skiptoken_of(page.next_link)
@@ -261,7 +261,7 @@ async def _teams_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
             messages.insert(0, await graph.get_message(ref.group_id, ref.channel_id, root))
     except GraphUnavailable as err:
         raise _graph_refused(err) from err
-    links = await file_links(runtime, auth, client, ref, messages)
+    links = await file_links(client, ref, messages)
     rows = [
         row
         for message in messages
@@ -300,7 +300,7 @@ async def _teams_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
                 "channel_id=<channel>;messageid=<root>"
             ) from err
         raise _graph_refused(err) from err
-    links = await file_links(runtime, auth, client, ref, [message])
+    links = await file_links(client, ref, [message])
     row = _row(message, channel_id=ref.channel_id, root_id=root or message.id, links=links)
     if row is None:
         raise ToolError("that message was deleted, or is a system event")
@@ -467,7 +467,7 @@ async def _teams_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
     links: dict[str, dict[str, str]] = {}
     for ref in refs[:_SEARCH_CHANNELS]:
         if mine := [m for r, _, m in found if r is ref]:
-            links[ref.channel_id] = await file_links(runtime, auth, client, ref, mine)
+            links[ref.channel_id] = await file_links(client, ref, mine)
     matches = [
         TeamsSearchMatch(channel_id=ref.channel_id, channel_name=ref.channel_name, message=row)
         for ref, root, message in found

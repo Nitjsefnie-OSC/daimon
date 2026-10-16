@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -71,6 +73,8 @@ class _Fake:
         # A file posted from a library folder outside the channel's own (`Board`).
         self.restricted = False
         self.site_status = 200
+        # Shared file name -> its folder, as `/shares` found it.
+        self._folders: dict[str, str] = {}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -145,25 +149,28 @@ class _Fake:
         return [{"contentType": "reference", "name": name, "contentUrl": url}]
 
     def _site(self, path: str) -> httpx.Response | None:
-        """The channel's SharePoint site, readable only once granted (`site_status`)."""
-        if path == f"/v1.0/groups/{_GROUP}/sites/root":
+        """The channel's files, readable once `Files.ReadWrite.All` is consented (`site_status`)."""
+        if path.endswith("/filesFolder"):
             if self.site_status != 200:
                 return httpx.Response(self.site_status)
-            return httpx.Response(200, json={"id": _SITE})
-        if path == "/v1.0/sites/example.sharepoint.com:/sites/team":
-            return httpx.Response(200, json={"id": _SITE})
-        if path == f"/v1.0/sites/{_SITE}/drives":
-            return httpx.Response(200, json={"value": [{"id": "b!d", "webUrl": _LIBRARY}]})
-        # The channel's folder, found by name: `filesFolder` is refused under `Sites.Selected`.
-        if path in (f"/v1.0/sites/{_SITE}/drive/root:/research", "/v1.0/drives/b!d/items/f1"):
-            parent = {"driveId": "b!d", "path": "/drives/b!d/root:"}
+            # A private channel's folder is on a site of its own.
+            drive = "b!p" if f"/channels/{_PRIVATE}/" in path else "b!d"
+            return httpx.Response(200, json={"id": "f1", "parentReference": {"driveId": drive}})
+        if path in ("/v1.0/drives/b!d/items/f1", "/v1.0/drives/b!p/items/f1"):
+            parent = {"driveId": path.split("/")[3], "path": f"/drives/{path.split('/')[3]}/root:"}
             return httpx.Response(
                 200, json={"id": "f1", "name": "research", "parentReference": parent}
             )
-        if path.startswith("/v1.0/drives/b!d/root:/"):
-            folder, name = path.removeprefix("/v1.0/drives/b!d/root:/").rsplit("/", 1)
+        if path.startswith("/v1.0/shares/u!") and path.endswith("/driveItem"):
+            share = path.removeprefix("/v1.0/shares/u!").removesuffix("/driveItem")
+            url = base64.urlsafe_b64decode(share + "=" * (-len(share) % 4)).decode()
+            folder, name = unquote(url).removeprefix(f"{_LIBRARY}/").rsplit("/", 1)
+            self._folders[name] = folder
+            return httpx.Response(200, json={"id": name, "parentReference": {"driveId": "b!d"}})
+        if path.startswith("/v1.0/drives/b!d/items/"):
+            name = path.removeprefix("/v1.0/drives/b!d/items/")
             download = f"https://example.sharepoint.com/download/{name}?tempauth=t"
-            parent = {"driveId": "b!d", "path": f"/drives/b!d/root:/{folder}"}
+            parent = {"driveId": "b!d", "path": f"/drives/b!d/root:/{self._folders[name]}"}
             item = {"id": name, "parentReference": parent, "@microsoft.graph.downloadUrl": download}
             return httpx.Response(200, json=item)
         return None
@@ -341,7 +348,7 @@ async def test_a_sealed_thread_stays_out_of_its_channel_reads(
 
 
 @pytest.mark.parametrize("granted", [True, False])
-async def test_files_are_linked_only_where_the_channels_site_is_granted(
+async def test_files_are_linked_only_where_the_files_permission_is_granted(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession], granted: bool
 ) -> None:
     auth, fake = await _setup(db_session), _Fake()
@@ -369,14 +376,15 @@ async def test_files_are_linked_only_where_the_channels_site_is_granted(
         ]
     else:
         assert all(f.url is None for f in files)
-        sites = [r for r in fake.graph() if "/sites" in r.url.path]
-        assert len(sites) == 2, "a refused site stops each read's lookups at the first"
+        paths = [r.url.path for r in fake.graph()]
+        assert len([p for p in paths if p.endswith("/filesFolder")]) == 2, "one try per read"
+        assert not [p for p in paths if p.startswith("/v1.0/shares/")], "no file is looked up"
 
 
 async def test_a_file_outside_the_channels_folder_is_named_but_not_linked(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The site grant ignores per-file permissions, so only the channel's own folder is linked."""
+    """The permission ignores per-file permissions, so only the channel's own folder is linked."""
     auth, fake = await _setup(db_session), _Fake()
     fake.files = fake.restricted = True
     read = await _teams_read_channel_impl(
@@ -395,7 +403,7 @@ async def test_a_file_outside_the_channels_folder_is_named_but_not_linked(
     }, "a file from another folder on the site is listed by name only"
 
 
-async def test_no_link_for_a_sealed_thread_or_an_ungranted_private_channel(
+async def test_no_link_for_a_sealed_thread_or_a_file_outside_a_private_channels_folder(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     auth, fake = await _setup(db_session), _Fake()
@@ -415,8 +423,12 @@ async def test_no_link_for_a_sealed_thread_or_an_ungranted_private_channel(
     private = await _teams_read_channel_impl(
         runtime, auth, channel_id=_PRIVATE, limit=5, cursor=None, read_policy=inside
     )
-    assert all(f.url is None for p in private.posts for f in p.files)
-    assert not [r for r in fake.graph() if "/sites" in r.url.path], "its own site is not stored"
+    assert all(f.url is None for p in private.posts for f in p.files), (
+        "the team site's files are outside the private channel's own folder"
+    )
+    assert any(
+        r.url.path == f"/v1.0/teams/{_GROUP}/channels/{_PRIVATE}/filesFolder" for r in fake.graph()
+    ), "its own folder is looked up"
 
 
 async def test_list_channels_hides_private_channels_from_non_members(

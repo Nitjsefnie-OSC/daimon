@@ -20,7 +20,6 @@ from daimon.adapters.mcp.tools.teams._send import (
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.file_uploads import create_upload, store_upload_content
-from daimon.core.stores.teams_channel_sites import upsert_teams_channel_site
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.teams_file_offers import UploadOffer, verify_offer
 from daimon.testing.factories import make_tenant
@@ -62,6 +61,10 @@ class _Fake:
         if url.host == "graph.microsoft.com":
             if self.graph_status != 200:
                 return httpx.Response(self.graph_status)
+            if path.endswith(f"/channels/{_PRIVATE}/filesFolder"):
+                # A private channel's folder is on a site of its own.
+                folder = {"id": "f-private", "parentReference": {"driveId": "d-private"}}
+                return httpx.Response(200, json=folder)
             if path.endswith("/filesFolder"):
                 return httpx.Response(200, json={"id": "f1", "parentReference": {"driveId": "d1"}})
             if request.method == "PUT":
@@ -142,11 +145,11 @@ async def test_a_channel_file_is_saved_to_its_files_and_linked(
     assert json.loads(post.content)["text"] == f"the chart\n\n- [chart.png]({_WEB_URL})"
 
 
-async def test_a_channel_without_site_access_refuses_and_posts_nothing(
+async def test_a_channel_without_the_files_permission_refuses_and_posts_nothing(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     (auth, handle), fake = await _setup(db_session), _Fake(graph_status=403)
-    with pytest.raises(ToolError, match="SharePoint site is not granted"):
+    with pytest.raises(ToolError, match="Files.ReadWrite.All"):
         await _teams_send_message_impl(
             _runtime(fake, sessionmaker),
             auth,
@@ -157,35 +160,11 @@ async def test_a_channel_without_site_access_refuses_and_posts_nothing(
     assert fake.posts() == []
 
 
-async def test_a_private_channel_takes_no_files_until_they_are_turned_on(
+async def test_a_private_channel_saves_to_its_own_files_folder(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
+    """`filesFolder` names the channel's own folder, never the team site's same-named one."""
     (auth, handle), fake = await _setup(db_session), _Fake()
-    with pytest.raises(ToolError, match="enable_channel_files"):
-        await _teams_send_message_impl(
-            _runtime(fake, sessionmaker),
-            auth,
-            channel_id=_PRIVATE,
-            content="x",
-            file_handles=[handle],
-        )
-    assert fake.graph() == [] and fake.posts() == [], "never the team site's same-named folder"
-
-
-async def test_a_private_channel_turned_on_saves_to_its_stored_folder(
-    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
-) -> None:
-    """The folder an admin's sign-in found is used as is: the app cannot look it up."""
-    (auth, handle), fake = await _setup(db_session), _Fake()
-    await upsert_teams_channel_site(
-        db_session,
-        tenant_id=auth.tenant_id,
-        channel_id=_PRIVATE,
-        group_id=_GROUP,
-        site_id="contoso.sharepoint.com,s,w",
-        drive_id="d-private",
-        folder_id="f-private",
-    )
     await _teams_send_message_impl(
         _runtime(fake, sessionmaker),
         auth,
@@ -194,8 +173,9 @@ async def test_a_private_channel_turned_on_saves_to_its_stored_folder(
         file_handles=[handle],
     )
     assert [(r.method, r.url.path) for r in fake.graph()] == [
-        ("PUT", "/v1.0/drives/d-private/items/f-private:/chart.png:/content")
-    ], "straight to the stored folder, no filesFolder or team-site lookup"
+        ("GET", f"/v1.0/teams/{_GROUP}/channels/{_PRIVATE}/filesFolder"),
+        ("PUT", "/v1.0/drives/d-private/items/f-private:/chart.png:/content"),
+    ], "its own folder, looked up through Graph"
     assert len(fake.posts()) == 1, "the message links the saved file"
 
 
@@ -263,16 +243,19 @@ async def test_files_refused_where_teams_takes_none_or_the_handle_is_unknown(
     assert fake.posts() == []
 
 
-async def test_an_external_participant_in_a_shared_channel_gets_the_tool_error(
+async def test_an_external_participant_in_a_shared_channel_saves_to_its_files(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
+    """The shared channel's own folder, which its members, external ones included, share."""
     (auth, handle), fake = await _setup(db_session), _Fake()
-    with pytest.raises(ToolError, match="SharePoint site is not granted"):
-        await _teams_send_message_impl(
-            _runtime(fake, sessionmaker),
-            dataclasses.replace(auth, is_external=True),
-            channel_id=_SHARED,
-            content="x",
-            file_handles=[handle],
-        )
-    assert fake.graph() == [] and fake.posts() == [], "refused before anything is saved"
+    await _teams_send_message_impl(
+        _runtime(fake, sessionmaker),
+        dataclasses.replace(auth, is_external=True),
+        channel_id=_SHARED,
+        content="x",
+        file_handles=[handle],
+    )
+    assert [r.url.path for r in fake.graph()][0] == (
+        f"/v1.0/teams/{_GROUP}/channels/{_SHARED}/filesFolder"
+    ), "the channel's own folder"
+    assert len(fake.posts()) == 1, "the message links the saved file"
