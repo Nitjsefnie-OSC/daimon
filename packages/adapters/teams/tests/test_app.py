@@ -48,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    ADMIN_TEAM,
     BOT_ACCOUNT_ID,
     CHANNEL_ID,
     CONVERSATION_ID,
@@ -67,7 +68,6 @@ from .conftest import (
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-ADMIN_TEAM = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
 
 
 def test_agent_name_prefix_follows_deployment_switch() -> None:
@@ -829,26 +829,16 @@ async def test_an_external_participants_command_is_not_intercepted(
     )
 
 
-async def test_an_external_participant_is_never_an_admin(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    teams = _app(db_session_factory, FakeSender())
-    teams._teams = teams._teams.model_copy(update={"admin_user_ids": [AAD_OBJECT_ID]})
-    assert await teams._role(make_inbound()) is Role.ADMIN, "listed and ours"
-    assert await teams._role(_external()) is Role.USER, "listed, but from another organisation"
-
-
 async def test_an_owner_of_the_admin_team_gets_the_admin_role(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    team = ADMIN_TEAM
     teams = _app(db_session_factory, FakeSender())
-    teams._teams = teams._teams.model_copy(update={"admin_team_id": team})
+    teams._teams = teams._teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
     owners = AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
     teams.runtime = dataclasses.replace(teams.runtime, team_owners=owners)
     assert await teams._role(make_inbound()) is Role.ADMIN, "an owner of the admin team"
     assert await teams._role(_external()) is Role.USER, "an owner, but held as from outside"
-    owners.assert_awaited_with(team)
+    owners.assert_awaited_with(ADMIN_TEAM)
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

@@ -53,7 +53,7 @@ from daimon.adapters.teams.context import (
     render_user_message,
 )
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
-from daimon.adapters.teams.deployment_admins import boot_admin_ids, inbound_is_admin, inbound_role
+from daimon.adapters.teams.deployment_admins import boot_owner_ids, inbound_is_admin, inbound_role
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.group_chats import OUTSIDERS_PRESENT, RosterCheck, placed, turn_guard
 from daimon.adapters.teams.identity import (
@@ -711,7 +711,7 @@ class TeamsApp:
             public_url=public_url,
             entra_tenant_id=self._teams.tenant_id,
             signup_credit=settings.billing.signup_credit,
-            admin_user_ids=await boot_admin_ids(self.runtime, self._teams),
+            admin_ids=await boot_owner_ids(self.runtime, self._teams),
         )
 
     async def drain(self, timeout: float) -> None:

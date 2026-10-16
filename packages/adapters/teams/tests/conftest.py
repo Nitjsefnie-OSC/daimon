@@ -22,6 +22,7 @@ from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.channel_admins import GroupLookupFailed, GroupMembers
 from daimon.core.config import (
     PrivateChannelMessagesSettings,
     SupportSettings,
@@ -68,6 +69,8 @@ THREAD_ID = f"{CHANNEL_ID};messageid=1700000000001"
 GROUP_CHAT_ID = "19:group-chat-1@thread.v2"
 # The Entra group behind the fixtures' team, as Bot Framework's team details name it.
 TEAM_GROUP_ID = "00000000-0000-0000-0000-000000007ea3"
+#: `DAIMON_TEAMS__ADMIN_TEAM_ID`: its owners are the deployment admins.
+ADMIN_TEAM = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
 DIRECT_CHAT_ID = "a:direct-chat"
 USER_NAME = "Ada Lovelace"
 # Vendored for an offline test from
@@ -103,7 +106,6 @@ MAX_ACTIVITY_BYTES = 26_000  # a margin under Teams' 28 KB
 def teams_settings(
     *,
     enabled: bool = True,
-    admins: tuple[str, ...] = (),
     public_url: str | None = None,
 ) -> TeamsSettings:
     return TeamsSettings.model_validate(
@@ -112,7 +114,6 @@ def teams_settings(
             "client_secret": "test-secret",
             "tenant_id": ENTRA_TENANT_ID,
             "enabled": enabled,
-            "admin_user_ids": admins,
             "public_url": public_url,
         }
     )
@@ -455,14 +456,18 @@ def build_teams_runtime(
     http_client: httpx.AsyncClient | None = None,
     deployment_default: DeploymentDefault | None = None,
     private_channel_messages: bool = False,
+    admins: tuple[str, ...] = (),
 ) -> TeamsRuntime:
     """A runtime over the test DB and a fake MA transport, with real turn deps.
 
     Outbound HTTP never reaches the network: it answers 404 unless given.
+    `admins` own `ADMIN_TEAM`, which is then the admin team.
     """
     settings = MagicMock()
     settings.agent_identity.enabled = False
     settings.teams = teams or teams_settings()
+    if admins:
+        settings.teams = settings.teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
     settings.turn_queue = TurnQueueSettings()
     settings.crypto.keys = ()
     settings.mcp.public_url = None
@@ -497,7 +502,19 @@ def build_teams_runtime(
             billing_config=None,
         ),
         deployment_default=deployment_default,
+        team_owners=admin_team(admins) if admins else None,
     )
+
+
+def admin_team(owners: Sequence[str]) -> GroupMembers:
+    """Graph's owner read: `owners` own `ADMIN_TEAM`; any other team is refused."""
+
+    async def read(group_id: str) -> frozenset[str]:
+        if group_id != ADMIN_TEAM:
+            raise GroupLookupFailed("not the test's admin team (status 404)")
+        return frozenset(owners)
+
+    return read
 
 
 @contextmanager

@@ -268,8 +268,10 @@ async def test_an_admin_whose_channel_files_are_refused_gets_the_enable_files_si
 ) -> None:
     """A card, once: the sign-in that grants the team's site goes to a daimon admin only."""
     admins = (AAD_OBJECT_ID,) if admin else ()
-    teams = teams_settings(admins=admins, public_url="https://teams.example")
-    runtime = build_teams_runtime(db_session_factory, teams=teams, http_client=_graph([]))
+    teams = teams_settings(public_url="https://teams.example")
+    runtime = build_teams_runtime(
+        db_session_factory, teams=teams, http_client=_graph([]), admins=admins
+    )
     with patched_turns():
         async with running_service(runtime, teams_api_fake) as service:
             for _ in range(2):
@@ -303,13 +305,15 @@ async def test_the_agents_enable_files_call_posts_the_card_for_this_channel(
     The card follows the answer though nothing was refused: files already work here.
     Only for an admin, and only after a call that succeeded.
     """
-    teams = teams_settings(
-        admins=(AAD_OBJECT_ID,) if admin else (), public_url="https://teams.example"
-    )
+    teams = teams_settings(public_url="https://teams.example")
     anthropic = build_fake_anthropic(combine_handlers(_no_outputs, make_agent_env_echo_handler()))
     graph = _graph([], site=GRANTED_SITE)
     runtime = build_teams_runtime(
-        db_session_factory, anthropic=anthropic, teams=teams, http_client=graph
+        db_session_factory,
+        anthropic=anthropic,
+        teams=teams,
+        http_client=graph,
+        admins=(AAD_OBJECT_ID,) if admin else (),
     )
     asked = ToolUseBlock(
         kind="tool_use",

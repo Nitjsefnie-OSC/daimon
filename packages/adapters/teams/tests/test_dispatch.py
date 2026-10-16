@@ -38,7 +38,6 @@ from .conftest import (
     patched_turns,
     post_activity,
     running_service,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token")
@@ -53,7 +52,7 @@ async def _running(
     admins: tuple[str, ...] = (),
 ) -> AsyncIterator[tuple[TeamsHttpService, list[dict[str, Any]]]]:
     """A started service whose MA turn answers "Hello from Teams!"."""
-    runtime = build_teams_runtime(db_factory, teams=teams_settings(admins=admins))
+    runtime = build_teams_runtime(db_factory, admins=admins)
     with patched_turns("Hello from Teams!") as turns:
         async with running_service(runtime, fake) as service:
             yield service, turns

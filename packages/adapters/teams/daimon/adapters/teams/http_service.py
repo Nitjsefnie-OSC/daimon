@@ -280,7 +280,8 @@ def create_teams_http_service(
     graph, groups = GraphClient(runtime.http_client, graph_token), TeamGroups(team_group)
     owner_reads = demoting_owner_reads(
         runtime,
-        functools.partial(fetch_team_owner_ids, graph),
+        # A runtime that brings its own owner read (tests) keeps it, still demoting.
+        runtime.team_owners or functools.partial(fetch_team_owner_ids, graph),
         # `spawn` is bound below, before any read: the drain waits for a demotion.
         in_background=lambda coro: spawn(coro, name="teams.admin_demotion"),
     )

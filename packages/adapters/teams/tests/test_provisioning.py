@@ -53,7 +53,7 @@ async def _provision(
             public_url=None,
             entra_tenant_id=ENTRA_TENANT_ID,
             signup_credit=Decimal("0"),
-            admin_user_ids=admins,
+            admin_ids=admins,
         )
     return await get_tenant_liveness(db_factory, TENANT)
 
@@ -119,7 +119,7 @@ async def test_boot_demotes_an_admin_removed_from_the_list(
             k: getattr(await get_account(session, a), "role", None) for k, a in accounts.items()
         }
     assert roles == {"kept": Role.ADMIN, "removed": Role.USER, "elsewhere": Role.ADMIN}, (
-        "only this organisation's unlisted Teams admins are demoted"
+        "only this organisation's Teams admins who are not owners are demoted"
     )
 
 

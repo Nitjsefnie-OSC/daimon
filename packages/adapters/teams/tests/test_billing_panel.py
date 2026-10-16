@@ -78,7 +78,6 @@ from .conftest import (
     make_message_activity,
     post_activity,
     running_service,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
@@ -92,9 +91,8 @@ def _running(
     admins: tuple[str, ...] = (AAD_OBJECT_ID,),
 ) -> AbstractAsyncContextManager[TeamsHttpService]:
     """An admin (AAD_OBJECT_ID) and a member (OTHER_AAD_OBJECT_ID); `mcp` fakes checkout."""
-    settings = teams_settings(admins=admins)
     client = None if mcp is None else httpx.AsyncClient(transport=mcp)
-    runtime = build_teams_runtime(db_factory, teams=settings, http_client=client)
+    runtime = build_teams_runtime(db_factory, http_client=client, admins=admins)
     runtime.settings.mcp.app_root_url = "https://mcp.example"
     runtime.settings.mcp.jwt_secret = SecretStr("test-jwt-secret-at-least-32-chars-long!!")
     return running_service(runtime, fake)

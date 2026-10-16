@@ -724,36 +724,6 @@ async def test_admin_await_cannot_bypass_requester_expiry_or_fail_closed(
         await asyncio.gather(waiting, return_exceptions=True)
 
 
-async def test_runtime_hook_rechecks_current_configured_admins(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from uuid import uuid4
-
-    from daimon.core import confirmation
-    from daimon.core.config import TurnSettings
-
-    tenant, account = uuid4(), uuid4()
-    runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
-    runtime.settings.teams.admin_user_ids = (AAD_OBJECT_ID,)
-    runtime.settings.teams.admin_team_id = None
-    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
-    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
-    TeamsConfirmationCards(FakeSender()).hook(
-        conversation_id=CONVERSATION_ID,
-        service_url=SERVICE_URL,
-        runtime=runtime,
-        tenant_id=tenant,
-        account_id=account,
-    )
-    kwargs = factory.call_args.kwargs
-    assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
-    check = kwargs["current_admin"]
-    assert await check(AAD_OBJECT_ID) is True
-    runtime.settings.teams.admin_user_ids = ()
-    assert await check(AAD_OBJECT_ID) is False
-
-
 async def test_clicks_check_the_cached_owners_and_read_again_only_for_a_yes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -764,18 +734,20 @@ async def test_clicks_check_the_cached_owners_and_read_again_only_for_a_yes(
     owners = AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
     runtime = MagicMock(team_owners=owners, group_members=GroupMembersCache())
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
-    runtime.settings.teams.admin_user_ids = ()
     runtime.settings.teams.admin_team_id = team
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    tenant, account = uuid.uuid4(), uuid.uuid4()
     TeamsConfirmationCards(FakeSender()).hook(
         conversation_id=CONVERSATION_ID,
         service_url=SERVICE_URL,
         runtime=runtime,
-        tenant_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
+        tenant_id=tenant,
+        account_id=account,
     )
-    check = factory.call_args.kwargs["current_admin"]
+    kwargs = factory.call_args.kwargs
+    assert (kwargs["tenant_id"], kwargs["account_id"]) == (tenant, account), "the turn's ids"
+    check = kwargs["current_admin"]
     for _ in range(25):
         assert await check(OTHER_AAD_OBJECT_ID) is False, "a non-owner is no admin"
     assert owners.await_count == 1, "a cached no needs no further read"
@@ -824,7 +796,6 @@ async def test_always_click_rechecks_revoked_team_owner_after_cache_fill(
         sessionmaker=db_session_factory, team_owners=owners, group_members=GroupMembersCache()
     )
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=False)
-    runtime.settings.teams.admin_user_ids = ()
     runtime.settings.teams.admin_team_id = None
     members = team_owner_lookup(runtime)
     assert members is not None and OTHER_AAD_OBJECT_ID in await members(team_id)

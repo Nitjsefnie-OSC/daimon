@@ -732,16 +732,7 @@ class TeamsSettings(BaseModel):
             "app must be installed in that team. To find the ID, open the "
             "team's ⋯ menu in Teams, choose Get link to team and copy the "
             "groupId parameter. Guests and people from another organisation "
-            "are never admins. Unset with no admin_user_ids: nobody is an admin."
-        ),
-    )
-    admin_user_ids: tuple[str, ...] = Field(
-        default=(),
-        description=(
-            "Deprecated in favour of admin_team_id; still honoured, as admins "
-            "on top of that team's owners, and a warning is logged at startup "
-            "while it is set. Entra object IDs of people who administer this "
-            "deployment from Teams."
+            "are never admins. Unset: nobody is an admin."
         ),
     )
     restrict_guests: bool = Field(
@@ -763,17 +754,6 @@ class TeamsSettings(BaseModel):
             "admin role. When False, they are treated as team members."
         ),
     )
-
-    @field_validator("admin_user_ids")
-    @classmethod
-    def _canonicalize_admin_user_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        """Compare against the canonical lowercase form inbound ids arrive in."""
-        try:
-            return tuple(str(UUID(item)) for item in value)
-        except ValueError:
-            raise ValueError(
-                "DAIMON_TEAMS__ADMIN_USER_IDS must list Entra object ID UUIDs"
-            ) from None
 
     @field_validator("admin_team_id")
     @classmethod

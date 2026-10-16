@@ -1,4 +1,4 @@
-"""Deployment admins on Teams: the admin team's owners, plus the deprecated list."""
+"""Deployment admins on Teams: the admin team's owners, and nobody else."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from daimon.adapters.teams.deployment_admins import (
     STALE_OWNERS_S,
     AdminTeamReads,
     admin_team_owners,
-    boot_admin_ids,
+    boot_owner_ids,
     demoting_owner_reads,
     deployment_admin_ids,
     deployment_role,
@@ -41,8 +41,8 @@ FOREIGN_TENANT = "99999999-9999-9999-9999-999999999999"
 REMOVED_OWNER = str(uuid.UUID(int=4))
 
 
-def _settings(*, team: str | None = TEAM, admins: tuple[str, ...] = ()) -> TeamsSettings:
-    return teams_settings(admins=admins).model_copy(update={"admin_team_id": team})
+def _settings(*, team: str | None = TEAM) -> TeamsSettings:
+    return teams_settings().model_copy(update={"admin_team_id": team})
 
 
 class _Owners:
@@ -85,9 +85,9 @@ async def test_an_owner_of_the_admin_team_is_an_admin_and_a_member_is_not() -> N
 async def test_an_owner_held_as_from_outside_is_never_an_admin() -> None:
     """A guest held as one, an external participant or a group chat with outsiders."""
     owners = admin_team_owners(_runtime(_Owners(AAD_OBJECT_ID)))
-    settings = _settings(admins=(AAD_OBJECT_ID,))
+    settings = _settings()
     external = await is_deployment_admin(settings, owners, user_id=AAD_OBJECT_ID, is_external=True)
-    assert not external, "someone answered as from outside is never an admin, listed or owner"
+    assert not external, "someone answered as from outside is never an admin, owner or not"
     foreign = await is_deployment_admin(
         settings, owners, user_id=AAD_OBJECT_ID, is_external=False, home_tenant_id=FOREIGN_TENANT
     )
@@ -102,36 +102,28 @@ async def test_a_failed_owner_read_grants_nothing_and_logs_once() -> None:
     owners = _Owners(AAD_OBJECT_ID)
     owners.failure = "http error (status 403)"
     runtime = _runtime(owners)
-    settings = _settings(admins=(OTHER_AAD_OBJECT_ID,))
+    settings = _settings()
     with structlog.testing.capture_logs() as logs:
         assert not await _is_admin(runtime, settings, AAD_OBJECT_ID), "a failed read fails closed"
         assert not await _is_admin(runtime, settings, AAD_OBJECT_ID), "a cached failure too"
-        assert await _is_admin(runtime, settings, OTHER_AAD_OBJECT_ID), "the old list still works"
     failed = [log for log in logs if log["event"] == "teams.admin_team.lookup_failed"]
     assert len(failed) == 1, f"one log per failed read, not per check: {logs}"
     assert failed[0]["reason"] == "http error (status 403)", "reason and status only"
     assert owners.reads == 1, "the failure is cached, not read again by every check"
 
 
-async def test_the_deprecated_list_still_counts_and_warns_at_boot() -> None:
+async def test_boot_keeps_only_the_owners_and_without_a_team_nobody() -> None:
     runtime = _runtime(_Owners(AAD_OBJECT_ID))
-    settings = _settings(admins=(OTHER_AAD_OBJECT_ID,))
-    assert await _is_admin(runtime, settings, OTHER_AAD_OBJECT_ID), "a listed id administers"
-    with structlog.testing.capture_logs() as logs:
-        boot = await boot_admin_ids(runtime, settings)
-    assert boot == tuple(sorted({AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID})), "owners and the list"
-    warned = [log for log in logs if log["event"] == "teams.admin_user_ids_deprecated"]
-    assert len(warned) == 1 and warned[0]["log_level"] == "warning", logs
-    with structlog.testing.capture_logs() as quiet:
-        await boot_admin_ids(runtime, _settings())
-    assert not quiet, "no warning without the deprecated list"
+    assert await boot_owner_ids(runtime, _settings()) == {AAD_OBJECT_ID}, "the owners stay"
+    no_team = await boot_owner_ids(runtime, _settings(team=None))
+    assert no_team == frozenset(), "no admin team: every stored admin is demoted"
 
 
 async def test_with_neither_set_nobody_is_an_admin() -> None:
     owners = _Owners(AAD_OBJECT_ID)
     runtime = _runtime(owners)
     settings = _settings(team=None)
-    assert not await _is_admin(runtime, settings, AAD_OBJECT_ID), "no team, no list: no admin"
+    assert not await _is_admin(runtime, settings, AAD_OBJECT_ID), "no admin team: no admin"
     assert await deployment_admin_ids(settings, admin_team_owners(runtime)) == ()
     assert owners.reads == 0, "no admin team is read"
 
@@ -146,11 +138,11 @@ async def test_a_removed_owner_loses_admin_when_the_cache_expires() -> None:
     assert not await _is_admin(runtime, _settings(), AAD_OBJECT_ID), "lapsed once it expires"
 
 
-async def test_notices_to_the_admins_reach_the_owners_and_the_list() -> None:
-    runtime = _runtime(_Owners(AAD_OBJECT_ID))
-    runtime.settings.teams = _settings(admins=(OTHER_AAD_OBJECT_ID,))
+async def test_notices_to_the_admins_reach_the_owners() -> None:
+    runtime = _runtime(_Owners(AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID))
+    runtime.settings.teams = _settings()
     expected = tuple(sorted({AAD_OBJECT_ID, OTHER_AAD_OBJECT_ID}))
-    assert await live_admin_ids(runtime)() == expected, "owners plus the deprecated list"
+    assert await live_admin_ids(runtime)() == expected, "every owner, sorted"
     runtime.settings.teams = _settings(team=None)
     assert await live_admin_ids(runtime)() == (), "nobody to tell, as before"
 
@@ -221,7 +213,7 @@ async def test_each_owner_read_demotes_a_removed_owners_stored_role_in_the_backg
     )
     graph, clock, background = _Owners(AAD_OBJECT_ID), [0.0], _Background()
     runtime = _runtime(graph, clock=clock)
-    runtime.settings.teams = settings = _settings(admins=(OTHER_AAD_OBJECT_ID,))
+    runtime.settings.teams = settings = _settings()
     runtime.sessionmaker = db_session_factory
     runtime.team_owners = demoting_owner_reads(runtime, graph, in_background=background)
 
@@ -231,20 +223,20 @@ async def test_each_owner_read_demotes_a_removed_owners_stored_role_in_the_backg
     await asyncio.gather(*background.tasks)
     assert await _roles(db_session_factory, accounts) == {
         AAD_OBJECT_ID: Role.ADMIN,
-        OTHER_AAD_OBJECT_ID: Role.ADMIN,
+        OTHER_AAD_OBJECT_ID: Role.USER,
         REMOVED_OWNER: Role.USER,
-    }, "only someone neither an owner nor listed is demoted"
+    }, "everyone not an owner is demoted"
 
     graph.failure, clock[0] = "http error (status 503)", 61.0
     await _is_admin(runtime, settings, AAD_OBJECT_ID)
     assert len(background.tasks) == 1, "a failed read demotes no one"
 
 
-async def test_an_outage_keeps_the_last_owners_for_an_hour_then_grants_nothing() -> None:
+async def test_an_outage_keeps_the_last_owners_for_an_hour_then_nobody_until_a_good_read() -> None:
     """Graph failing, or the app removed from the team, is not an instant lockout."""
     graph, clock = _Owners(AAD_OBJECT_ID), [0.0]
     runtime = _runtime(graph, clock=clock)
-    settings = _settings(admins=(OTHER_AAD_OBJECT_ID,))
+    settings = _settings()
     assert await _is_admin(runtime, settings, AAD_OBJECT_ID), "read while Graph answers"
     graph.failure, clock[0] = "http error (status 403)", 61.0
     assert await _is_admin(runtime, settings, AAD_OBJECT_ID), "the last read stands in"
@@ -252,15 +244,15 @@ async def test_an_outage_keeps_the_last_owners_for_an_hour_then_grants_nothing()
     owners = admin_team_owners(runtime)
     role = await deployment_role(settings, owners, user_id=AAD_OBJECT_ID, is_external=False)
     assert role is None, "past the hour, ownership is unknown: no role to record"
-    assert await deployment_admin_ids(settings, owners) == (OTHER_AAD_OBJECT_ID,), "list only"
-    listed = await deployment_role(settings, owners, user_id=OTHER_AAD_OBJECT_ID, is_external=False)
-    assert listed is Role.ADMIN, "the deprecated list still answers"
+    assert await deployment_admin_ids(settings, owners) == (), "nobody is an admin"
+    graph.failure, clock[0] = None, STALE_OWNERS_S + 61.0
+    assert await _is_admin(runtime, settings, AAD_OBJECT_ID), "the next good read restores them"
 
 
 async def test_boot_demotes_no_one_when_the_owners_cannot_be_read() -> None:
     graph = _Owners(AAD_OBJECT_ID)
     graph.failure = "http error (status 503)"
-    boot = await boot_admin_ids(_runtime(graph), _settings(admins=(OTHER_AAD_OBJECT_ID,)))
+    boot = await boot_owner_ids(_runtime(graph), _settings())
     assert boot is None, "a failed read must not take every owner's stored role"
 
 

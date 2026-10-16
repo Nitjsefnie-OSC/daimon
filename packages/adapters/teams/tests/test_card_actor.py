@@ -24,7 +24,6 @@ from .conftest import (
     THREAD_ID,
     build_teams_runtime,
     make_invoke,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("provisioned_tenant")
@@ -45,7 +44,7 @@ class _Externals:
 
 
 def _runtime(db: async_sessionmaker[AsyncSession], membership: Membership) -> TeamsRuntime:
-    runtime = build_teams_runtime(db, teams=teams_settings(admins=(AAD_OBJECT_ID,)))
+    runtime = build_teams_runtime(db, admins=(AAD_OBJECT_ID,))
     return dataclasses.replace(runtime, externals=cast(Any, _Externals(membership)))
 
 

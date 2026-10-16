@@ -53,7 +53,7 @@ class TeamsRuntime:
     deployment_default: DeploymentDefault = field(default_factory=DeploymentDefault)
     # Pre-save check of a pasted MCP token; production wires `probe_bearer_token`.
     mcp_token_probe: McpTokenProbe | None = None
-    # A team's owners by Entra group id, for channel admin grants; None (no
+    # A team's owners by Entra group id, for channel grants and the admin team; None (no
     # Graph) admits nobody by team. Production wires `fetch_team_owner_ids`.
     team_owners: GroupMembers | None = None
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)

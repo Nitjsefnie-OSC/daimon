@@ -53,7 +53,6 @@ from .conftest import (
     post_activity,
     running_service,
     settle,
-    teams_settings,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token")
@@ -361,7 +360,7 @@ async def test_task_fetch_opens_the_dialog_and_task_submit_creates_the_routine(
     runtime = build_teams_runtime(
         db_session_factory,
         anthropic=build_fake_anthropic(router.dispatch),
-        teams=teams_settings(admins=(AAD_OBJECT_ID,)),
+        admins=(AAD_OBJECT_ID,),
     )
     async with running_service(runtime, teams_api_fake) as service:
         opened = await post_activity(service, _load("task_fetch"))
