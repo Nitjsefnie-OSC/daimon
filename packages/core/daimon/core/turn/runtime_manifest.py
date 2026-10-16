@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints, overload
 from uuid import UUID
 
-from daimon.core.errors import TurnError
+from daimon.core.errors import DaimonError, TurnError
 from daimon.core.neutral_resources import (
     AgentFleetGrant,
     WorkerPermissions,
@@ -29,7 +29,7 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, ResourceRef, Scope, SkillRef
 from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProviderBinding, ResourceBinding
-from mux.errors import InvalidConfig, UnsupportedCapability
+from mux.errors import MuxError, UnsupportedCapability
 from mux.profiles import backend_selection, get_profile, native_agent_tools
 from mux.state.operations import OperationRecord, request_digest
 from mux.state.store import binding_slot
@@ -1340,6 +1340,7 @@ async def _capture_source_capabilities(
     No configured representation means no archive, catalogue or provider reads.
     Native target ownership/readback remains a separate mandatory preparation gate.
     """
+    from anthropic import AnthropicError
     from daimon.core.defaults.ma_index import download_skill_version
     from daimon.core.mcp_auth import mint_jwt
     from daimon.core.mcp_oauth.discovery import list_mcp_tools
@@ -1583,7 +1584,7 @@ async def _capture_source_capabilities(
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
             raise ValueError("ambiguous source representation")
         return source.model_copy(update={"representations": tuple(represented)})
-    except (OSError, ValueError, InvalidConfig):
+    except (OSError, ValueError, DaimonError, MuxError, AnthropicError):
         # Representations are optional capture evidence, never a new failure
         # mode for native callers or worker ceilings. Full deployments require
         # this evidence independently and refuse before any provider exposure.

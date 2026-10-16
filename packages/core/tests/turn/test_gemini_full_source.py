@@ -504,6 +504,7 @@ async def full(consent_request, monkeypatch, tmp_path):
             storage,
             catalogue_state,
             readback_calls,
+            capture_bound_source,
         )
     finally:
         await binding.close()
@@ -796,4 +797,31 @@ async def test_readback_cannot_verify_a_receipt_for_an_unmounted_directory(full)
     with pytest.raises(AdmissionDenied):
         await read_preparation_counterpart(scope_channel_runtimes(request)[0])
     assert not any(call.url.host == "storage.googleapis.com" for call in full[12])
+    assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("fault", ["version_unavailable", "provider_unavailable"])
+async def test_optional_skill_proof_outage_does_not_break_native_public_preview(
+    full, monkeypatch, fault
+):
+    from anthropic import APIConnectionError
+    from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.defaults import ma_index
+
+    request, _, canonical, _, _, posts, *_ = full
+
+    async def unavailable(*args, **kwargs):
+        if fault == "version_unavailable":
+            raise ma_index.SkillVersionNotFoundError("fixture version unavailable")
+        raise APIConnectionError(request=httpx.Request("GET", "https://offline.invalid/source"))
+
+    monkeypatch.setattr(ma_index, "download_skill_version", unavailable)
+    captured = await capture_preparation_source(request, fresh=True)
+    assert not captured.representations
+    service = AgentBackendService(request.deps.sessionmaker, enabled=True, capture_source=full[13])
+    quote = await service.preview(canonical.source, "anthropic")
+    assert quote.allowed and "tools" not in quote.declared_drops
+    with pytest.raises(AgentBackendRefused, match="re confirm"):
+        await prepare_source(request)
     assert not posts
