@@ -1210,3 +1210,78 @@ async def test_private_gcs_changed_or_unavailable_auth_never_dispatches(
     with pytest.raises((UnsupportedCapability, ProviderError)):
         await sdk.create(request)
     assert wire.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "get"])
+async def test_protected_response_refuses_network_transform_echo_without_exposing_it(
+    operation: str, caplog: pytest.LogCaptureFixture, recwarn: pytest.WarningsRecorder
+) -> None:
+    echoed = "offline-mount-token-must-not-escape"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                **interaction("native"),
+                "environment": {
+                    "network": {
+                        "allowlist": [
+                            {
+                                "domain": "storage.googleapis.com",
+                                "transform": {"Authorization": "Bearer " + echoed},
+                            }
+                        ]
+                    }
+                },
+            },
+        )
+
+    caplog.set_level(logging.DEBUG)
+    async with mcp_sdk(httpx.MockTransport(handle)) as client:
+        sdk = SDKTransport(client, protect_storage_credentials=True)
+        with pytest.raises(ProviderError, match="gcs_transform_echo") as error:
+            if operation == "create":
+                await sdk.create({"agent": "antigravity-preview-05-2026", "tools": [], "input": []})
+            else:
+                await sdk.get("native")
+    assert echoed not in str(error.value) and echoed not in caplog.text
+    assert not any(echoed in str(warning.message) for warning in recwarn)
+
+
+@pytest.mark.asyncio
+async def test_protected_stream_refuses_transform_echo_without_serializer_warning(
+    caplog: pytest.LogCaptureFixture, recwarn: pytest.WarningsRecorder
+) -> None:
+    echoed = "offline-stream-mount-token-must-not-escape"
+    frame = {
+        "event_type": "interaction.created",
+        "interaction": {
+            **interaction("native"),
+            "environment": {
+                "network": {
+                    "allowlist": [
+                        {
+                            "domain": "storage.googleapis.com",
+                            "transform": {"Authorization": "Bearer " + echoed},
+                        }
+                    ]
+                }
+            },
+        },
+    }
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=("data: " + json.dumps(frame) + "\n\n").encode(),
+        )
+
+    caplog.set_level(logging.DEBUG)
+    async with mcp_sdk(httpx.MockTransport(handle)) as client:
+        opened = await SDKTransport(client, protect_storage_credentials=True).open_stream("native")
+        with pytest.raises(ProviderError, match="gcs_transform_echo"):
+            await anext(opened)
+    assert echoed not in caplog.text
+    assert not any(echoed in str(warning.message) for warning in recwarn)

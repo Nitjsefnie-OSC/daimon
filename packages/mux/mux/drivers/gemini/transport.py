@@ -46,6 +46,24 @@ def string(value: JsonValue) -> str:
     return value
 
 
+def network_transform_present(value: JsonValue, *, in_network: bool = False) -> bool:
+    """Presence-only inspection; never serialize a potentially echoed secret."""
+    if isinstance(value, dict):
+        return (in_network and "transform" in value) or any(
+            network_transform_present(child, in_network=in_network or key == "network")
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(network_transform_present(child, in_network=in_network) for child in value)
+    return False
+
+
+def checked_storage_response(value: Object, *, protected: bool) -> Object:
+    if protected and network_transform_present(value):
+        raise ProviderError("permission", retryable=False, native_code="gcs_transform_echo")
+    return value
+
+
 def normalize_error(error: Exception) -> ProviderError:
     status = (
         error.status_code
@@ -120,7 +138,8 @@ class SDKTransport:
     supplied base client's HttpRetryOptions(attempts=1).
     """
 
-    def __init__(self, client: genai.Client) -> None:
+    def __init__(self, client: genai.Client, *, protect_storage_credentials: bool = False) -> None:
+        self._protect_storage_credentials = protect_storage_credentials
         # google-genai 2.7 forwards attempts as Stainless max_retries, so
         # attempts=1 still retries once. Set the Interactions edge to zero.
         nextgen = client.aio._nextgen_client  # pyright: ignore[reportPrivateUsage]
@@ -187,9 +206,10 @@ class SDKTransport:
                 "invalid_request", retryable=False, native_code="explicit_tools_required"
             )
         bounded = await refresh_bound_request(bounded)
+        protected = self._protect_storage_credentials or network_transform_present(bounded)
         if model_request(bounded):
             response = await provider_call(
-                self._interactions.create(
+                self._interactions.with_raw_response.create(
                     model=string(bounded["model"]),
                     input=[],
                     background=True,
@@ -200,7 +220,7 @@ class SDKTransport:
             )
         else:
             response = await provider_call(
-                self._interactions.create(
+                self._interactions.with_raw_response.create(
                     agent=string(bounded["agent"]),
                     input=[],
                     background=True,
@@ -209,16 +229,26 @@ class SDKTransport:
                     extra_headers={"Api-Revision": API_REVISION},
                 )
             )
-        return object_value(cast(JsonValue, response.model_dump(mode="json", exclude_none=True)))
+        if protected:
+            checked_storage_response(
+                object_value(cast(JsonValue, response.http_response.json())), protected=True
+            )
+        parsed = await response.parse()
+        return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
 
     async def get(self, interaction_id: str) -> Object:
         response = await provider_call(
-            self._interactions.get(
+            self._interactions.with_raw_response.get(
                 id=interaction_id,
                 extra_headers={"Api-Revision": API_REVISION},
             )
         )
-        return object_value(cast(JsonValue, response.model_dump(mode="json", exclude_none=True)))
+        if self._protect_storage_credentials:
+            checked_storage_response(
+                object_value(cast(JsonValue, response.http_response.json())), protected=True
+            )
+        parsed = await response.parse()
+        return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
 
     async def cancel(self, interaction_id: str) -> Object:
         response = await provider_call(
@@ -246,9 +276,18 @@ class SDKTransport:
         async def records() -> AsyncIterator[Object]:
             try:
                 async for event in source:
-                    yield object_value(
-                        cast(JsonValue, event.model_dump(mode="json", exclude_none=True))
-                    )
+                    if self._protect_storage_credentials:
+                        value = object_value(
+                            cast(
+                                JsonValue,
+                                event.model_dump(mode="json", exclude_none=True, warnings=False),
+                            )
+                        )
+                        yield checked_storage_response(value, protected=True)
+                    else:
+                        yield object_value(
+                            cast(JsonValue, event.model_dump(mode="json", exclude_none=True))
+                        )
             except (APIError, httpx.HTTPError) as error:
                 raise normalize_error(error) from None
             finally:

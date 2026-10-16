@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import stat
@@ -78,15 +79,10 @@ from pydantic import (
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
 
 
-def _private_credential(
-    path: Path, *, storage_until: datetime | None = None, current: datetime | None = None
-) -> str:
-    """Read one explicitly owned, bounded bearer file without following links."""
-    from mux.drivers.gemini.mcp_auth import credential
-
-    descriptor: int | None = None
+def _private_credential_bytes(path: Path) -> bytes:
+    """One owned, bounded, no-follow file reader for explicit credentials."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         info = os.fstat(descriptor)
         if (
             not stat.S_ISREG(info.st_mode)
@@ -98,27 +94,34 @@ def _private_credential(
             raw = stream.read(16_385)
         if len(raw) > 16_384:
             raise ValueError("invalid credential")
-        if storage_until is not None:
-            value = cast(JsonValue, json.loads(raw))
-            if not isinstance(value, dict) or set(value) != {"access_token", "expires_at"}:
-                raise ValueError("storage credential requires exact token/expiry fields")
-            expiry = value["expires_at"]
-            if not isinstance(expiry, str):
-                raise ValueError("storage credential expiry must be a timestamp")
-            expires = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
-            if (
-                current is None
-                or expires.tzinfo is None
-                or not storage_until + timedelta(seconds=30)
-                < expires
-                <= current + timedelta(hours=1)
-            ):
-                raise ValueError("storage credential expiry does not cover the bounded turn")
-            return credential(value["access_token"])
-        return credential(raw.decode().strip())
+        return raw
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
+        os.close(descriptor)
+
+
+def _private_credential(path: Path) -> str:
+    from mux.drivers.gemini.mcp_auth import credential
+
+    return credential(_private_credential_bytes(path).decode().strip())
+
+
+def _private_storage_credential(
+    path: Path, *, storage_until: datetime, current: datetime
+) -> tuple[str, datetime]:
+    from mux.drivers.gemini.mcp_auth import credential
+
+    value = cast(JsonValue, json.loads(_private_credential_bytes(path)))
+    if not isinstance(value, dict) or set(value) != {"access_token", "expires_at"}:
+        raise ValueError("storage credential requires exact token/expiry fields")
+    expiry = value["expires_at"]
+    if not isinstance(expiry, str):
+        raise ValueError("storage credential expiry must be a timestamp")
+    expires = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+    if expires.tzinfo is None or not storage_until + timedelta(
+        seconds=30
+    ) < expires <= current + timedelta(hours=1):
+        raise ValueError("storage credential expiry does not cover the bounded turn")
+    return credential(value["access_token"]), expires
 
 
 class GeminiPlan(BaseModel):
@@ -159,6 +162,8 @@ class GeminiPlan(BaseModel):
     )
     mcp_credential_file: Path | None = Field(default=None, exclude_if=lambda value: value is None)
     gcs_credential_file: Path | None = Field(default=None, exclude_if=lambda value: value is None)
+    gcs_mount_bucket: Nonblank | None = Field(default=None, exclude_if=lambda value: value is None)
+    gcs_mount_prefix: Nonblank | None = Field(default=None, exclude_if=lambda value: value is None)
     skill_deployments: tuple[GCSBundleDeployment, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
@@ -191,6 +196,8 @@ class GeminiPlan(BaseModel):
                 != self.skill_ids
                 or self.gcs_credential_file is None
                 or not self.gcs_credential_file.is_absolute()
+                or self.gcs_mount_bucket is None
+                or self.gcs_mount_prefix is None
                 or not self.skill_deployments
             ):
                 raise ValueError(
@@ -200,6 +207,8 @@ class GeminiPlan(BaseModel):
         elif (
             self.mcp_credential_file is not None
             or self.gcs_credential_file is not None
+            or self.gcs_mount_bucket is not None
+            or self.gcs_mount_prefix is not None
             or self.skill_deployments
         ):
             raise ValueError("capability dependencies require a verified source capability plan")
@@ -475,13 +484,26 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         if plan.gcs_credential_file is None:
             raise AdmissionDenied(reason="backend_unsupported")
         try:
-            token = _private_credential(
+            source_token, expires_at = _private_storage_credential(
                 plan.gcs_credential_file, storage_until=request.deadline, current=request.now()
             )
         except (OSError, ValueError):
             raise ScopeViolation(
                 "skill-deployment", "invalid explicit storage credential"
             ) from None
+        from mux.drivers.gemini.deployment import downscoped_storage_token
+
+        if plan.gcs_mount_bucket is None or plan.gcs_mount_prefix is None:
+            raise AdmissionDenied(reason="backend_unsupported")
+        token = await asyncio.to_thread(
+            downscoped_storage_token,
+            token=source_token,
+            expires_at=expires_at,
+            retained_until=request.deadline,
+            bucket=plan.gcs_mount_bucket,
+            prefix=plan.gcs_mount_prefix,
+            sources=tuple(item.source for item in plan.skill_deployments),
+        )
         await verify_retained_deployments(
             plan.skill_deployments,
             token=token,
@@ -549,7 +571,9 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         from mux.drivers.gemini.deployment import configured_catalog_transport, configured_transport
 
         return GeminiTransportRuntime(
-            configured_transport(api_key=secret),
+            configured_transport(api_key=secret, protect_storage_credentials=True)
+            if plan.source_capabilities is not None
+            else configured_transport(api_key=secret),
             configured_catalog_transport(api_key=secret)
             if request.admission.backend_revision_origin == "agent"
             else None,

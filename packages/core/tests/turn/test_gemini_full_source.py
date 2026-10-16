@@ -15,6 +15,7 @@ import zipfile
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, unquote
 
 import httpx
 import pytest
@@ -268,6 +269,31 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
     native, calls, posts = {}, [], []
 
     def handle(call):
+        if call.url.host == "sts.googleapis.com":
+            assert call.method == "POST" and call.url.path == "/v1/token"
+            body = parse_qs(call.content.decode())
+            assert body["subject_token"] == ["offline-storage-token"]
+            boundary = json.loads(unquote(body["options"][0]))
+            rules = boundary["accessBoundary"]["accessBoundaryRules"]
+            assert len(rules) == 1
+            rule = rules[0]
+            assert (
+                rule["availableResource"]
+                == "//storage.googleapis.com/projects/_/buckets/owned-offline"
+            )
+            assert rule["availablePermissions"] == ["inRole:roles/storage.objectViewer"]
+            assert (
+                f".startsWith('{scope.tenant_id}/{scope.account_id}/')"
+                in rule["availabilityCondition"]["expression"]
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "offline-downscoped-token",
+                    "expires_in": 3300,
+                    "token_type": "Bearer",
+                },
+            )
         calls.append(call)
         if call.url.path.startswith("/v1beta/agents"):
             if call.method == "POST":
@@ -323,6 +349,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
                     }
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
         assert call.url.host == "storage.googleapis.com" and call.method == "GET"
+        assert call.headers["Authorization"] == "Bearer offline-downscoped-token"
         if call.url.params.get("alt") == "media":
             assert call.url.params["generation"] == "123"
             return httpx.Response(200, content=storage[call.url.path.split("/o/", 1)[1]])
@@ -565,6 +592,8 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
         source_capabilities=capabilities,
         mcp_credential_file=credential,
         gcs_credential_file=gcs_credential,
+        gcs_mount_bucket="owned-offline",
+        gcs_mount_prefix=f"{scope.tenant_id}/{scope.account_id}/",
         skill_deployments=tuple(deployments),
     )
     manifest.write_text(json.dumps([plan.model_dump(mode="json")]))
@@ -656,7 +685,7 @@ async def test_full_default_preparation_and_fresh_followup_turns(full):
             "allowlist": [
                 {
                     "domain": "storage.googleapis.com",
-                    "transform": {"Authorization": "Bearer offline-storage-token"},
+                    "transform": {"Authorization": "Bearer offline-downscoped-token"},
                 }
             ]
         }
@@ -672,6 +701,7 @@ async def test_full_default_preparation_and_fresh_followup_turns(full):
     )
     assert all(
         b"offline-storage-token" not in path.read_bytes()
+        and b"offline-downscoped-token" not in path.read_bytes()
         for path in plan.records_path.parent.glob("records.sqlite*")
     )
 
