@@ -1166,3 +1166,70 @@ async def test_pending_resume_sends_private_recovery_button(
     assert len(pending) == (0 if status == "needs_install" else 1)
     if pending:
         assert pending[0].requested_access == "write"
+
+
+@pytest.mark.asyncio
+async def test_failed_private_recovery_delivery_still_reports_in_thread(
+    setup_linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = McpRuntime(
+        session_factory=setup_linked.sessionmaker,
+        client=AsyncMock(),
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
+            anthropic=AnthropicSettings(api_key=SecretStr("test")),
+            mcp=McpSettings(public_url=HttpUrl("https://mcp.test/mcp")),
+            github_app=GithubAppSettings(
+                app_id="42",
+                app_slug="sample-app",
+                private_key=SecretStr("pem"),
+                client_id="client",
+                client_secret=SecretStr("secret"),
+            ),
+        ),
+        deployment_default=DeploymentDefault(),
+        fernet=setup_linked.fernet,
+    )
+    async with setup_linked.sessionmaker.begin() as session:
+        await linked_pending.save_pending(
+            session,
+            tenant_id=setup_linked.tenant.id,
+            account_id=setup_linked.account.id,
+            agent_id=setup_linked.agent_id,
+            ma_agent_id="ma_agent",
+            agent_name="Agent",
+            repo_name="acme/widgets",
+            requested_access="write",
+            platform="discord",
+            platform_user_id="person",
+            workspace_id=setup_linked.tenant.external_id,
+            parent_channel_id="123",
+            thread_id="456",
+        )
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    monkeypatch.setattr(linked_pending, "requester_manages_agent", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        linked_pending,
+        "linked_grant",
+        AsyncMock(
+            return_value=linked.LinkedOutcome(
+                status="needs_install", message="Private setup needed."
+            )
+        ),
+    )
+    delivery = AsyncMock()
+    private_button = AsyncMock(side_effect=RuntimeError("private delivery refused"))
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    monkeypatch.setattr(connect_tool, "_post_personal_link", private_button)
+    result = await linked_pending.resume_pending(
+        runtime,
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        platform="discord",
+        platform_user_id="person",
+    )
+    message = "I couldn't send the private GitHub link. Ask me again."
+    assert result == [message]
+    delivery.assert_awaited_once()
+    assert delivery.await_args.args[2] == message

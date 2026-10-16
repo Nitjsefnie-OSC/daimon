@@ -7,6 +7,7 @@ from typing import Literal
 
 import discord
 import httpx
+import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -26,6 +27,8 @@ from daimon.core.stores.github_linked_pending import PendingGrant, save, take
 from daimon.core.stores.github_personal_links import mint_link
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+_log = structlog.get_logger(__name__)
 
 
 async def save_pending(
@@ -238,13 +241,22 @@ async def resume_pending(
                     )
                     message = outcome.message
                     if outcome.status in ("needs_install", "needs_link", "relink"):
-                        await _deliver_recovery(runtime, row, status=outcome.status)
+                        try:
+                            await _deliver_recovery(runtime, row, status=outcome.status)
+                        except Exception:
+                            # Private delivery can fail per person; the rest of the
+                            # batch still runs and the thread says what to do.
+                            _log.warning("github.linked_resume.recovery_delivery_failed")
+                            message = "I couldn't send the private GitHub link. Ask me again."
                 except DBAPIError as exc:
                     if getattr(exc.orig, "sqlstate", None) not in ("40001", "23505"):
                         raise
                     message = "Access changed. Ask again in chat."
                 except httpx.HTTPError:
                     message = "GitHub didn't answer. Ask again in chat."
-        await _deliver_result(runtime, row, message)
+        try:
+            await _deliver_result(runtime, row, message)
+        except Exception:
+            _log.warning("github.linked_resume.result_delivery_failed")
         results.append(message)
     return results
