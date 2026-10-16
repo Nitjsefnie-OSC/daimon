@@ -40,6 +40,7 @@ from .conftest import (
     bot_token,
     build_teams_runtime,
     make_channel_activity,
+    make_group_activity,
     make_inbound,
     make_message_activity,
 )
@@ -128,6 +129,40 @@ async def test_a_channel_command_is_answered_privately_in_its_thread() -> None:
     assert where == THREAD_ID and answer.text == "answer" and _is_private(answer)
     assert [inbound.kind for inbound in seen] == ["channel"] and direct.looked_up == 0
     assert not answer.entities, "an @mention gets no prompt preview"
+
+
+CHAT = "19:group-chat-1@thread.v2"
+
+
+def _group(text: str) -> TeamsInbound:
+    inbound = make_inbound(text, conversation=CHAT, kind="group")
+    return dataclasses.replace(inbound, sender_id=SENDER_ID)
+
+
+@pytest.mark.parametrize("name", ["help", "new"])
+async def test_a_group_chat_command_is_answered_privately_in_the_chat(name: str) -> None:
+    sender, seen, direct = FakeSender(), [], _Direct()
+    await _replies(sender, seen, direct=direct).run(_group(name), TENANT, (name, ""))
+    [(where, answer, _)] = sender.sent
+    assert where == CHAT and answer.text == "answer" and _is_private(answer)
+    assert [inbound.kind for inbound in seen] == ["group"] and direct.looked_up == 0
+
+
+async def test_a_refused_private_new_in_a_group_chat_restarts_that_chat() -> None:
+    sender, seen, direct = FakeSender(refuse_on={0}), [], _Direct()
+    await _replies(sender, seen, direct=direct).run(_group("new"), TENANT, ("new", ""))
+    _, (where, answer, _) = sender.sent
+    assert where == CHAT and not _is_private(answer), "not the 1:1 chat's session"
+    assert [inbound.kind for inbound in seen] == ["group", "group"] and direct.looked_up == 0
+
+
+async def test_a_group_chat_refusal_reaches_only_its_sender() -> None:
+    send = AsyncMock()
+    ctx = _ctx(make_group_activity(), send)
+    await reply_privately(ctx)("no")
+    (notice,) = send.await_args.args
+    assert notice.text == "no" and _is_private(notice)
+    ctx.reply.assert_not_awaited()
 
 
 async def test_a_targeted_command_previews_its_prompt() -> None:
@@ -249,7 +284,9 @@ async def test_a_1_1_refusal_is_replied_as_before() -> None:
     send.assert_not_awaited()
 
 
-@pytest.mark.parametrize(("kind", "private"), [("channel", True), ("personal", False)])
+@pytest.mark.parametrize(
+    ("kind", "private"), [("channel", True), ("groupChat", True), ("personal", False)]
+)
 async def test_a_panel_is_edited_for_whoever_saw_it(kind: str, private: bool) -> None:
     send = AsyncMock()
     activity = SimpleNamespace(

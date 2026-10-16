@@ -1,7 +1,9 @@
 """Executable record of Teams' deliberate gaps against Discord and Slack.
 
-Teams group chats have no thread to scope a session to, so the adapter refuses
-them and the manifest does not offer the scope. Neither Bot Framework nor
+A Teams group chat is one session, answered only while everyone in it is from
+the host organisation (anyone else is told privately why not); it takes no
+files beyond image previews, and routines and agent tools do not reach it.
+Neither Bot Framework nor
 app-only Graph reads a 1:1 chat back, so the boot sweep finds a card whose post
 lost its id only in a channel thread; in a 1:1 chat that intent retires
 untouched (`packages/adapters/teams/tests/test_boot_sweep.py`).
@@ -66,13 +68,9 @@ from daimon.adapters.teams.attachments import (
 )
 from daimon.adapters.teams.commands import CommandContext, parse_command
 from daimon.adapters.teams.credential_requests import credential_form
+from daimon.adapters.teams.group_chats import ChatMember, outsiders
 from daimon.adapters.teams.help import COMMAND_HELP
-from daimon.adapters.teams.identity import (
-    GROUP_CHAT_UNSUPPORTED,
-    Refusal,
-    TeamsInbound,
-    parse_inbound,
-)
+from daimon.adapters.teams.identity import TeamsInbound, parse_inbound
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.adapters.teams.private_replies import IN_THREAD
@@ -91,7 +89,7 @@ TENANT = "00000000-0000-0000-0000-000000000001"
 CONTENT_URL = "https://example.sharepoint.com/sites/team/Shared%20Documents/q3.xlsx"
 
 
-def test_teams_refuses_group_chats() -> None:
+def test_a_teams_group_chat_is_one_session_answered_only_among_our_own() -> None:
     activity = MessageActivity.model_validate(
         {
             "type": "message",
@@ -106,28 +104,27 @@ def test_teams_refuses_group_chats() -> None:
                 "tenantId": TENANT,
             },
             "channelData": {"tenant": {"id": TENANT}},
-            "text": "hi",
+            "text": "<at>daimon</at> hi",
+            "entities": [
+                {"type": "mention", "text": "<at>daimon</at>", "mentioned": {"id": "28:bot"}}
+            ],
         }
     )
-    refusal = parse_inbound(activity, configured_tenant=TENANT, service_url=None)
-    assert refusal == Refusal(GROUP_CHAT_UNSUPPORTED), (
-        "Teams group chats are refused on purpose; if they gained support, replace this record"
+    inbound = parse_inbound(activity, configured_tenant=TENANT, service_url=None)
+    assert isinstance(inbound, TeamsInbound)
+    assert (inbound.kind, inbound.conversation_id) == ("group", "19:g@thread.v2")
+    guest = ChatMember("29:g", "00000000-0000-0000-0000-000000000003", TENANT, "guest")
+    assert outsiders([guest], tenant_id=TENANT, member_guests=frozenset()) == 1, (
+        "a guest closes the chat: everyone there sees each answer"
     )
 
 
-def test_teams_manifest_does_not_offer_group_chats() -> None:
-    manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
-    assert all("groupChat" not in bot["scopes"] for bot in manifest["bots"]), (
-        "the manifest must not offer a scope the adapter refuses"
-    )
-
-
-def test_teams_channels_offer_only_the_commands_answered_in_the_thread() -> None:
+def test_teams_channels_and_group_chats_offer_only_the_commands_answered_there() -> None:
     manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
     offered = {
         command["title"]
         for cl in manifest["bots"][0]["commandLists"]
-        if cl["scopes"] == ["team"]
+        if "team" in cl["scopes"] and "groupChat" in cl["scopes"]
         for command in cl["commands"]
         if command.get("type", "basic") == "basic"
     }
@@ -240,6 +237,7 @@ def test_teams_channel_files_need_a_site_grant_not_a_manifest_permission() -> No
         "ChannelMessage.Read.Group",
         "TeamMember.Read.Group",
         "ChannelMember.Read.Group",
+        "ChatMessage.Read.Chat",
     ], "no team permission reaches SharePoint, so files need an admin's Sites.Selected grant"
 
 

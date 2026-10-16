@@ -65,13 +65,14 @@ def _basic(commands: list[dict[str, str]]) -> set[str]:
 
 def test_manifest_offers_what_the_adapter_answers() -> None:
     [bot] = _manifest()["bots"]
-    assert bot["scopes"] == ["personal", "team"], "group chats are refused, so not offered"
+    assert bot["scopes"] == ["personal", "team", "groupChat"]
     assert bot["supportsFiles"] is True
     assert bot["supportsTargetedMessages"] is True, "slash commands need targeted messages"
     lists = _lists()
     assert _basic(lists[("personal", "mention")]) == set(COMMAND_HELP), "every command in 1:1"
     slash = _basic(lists[("team", "slash")])
     assert slash == IN_THREAD, "a channel's slash menu offers what is answered privately there"
+    assert _basic(lists[("groupChat", "slash")]) == slash, "a group chat's too"
     for title in slash:
         assert parse_command(title, dict.fromkeys(COMMAND_HELP, _noop)) == (title, ""), title
 
@@ -101,7 +102,9 @@ def test_manifest_requests_channel_message_consent_for_the_bot_app() -> None:
         {"name": "ChannelMessage.Read.Group", "type": "Application"},
         {"name": "TeamMember.Read.Group", "type": "Application"},
         {"name": "ChannelMember.Read.Group", "type": "Application"},
+        {"name": "ChatMessage.Read.Chat", "type": "Application"},
     ], (
-        "channel messages, the team's owners and a channel's members only; files need "
+        "channel and group chat messages, the team's owners and a channel's members only; "
+        "files need "
         "tenant-wide consent, which daimon does not ask"
     )

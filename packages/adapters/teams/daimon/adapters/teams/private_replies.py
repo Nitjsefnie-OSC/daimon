@@ -1,4 +1,4 @@
-"""Replies only their sender sees in a channel: commands and sender-only notices.
+"""Replies only their sender sees in a channel or group chat: commands and notices.
 
 Teams' targeted messages show in the thread to one member. Teams refuses one
 it cannot deliver (400, 403 `BotNotInConversationRoster`, 404), so every
@@ -6,7 +6,8 @@ caller keeps a fallback: a command moves to the sender's 1:1 chat, a notice
 posts in the thread as before. A timed-out send gets no fallback: it may
 have landed. Commands whose flows live in the 1:1 chat (`setup`'s setup
 conversations, `support`'s request) are answered there, as are messages read
-from Graph, which carry no Bot Framework id to address.
+from Graph, which carry no Bot Framework id to address. In a group chat,
+whose one conversation `new` restarts, `new` is answered privately too.
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ def targeted(
 
 
 def _recipient(inbound: TeamsInbound) -> Account | None:
-    if inbound.kind != "channel" or inbound.sender_id is None:
+    if inbound.kind == "dm" or inbound.sender_id is None:
         return None
     return Account(id=inbound.sender_id, aad_object_id=inbound.user_id, name=inbound.user_name)
 
@@ -111,11 +112,11 @@ class _PrivateSend:
 
 
 def reply_privately(ctx: ActivityContext[MessageActivity]) -> Callable[[str], Awaitable[object]]:
-    """A refusal's reply: in a channel for the sender only, else `ctx.reply` as before."""
+    """A refusal's reply: in a channel or group chat for the sender only, else `ctx.reply`."""
     activity = ctx.activity
 
     async def reply(text: str) -> object:
-        if activity.conversation.conversation_type != "channel":
+        if activity.conversation.conversation_type not in ("channel", "groupChat"):
             return await ctx.reply(text)
         prompt = activity.id if activity.recipient.is_targeted else None
         try:
@@ -193,17 +194,21 @@ class PrivateReplies:
             routed = await route_to_setup(self._runtime.sessionmaker, inbound, tenant_id)
             await self._invoke(name, args, routed, tenant_id, send=self._public(routed))
             return
-        if name == "new":
+        if name == "new" and inbound.kind == "channel":
             await self.tell_sender(inbound, NEW_IN_CHANNEL)
             return
         recipient = _recipient(inbound)
-        if name in IN_THREAD and recipient is not None:
+        private = IN_THREAD | {"new"} if inbound.kind == "group" else IN_THREAD
+        if name in private and recipient is not None:
             try:
                 send = _PrivateSend(self._sender, inbound, recipient)
                 await self._invoke(name, args, inbound, tenant_id, send=send)
                 return
             except TargetedRefused:
-                pass  # nothing shown yet: answered in full in the 1:1 chat
+                if name == "new":  # it restarts this chat, so it is answered here
+                    await self._invoke(name, args, inbound, tenant_id, send=self._public(inbound))
+                    return
+                # Otherwise nothing shown yet: answered in full in the 1:1 chat.
         chat = await self._direct_chat(inbound)
         pointer = ANSWERED_IN_CHAT if chat else CHANNEL_POINTER
         await self.tell_sender(inbound, pointer.format(name=name))

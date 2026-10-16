@@ -85,7 +85,7 @@ async def card_actor(
     The conversation must be the configured tenant's. A clicker from another
     organisation (or an unlisted guest) is classified as a message sender is,
     and gets None unless `allow_external`; in a 1:1 chat a foreign tenant is
-    refused outright.
+    refused outright, as is any click in a group chat holding someone from outside.
     """
     teams = runtime.settings.teams
     conversation = activity.conversation
@@ -99,6 +99,10 @@ async def card_actor(
     is_channel = conversation.conversation_type == "channel"
     if home is not None and not is_channel:
         return None
+    if conversation.conversation_type == "groupChat":
+        roster = runtime.group_chats  # a chat with anyone from outside takes no clicks
+        if roster is None or await roster.has_outsiders(conversation.id.split(";", 1)[0]):
+            return None
     tenant_id = await live_tenant_id(runtime.sessionmaker, teams.tenant_id)
     if tenant_id is None:
         return None
@@ -187,7 +191,7 @@ async def edit_origin_card(
     """
     activity = ctx.activity
     edit = MessageActivityInput(id=activity.reply_to_id).add_card(card)
-    if activity.conversation.conversation_type == "channel":
+    if activity.conversation.conversation_type in ("channel", "groupChat"):
         edit.with_recipient(activity.from_, is_targeted=True)
     with contextlib.suppress(*TEAMS_SEND_ERRORS):
         await asyncio.wait_for(ctx.send(edit), _EDIT_TIMEOUT_S)

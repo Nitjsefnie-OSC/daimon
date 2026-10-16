@@ -410,7 +410,7 @@ async def test_without_graph_the_turn_runs_and_the_agent_hears_what_was_missed(
     message = turn["user_message"]
     assert "thread_history" not in message, "no history when Graph refuses"
     assert not turn["image_blocks"]
-    unread = "was shared but can't be opened: daimon could not read this channel message."
+    unread = "was shared but can't be opened: daimon could not read this message."
     assert f"an image {unread}" in message and f"a file {unread}" in message, "never silent"
     assert "couldn't read" not in _texts(teams_api_fake), "the answer explains it, not a notice"
 

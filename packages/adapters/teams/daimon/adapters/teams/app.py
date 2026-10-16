@@ -53,11 +53,13 @@ from daimon.adapters.teams.context import (
 )
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
 from daimon.adapters.teams.direct_chats import DirectChats
+from daimon.adapters.teams.group_chats import OUTSIDERS_PRESENT, placed
 from daimon.adapters.teams.identity import (
     DENIED,
     Refusal,
     TeamsInbound,
     canonical_uuid,
+    kind_of,
     live_tenant_id,
     parse_graph_message,
     parse_inbound,
@@ -236,8 +238,8 @@ _NO_CONTEXT = (
 
 
 def _bare_mention(inbound: TeamsInbound) -> bool:
-    """A channel mention with no words or files: it asks about the thread."""
-    return inbound.kind == "channel" and not inbound.text.strip() and not inbound.files
+    """A channel or group chat mention with no words or files: it asks about the thread."""
+    return inbound.kind != "dm" and not inbound.text.strip() and not inbound.files
 
 
 LifecycleFactory = Callable[[asyncio.Event, str | None], TeamsTurnLifecycle]
@@ -745,6 +747,8 @@ class TeamsApp:
 
     async def _classified(self, inbound: TeamsInbound) -> TeamsInbound:
         """`inbound` with what its member lists say about the sender (`externals`)."""
+        if inbound.kind == "group":  # everyone there counts
+            return await placed(self.runtime.group_chats, inbound)
         externals = self.runtime.externals
         if externals is None:
             return inbound
@@ -1091,6 +1095,10 @@ class TeamsApp:
                 await self._say(inbound, DENIED, sender_only=True)
             return
         inbound = await self._stored_external(inbound, tenant_id)
+        if inbound.kind == "group" and inbound.is_external:
+            if await self._finish([inbound]):
+                await self._private.tell_sender(inbound, OUTSIDERS_PRESENT)
+            return
         command = self._private.command(inbound)
         if command is None and not inbound.is_targeted:
             await self._orchestrate(inbound, tenant_id)
@@ -1168,7 +1176,7 @@ class TeamsApp:
             here = channel_permissions(
                 policy, channel_id=inbound.thread_id, parent_channel_id=inbound.channel_id
             )
-            if inbound.kind == "dm" or not here.answers_external:
+            if inbound.kind != "channel" or not here.answers_external:
                 return False
         subject = build_subject(
             is_admin=self._role(inbound) is Role.ADMIN, platform_user_id=inbound.user_id
@@ -1344,9 +1352,9 @@ class TeamsApp:
         cancel_key = (intent_id or uuid.uuid4()).hex
         # Every attempt's lifecycle; dead-session recovery adds one, the last is current.
         holder: list[TeamsTurnLifecycle] = []
-        # A ping mentions the asker in a channel; the 1:1 chat notifies them anyway.
+        # A ping mentions the asker in a channel or group chat; a 1:1 chat notifies anyway.
         requester = None
-        if inbound.kind == "channel":
+        if inbound.kind != "dm":
             requester = Account(id=inbound.user_id, name=inbound.user_name or "you")
 
         def new_lifecycle(cancel: asyncio.Event, adopt: str | None) -> TeamsTurnLifecycle:
@@ -1569,7 +1577,7 @@ class TeamsApp:
             inbound.files,
             bot_token=self._bot_token,
             service_url=inbound.service_url,
-            channel=inbound.kind == "channel",
+            channel=inbound.kind != "dm",
             channel_media=media,
             graph_token=reader.token if reader else None,
             history_images=history.image_urls if history else (),
@@ -1669,7 +1677,7 @@ class TeamsApp:
             log.info("teams.turn.summary_dropped")
         if outcome.mapping_id is not None and final.final_message_id is not None:
             mark = final.final_message_id
-            if inbound.kind == "channel":
+            if inbound.kind != "dm":
                 # The newest message read, not the answer: replies posted while the
                 # turn ran are older than the answer, and the next delta needs them.
                 newest = (h.newest_id for h in read if h is not None)
@@ -1928,7 +1936,7 @@ class TeamsApp:
 
         conversation = conversation_of(row.thread_id)
         inbound = TeamsInbound(
-            kind="dm" if conversation == row.parent_channel_id else "channel",
+            kind=kind_of(conversation, row.parent_channel_id),
             entra_tenant_id=self._teams.tenant_id,
             user_id=row.requester_external_user_id,
             conversation_id=conversation,
@@ -1939,6 +1947,8 @@ class TeamsApp:
             service_url=service_url,
         )
         inbound = await self._stored_external(await self._classified(inbound), tenant_id)
+        if inbound.kind == "group" and inbound.is_external:
+            raise AdmissionDenied(reason="external_participant")
         await self._run_turn(inbound, tenant_id, handoff=handoff, reraise=True, continuation=row)
 
     async def _settle(

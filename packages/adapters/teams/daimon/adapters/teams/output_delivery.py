@@ -253,7 +253,7 @@ class TeamsOutputDelivery:
             if previous is not None:
                 with contextlib.suppress(Exception):
                     await previous
-            if inbound.kind == "channel":
+            if inbound.kind != "dm":  # a group chat has no files: previews only
                 await self._sweep_channel(inbound, session_id, append)
                 return
             await sweep_session_outputs(
@@ -457,7 +457,7 @@ class TeamsOutputDelivery:
             or file.size_bytes > MAX_BYTES_PER_FILE
         ):
             return False
-        if inbound.kind != "channel":
+        if inbound.kind == "dm":
             # A consent ledger key binds the bytes and their actual destination.
             # It is local identity, never a provider resource ID or byte-read authority.
             identity = hashlib.sha256()

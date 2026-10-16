@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +18,9 @@ import httpx
 import pytest
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.teams.attachments import InboundFile
+from daimon.adapters.teams.group_chats import OUTSIDERS_PRESENT
 from daimon.adapters.teams.identity import (
     DENIED,
-    GROUP_CHAT_UNSUPPORTED,
     Refusal,
     TeamsInbound,
     parse_inbound,
@@ -168,6 +169,7 @@ MESSAGES: dict[str, tuple[str, str, str, tuple[InboundFile, ...]]] = {
         (),
     ),
     "channel_mention": ("channel", THREAD_ID, "summarise this week's releases", ()),
+    "group_chat_message": ("group", GROUP_CHAT_ID, "what did we decide?", ()),
     "channel_thread_reply": ("channel", THREAD_ID, "reply to thread", ()),
     "channel_attachments_reply": ("channel", THREAD_ID, "describe these attachments", ()),
     "channel_media_reply": (
@@ -242,10 +244,6 @@ def test_real_messages_parse_to_verified_facts(case: str) -> None:
     assert inbound.files == files, "the text/html sibling is not a file"
 
 
-def test_group_chat_message_is_refused() -> None:
-    assert _parse(_load("group_chat_message")) == Refusal(GROUP_CHAT_UNSUPPORTED)
-
-
 def test_personal_message_without_a_conversation_tenant_is_denied() -> None:
     """The documented 1:1 example predates `conversation.tenantId`; identity fails closed."""
     payload = _load("personal_message")
@@ -255,7 +253,14 @@ def test_personal_message_without_a_conversation_tenant_is_denied() -> None:
 
 @pytest.mark.usefixtures("provisioned_tenant")
 @pytest.mark.parametrize(
-    "case", ["personal_message", "channel_mention", "channel_thread_reply", "channel_quote_reply"]
+    "case",
+    [
+        "personal_message",
+        "channel_mention",
+        "channel_thread_reply",
+        "channel_quote_reply",
+        "group_chat_message",
+    ],
 )
 async def test_real_message_runs_a_turn_answered_in_its_conversation(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake, case: str
@@ -270,15 +275,32 @@ async def test_real_message_runs_a_turn_answered_in_its_conversation(
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
-async def test_group_chat_message_is_answered_with_the_refusal(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+@pytest.mark.parametrize(
+    "outsider",
+    [
+        {"id": "29:x", "aadObjectId": str(uuid.UUID(int=7)), "tenantId": str(uuid.UUID(int=99))},
+        {
+            "id": "29:g",
+            "aadObjectId": str(uuid.UUID(int=8)),
+            "tenantId": ENTRA_TENANT_ID,
+            "userRole": "guest",
+        },
+        {"id": "29:a", "userRole": "anonymous"},
+    ],
+)
+async def test_a_group_chat_holding_an_outsider_gets_only_a_private_notice(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    outsider: dict[str, object],
 ) -> None:
+    teams_api_fake.chat_guests.append(outsider)
     _, turns = await _run(db_session_factory, teams_api_fake, "group_chat_message")
-    assert turns == [], "no turn runs in a group chat"
-    [reply] = teams_api_fake.activity_requests
-    assert str(reply.body.get("text")).endswith(GROUP_CHAT_UNSUPPORTED), "a quoted reply"
+    assert turns == [], "no answer anyone from outside would see"
+    [notice] = teams_api_fake.activity_requests
+    assert notice.body.get("text") == OUTSIDERS_PRESENT
+    assert notice in teams_api_fake.private_requests, "only the sender sees why"
     assert (
-        httpx.URL(reply.url).path == f"{SERVICE_PATH}/v3/conversations/{GROUP_CHAT_ID}/activities"
+        httpx.URL(notice.url).path == f"{SERVICE_PATH}/v3/conversations/{GROUP_CHAT_ID}/activities"
     )
 
 

@@ -41,6 +41,7 @@ from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
+from daimon.adapters.teams.group_chats import ChatMember, GroupChatRoster
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.here import show_here
 from daimon.adapters.teams.installations import TeamInstalls
@@ -286,6 +287,13 @@ def create_teams_http_service(
         guest = None if member.user_role is None else member.user_role.lower() == "guest"
         return MemberFacts(tenant_id=member.tenant_id, is_guest=guest)
 
+    async def chat_members(chat_id: str) -> list[ChatMember]:
+        conversations = teams_app.api.from_service_url(SERVICE_URL).conversations
+        return [
+            ChatMember(m.id, m.aad_object_id, m.tenant_id, m.user_role)
+            for m in await conversations.get_members(chat_id)
+        ]
+
     async def channel_type(team_id: str, channel_id: str) -> str | None:
         api = teams_app.api.from_service_url(SERVICE_URL)
         channels = await api.teams.get_conversations(team_id)
@@ -318,6 +326,12 @@ def create_teams_http_service(
             member_guests=member_guests,
             restrict_guests=settings.restrict_guests,
             restrict_external=settings.restrict_external_participants,
+        ),
+        group_chats=GroupChatRoster(
+            tenant_id=settings.tenant_id,
+            members=chat_members,
+            member_guests=member_guests,
+            restrict_guests=settings.restrict_guests,
         ),
     )
     installs = TeamInstalls(

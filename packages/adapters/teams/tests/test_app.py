@@ -615,13 +615,13 @@ async def test_a_refusal_that_cannot_be_sent_is_logged(
     reply = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
     with structlog.testing.capture_logs() as logs:
         await teams.handle_message(
-            _message(make_message_activity(conversation_type="groupChat"), reply)
+            _message(make_message_activity(aad_object_id=None), reply)
         )
     reply.assert_awaited_once()
     assert {
         "event": "teams.refusal.send_failed",
         "log_level": "warning",
-        "conversation_type": "groupChat",
+        "conversation_type": "personal",
         "reason": "ConnectError",
     } in logs, "a refusal nobody saw is still on record"
 

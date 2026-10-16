@@ -17,7 +17,8 @@
 #    No API permissions are required: the bot calls the Bot Framework REST
 #    API, which authorizes on the app registration itself, and reads channel
 #    messages through Microsoft Graph under the resource-specific consent
-#    below, which a team owner grants when installing the app in a team.
+#    below, which a team owner grants when installing the app in a team
+#    (group chats: a chat member, when adding the app to the chat).
 #    Channel files optionally need the Graph application permission
 #    Sites.Selected plus a grant per team site (docs/teams.md), and
 #    DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED the tenant-wide Graph
@@ -37,13 +38,14 @@
 #    sideload it.
 #
 # The adapter provisions the tenant for DAIMON_TEAMS__TENANT_ID at boot; there
-# is no install flow. The bot answers in 1:1 chat and when @mentioned in a
-# channel, replaying the thread it is in; group chats are refused, so the
-# manifest does not offer them.
+# is no install flow. The bot answers in 1:1 chat, and when @mentioned in a
+# channel or group chat, replaying the thread or chat it is in. A group chat
+# is answered only while everyone in it is from this organisation.
 #
 # Commands and prompt starters: `supportsTargetedMessages` lets people send
-# the bot a message only it sees, which slash commands need. A channel command,
-# typed with / or after a mention, is answered for its sender only. Prompt
+# the bot a message only it sees, which slash commands need. A channel or
+# group chat command, typed with / or after a mention, is answered for its
+# sender only. Prompt
 # starters are fixed text: Teams lists them in the 1:1 chat ("View prompts")
 # and after an @mention in a channel. A list holds at most 12 commands, and
 # the bot at most 3 lists.
@@ -55,7 +57,7 @@
 
 manifestVersion: "1.30"
 id: "${DAIMON_TEAMS__CLIENT_ID}"        # must equal the Entra app id
-version: "0.5.0"                       # bump on every change, then re-upload
+version: "0.6.0"                       # bump on every change, then re-upload
 supportsChannelFeatures: tier1          # private and shared channels (see above)
 developer:
   name: daimon
@@ -77,6 +79,7 @@ bots:
     scopes:
       - personal
       - team                            # channels: answers when @mentioned
+      - groupChat                       # group chats: answers when @mentioned
     supportsTargetedMessages: true      # slash commands and private replies
     commandLists:
       - scopes:
@@ -120,6 +123,7 @@ bots:
               routines. Start with what is set up now.
       - scopes:
           - team
+          - groupChat
         triggers:
           - slash
         commands:                       # answered for the sender only
@@ -180,4 +184,7 @@ authorization:
       # List a channel's members and their home tenants, to tell people from
       # another organisation (shared channels' external participants, guests).
       - name: ChannelMember.Read.Group
+        type: Application
+      # Read the group chats the bot is mentioned in, and their images.
+      - name: ChatMessage.Read.Chat
         type: Application

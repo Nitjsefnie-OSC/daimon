@@ -65,6 +65,7 @@ SERVICE_URL = "https://smba.trafficmanager.net/test"
 CONVERSATION_ID = "a:conversation-1"
 CHANNEL_ID = "19:channel-1@thread.tacv2"
 THREAD_ID = f"{CHANNEL_ID};messageid=1700000000001"
+GROUP_CHAT_ID = "19:group-chat-1@thread.v2"
 # The Entra group behind the fixtures' team, as Bot Framework's team details name it.
 TEAM_GROUP_ID = "00000000-0000-0000-0000-000000007ea3"
 DIRECT_CHAT_ID = "a:direct-chat"
@@ -180,6 +181,16 @@ def make_message_activity(
     }
 
 
+def make_group_activity(**kwargs: Any) -> dict[str, object]:
+    """A group chat message that @mentions the bot."""
+    params: dict[str, Any] = {
+        "conversation_id": GROUP_CHAT_ID,
+        "conversation_type": "groupChat",
+        "mention_bot": True,
+    }
+    return make_message_activity(**(params | kwargs))
+
+
 def make_channel_activity(**kwargs: Any) -> dict[str, object]:
     """A channel-thread reply that @mentions the bot."""
     params: dict[str, Any] = {
@@ -221,7 +232,7 @@ def make_inbound(
     *,
     user: str = AAD_OBJECT_ID,
     conversation: str = CONVERSATION_ID,
-    kind: Literal["dm", "channel"] = "dm",
+    kind: Literal["dm", "channel", "group"] = "dm",
     setup_thread_id: str | None = None,
 ) -> TeamsInbound:
     return TeamsInbound(
@@ -277,6 +288,10 @@ class TeamsApiFake:
     """Roster names by Entra object id; a member lookup answers with the person's name."""
     absent: set[str] = dataclasses.field(default_factory=set[str])
     """Entra object ids no roster has: a member lookup answers 404."""
+    chat_guests: list[dict[str, object]] = dataclasses.field(
+        default_factory=list[dict[str, object]]
+    )
+    """Members a group chat's roster lists beside the sender and the bot."""
 
     async def send(
         self,
@@ -305,6 +320,15 @@ class TeamsApiFake:
         if context.method == "GET" and team:
             details = {"id": team.group(1), "aadGroupId": TEAM_GROUP_ID}
             return httpx.Response(200, json=details, request=request)
+        if context.method == "GET" and httpx.URL(context.url).path.endswith("/members"):
+            ours = {
+                "id": f"29:{AAD_OBJECT_ID}",
+                "aadObjectId": AAD_OBJECT_ID,
+                "tenantId": ENTRA_TENANT_ID,
+                "userRole": "user",
+            }
+            roster = [ours, {"id": BOT_ACCOUNT_ID, "name": "daimon"}, *self.chat_guests]
+            return httpx.Response(200, json=roster, request=request)
         if context.method == "GET" and "/members/" in context.url:
             aad_object_id = httpx.URL(context.url).path.rsplit("/", 1)[-1]
             if aad_object_id in self.absent:

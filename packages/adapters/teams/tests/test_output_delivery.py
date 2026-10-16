@@ -1156,3 +1156,22 @@ async def test_thumbnails_wait_no_longer_than_their_budget(
     assert sent == [["chart.png"]], "only the image preview: the deck's ran out of time"
     skips = [e["reason"] for e in logs if e["event"] == "teams.output_thumbnail.skipped"]
     assert skips == ["timed_out"], "the timeout is logged once"
+
+
+async def test_a_group_chat_previews_images_and_saves_or_offers_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """No files there, even with a channel site granted, and no consent card."""
+    chat = "19:group-chat-1@thread.v2"
+    image, content = _png("file_png")
+    harness = _harness(
+        db_session_factory,
+        [_csv(), image],
+        channel_files=_channel_files(_uploaded),
+        contents={image.id: content},
+    )
+    await harness.delivery.sweep(make_inbound(kind="group", conversation=chat), "sesn_1")
+
+    [(conversation, message, _)] = harness.sender.sent
+    assert conversation == chat and [a.name for a in message.attachments or []] == ["chart.png"]
+    assert sorted(harness.deletes) == ["file_csv", "file_png"] and harness.uploads == []

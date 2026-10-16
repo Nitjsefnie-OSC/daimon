@@ -13,6 +13,7 @@ from daimon.adapters.teams.context import (
     Attached,
     channel_block,
     channel_media,
+    chat_media,
     classifier_window,
     delta_block,
     history_media,
@@ -319,3 +320,35 @@ def test_unread_history_is_marked_so_the_agent_does_not_guess() -> None:
     )
     assert '<history status="unavailable" reason="http error"' in message
     assert "untrusted" not in message
+
+
+def test_a_group_chat_turn_is_one_place_without_files() -> None:
+    chat = "19:g@thread.v2"
+    inbound = dataclasses.replace(
+        make_inbound("hi", conversation=chat, kind="group"), channel_name="Launch & co"
+    )
+    message = render_user_message(
+        "<controls/>",
+        inbound,
+        is_admin=False,
+        keys="",
+        prefix="",
+        history=unavailable_block("graph 403"),
+    )
+    assert f'<channel platform="teams" id="{chat}" role="group_chat" name="Launch &amp; co"' in (
+        message
+    )
+    assert 'files="unavailable"' in message and "cannot be shared in a group chat" in message
+    assert "still shows inline" in message, "image outputs preview there"
+    assert "<thread " not in message and "read_thread" not in message
+
+
+def test_chat_media_reads_only_this_messages_hosted_images() -> None:
+    own = "https://graph.microsoft.com/v1.0/chats/19:g@thread.v2/messages/7/hostedContents/a/$value"
+    other = (
+        "https://graph.microsoft.com/v1.0/chats/19:x@thread.v2/messages/7/hostedContents/a/$value"
+    )
+    message = _msg("7", f'<img src="{own}"><img src="{other}">')
+    assert chat_media(message, chat_id="19:g@thread.v2").image_urls == (own,)
+    images, _ = history_media([message], chat_id="19:g@thread.v2")
+    assert images == {"7": (own,)}
