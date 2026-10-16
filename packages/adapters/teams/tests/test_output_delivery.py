@@ -16,6 +16,7 @@ import httpx
 import pytest
 import structlog
 from anthropic.types.beta import FileMetadata
+from daimon.adapters.teams import output_delivery
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.output_delivery import (
     FILE_CONSENT_CONTENT_TYPE,
@@ -75,13 +76,13 @@ def _harness(
     channel_files: ChannelFiles | None = None,
     contents: dict[str, bytes] | None = None,
     clock: Callable[[], float] = time.monotonic,
-    served: dict[str, bytes] | None = None,
+    served: dict[str, bytes | str] | None = None,
     unreadable: frozenset[str] = frozenset(),
 ) -> _Harness:
     """MA serves `listing` (a small CSV by default) minus deleted entries;
     a file's bytes come from `contents` by id, else a small CSV, and one in
     `unreadable` answers 404. Other plain HTTP is recorded in `uploads`; a URL
-    in `served` answers with its bytes."""
+    in `served` answers with its bytes, or redirects to it when it is a URL."""
     files = listing if listing is not None else [_csv()]
     deletes: list[str] = []
     uploads: list[httpx.Request] = []
@@ -96,7 +97,9 @@ def _harness(
 
     def on_upload(request: httpx.Request) -> httpx.Response:
         uploads.append(request)
-        if (body := (served or {}).get(str(request.url))) is not None:
+        if isinstance(body := (served or {}).get(str(request.url)), str):
+            return httpx.Response(302, headers={"Location": body})
+        if body is not None:
             return httpx.Response(200, content=body)
         return httpx.Response(201, json={"id": "item-1"})
 
@@ -1014,11 +1017,16 @@ async def test_an_unprompted_channel_turn_posts_no_previews(
 THUMBNAIL_URL = "https://eus1-mediap.svc.ms/transform/thumbnail?provider=spo&tempauth=x"
 
 
-def _thumbnail_sets(*answers: object) -> Callable[[httpx.Request], httpx.Response]:
-    """Graph's thumbnail replies in turn, the last one repeated; a number is a status."""
+def _thumbnail_sets(
+    *answers: object, asked: list[httpx.Request] | None = None
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Graph's thumbnail replies in turn, the last one repeated; a number is a status.
+    Each lookup is recorded in `asked`."""
     replies = list(answers)
 
-    def reply(_: httpx.Request) -> httpx.Response:
+    def reply(request: httpx.Request) -> httpx.Response:
+        if asked is not None:
+            asked.append(request)
         answer = replies.pop(0) if len(replies) > 1 else replies[0]
         if isinstance(answer, int):
             return httpx.Response(answer, json={"error": {"code": "itemNotFound"}})
@@ -1080,20 +1088,26 @@ async def test_documents_never_take_an_images_preview_place(
 
 
 @pytest.mark.parametrize(
-    ("answers", "reason"),
+    ("answers", "reason", "lookups"),
     [
-        ((None,), "not_ready"),
-        ((500,), "http error"),
-        (("https://evil.example/thumbnail",), "FetchRefused"),
+        ((None,), "not_ready", 3),
+        ((500,), "http error", 1),
+        (("https://evil.example/thumbnail",), "FetchRefused", 1),
+        (("https://svc.ms.example/thumbnail",), "FetchRefused", 1),
+        (("https://evilsvc.ms/thumbnail",), "FetchRefused", 1),
     ],
+    ids=["never-rendered", "graph-error", "other-host", "lookalike-suffix", "lookalike-domain"],
 )
 async def test_a_document_thumbnail_that_fails_is_logged_once_and_skipped(
-    db_session_factory: async_sessionmaker[AsyncSession], answers: tuple[object, ...], reason: str
+    db_session_factory: async_sessionmaker[AsyncSession],
+    answers: tuple[object, ...],
+    reason: str,
+    lookups: int,
 ) -> None:
     listing, contents = _deck_listing()
-    harness = _harness(
-        db_session_factory, listing, _channel_files(_uploaded, _thumbnail_sets(*answers)), contents
-    )
+    asked: list[httpx.Request] = []
+    files = _channel_files(_uploaded, _thumbnail_sets(*answers, asked=asked))
+    harness = _harness(db_session_factory, listing, files, contents)
 
     with structlog.testing.capture_logs() as logs:
         await harness.delivery.sweep(_in_channel(), "sesn_1", append=_append)
@@ -1102,5 +1116,43 @@ async def test_a_document_thumbnail_that_fails_is_logged_once_and_skipped(
     assert [a.name for a in message.attachments or []] == ["chart.png"], "the chart still shows"
     skips = [e for e in logs if e["event"] == "teams.output_thumbnail.skipped"]
     assert [e["reason"] for e in skips] == [reason], "one line, with no name or URL"
-    assert all(r.url.host != "evil.example" for r in harness.uploads), "nothing left for it"
+    assert len(asked) == lookups, "only a thumbnail not rendered yet is asked for again"
     assert len(harness.deletes) == 3, "every file was still saved and leaves the listing"
+
+
+async def test_a_thumbnail_redirected_off_the_allowed_hosts_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Every hop is checked: the media service's URL may not send the fetch elsewhere."""
+    listing, contents = _deck_listing()
+    files = _channel_files(_uploaded, _thumbnail_sets(THUMBNAIL_URL))
+    served: dict[str, bytes | str] = {THUMBNAIL_URL: "https://attacker.example/page.png"}
+    harness = _harness(db_session_factory, listing, files, contents, served=served)
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(_in_channel(), "sesn_1", append=_append)
+
+    sent = [[a.name for a in message.attachments or []] for _, message, _ in harness.sender.sent]
+    assert sent == [["chart.png"]], "the chart shows, the deck's redirected thumbnail does not"
+    assert [str(r.url) for r in harness.uploads] == [THUMBNAIL_URL], "the redirect is not followed"
+    skips = [e["reason"] for e in logs if e["event"] == "teams.output_thumbnail.skipped"]
+    assert skips == ["FetchRefused"], "refused, and logged once"
+
+
+async def test_thumbnails_wait_no_longer_than_their_budget(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Out of time, the documents are left out; the images went before them regardless."""
+    monkeypatch.setattr(output_delivery, "THUMBNAIL_BUDGET_S", 0.0)
+    listing, contents = _deck_listing()
+    _, page = _png("page")
+    files = _channel_files(_uploaded, _thumbnail_sets(THUMBNAIL_URL))
+    harness = _harness(db_session_factory, listing, files, contents, served={THUMBNAIL_URL: page})
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(_in_channel(), "sesn_1", append=_append)
+
+    sent = [[a.name for a in message.attachments or []] for _, message, _ in harness.sender.sent]
+    assert sent == [["chart.png"]], "only the image preview: the deck's ran out of time"
+    skips = [e["reason"] for e in logs if e["event"] == "teams.output_thumbnail.skipped"]
+    assert skips == ["timed_out"], "the timeout is logged once"
