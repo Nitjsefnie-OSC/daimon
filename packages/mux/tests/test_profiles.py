@@ -173,7 +173,7 @@ def test_resource_profile_native_projection_preserves_authored_intent() -> None:
         == authored.tools
     )
     assert PERSISTENT_WORKSPACE.execution_tool == "bash"
-    assert PERSISTENT_WORKSPACE.skill_digest is None
+    assert PERSISTENT_WORKSPACE.skill_digest == "content"
     assert PERSISTENT_WORKSPACE.support_for("agent_delete") == "native"
     assert INLINE_REUSE.execution_tool == "code_execution"
     assert INLINE_REUSE.skill_digest == "version"
