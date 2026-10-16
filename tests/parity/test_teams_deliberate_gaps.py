@@ -6,11 +6,11 @@ app-only Graph reads a 1:1 chat back, so the boot sweep finds a card whose post
 lost its id only in a channel thread; in a 1:1 chat that intent retires
 untouched (`packages/adapters/teams/tests/test_boot_sweep.py`).
 
-The rest follows from what a Teams bot can do (see `docs/teams.md`): there is
-no message only its sender sees, so a command typed in a channel is answered in
-the 1:1 chat and the manifest offers commands there only, and a Connect GitHub
-link goes to the requester's 1:1 chat rather than the thread; the 1:1 chat has no
-threads, so a setup conversation is keyed inside it, and since panels live
+The rest follows from what a Teams bot can do (see `docs/teams.md`): a
+private message in a channel expires after 24 hours, so `setup` and `support`,
+whose flows outlast that, answer in the 1:1 chat while other commands answer
+privately in the thread, and a Connect GitHub link goes to the requester's 1:1
+chat rather than the thread; the 1:1 chat has no threads, so a setup conversation is keyed inside it, and since panels live
 there a channel admin picks which of their channels a coding-tool token is
 bound to rather than pressing the button inside it; files in a channel work
 only once a tenant admin grants the app the team's SharePoint site (`Sites.Selected`), because no team-scoped
@@ -30,11 +30,11 @@ consent a followed thread stays mention-only; and where Discord's unprompted
 card appears once there is output, Teams posts only the answer and its controls,
 so there is no running card or Cancel button. The `here` card counts only the place it was
 typed in as one the caller can see: naming their other channels would take
-Graph lookups per team, so an agent rule's other channels stay unnamed. Slack
-answers `memory` privately inside the channel; Teams answers in the 1:1 chat,
+Graph lookups per team, so an agent rule's other channels stay unnamed. Where Teams
+will not deliver `memory` privately in the channel it answers in the 1:1 chat,
 so for a channel whose readers are limited it says why instead, as `/dm`
 refuses to carry such a channel's work out. Teams bot commands are typed
-words (the manifest's command list only fills them in), so a message that is
+words (the manifest's command lists and `/` only fill them in), so a message that is
 exactly a command word runs it: a reply of just `here` gets the card, where
 Slack and Discord take `here` as a slash command no reply can trip. The word
 stays `here` to match them.
@@ -75,6 +75,7 @@ from daimon.adapters.teams.identity import (
 )
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
+from daimon.adapters.teams.private_replies import IN_THREAD
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.credential_requests import ENV_FILE_TARGET
 from daimon.core.github_connect_cards import build_connect_card
@@ -121,10 +122,17 @@ def test_teams_manifest_does_not_offer_group_chats() -> None:
     )
 
 
-def test_teams_commands_are_offered_only_in_the_one_to_one_chat() -> None:
+def test_teams_channels_offer_only_the_commands_answered_in_the_thread() -> None:
     manifest = yaml.safe_load((REPO_ROOT / "docs/teams-app-manifest.yaml").read_text())
-    assert all(cl["scopes"] == ["personal"] for cl in manifest["bots"][0]["commandLists"]), (
-        "command replies can carry account details; one typed in a channel is answered in the 1:1"
+    offered = {
+        command["title"]
+        for cl in manifest["bots"][0]["commandLists"]
+        if cl["scopes"] == ["team"]
+        for command in cl["commands"]
+        if command.get("type", "basic") == "basic"
+    }
+    assert offered == IN_THREAD and not offered & {"setup", "support"}, (
+        "setup and support keep their flows in the 1:1 chat, past a private message's 24 hours"
     )
 
 
@@ -214,7 +222,7 @@ async def test_teams_memory_from_a_limited_readers_channel_is_not_shown_in_the_c
         await memory.show_memory(context)
     store.assert_not_awaited()
     assert json.dumps(memory.KEPT_INSIDE)[1:-1] in send.await_args.args[0].model_dump_json(), (
-        "Teams has no private reply inside a channel; if it gained one, replace this record"
+        "answered in the 1:1 chat, a limited channel's memory stays inside it"
     )
 
 
@@ -334,7 +342,7 @@ async def test_removing_the_teams_app_forgets_the_team_and_archives_nothing() ->
 
 
 async def test_a_teams_connect_github_link_goes_to_the_requesters_one_to_one_chat() -> None:
-    """Slack shows the link only to the requester in the thread; Teams cannot, so 1:1."""
+    """Slack shows the link only to the requester in the thread; Teams keeps it in the 1:1."""
     posts: list[str] = []
 
     def bot_framework(request: httpx.Request) -> httpx.Response:
@@ -368,6 +376,6 @@ async def test_a_teams_connect_github_link_goes_to_the_requesters_one_to_one_cha
             agent_name="Agent",
         )
     assert posts == ["conversations", "conversations/a:dm-1/activities"], (
-        "the link goes to a 1:1 chat, never the channel; if Teams gains private replies, "
-        "replace this record"
+        "the link goes to a 1:1 chat, never the channel; if it moves to a private reply "
+        "in the thread, replace this record"
     )
