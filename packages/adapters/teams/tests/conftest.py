@@ -256,9 +256,14 @@ async def bot_token() -> str:
 def teams_update_error(body: dict[str, Any]) -> str | None:
     """Why Teams refuses this edit, in its words; None when it takes it.
 
-    An edit replaces one Teams message, and text beside an attachment is two.
+    An edit replaces one Teams message, and text beside a card is two; inline
+    images are taken to stay in the text's message.
     """
-    if body.get("text") and body.get("attachments"):
+    attachments = cast("list[dict[str, Any]]", body.get("attachments") or [])
+    if body.get("text") and any(
+        str(a.get("contentType", "")).startswith("application/vnd.microsoft.card.")
+        for a in attachments
+    ):
         return "Activity resulted into multiple skype activities"
     return None
 

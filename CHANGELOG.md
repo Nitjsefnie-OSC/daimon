@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owners. Guest owners no longer count for channel-admin team grants
   (`role_ids`) either.
 
+- **Teams output previews show inside the answer.** Image previews and
+  document first pages are added to the answer's last message, beside its
+  text and file links, instead of following it as separate messages; in a
+  1:1 chat they sit above the consent cards. When the answer cannot take
+  them, such as a closing notice card or an edit Teams refuses, they still
+  come in a message of their own. Channels without file access and group
+  chats no longer show image previews: nothing is saved there, so the agent
+  is no longer told an image will still show.
+
 ### Removed
 
 - **`DAIMON_TEAMS__ADMIN_USER_IDS` is no longer read.** Make those admins

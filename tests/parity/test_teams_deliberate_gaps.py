@@ -2,7 +2,7 @@
 
 A Teams group chat is one session, answered only while everyone in it is from
 the host organisation (anyone else is told privately why not); it takes no
-files beyond image previews, and routines and agent tools do not reach it.
+files, not even image previews, and routines and agent tools do not reach it.
 Neither Bot Framework nor
 app-only Graph reads a 1:1 chat back, so the boot sweep finds a card whose post
 lost its id only in a channel thread; in a 1:1 chat that intent retires

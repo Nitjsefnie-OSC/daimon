@@ -255,8 +255,8 @@ that a chat member grants when adding the app. Without it the agent gets the
 text of the message alone. Those first 25 can predate the app's addition: the
 bot does not record when it joined a chat, so it reads them all. Commands answer privately as in a channel; `new`
 resets the sender's session there, and `setup` and `support` stay in the 1:1
-chat. Files are not shared in group chats: image previews are posted, any
-other output is skipped and deleted, and the agent is told so. Routines and
+chat. Files are not shared in group chats: every output, images included, is
+skipped and deleted, and the agent is told so. Routines and
 the agent's Teams tools do not reach group chats yet, and adding the app to
 one posts no welcome.
 
@@ -404,28 +404,32 @@ setting off the routes answer 404 and nothing is subscribed.
   after that answer, for a Daimon admin who asked.
 - **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as
   Teams renders a base64 image attachment: downscaled to fit 1024x1024 and
-  re-encoded under 512 KiB (PNG, else JPEG). In a 1:1 chat each image comes
-  just before its consent card; in a channel up to four, in delivery order,
-  follow the links in one message (not after an unprompted answer). A channel
-  without file access gets the previews too, after the answer, while the
-  images themselves are logged and dropped like any other output there.
-  Animated GIFs get no preview, and a preview Teams refuses is only logged
-  (`teams.output_preview.send_failed`).
+  re-encoded under 512 KiB (PNG, else JPEG). Up to four, in delivery order,
+  are added to the answer's last message, beside its text: in a channel in the
+  same edit as the file links (not after an unprompted answer), in a 1:1 chat
+  above the consent cards. When the answer cannot take them (a closing notice
+  card, or Teams refuses the edit, as it may when the message gets too large),
+  they come in a message of their own after it; in a 1:1 chat, one message
+  each below the consent cards, as do any beyond four. A channel without file
+  access shows no previews. Animated GIFs get no preview, and a preview Teams
+  refuses is only logged (`teams.output_preview.send_failed`).
 - **Document previews.** Up to four Word, PowerPoint, Excel or PDF outputs
-  saved to a channel's files show their first page, in delivery order, in one
-  message after the image previews, which never wait for them or give up a
-  place to them. Each is Graph's thumbnail of the uploaded file, asked for up
-  to three times while Graph renders it (ten seconds at most for them all),
+  saved to a channel's files show their first page, in delivery order, added
+  to the answer in a second edit after the image previews, which never wait
+  for them or give up a place to them. When the answer would then hold more
+  than four previews, or the edit is refused, they come in a message of their
+  own. Each is Graph's thumbnail of the uploaded file, asked for up to
+  three times while Graph renders it (ten seconds at most for them all),
   fetched without a token and re-encoded like an image. One that does not come
   is logged (`teams.output_thumbnail.skipped`, no name) and left out.
 - **Preview outputs.** An output named `<file>.preview.png`, such as
   `report.pdf.preview.png`, is the agent's own picture of that file. It shows
   inline like an image, under the file's name, and is never offered or
   uploaded; delivery deletes it. In a channel it stands in for Graph's
-  thumbnail of that file. In a 1:1 chat it shows just before its file's
-  consent card, and `files_hint` tells the agent it may make one when it can
-  render the first page cheaply (PyMuPDF from a PDF); no office renderer is
-  installed by default.
+  thumbnail of that file. In a 1:1 chat it shows with the other previews,
+  and `files_hint` tells the agent it may make one when it can render the
+  first page cheaply (PyMuPDF from a PDF); no office renderer is installed by
+  default.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts (a
