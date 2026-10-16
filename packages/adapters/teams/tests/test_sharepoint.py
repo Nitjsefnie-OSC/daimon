@@ -1,49 +1,50 @@
-"""Channel files through Graph under `Sites.Selected`: folders, uploads, shared-file links.
+"""Channel files through Graph under `Files.ReadWrite.All`: folders, uploads, shared-file links.
 
 Graph and SharePoint are one `MockTransport` with payloads shaped like Graph's.
 """
 
 from __future__ import annotations
 
+import base64
 import dataclasses
-import json
-import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 
 import httpx
 import pytest
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.channel_files import RECHECK_S, ChannelFiles
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.core.stores.domain import TeamsChannelSiteRow
+from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.core.teams_graph import GraphClient, GraphUnavailable, TeamGroups
-from daimon.core.teams_sharepoint import (
-    SIMPLE_UPLOAD_MAX,
-    UPLOAD_CHUNK,
-    DriveFolder,
-    SharePoint,
-)
+from daimon.core.teams_sharepoint import UPLOAD_TIMEOUT_S, DriveFolder, SharePoint
 
 from .conftest import make_inbound
 
 GROUP = "11111111-1111-1111-1111-111111111111"
 TEAM = "19:team@thread.tacv2"
 CHANNEL = "19:channel-1@thread.tacv2"
+PRIVATE = "19:private@thread.tacv2"
 FILES_FOLDER = f"/v1.0/teams/{GROUP}/channels/{CHANNEL}/filesFolder"
-SITE_ID = "example.sharepoint.com,2c1f0a9e-0000-4000-8000-000000000001,7d3b-web"
 LIBRARY = "https://example.sharepoint.com/sites/team/Shared%20Documents"
 FOLDER = DriveFolder(drive_id="b!drive-1", item_id="01FOLDER")
+FOLDER_ITEM = {"id": "01FOLDER", "name": "Planning", "parentReference": {"driveId": "b!drive-1"}}
 ITEM = {
     "id": "01ITEM",
     "name": "report.csv",
     "webUrl": f"{LIBRARY}/Planning/report.csv",
     "parentReference": {"driveId": "b!drive-1", "id": "01FOLDER"},
 }
-UPLOAD_URL = (
-    "https://example.sharepoint.com/sites/team/_api/v2.0/drives/b!drive-1/uploadSession?guid=1"
-)
 DOWNLOAD_URL = (
     "https://example.sharepoint.com/sites/team/_layouts/15/download.aspx?UniqueId=1&tempauth=x"
+)
+# The channel's folder as Graph reads it by id: `Planning` at the library's root.
+FOLDER_BY_ID = (
+    "/v1.0/drives/b!drive-1/items/01FOLDER",
+    {
+        "id": "01FOLDER",
+        "name": "Planning",
+        "parentReference": {"driveId": "b!drive-1", "path": "/drives/b!drive-1/root:"},
+    },
 )
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -65,8 +66,9 @@ def _sharepoint(routes: Mapping[tuple[str, str], Handler], seen: list[httpx.Requ
             else httpx.Response(404, json={"error": {"code": "itemNotFound"}})
         )
 
-    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return SharePoint(GraphClient(http, _token), http)
+    return SharePoint(
+        GraphClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)), _token)
+    )
 
 
 def _ok(body: object, status: int = 200) -> Handler:
@@ -77,77 +79,60 @@ def _denied(_: httpx.Request) -> httpx.Response:
     return httpx.Response(403, json={"error": {"code": "accessDenied", "message": "Access denied"}})
 
 
+def _shares(url: str) -> str:
+    """Graph's `/shares` path for a file URL: `u!` and the URL in unpadded base64url."""
+    return f"/v1.0/shares/u!{base64.urlsafe_b64encode(url.encode()).decode().rstrip('=')}/driveItem"
+
+
+def _file_routes(
+    url: str, *, drive: str = "b!drive-1", parent: str = "/drives/b!drive-1/root:/Planning"
+) -> dict[tuple[str, str], Handler]:
+    """A shared file at `url`, in `drive` under Graph path `parent`, plus the channel's folder."""
+    found = {"id": "01Q3", "parentReference": {"driveId": drive}}
+    item = {
+        "id": "01Q3",
+        "parentReference": {"driveId": drive, "path": parent},
+        "@microsoft.graph.downloadUrl": DOWNLOAD_URL,
+    }
+    return {
+        ("GET", _shares(url)): _ok(found),
+        ("GET", f"/v1.0/drives/{drive}/items/01Q3"): _ok(item),
+        ("GET", FOLDER_BY_ID[0]): _ok(FOLDER_BY_ID[1]),
+    }
+
+
 def _channel(**changes: object) -> TeamsInbound:
     inbound = make_inbound(kind="channel", conversation=f"{CHANNEL};messageid=1700000000001")
     facts: dict[str, object] = {"channel_id": CHANNEL, "team_id": TEAM, "team_group_id": GROUP}
     return dataclasses.replace(inbound, **(facts | changes))
 
 
-async def _no_names(_: str) -> dict[str, str | None]:
-    raise AssertionError("no channel lookup expected")
+async def _no_group(_: str) -> str | None:
+    raise AssertionError("the activity's group id is used")
 
 
-async def test_upload_puts_a_small_file_in_one_call_when_under_the_simple_limit() -> None:
-    """Up to 4 MiB: one PUT to Graph with the token, renaming rather than overwriting."""
+def _files(sharepoint: SharePoint, *, clock: Callable[[], float] | None = None) -> ChannelFiles:
+    if clock is None:
+        return ChannelFiles(sharepoint, TeamGroups(_no_group))
+    return ChannelFiles(sharepoint, TeamGroups(_no_group), clock=clock)
+
+
+@pytest.mark.parametrize("size", [4, MAX_BYTES_PER_FILE])
+async def test_upload_puts_any_file_up_to_the_cap_in_one_call(size: int) -> None:
+    """One PUT to Graph with the token, renaming rather than overwriting, up to 20 MiB."""
     seen: list[httpx.Request] = []
     path = "/v1.0/drives/b!drive-1/items/01FOLDER:/report.csv:/content"
     sharepoint = _sharepoint({("PUT", path): _ok(ITEM, 201)}, seen)
+    content = b"x" * size
 
-    item = await sharepoint.upload(FOLDER, "report.csv", b"a,b\n")
+    item = await sharepoint.upload(FOLDER, "report.csv", content)
 
     assert item.web_url == ITEM["webUrl"], "the link comes from Graph's driveItem"
     [put] = seen
     assert put.url.params["@microsoft.graph.conflictBehavior"] == "rename", "never overwrite"
     assert put.headers["Authorization"] == "Bearer graph-token"
-    assert put.content == b"a,b\n", "the bytes go up as the body"
-
-
-async def test_upload_streams_a_large_file_through_a_session_without_the_token() -> None:
-    """Over 4 MiB: an upload session, then chunks to its SharePoint URL with no bearer token."""
-    seen: list[httpx.Request] = []
-    content = b"x" * (SIMPLE_UPLOAD_MAX + 1)
-    session = "/v1.0/drives/b!drive-1/items/01FOLDER:/big.bin:/createUploadSession"
-
-    def chunk(request: httpx.Request) -> httpx.Response:
-        end = int(request.headers["Content-Range"].split("-")[1].split("/")[0])
-        if end + 1 < len(content):
-            return httpx.Response(202, json={"nextExpectedRanges": [f"{end + 1}-"]})
-        return httpx.Response(201, json=ITEM)
-
-    routes = {
-        ("POST", session): _ok(
-            {"uploadUrl": UPLOAD_URL, "expirationDateTime": "2026-10-02T00:00:00Z"}
-        ),
-        ("PUT", httpx.URL(UPLOAD_URL).path): chunk,
-    }
-    sharepoint = _sharepoint(routes, seen)
-
-    item = await sharepoint.upload(FOLDER, "big.bin", content)
-
-    assert item.id == "01ITEM", "the last chunk's reply is the driveItem"
-    create, *chunks = seen
-    assert json.loads(create.content) == {"item": {"@microsoft.graph.conflictBehavior": "rename"}}
-    assert [c.headers["Content-Range"] for c in chunks] == [
-        f"bytes {start}-{min(start + UPLOAD_CHUNK, len(content)) - 1}/{len(content)}"
-        for start in range(0, len(content), UPLOAD_CHUNK)
-    ], "chunks are whole multiples of 320 KiB, in order"
-    assert all("Authorization" not in c.headers for c in chunks), (
-        "the session URL is pre-authorised"
-    )
-    assert b"".join(c.content for c in chunks) == content
-
-
-async def test_upload_refuses_a_session_url_off_sharepoint() -> None:
-    """An upload URL is followed only to SharePoint, so bytes never leave for another host."""
-    seen: list[httpx.Request] = []
-    session = "/v1.0/drives/b!drive-1/items/01FOLDER:/big.bin:/createUploadSession"
-    sharepoint = _sharepoint(
-        {("POST", session): _ok({"uploadUrl": "https://evil.example/u"})}, seen
-    )
-
-    with pytest.raises(GraphUnavailable, match="not on SharePoint"):
-        await sharepoint.upload(FOLDER, "big.bin", b"x" * (SIMPLE_UPLOAD_MAX + 1))
-    assert {r.url.host for r in seen} == {"graph.microsoft.com"}, "nothing went to the other host"
+    assert put.content == content, "the bytes go up as the body, whole"
+    assert put.extensions["timeout"]["read"] == UPLOAD_TIMEOUT_S, "a 20 MiB body gets time"
 
 
 async def test_thumbnail_url_reads_the_large_first_page_thumbnail_of_an_upload() -> None:
@@ -168,119 +153,76 @@ async def test_thumbnail_url_reads_the_large_first_page_thumbnail_of_an_upload()
     assert await empty.thumbnail_url(item) is None, "none while Graph is still rendering it"
 
 
-async def test_channel_folder_falls_back_to_the_team_site_when_files_folder_is_refused() -> None:
-    """`filesFolder` does not list Sites.Selected: the folder is then found by name in the site."""
+async def test_channel_folder_is_files_folder_with_no_fallback_when_refused() -> None:
+    """Only `filesFolder`: a refusal is the answer, with no lookup by the channel's name."""
+    found = _sharepoint({("GET", FILES_FOLDER): _ok(FOLDER_ITEM)}, [])
+    assert await found.channel_folder(GROUP, CHANNEL) == FOLDER, "the folder and its drive"
+
     seen: list[httpx.Request] = []
-    routes = {
-        ("GET", FILES_FOLDER): _denied,
-        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID, "name": "team"}),
-        ("GET", f"/v1.0/sites/{SITE_ID}/drive/root:/Planning"): _ok(
-            {
-                "id": "01FOLDER",
-                "name": "Planning",
-                "folder": {},
-                "parentReference": {"driveId": "b!drive-1"},
-            }
-        ),
-    }
-    sharepoint = _sharepoint(routes, seen)
-
-    async def name() -> str:
-        return "Planning"
-
-    folder = await sharepoint.channel_folder(GROUP, CHANNEL, channel_name=name)
-
-    assert folder == FOLDER, "the channel's folder in the site's default library"
+    with pytest.raises(GraphUnavailable) as refused:
+        await _sharepoint({("GET", FILES_FOLDER): _denied}, seen).channel_folder(GROUP, CHANNEL)
+    assert refused.value.status == 403, "the refusal reaches the caller"
+    assert [r.url.path for r in seen] == [FILES_FOLDER], "no site or library lookup"
 
 
-async def test_download_url_finds_a_shared_file_through_its_site_library() -> None:
-    """`/shares` needs Files.ReadWrite.All, so the URL is resolved by site, library and path."""
+async def test_download_url_finds_a_shared_file_in_the_channels_folder_through_shares() -> None:
+    """The URL resolves through `/shares`, then by drive and id; no site or library lookup."""
     seen: list[httpx.Request] = []
-    drives = {
-        "value": [
-            {"id": "b!drive-2", "webUrl": "https://example.sharepoint.com/sites/team/Other"},
-            {"id": "b!drive-1", "webUrl": LIBRARY},
-        ]
-    }
-    routes = {
-        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/sites/{SITE_ID}/drives"): _ok(drives),
-        ("GET", "/v1.0/drives/b!drive-1/root:/Planning/q3 plan.xlsx"): _ok(
-            {"id": "01Q3", "name": "q3 plan.xlsx", "@microsoft.graph.downloadUrl": DOWNLOAD_URL}
-        ),
-    }
-    sharepoint = _sharepoint(routes, seen)
+    url = f"{LIBRARY}/Planning/q3%20plan.xlsx"
+    sharepoint = _sharepoint(_file_routes(url), seen)
 
-    url = await sharepoint.download_url(f"{LIBRARY}/Planning/q3%20plan.xlsx", group_id=GROUP)
-    again = await sharepoint.download_url(f"{LIBRARY}/Planning/q3%20plan.xlsx", group_id=GROUP)
-
-    assert url == again == DOWNLOAD_URL
-    assert len(seen) == 5, "the sites and their libraries are looked up once"
+    assert await sharepoint.download_url(url, folder=FOLDER) == DOWNLOAD_URL
+    assert await sharepoint.download_url(url, folder=FOLDER) == DOWNLOAD_URL
+    paths = [r.url.path for r in seen]
+    assert not any(p.startswith(("/v1.0/sites", "/v1.0/groups")) for p in paths), (
+        "only Files.ReadWrite.All calls"
+    )
+    assert paths.count(FOLDER_BY_ID[0]) == 1, "the folder's path is looked up once"
 
 
-async def test_download_url_reads_the_unencoded_path_teams_sends() -> None:
+async def test_download_url_shares_the_encoded_form_of_the_unencoded_path_teams_sends() -> None:
     """As captured, a channel file's `contentUrl` is not percent-encoded: `#` is in the name."""
-    routes = {
-        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/sites/{SITE_ID}/drives"): _ok(
-            {"value": [{"id": "b!d", "webUrl": LIBRARY}]}
-        ),
-        ("GET", "/v1.0/drives/b!d/root:/Daimon Testing/q3 #2?.xlsx"): _ok(
-            {"id": "01Q3", "@microsoft.graph.downloadUrl": DOWNLOAD_URL}
-        ),
-    }
-    content_url = (
-        "https://example.sharepoint.com/sites/team/Shared Documents/Daimon Testing/q3 #2?.xlsx"
-    )
+    raw = "https://example.sharepoint.com/sites/team/Shared Documents/Planning/q3 #2?.xlsx"
+    encoded = f"{LIBRARY}/Planning/q3%20%232%3F.xlsx"
 
-    url = await _sharepoint(routes, []).download_url(content_url, group_id=GROUP)
+    url = await _sharepoint(_file_routes(encoded), []).download_url(raw, folder=FOLDER)
 
-    assert url == DOWNLOAD_URL
+    assert url == DOWNLOAD_URL, "the share id carries the file's whole name"
 
 
-async def test_download_url_refuses_a_file_on_another_granted_site() -> None:
-    """App permissions reach every granted site; a link to one not the team's is not opened."""
+@pytest.mark.parametrize(
+    ("drive", "parent", "where"),
+    [
+        ("b!finance", "/drives/b!finance/root:/Payroll", "another site"),
+        ("b!drive-2", "/drives/b!drive-2/root:/Planning", "another library of the team site"),
+        ("b!drive-1", "/drives/b!drive-1/root:/Board", "another folder of the same library"),
+        ("b!drive-1", "/drives/b!drive-1/root:/Planning 2", "a sibling sharing its name"),
+        ("b!drive-1", "/drives/b!drive-1/root:", "the library's root"),
+    ],
+)
+async def test_download_url_refuses_a_file_outside_the_channels_folder(
+    drive: str, parent: str, where: str
+) -> None:
+    """The tenant-wide permission reads any file: the channel's folder is the only boundary."""
+    url = "https://example.sharepoint.com/sites/finance/Shared%20Documents/Payroll/pay.xlsx"
+
+    with pytest.raises(GraphUnavailable, match="outside the channel's folder") as refused:
+        await _sharepoint(_file_routes(url, drive=drive, parent=parent), []).download_url(
+            url, folder=FOLDER
+        )
+    assert refused.value.status == 200, f"{where}: unreachable, not a missing permission"
+
+
+async def test_download_url_refuses_another_drive_before_reading_the_item() -> None:
+    """A file in another drive is refused on the share's answer, without a second read."""
     seen: list[httpx.Request] = []
-    routes = {
-        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/finance"): _ok({"id": "other-site"}),
-        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
-    }
-    url = "https://example.sharepoint.com/sites/finance/Shared%20Documents/payroll.xlsx"
+    url = "https://example.sharepoint.com/sites/finance/Shared%20Documents/pay.xlsx"
 
-    with pytest.raises(GraphUnavailable, match="not the channel's site"):
-        await _sharepoint(routes, seen).download_url(url, group_id=GROUP)
-    assert not any("drives" in r.url.path for r in seen), "nothing in that site is read"
-
-
-async def test_download_url_lists_the_libraries_again_when_none_holds_the_file() -> None:
-    """A library made after the first lookup is found by one fresh listing, not cached away."""
-    listings = [
-        {"value": [{"id": "b!drive-1", "webUrl": LIBRARY}]},
-        {"value": [{"id": "b!drive-2", "webUrl": "https://example.sharepoint.com/sites/team/New"}]},
-    ]
-    routes = {
-        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/sites/{SITE_ID}/drives"): lambda _: httpx.Response(
-            200, json=listings.pop(0)
-        ),
-        ("GET", "/v1.0/drives/b!drive-1/root:/a.csv"): _ok(
-            {"id": "01A", "@microsoft.graph.downloadUrl": DOWNLOAD_URL}
-        ),
-        ("GET", "/v1.0/drives/b!drive-2/root:/b.csv"): _ok(
-            {"id": "01B", "@microsoft.graph.downloadUrl": DOWNLOAD_URL}
-        ),
-    }
-    sharepoint = _sharepoint(routes, [])
-
-    await sharepoint.download_url(f"{LIBRARY}/a.csv", group_id=GROUP)
-    url = await sharepoint.download_url(
-        "https://example.sharepoint.com/sites/team/New/b.csv", group_id=GROUP
-    )
-
-    assert url == DOWNLOAD_URL, "the new library is found on the second listing"
+    with pytest.raises(GraphUnavailable, match="outside the channel's folder"):
+        await _sharepoint(_file_routes(url, drive="b!finance"), seen).download_url(
+            url, folder=FOLDER
+        )
+    assert [r.url.path for r in seen] == [_shares(url)], "nothing in that drive is read"
 
 
 @pytest.mark.parametrize(
@@ -299,40 +241,32 @@ async def test_download_url_refuses_a_link_off_a_sharepoint_site_without_a_reque
     """Only a team site's file on a SharePoint host is looked up; the URL is untrusted input."""
     seen: list[httpx.Request] = []
     with pytest.raises(GraphUnavailable):
-        await _sharepoint({}, seen).download_url(content_url, group_id=GROUP)
+        await _sharepoint({}, seen).download_url(content_url, folder=FOLDER)
     assert seen == [], "a refused link costs no call"
 
 
 async def test_download_url_refuses_a_download_url_off_sharepoint() -> None:
     """The pre-authorised URL is fetched later, so it too must be on SharePoint."""
-    routes = {
-        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/sites/{SITE_ID}/drives"): _ok(
-            {"value": [{"id": "b!drive-1", "webUrl": LIBRARY}]}
-        ),
-        ("GET", "/v1.0/drives/b!drive-1/root:/q3.xlsx"): _ok(
-            {"id": "01Q3", "@microsoft.graph.downloadUrl": "https://evil.example/q3.xlsx"}
-        ),
+    url = f"{LIBRARY}/Planning/q3.xlsx"
+    routes = _file_routes(url)
+    item = {
+        "id": "01Q3",
+        "parentReference": {"driveId": "b!drive-1", "path": "/drives/b!drive-1/root:/Planning"},
+        "@microsoft.graph.downloadUrl": "https://evil.example/q3.xlsx",
     }
+    routes["GET", "/v1.0/drives/b!drive-1/items/01Q3"] = _ok(item)
+
     with pytest.raises(GraphUnavailable, match="no SharePoint download URL"):
-        await _sharepoint(routes, []).download_url(f"{LIBRARY}/q3.xlsx", group_id=GROUP)
+        await _sharepoint(routes, []).download_url(url, folder=FOLDER)
 
 
-async def test_a_refused_upload_marks_the_team_unavailable_until_the_recheck() -> None:
+async def test_a_refused_upload_marks_the_channel_unavailable_until_the_recheck() -> None:
     """A 403 is remembered, so later files skip Graph, and re-probed after `RECHECK_S`."""
     seen: list[httpx.Request] = []
     now = [0.0]
     put = "/v1.0/drives/b!drive-1/items/01FOLDER:/a.csv:/content"
-    folder = {"id": "01FOLDER", "parentReference": {"driveId": "b!drive-1"}}
-    sharepoint = _sharepoint({("GET", FILES_FOLDER): _ok(folder), ("PUT", put): _denied}, seen)
-    files = ChannelFiles(
-        sharepoint,
-        TeamGroups(_no_group),
-        _no_names,
-        stored_site=_nothing_stored,
-        clock=lambda: now[0],
-    )
+    sharepoint = _sharepoint({("GET", FILES_FOLDER): _ok(FOLDER_ITEM), ("PUT", put): _denied}, seen)
+    files = _files(sharepoint, clock=lambda: now[0])
     inbound = _channel()
 
     assert await files.is_available(inbound), "the folder is reachable, so files look available"
@@ -345,228 +279,91 @@ async def test_a_refused_upload_marks_the_team_unavailable_until_the_recheck() -
     assert len(seen) == calls, "known unavailable: no Graph call until the recheck"
 
     now[0] = RECHECK_S
-    assert await files.is_available(inbound), "a grant added later is picked up"
+    assert await files.is_available(inbound), "a permission consented to later is picked up"
     assert len(seen) == calls + 1, "the recheck probes the folder again"
 
 
-@pytest.mark.parametrize("private_first", [False, True])
-async def test_a_private_channel_is_unavailable_while_the_teams_standard_channel_works(
-    private_first: bool,
-) -> None:
-    """Access is per channel: a private channel has no folder in the team site, whatever ran first."""
-    private = "19:private@thread.tacv2"
-    routes = {
-        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/sites/{SITE_ID}/drive/root:/Planning"): _ok(
-            {"id": "01FOLDER", "parentReference": {"driveId": "b!drive-1"}}
-        ),
-        ("GET", FILES_FOLDER): _denied,
-        ("GET", f"/v1.0/teams/{GROUP}/channels/{private}/filesFolder"): _denied,
-    }
+async def test_files_are_off_until_the_permission_is_consented_then_on() -> None:
+    """No consent: `filesFolder` is refused, files are off, and the recheck turns them on."""
+    now = [0.0]
+    consented = [False]
 
-    async def standard_only(_: str) -> dict[str, str | None]:
-        return {CHANNEL: "Planning"}  # what Bot Framework lists once private ones are dropped
+    def folder(request: httpx.Request) -> httpx.Response:
+        return _ok(FOLDER_ITEM)(request) if consented[0] else _denied(request)
 
-    files = ChannelFiles(
-        _sharepoint(routes, []), TeamGroups(_no_group), standard_only, stored_site=_nothing_stored
-    )
-    order = [_channel(channel_id=private), _channel()] if private_first else [_channel()]
-    results = [await files.is_available(inbound) for inbound in order]
+    files = _files(_sharepoint({("GET", FILES_FOLDER): folder}, []), clock=lambda: now[0])
 
-    assert results[-1], "the standard channel's folder is found"
-    assert not await files.is_available(_channel(channel_id=private)), (
-        "the private channel never inherits the standard channel's answer"
-    )
-    assert await files.is_available(_channel()), "nor does it mark the whole team unavailable"
+    assert not await files.is_available(_channel()), "refused: files are off in the channel"
+    consented[0] = True
+    assert not await files.is_available(_channel()), "still off until the recheck"
+    now[0] = RECHECK_S
+    assert await files.is_available(_channel()), "on once Graph allows the folder"
 
 
-async def test_the_general_channel_folder_is_named_without_a_channel_lookup() -> None:
-    """The General channel's id is the team's; its folder is `General`, no Bot Framework call."""
+@pytest.mark.parametrize("kind", ["private", "shared"])
+async def test_a_private_or_shared_channel_saves_to_its_own_files_folder(kind: str) -> None:
+    """`filesFolder` names the channel's own site's folder, so no team-site folder is used."""
     seen: list[httpx.Request] = []
+    own = {"id": "01PRIVATE", "parentReference": {"driveId": "b!private"}}
+    put = "/v1.0/drives/b!private/items/01PRIVATE:/a.csv:/content"
     routes = {
-        ("GET", f"/v1.0/teams/{GROUP}/channels/{TEAM}/filesFolder"): _denied,
-        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/sites/{SITE_ID}/drive/root:/General"): _ok(
-            {"id": "01GEN", "parentReference": {"driveId": "b!drive-1"}}
+        ("GET", f"/v1.0/teams/{GROUP}/channels/{PRIVATE}/filesFolder"): _ok(own),
+        ("PUT", put): _ok(ITEM, 201),
+    }
+    files = _files(_sharepoint(routes, seen))
+    inbound = _channel(channel_id=PRIVATE, channel_type=kind)
+
+    assert await files.is_available(inbound), "its own folder is reachable"
+    await files.upload(inbound, "a.csv", b"a")
+
+    assert [r.url.path for r in seen] == [
+        f"/v1.0/teams/{GROUP}/channels/{PRIVATE}/filesFolder",
+        put,
+    ], "the folder is looked up once, then the file goes there"
+
+
+async def test_access_is_per_channel_not_per_team() -> None:
+    """A refused channel neither inherits a working channel's answer nor marks the team off."""
+    routes = {
+        ("GET", FILES_FOLDER): _ok(FOLDER_ITEM),
+        ("GET", f"/v1.0/teams/{GROUP}/channels/{PRIVATE}/filesFolder"): _denied,
+    }
+    files = _files(_sharepoint(routes, []))
+
+    assert await files.is_available(_channel()), "the standard channel's folder is found"
+    assert not await files.is_available(_channel(channel_id=PRIVATE)), "the refused one is off"
+    assert await files.is_available(_channel()), "and the team stays on"
+
+
+async def test_resolve_links_a_file_in_the_channels_folder_and_names_the_rest() -> None:
+    """Only the file inside the channel's folder gets a URL; one elsewhere is named only."""
+    inside = SharedFile("q3.xlsx", f"{LIBRARY}/Planning/q3.xlsx")
+    elsewhere = SharedFile("pay.xlsx", "https://example.sharepoint.com/sites/hr/Docs/pay.xlsx")
+    routes = {
+        ("GET", FILES_FOLDER): _ok(FOLDER_ITEM),
+        **_file_routes(inside.content_url or ""),
+        ("GET", _shares(elsewhere.content_url or "")): _ok(
+            {"id": "01PAY", "parentReference": {"driveId": "b!hr"}}
         ),
     }
-    files = ChannelFiles(
-        _sharepoint(routes, seen), TeamGroups(_no_group), _no_names, stored_site=_nothing_stored
+    files = _files(_sharepoint(routes, []))
+
+    media = await files.resolve(
+        ChannelMedia(files=(inside, elsewhere)), group_id=GROUP, channel_id=CHANNEL
     )
 
-    assert await files.is_available(_channel(channel_id=TEAM)), "General resolves by its name"
+    assert media.files == (dataclasses.replace(inside, download_url=DOWNLOAD_URL), elsewhere), (
+        "the channel's file is linked; the other, which its members may not share, is not"
+    )
 
 
-async def test_resolve_leaves_an_unreachable_shared_file_without_a_link() -> None:
-    """No site grant: the file keeps no download URL, so it is named, never fetched."""
+async def test_resolve_marks_shared_files_refused_without_the_permission() -> None:
+    """No consent: the folder is refused, so each file is named as refused, never fetched."""
+    seen: list[httpx.Request] = []
     shared = SharedFile("q3.xlsx", f"{LIBRARY}/q3.xlsx")
-    routes = {("GET", f"/v1.0/groups/{GROUP}/sites/root"): _denied}
-    files = ChannelFiles(
-        _sharepoint(routes, []), TeamGroups(_no_group), _no_names, stored_site=_nothing_stored
-    )
+    files = _files(_sharepoint({("GET", FILES_FOLDER): _denied}, seen))
 
     media = await files.resolve(ChannelMedia(files=(shared,)), group_id=GROUP, channel_id=CHANNEL)
 
     assert media.files == (dataclasses.replace(shared, refused=True),), "named, never linked"
-
-
-async def test_resolve_does_not_call_a_file_on_a_site_outside_the_team_refused() -> None:
-    """The team's site is granted but the link is elsewhere: no grant would open it."""
-    shared = SharedFile("pay.xlsx", "https://example.sharepoint.com/sites/finance/Docs/pay.xlsx")
-    routes = {
-        ("GET", f"/v1.0/groups/{GROUP}/sites/root"): _ok({"id": SITE_ID}),
-        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/finance"): _denied,
-    }
-    files = ChannelFiles(
-        _sharepoint(routes, []), TeamGroups(_no_group), _no_names, stored_site=_nothing_stored
-    )
-
-    media = await files.resolve(ChannelMedia(files=(shared,)), group_id=GROUP, channel_id=CHANNEL)
-
-    assert media.files == (shared,), "unreachable, so no Enable files offer"
-
-
-async def _nothing_stored(_: str) -> None:
-    return None
-
-
-async def _no_group(_: str) -> str | None:
-    raise AssertionError("the activity's group id is used")
-
-
-PRIVATE = "19:private@thread.tacv2"
-PRIVATE_SITE = "example.sharepoint.com,9e0f-private,1a2b-web"
-PRIVATE_LIBRARY = "https://example.sharepoint.com/sites/team-Private/Shared%20Documents"
-
-
-def _stored(channel_id: str) -> Callable[[str], Awaitable[TeamsChannelSiteRow | None]]:
-    row = TeamsChannelSiteRow(
-        tenant_id=uuid.uuid4(),
-        channel_id=channel_id,
-        group_id=GROUP,
-        site_id=PRIVATE_SITE,
-        drive_id="b!private",
-        folder_id="01PRIVATE",
-    )
-
-    async def stored(asked: str) -> TeamsChannelSiteRow | None:
-        return row if asked == channel_id else None
-
-    return stored
-
-
-async def test_a_private_channel_uses_its_stored_folder_once_graph_shows_it() -> None:
-    """Turned on from the channel: its own site's folder, checked once, never the team site's."""
-    seen: list[httpx.Request] = []
-    put = "/v1.0/drives/b!private/items/01PRIVATE:/a.csv:/content"
-    routes = {
-        ("GET", "/v1.0/drives/b!private/items/01PRIVATE"): _ok({"id": "01PRIVATE"}),
-        ("PUT", put): _ok(ITEM, 201),
-    }
-    files = ChannelFiles(
-        _sharepoint(routes, seen), TeamGroups(_no_group), _no_names, stored_site=_stored(PRIVATE)
-    )
-    inbound = _channel(channel_id=PRIVATE)
-
-    assert await files.is_available(inbound), "the stored folder is reachable"
-    await files.upload(inbound, "a.csv", b"a")
-
-    assert [(r.method, r.url.path) for r in seen] == [
-        ("GET", "/v1.0/drives/b!private/items/01PRIVATE"),
-        ("PUT", put),
-    ], "no filesFolder or team-site lookup, and the folder is checked once"
-
-
-@pytest.mark.parametrize("kind", ["private", "shared", "Private"])
-async def test_a_private_channel_without_a_stored_folder_never_uses_the_team_sites(
-    kind: str,
-) -> None:
-    """A same-named folder in the team site is not the channel's: no lookup, nothing uploaded."""
-    seen: list[httpx.Request] = []
-    files = ChannelFiles(
-        _sharepoint({}, seen), TeamGroups(_no_group), _no_names, stored_site=_nothing_stored
-    )
-    inbound = _channel(channel_id=PRIVATE, channel_type=kind)
-
-    assert not await files.is_available(inbound), "unavailable until turned on there"
-    with pytest.raises(GraphUnavailable):
-        await files.upload(inbound, "a.csv", b"a")
-    assert seen == [], "Graph is never asked"
-
-
-async def test_a_private_channel_is_unavailable_when_its_stored_folder_is_refused() -> None:
-    """A grant removed since: the stored folder is refused, so the agent is told the truth."""
-    routes = {("GET", "/v1.0/drives/b!private/items/01PRIVATE"): _denied}
-    files = ChannelFiles(
-        _sharepoint(routes, []), TeamGroups(_no_group), _no_names, stored_site=_stored(PRIVATE)
-    )
-
-    assert not await files.is_available(_channel(channel_id=PRIVATE)), "refused: unavailable"
-
-
-async def test_resolve_in_a_private_channel_reads_only_its_own_site() -> None:
-    """A stored site replaces the team's as the one site the channel's links may open."""
-    own = SharedFile("q3.xlsx", f"{PRIVATE_LIBRARY}/q3.xlsx")
-    team = SharedFile("pay.xlsx", f"{LIBRARY}/pay.xlsx")
-    routes = {
-        ("GET", f"/v1.0/sites/{PRIVATE_SITE}"): _ok({"id": PRIVATE_SITE}),
-        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team-Private"): _ok(
-            {"id": PRIVATE_SITE}
-        ),
-        ("GET", "/v1.0/sites/example.sharepoint.com:/sites/team"): _ok({"id": SITE_ID}),
-        ("GET", f"/v1.0/sites/{PRIVATE_SITE}/drives"): _ok(
-            {"value": [{"id": "b!private", "webUrl": PRIVATE_LIBRARY}]}
-        ),
-        ("GET", "/v1.0/drives/b!private/root:/q3.xlsx"): _ok(
-            {"id": "01Q3", "@microsoft.graph.downloadUrl": DOWNLOAD_URL}
-        ),
-    }
-    files = ChannelFiles(
-        _sharepoint(routes, []), TeamGroups(_no_group), _no_names, stored_site=_stored(PRIVATE)
-    )
-
-    media = await files.resolve(ChannelMedia(files=(own, team)), group_id=GROUP, channel_id=PRIVATE)
-
-    assert media.files == (dataclasses.replace(own, download_url=DOWNLOAD_URL), team), (
-        "the channel's own file is linked; the team site's, which its members may not share, is not"
-    )
-
-
-async def test_resolve_refuses_a_shared_file_once_the_stored_site_is_revoked() -> None:
-    """A 403 on the channel's own site is a refusal, so the admin is offered the sign-in again."""
-    own = SharedFile("q3.xlsx", f"{PRIVATE_LIBRARY}/q3.xlsx")
-    files = ChannelFiles(
-        _sharepoint({("GET", f"/v1.0/sites/{PRIVATE_SITE}"): _denied}, []),
-        TeamGroups(_no_group),
-        _no_names,
-        stored_site=_stored(PRIVATE),
-    )
-
-    media = await files.resolve(ChannelMedia(files=(own,)), group_id=GROUP, channel_id=PRIVATE)
-
-    assert media.files == (dataclasses.replace(own, refused=True),)
-
-
-async def test_forget_drops_a_cached_folder_so_a_stored_one_is_used() -> None:
-    """After a grant the channel's folder is looked up again, finding the newly stored one."""
-    granted = [False]
-    row_lookup = _stored(CHANNEL)
-
-    async def stored_site(channel_id: str) -> TeamsChannelSiteRow | None:
-        return await row_lookup(channel_id) if granted[0] else None
-
-    routes = {
-        ("GET", FILES_FOLDER): _ok({"id": "01FOLDER", "parentReference": {"driveId": "b!drive-1"}}),
-        ("GET", "/v1.0/drives/b!private/items/01PRIVATE"): _ok({"id": "01PRIVATE"}),
-        ("PUT", "/v1.0/drives/b!private/items/01PRIVATE:/a.csv:/content"): _ok(ITEM, 201),
-    }
-    files = ChannelFiles(
-        _sharepoint(routes, []), TeamGroups(_no_group), _no_names, stored_site=stored_site
-    )
-    assert await files.is_available(_channel()), "found through filesFolder first"
-
-    granted[0] = True
-    files.forget(GROUP)
-    item = await files.upload(_channel(), "a.csv", b"a")
-
-    assert item.id == ITEM["id"], "the upload went to the stored folder (only it has a PUT route)"
+    assert [r.url.path for r in seen] == [FILES_FOLDER], "no share is looked up"
