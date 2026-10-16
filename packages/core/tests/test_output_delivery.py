@@ -582,6 +582,36 @@ async def test_discard_skipped_up_to_deletes_only_files_that_fit() -> None:
     assert deletes == ["file_ok"], "only the file that fits the cap is discarded"
 
 
+async def test_a_skipped_file_carries_its_mime_type() -> None:
+    """A caller that skips everything can still tell an image from the rest."""
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    deletes: list[str] = []
+    skipped: list[SkippedFile] = []
+
+    async def post(file: DeliverableFile) -> None:
+        raise AssertionError("a zero cap posts nothing")
+
+    async def on_skip(file: SkippedFile) -> None:
+        skipped.append(file)
+
+    await sweep_session_outputs(
+        _oversize_then_normal_client(deletes),
+        session_id="sesn_1",
+        post=post,
+        on_skip=on_skip,
+        sleep=sleep,
+        max_bytes=0,
+    )
+
+    assert [(f.file_id, f.mime_type) for f in skipped] == [
+        ("file_big", "video/mp4"),
+        ("file_ok", "text/plain"),
+    ], "each skipped file names its type"
+
+
 async def test_max_bytes_for_lets_one_type_through_a_sweep_that_skips_the_rest() -> None:
     """A per-type cap overrides ``max_bytes``: here only text is posted, while
     the video is skipped and, under ``discard_skipped_up_to``, discarded."""

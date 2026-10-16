@@ -82,11 +82,16 @@ class DeliverableFile:
 
 @dataclass(frozen=True)
 class SkippedFile:
-    """An output skipped without downloading it (oversize). No ``content``."""
+    """An output skipped without downloading it (oversize). No ``content``.
+
+    ``mime_type`` lets a caller that skips everything still pick some types
+    to fetch on its own, such as an image to preview where nothing is saved.
+    """
 
     file_id: str
     filename: str
     size_bytes: int
+    mime_type: str = "application/octet-stream"
 
 
 class OutputPostingUnavailable(DaimonError):
@@ -324,6 +329,7 @@ async def sweep_session_outputs(
                             file_id=meta.id,
                             filename=meta.filename,
                             size_bytes=meta.size_bytes,
+                            mime_type=meta.mime_type,
                         )
                     )
                     if noticed is not None:
