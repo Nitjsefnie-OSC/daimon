@@ -1876,13 +1876,21 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
     assert all(client.is_closed() for client in clients)
 
 
+@pytest.mark.parametrize("storage_backend", ["sqlite", "postgres"])
 @pytest.mark.parametrize("explicit_worker_request", [True], indirect=True)
 async def test_capped_worker_materialization_runs_through_headless_preparation_and_sdk(
     materialization_worker_request,
+    storage_backend,
 ):
     from daimon.core.headless_runner import run_worker
 
     (selected, root, worker, prices, owned, calls), _ = materialization_worker_request
+    if storage_backend == "postgres":
+        values = json.loads(owned.manifest_path.read_text())[0]
+        values.pop("records_path")
+        values.pop("holds_path")
+        values["storage_backend"] = "postgres"
+        owned.manifest_path.write_text(json.dumps([values]))
     assert selected.worker.limits.max_input_tokens == 262144
     result = await run_worker(
         selected,
@@ -1917,3 +1925,23 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
     assert (
         len([r for r in calls if r.url.path.endswith("/interactions") and r.method == "POST"]) == 1
     )
+
+
+async def test_postgres_plan_is_explicit_and_refuses_ambiguous_storage(selected, tmp_path):
+    from pydantic import ValidationError
+
+    values = entry(selected, tmp_path)
+    sqlite = GeminiPlan.model_validate(values)
+    assert sqlite.storage_backend == "sqlite"
+    assert "storage_backend" not in sqlite.model_dump(mode="json")
+    postgres = dict(values, storage_backend="postgres")
+    with pytest.raises(ValidationError, match="silently replace"):
+        GeminiPlan.model_validate(postgres)
+    postgres.pop("records_path")
+    postgres.pop("holds_path")
+    plan = GeminiPlan.model_validate(postgres)
+    assert plan.records_path is None and plan.holds_path is None
+    assert plan.model_dump(mode="json")["storage_backend"] == "postgres"
+    for changes in ({"storage_backend": "unknown"}, {"storage_backend": "sqlite"}):
+        with pytest.raises(ValidationError):
+            GeminiPlan.model_validate(postgres | changes)
