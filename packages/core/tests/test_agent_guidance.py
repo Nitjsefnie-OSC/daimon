@@ -163,8 +163,8 @@ def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
             )
         ]
     )
-    assert "never call it or create_file_upload_url for a file" in teams, (
-        "Teams send_message refuses files; the agent must not reach for the Discord path"
+    assert "never call it or create_file_upload_url for one" in teams, (
+        "send_message cannot attach a file where files are unavailable"
     )
     assert "follow the `files` attribute on `<channel>`" in teams, (
         "whether a channel takes files depends on what Graph allows there"
