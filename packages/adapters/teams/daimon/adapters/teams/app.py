@@ -1,8 +1,8 @@
 """Teams turn orchestration: queueing, the turn body, commands and Cancel.
 
 Mirrors `SlackApp`. One turn per conversation thread at a time; messages that
-arrive meanwhile queue silently (Teams bots cannot react) and run after it as
-one turn per author. A per-tenant cap sheds load, and no turn starts until the
+arrive meanwhile queue, marked ⌛ (`reactions`), and run after it as one turn
+per author. A per-tenant cap sheds load, and no turn starts until the
 boot sweep has retired the previous process's turns. A wake poller opens chats
 with due handoffs and timers. Unmentioned thread replies go to organic thread
 participation (`participation.py`), whose turns run here, silently on failure.
@@ -84,6 +84,7 @@ from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.participation import TeamsParticipation
 from daimon.adapters.teams.provider_actions import TeamsProviderActions, provider_action_options
 from daimon.adapters.teams.provisioning import provision_configured_tenant
+from daimon.adapters.teams.reactions import React, TeamsReactions
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
 from daimon.adapters.teams.site_grant import (
@@ -316,6 +317,7 @@ class TeamsApp:
         routine_poster: RoutinePoster | None = None,
         ask_human: bool = False,
         subscriptions: ChannelSubscriptions | None = None,
+        react: React | None = None,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -363,6 +365,8 @@ class TeamsApp:
         # cancel_key (the card intent id) -> (cancel Event, author's Entra id).
         self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        spawn = functools.partial(self.spawn, name="teams.reaction")
+        self._reactions = TeamsReactions(react, spawn=spawn)
         # Bot Framework retries a slow delivery with the same activity id.
         # Not durable: a retry landing after a restart runs a second turn.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
@@ -1155,6 +1159,7 @@ class TeamsApp:
         if key in self._processing:
             self._last_message_at[key] = datetime.now(UTC)
             self._thread_queue.enqueue(key, inbound)
+            self._reactions.mark_queued(inbound)
             self._supersede_batch(inbound)
             return
         # Over the cap the turn queues: it posts the ordinary card and waits
@@ -1202,6 +1207,7 @@ class TeamsApp:
         finally:
             self._release(key)
             unstarted = self._pending.pop(key, [])
+            self._reactions.clear_queued(unstarted)
             if self.draining:
                 if unstarted:
                     await self._hold(unstarted)
@@ -1218,6 +1224,7 @@ class TeamsApp:
         """One turn per author, composed of the messages its fence still held."""
 
         async def run(batch: list[TeamsInbound]) -> None:
+            self._reactions.clear_queued(batch)
             if self.draining:
                 # A turn started now would be cut off: `_holding` holds these instead.
                 self._pending.setdefault(key, []).extend(batch)
@@ -1381,6 +1388,7 @@ class TeamsApp:
                 markup=self.runtime.turn_deps.markup,
                 sessionmaker=self.runtime.sessionmaker,
                 budget_channel_id=admission.budget_channel_id,
+                acknowledge=None if continuation else self._reactions.acknowledger(inbound),
             )
             holder.append(attempt)
             return attempt

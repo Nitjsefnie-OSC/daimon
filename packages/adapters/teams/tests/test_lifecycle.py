@@ -69,6 +69,9 @@ async def _posted(
     return lifecycle
 
 
+_TOOL = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
+
+
 def _answer(text: str) -> TurnState:
     return TurnState(content=[TextBlock(kind="text", text=text)])
 
@@ -436,6 +439,47 @@ async def test_a_ping_whose_answer_fails_collapses_the_card_to_the_failure() -> 
     await lifecycle.on_terminal_success(_answer("Done."))
     assert sender.activities[-1].id == "m-1" and card.ANSWERED_BELOW not in _card_json(sender, -1)
     assert lifecycle.final_message_id is None, "no watermark past an answer nobody saw"
+
+
+@pytest.mark.parametrize(
+    ("ping", "state", "expected"),
+    [
+        (True, _answer("Done."), ["accepted", "done"]),
+        (True, TurnState(content=[_TOOL]), ["accepted", "done"]),
+        (True, TurnState(), ["accepted"]),
+        (False, _answer("Done."), []),
+    ],
+    ids=["answered", "tool-only", "cancelled", "no-ping"],
+)
+async def test_a_ping_reacts_on_the_askers_message_as_on_discord(
+    ping: bool, state: TurnState, expected: list[str]
+) -> None:
+    phases: list[str] = []
+    lifecycle = await _posted(FakeSender(), completion_ping=ping, acknowledge=phases.append)
+    await lifecycle.on_acknowledgment("accepted")
+    await lifecycle.on_terminal_success(state)
+    await lifecycle.on_acknowledgment("done")
+    assert phases == expected, "👀 on acceptance with a ping, ✅ only once something was answered"
+
+
+async def test_a_failed_answer_or_an_unprompted_turn_earns_no_check() -> None:
+    phases: list[str] = []
+    lifecycle = await _posted(
+        FakeSender(fail_on={1}), completion_ping=True, acknowledge=phases.append
+    )
+    await lifecycle.on_terminal_success(_answer("Done."))
+    await lifecycle.on_acknowledgment("done")
+    unprompted = TeamsTurnLifecycle(
+        sender=FakeSender(),
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        unprompted=True,
+        completion_ping=True,
+        acknowledge=phases.append,
+    )
+    await unprompted.on_acknowledgment("accepted")
+    assert phases == [], "no ✅ for an answer nobody saw, no reaction in a thread nobody asked in"
 
 
 async def test_a_late_notice_is_edited_in_above_the_answer() -> None:

@@ -47,6 +47,7 @@ from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
 from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
+from daimon.adapters.teams.reactions import ReactionTarget
 from daimon.adapters.teams.routine_delivery import make_teams_routine_poster
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -381,6 +382,13 @@ def create_teams_http_service(
         )
     if support is not None:
         commands["support"] = support.command
+
+    async def react(target: ReactionTarget, reaction: str, *, add: bool) -> None:
+        # The SDK's own client: the bot token, and only the activity's service URL.
+        api = teams_app.api.from_service_url(target.service_url or SERVICE_URL).conversations
+        change = api.add_reaction if add else api.delete_reaction
+        await change(target.conversation_id, target.activity_id, reaction)
+
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
     turns = TeamsApp(
         runtime=runtime,
@@ -393,6 +401,7 @@ def create_teams_http_service(
         direct=direct,
         ask_human=support is not None,
         subscriptions=subscriptions,
+        react=react,
         routine_poster=make_teams_routine_poster(
             runtime.sessionmaker,
             direct,

@@ -10,6 +10,8 @@ it works only in personal chats and stops after two minutes. Cancel clicks
 route by `cancel_key` (the card intent id), carried from the first render.
 An `unprompted` turn (organic thread participation) posts no card: it stays
 invisible until it has an answer, and posts nothing if it has none or fails.
+With a completion ping the asker's message also gets 👀 once the turn is
+accepted and ✅ in its place once answered, as on Discord (`acknowledge`).
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
-from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
+from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
@@ -143,8 +145,13 @@ class TeamsTurnLifecycle:
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         budget_channel_id: str | None = None,
         on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
+        acknowledge: Callable[[Acknowledgment], None] | None = None,
     ) -> None:
         self._sender = sender
+        # Reacts on the asker's message, in the background; None when there is none.
+        self._acknowledge = acknowledge
+        # An answer, or a tool-only turn's result, reached the chat: ✅ is due.
+        self._answered = False
         # Support is on: the controls below the answer offer Ask a human.
         self._ask_human = ask_human
         # The summary line's agent, price and money left.
@@ -384,6 +391,7 @@ class TeamsTurnLifecycle:
                     actions = (*actions, card.ask_human_action())
                 summary = await self._summary(state)
                 await self._close(text, actions=actions, summary=summary)
+                self._answered = tool_only
                 return
             if self.answer_prefix is not None:
                 answer = f"{self.answer_prefix}\n\n{answer}"
@@ -406,6 +414,7 @@ class TeamsTurnLifecycle:
                     current = await self._send(message, message_id=None)
                 if index == 0:
                     self._answer_id, replaced = current, True
+                    self._answered = True
                 self._shown[current] = chunk
             self.final_message_id = current
             if fresh:  # retire before the best-effort controls so a lost post can't strand it
@@ -535,6 +544,14 @@ class TeamsTurnLifecycle:
             request_id=request_id,
         )
         await self.close_with_notice(text, summary=summary)
+
+    async def on_acknowledgment(self, phase: Acknowledgment) -> None:
+        """Discord's completion-ping reactions; queued in the background, so never a delay."""
+        if not self._ping or self._acknowledge is None:
+            return
+        if phase == "done" and not self._answered:
+            return
+        self._acknowledge(phase)
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
         return None

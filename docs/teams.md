@@ -71,7 +71,8 @@ A turn shows one status card, edited in place, with a Cancel button only the
 author can use. The answer replaces the card, split across messages when long,
 then a card follows with the summary line (agent, time, cost, money left; see
 [billing.md](billing.md)) and the controls below. Messages sent while a turn
-runs are queued and run as one follow-up per author. Work an agent hands off
+runs are queued, each marked ⌛ until its turn starts, and run as one
+follow-up per author. Work an agent hands off
 (`hand_off_task`) runs right after the turn that queued it; if admission
 refuses that work, it is dropped without a notice, as on Slack. A retried
 delivery runs once, across restarts too (see Restart behaviour).
@@ -474,7 +475,8 @@ roster; when they are not, or the post fails, the result goes to their 1:1
 chat if the direct-message policy allows. With completion pings on
 (`DAIMON_COMPLETION_PINGS`), the answer is posted as a new message (in a
 channel, @mentioning the asker) so Teams notifies, and the card then reads
-"Done. The answer is below."; bots cannot react. Teams renders markdown tables
+"Done. The answer is below.". The asker's message also gets 👀 once the turn
+is accepted and ✅ in its place once it is answered, as on Discord. Teams renders markdown tables
 natively, so `DAIMON_TABLE_RENDERING` has nothing to do here.
 
 ### Capacity
@@ -484,6 +486,9 @@ Each tenant runs three turns at once by default
 gets a retry-later reply without starting a turn, and due timers and handoffs
 from the wake poller wait until a turn finishes. A post or edit Teams throttles
 (HTTP 429) is retried once after the wait Teams asks for, up to 10 seconds.
+Reactions (👀, ✅, ⌛) are spaced to Bot Framework's limit of two a second per
+bot, sent in the background, and dropped when they would wait over five
+seconds or fail: they never hold up a turn.
 
 ### Restart behaviour
 
@@ -517,7 +522,7 @@ different agent posts a notice instead of running. A deployment with
 
 ### Not supported
 
-Group chats, reactions, `/dm` conversations, files in channels whose site is
+Group chats, `/dm` conversations, files in channels whose site is
 not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.
 

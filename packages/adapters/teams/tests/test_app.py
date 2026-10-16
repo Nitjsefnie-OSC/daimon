@@ -14,6 +14,7 @@ import httpx
 import pytest
 import structlog
 from daimon.adapters.teams import app as app_module
+from daimon.adapters.teams import reactions
 from daimon.adapters.teams.admissions import HOLDING
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import ANSWERED_IN_CHAT, CHANNEL_POINTER, fresh_start
@@ -61,6 +62,7 @@ from .conftest import (
     make_message_activity,
     patched_admission,
     patched_turns,
+    settle,
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
@@ -124,6 +126,46 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
     ]
     assert ran[1].message_ids == (two.activity_id, three.activity_id), (
         "the composed turn knows every message it answers, for media and history"
+    )
+
+
+async def test_a_queued_message_shows_an_hourglass_until_its_turn_starts(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(reactions, "MIN_INTERVAL_S", 0.0)
+    made: list[tuple[str, str, bool]] = []
+
+    async def react(target: reactions.ReactionTarget, reaction: str, *, add: bool) -> None:
+        made.append((target.activity_id, reaction, add))
+
+    runtime = build_teams_runtime(db_session_factory)
+    teams = TeamsApp(runtime=runtime, sender=FakeSender(), commands={}, bot_token=bot_token)
+    teams._reactions = reactions.TeamsReactions(
+        react, spawn=lambda coro: teams.spawn(coro, name="r")
+    )
+    started, release = asyncio.Event(), asyncio.Event()
+    ran: list[TeamsInbound] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound)
+        if len(ran) == 1:
+            started.set()
+            await release.wait()
+
+    first, queued = make_inbound("one"), make_inbound("two")
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        running = asyncio.create_task(teams._orchestrate(first, TENANT))
+        await started.wait()
+        await teams._orchestrate(queued, TENANT)
+        await settle(teams)
+        assert made == [(queued.activity_id, reactions.HOURGLASS, True)], (
+            "only the message waiting behind the running turn gets ⌛"
+        )
+        release.set()
+        await running
+    await settle(teams)
+    assert made[1:] == [(queued.activity_id, reactions.HOURGLASS, False)], (
+        "the ⌛ comes off once its turn starts"
     )
 
 

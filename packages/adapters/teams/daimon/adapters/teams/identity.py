@@ -99,6 +99,7 @@ class TeamsInbound:
     come from the activity, General's filled in. `is_external` marks a sender
     answered as from another organisation, `is_external_known` that it rests on
     positive evidence (`externals.Membership`), `home_tenant_id` their tenant.
+    `from_form` marks a submitted form's turn: its `activity_id` names no message.
     """
 
     kind: Literal["dm", "channel"]
@@ -125,6 +126,7 @@ class TeamsInbound:
     is_external: bool = False
     is_external_known: bool = False
     home_tenant_id: str | None = None
+    from_form: bool = False
 
     @property
     def thread_id(self) -> str:

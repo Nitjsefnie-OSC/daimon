@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teams now reacts on the asker's message, as Discord and Slack do.** Teams bots
+  could not react, so a message queued behind a running turn showed nothing
+  until its turn began, and a completion ping was an @mention alone. A message
+  waiting behind the turn running in its chat or thread now gets ⌛, removed
+  once its turn starts. With completion pings on, the asker's message gets 👀
+  once the turn is accepted and ✅ in its place once it is answered. Reactions
+  go through Bot Framework in the background, spaced to its limit of two a
+  second per bot; one that would wait over five seconds, or fails, is dropped,
+  so a reaction never holds up or fails a turn. No new setting or manifest change.
 - **Fleet roots now run against one retained original reservation.** A fleet root is admitted once against a scoped hold that it keeps for its whole run: pending financial state is settled before any funding check, each original input the root sends is counted against that hold, and a native root carries its explicit budget into the session. A root is an ordinary agent session, so it keeps the agent's personal memory store, which is neither counted nor funded. Off by default: fleet roots run only with `DAIMON_FLEET__ENABLED=true`. No migration.
 - Explicitly authorized OpenAI fleet workers can run without a workspace, tools, MCP, memory or skills. Their initial task is counted and sent with session creation; retries reuse the acknowledged input and uncertain delivery requires reconciliation.
 
