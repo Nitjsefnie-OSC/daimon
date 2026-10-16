@@ -1251,9 +1251,12 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         private_handles.append(handle)
         await check_sessions(token, handle, allowed=True)
         await check(token, allowed=True)
-        # Even a trusted token with a mixed caller kind cannot use a DM grant.
+        # A registered chat token cannot turn into a trusted internal token.
+        forged = jwt.encode(claims | {"internal": True}, secret, algorithm="HS256")
+        verifier = DaimonJWTVerifier(secret=secret, sessionmaker=db_session_factory)
+        assert await verifier.verify_token(forged) is None
+        # A valid caller kind still cannot borrow an invalid execution grant.
         for extra in (
-            {"internal": True},
             {"slack_turn_context_id": "malformed"},
             {"slack_turn_context_id": "00000000-0000-0000-0000-000000000000"},
         ):

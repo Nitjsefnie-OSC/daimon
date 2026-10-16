@@ -598,7 +598,8 @@ def test_private_session_stamp_is_not_account_or_admin_authority(private_stamp, 
 
 @pytest.mark.parametrize("role", [Role.USER, Role.ADMIN])
 @pytest.mark.parametrize("claim", ["chat_agent_id", "agent_id"])
-async def test_session_reads_do_not_cross_executing_agent(role, claim):
+@pytest.mark.parametrize("agent_name", [None, "owned", "other"])
+async def test_session_reads_do_not_cross_executing_agent(role, claim, agent_name):
     from daimon.core.ma_identity import derive_agent_uuid
 
     account, tenant = uuid.uuid4(), uuid.uuid4()
@@ -647,7 +648,8 @@ async def test_session_reads_do_not_cross_executing_agent(role, claim):
             **{claim: derive_agent_uuid(tenant_id=tenant, ma_agent_id=own.id)},
         )
         runtime = _runtime(client)
-        assert [s.id for s in await _list_sessions_impl(runtime, auth, None, None)] == ["sess_mine"]
+        listed = await _list_sessions_impl(runtime, auth, None, agent_name)
+        assert [s.id for s in listed] == ([] if agent_name == "other" else ["sess_mine"])
         assert (await _get_session_impl(runtime, auth, "sess_mine")).id == "sess_mine"
         for read in (
             lambda: _get_session_impl(runtime, auth, "sess_other"),

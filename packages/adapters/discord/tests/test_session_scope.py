@@ -8,6 +8,7 @@ actually gets minted and lands in a recorded credential POST.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import uuid
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.core.config import McpSettings
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_vault import chat_mcp_credential
 from daimon.core.sessions import create_session
 from daimon.testing import (
     build_fake_anthropic,
@@ -105,6 +107,7 @@ def _cold_path_handler(
 
 def _warm_rebind_handler(
     *,
+    chat_metadata: dict[str, Any],
     account_id: uuid.UUID,
     agent_uuid: uuid.UUID,
     call_log: list[tuple[str, str]],
@@ -130,7 +133,7 @@ def _warm_rebind_handler(
                     "data": [
                         {
                             **_credential_obj("vcrd_old", "vlt_warm"),
-                            "metadata": {"daimon_chat_identity": str(agent_uuid)},
+                            "metadata": chat_metadata,
                         }
                     ],
                     "has_more": False,
@@ -202,18 +205,23 @@ async def test_discord_turn_with_existing_matching_url_vault_skips_rebind(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Existing vault with credential at the current URL: no DELETE, no new credential POST.
-
-    The credential re-stamp limb was removed (per-turn delete+recreate keyed on
-    is_admin claim). The credential is identity-stable — only a URL mismatch triggers
-    a new credential. Same-URL warm path is now a no-op on vault credentials.
-    """
+    """A healthy registered credential at the current URL needs no vault writes."""
     tenant_id, account_id = await _seed_tenant_and_account(db_session)
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_discord")
 
+    payload = await chat_mcp_credential(
+        db_session,
+        account_id=account_id,
+        agent_id=agent_uuid,
+        jwt_secret=SECRET,
+        public_url=PUBLIC_URL,
+        now=dt.datetime.now(dt.UTC),
+    )
+    await db_session.commit()
     call_log: list[tuple[str, str]] = []
     client = build_fake_anthropic(
         _warm_rebind_handler(
+            chat_metadata=payload["metadata"],
             account_id=account_id,
             agent_uuid=agent_uuid,
             call_log=call_log,
