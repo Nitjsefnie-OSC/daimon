@@ -71,6 +71,7 @@ from daimon.core.session_snapshot import (
     hash_env_bytes,
     hash_mcp_servers,
     hash_tools,
+    refreshed_unavailable_state,
     session_mcp_servers,
     session_tools,
 )
@@ -329,6 +330,7 @@ async def apply_update_ops(
                     is_external=is_external,
                     vault_id=snapshot.vault_id,
                     resource_ids=op.resource_ids,
+                    unavailable_repos=snapshot.unavailable_repos,
                     config=agent_github_app or GithubAppSettings(),
                     fernet=fernet,
                 )
@@ -340,9 +342,9 @@ async def apply_update_ops(
                             if url not in access.excluded_repo_urls
                         ),
                         "token_repo_urls": access.token_repo_urls,
-                        "unavailable_repo_urls": access.excluded_repo_urls,
-                        "unavailable_since": now if access.excluded_repo_urls else None,
-                        "unavailable_notice_announced": not bool(access.excluded_repo_urls),
+                        **refreshed_unavailable_state(
+                            snapshot, access.excluded_repo_urls, now=dt.datetime.now(dt.UTC)
+                        ),
                         "repo_token_issued_at": int(now.timestamp()),
                     }
                 )

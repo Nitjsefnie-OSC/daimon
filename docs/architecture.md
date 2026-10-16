@@ -1185,11 +1185,17 @@ The refresh never adds repos to the tenant-confirmed set.
 If token minting returns 403, 404, or 422 for a repository group, that group's
 pending token is closed, its installation is queued for reconciliation, and
 only successfully minted groups enter the session. The refused group's repos
-are excluded from the session snapshot and announced plainly on the next turn,
-subject to the requester's repository-name visibility. Authentication failures,
+are recorded with a per-URL first-refusal time in the session snapshot. A pending
+notice is announced on the next turn, including after reconciliation removes the
+repository or the exclusion expires, subject to the requester's repository-name
+visibility. The notice is sent once for a continuous refusal; if access returns
+and a later mint refuses it again, a new notice is sent. Authentication failures,
 rate limits, timeouts, and server failures stop preparation so it can be retried.
-Exclusions remain valid for 60 minutes; then the next turn replaces the session
-and retries minting once. A new refusal records a new 60-minute exclusion.
+Each exclusion remains valid for 60 minutes from its first refusal. Token
+rotation skips groups whose repositories are all validly excluded, preserving
+that deadline. If the repository is still desired when the exclusion expires,
+the next turn replaces the session and retries minting once. A refusal in the
+replacement starts a new 60-minute period.
 Reconciliation can change coverage sooner, triggering normal session change
 handling. Issued installation tokens remain valid for up to one hour, so
 reconciliation does not immediately revoke access already delivered to a

@@ -376,6 +376,7 @@ async def prepare_app_access(
     config: GithubAppSettings,
     fernet: MultiFernet | None,
     cache: PermissionCache,
+    excluded_repo_urls: tuple[str, ...] = (),
 ) -> AppSessionAccess:
     """Mint only this session's effective repository groups, recording every token."""
     if is_external:
@@ -400,16 +401,26 @@ async def prepare_app_access(
         [(repo.installation_id, repo.repo_id, access) for _, repo, access in rows]
     )
     groups.sort(key=lambda group: (group[0], group[1], group[2]))
-    if len(groups) + 1 > 15:
+    repo_urls = {repo.repo_id: f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows}
+    skipped_repo_ids = {
+        repo_id
+        for _, _, repo_ids in groups
+        if all(repo_urls[repo_id] in excluded_repo_urls for repo_id in repo_ids)
+        for repo_id in repo_ids
+    }
+    active_groups = tuple(
+        group for group in groups if not all(repo_id in skipped_repo_ids for repo_id in group[2])
+    )
+    if len(active_groups) + 1 > 15:
         raise ValueError("GitHub App access exceeds the session vault credential limit")
     jwt = build_app_jwt(
         config.private_key.get_secret_value(), config.app_id, now=int(datetime.now(UTC).timestamp())
     )
     tokens: list[AppToken] = []
-    excluded_repo_ids: set[int] = set()
+    excluded_repo_ids: set[int] = set(skipped_repo_ids)
     pending_token_id: uuid.UUID | None = None
     try:
-        for installation_id, profile, repo_ids in groups:
+        for installation_id, profile, repo_ids in active_groups:
             versions = {
                 key: version
                 for grant, repo, _ in rows
@@ -914,6 +925,7 @@ async def _rotate_live_app_tokens_unlocked(
     config: GithubAppSettings,
     fernet: MultiFernet,
     active_turn: bool = False,
+    unavailable_repos: tuple[tuple[str, datetime], ...] = (),
 ) -> AppSessionAccess:
     """Refresh resources and vault in place; leave equal-access old tokens to expire."""
     scope = resource_scope(
@@ -945,6 +957,16 @@ async def _rotate_live_app_tokens_unlocked(
             # running turn alone; the next turn boundary replaces the session.
             _log.warning("No App rollback snapshot for active session %s", session_id)
     async with httpx.AsyncClient() as client:
+        from daimon.core.session_compat import UNAVAILABLE_RETRY_AFTER
+
+        now = datetime.now(UTC)
+        valid_exclusions = tuple(
+            url
+            for url, first_refused in unavailable_repos
+            if first_refused.tzinfo is not None
+            and first_refused.tzinfo.utcoffset(first_refused) is not None
+            and now - first_refused < UNAVAILABLE_RETRY_AFTER
+        )
         access = await prepare_app_access(
             sessionmaker,
             client,
@@ -956,6 +978,7 @@ async def _rotate_live_app_tokens_unlocked(
             config=config,
             fernet=fernet,
             cache=REQUESTER_CACHE,
+            excluded_repo_urls=valid_exclusions,
         )
         try:
             for resource in access.resources:
@@ -1133,6 +1156,7 @@ async def rotate_live_app_tokens(
     config: GithubAppSettings,
     fernet: MultiFernet,
     active_turn: bool = False,
+    unavailable_repos: tuple[tuple[str, datetime], ...] = (),
 ) -> AppSessionAccess:
     """Rotate without holding a database connection during network calls."""
     return await _rotate_live_app_tokens_unlocked(
@@ -1148,4 +1172,5 @@ async def rotate_live_app_tokens(
         config=config,
         fernet=fernet,
         active_turn=active_turn,
+        unavailable_repos=unavailable_repos,
     )

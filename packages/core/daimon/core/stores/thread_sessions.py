@@ -29,7 +29,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 from daimon.core._models import ThreadSession, UsageEvent
 from daimon.core.errors import SessionRetired
-from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
+from daimon.core.session_snapshot import (
+    SessionSnapshot,
+    fingerprint_identity,
+    refreshed_unavailable_state,
+)
 from daimon.core.stores.access_policy import lock_access_policy
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind, UnsavedWorkChoice
 from daimon.core.stores.worker_ownership import owner_is_alive
@@ -639,19 +643,19 @@ async def record_app_token_refresh(
         if config is not None and config.get("github_mode") == "app":
             updated = {**config, "repo_token_issued_at": issued_at}
             if access is not None:
+                assert now is not None
                 excluded = access.excluded_repo_urls
+                snapshot = SessionSnapshot.model_validate(config)
                 updated.update(
                     repo_urls=tuple(
                         url for url in config.get("repo_urls", ()) if url not in excluded
                     ),
                     token_repo_urls=access.token_repo_urls,
-                    unavailable_repo_urls=excluded,
-                    unavailable_since=now.isoformat() if excluded and now is not None else None,
-                    unavailable_notice_announced=not bool(excluded),
+                    **refreshed_unavailable_state(snapshot, excluded, now=now),
                 )
-                row.identity_fingerprint = fingerprint_identity(
-                    SessionSnapshot.model_validate(updated)
-                )
+                refreshed = SessionSnapshot.model_validate(updated)
+                row.identity_fingerprint = fingerprint_identity(refreshed)
+                updated = refreshed.model_dump(mode="json")
             row.effective_config = updated
     await session.flush()
 

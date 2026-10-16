@@ -60,7 +60,6 @@ from daimon.core.session_compat import (
     UpdateInPlace,
     UpdateOp,
     decide_session_compatibility,
-    valid_unavailable_repo_urls,
 )
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import lock_session_mutation
@@ -739,8 +738,33 @@ async def _prepare_session_for_turn_locked(
             continuity=continuity,
         )
 
-    def from_fresh(fresh: FreshSession, continuity: ContinuityOutcome) -> PreparedTurn:
-        continuity = _with_unavailable_notice(continuity, fresh.snapshot.unavailable_repo_urls)
+    async def from_fresh(
+        fresh: FreshSession,
+        continuity: ContinuityOutcome,
+        predecessor: SessionSnapshot | None = None,
+    ) -> PreparedTurn:
+        refused = tuple(url for url, _ in fresh.snapshot.unavailable_repos)
+        prior_sent = () if predecessor is None else predecessor.unavailable_notice_sent
+        prior_pending = () if predecessor is None else predecessor.unavailable_notice_pending
+        pending = tuple(
+            dict.fromkeys((*prior_pending, *(url for url in refused if url not in prior_sent)))
+        )
+        continuity = _with_unavailable_notice(continuity, pending)
+        snapshot = fresh.snapshot.model_copy(
+            update={
+                "unavailable_notice_pending": (),
+                "unavailable_notice_sent": tuple(
+                    dict.fromkeys(
+                        (
+                            *(url for url in prior_sent if url in refused),
+                            *(url for url in pending if url in refused),
+                        )
+                    )
+                ),
+            }
+        )
+        if pending or prior_sent:
+            await _persist_refresh(deps.sessionmaker, id=fresh.mapping_id, snapshot=snapshot)
         return prepared(
             ma_session_id=fresh.ma_session_id,
             mapping_id=fresh.mapping_id,
@@ -796,7 +820,7 @@ async def _prepare_session_for_turn_locked(
                 thread_id=thread_id,
                 session_account_id=session_account_id,
             )
-            return from_fresh(fresh, CONTINUED)
+            return await from_fresh(fresh, CONTINUED)
 
         fresh_start = row.fresh_start_requested_at is not None
         if admission.is_external and not row.is_external:
@@ -923,19 +947,29 @@ async def _prepare_session_for_turn_locked(
             model_id: str,
             snapshot: SessionSnapshot | None = recorded,
         ) -> PreparedTurn:
-            valid_unavailable = (
-                () if snapshot is None else valid_unavailable_repo_urls(snapshot, now=moment)
-            )
-            if (
-                snapshot is not None
-                and valid_unavailable
-                and not snapshot.unavailable_notice_announced
-            ):
-                continuity = _with_unavailable_notice(continuity, valid_unavailable)
+            pending = () if snapshot is None else snapshot.unavailable_notice_pending
+            if snapshot is not None and pending:
+                continuity = _with_unavailable_notice(continuity, pending)
                 await _persist_refresh(
                     deps.sessionmaker,
                     id=row.id,
-                    snapshot=snapshot.model_copy(update={"unavailable_notice_announced": True}),
+                    snapshot=snapshot.model_copy(
+                        update={
+                            "unavailable_notice_pending": (),
+                            "unavailable_notice_sent": tuple(
+                                dict.fromkeys(
+                                    (
+                                        *snapshot.unavailable_notice_sent,
+                                        *(
+                                            url
+                                            for url in pending
+                                            if url in dict(snapshot.unavailable_repos)
+                                        ),
+                                    )
+                                )
+                            ),
+                        }
+                    ),
                 )
             return prepared(
                 ma_session_id=row.ma_session_id,
@@ -1047,7 +1081,7 @@ async def _prepare_session_for_turn_locked(
             )
             if isinstance(outcome, PreparationFailure):
                 return outcome
-            return from_fresh(outcome.fresh, outcome.continuity)
+            return await from_fresh(outcome.fresh, outcome.continuity, recorded)
 
         assert recorded is not None, "an in-place path always has a recorded snapshot"
         applying: tuple[UpdateOp, ...] = decision.ops if isinstance(decision, UpdateInPlace) else ()

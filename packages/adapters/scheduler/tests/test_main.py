@@ -342,8 +342,7 @@ def _mapped_app_session(
                 vault_id="mapped-vault",
                 repo_urls=(url,),
                 repo_resource_ids={url: "res-1"},
-                unavailable_repo_urls=(),
-                unavailable_since=None,
+                unavailable_repos=(),
             ),
         ),
         agent_id=uuid.UUID(int=4),
@@ -434,8 +433,9 @@ async def test_mapped_excluded_working_repo_is_not_archived_before_retry(
     item = _mapped_app_session(active_turn=False)
     url = "https://github.com/acme/repo"
     item.mapping.effective_config.repo_urls = ()
-    item.mapping.effective_config.unavailable_repo_urls = (url,)
-    item.mapping.effective_config.unavailable_since = datetime.now(UTC) - timedelta(minutes=30)
+    item.mapping.effective_config.unavailable_repos = (
+        (url, datetime.now(UTC) - timedelta(minutes=30)),
+    )
     _, rotate, archive = await _refresh_mapped(
         db_session_factory,
         monkeypatch,
@@ -454,8 +454,9 @@ async def test_mapped_excluded_working_repo_retries_after_one_hour(
     item = _mapped_app_session(active_turn=False)
     url = "https://github.com/acme/repo"
     item.mapping.effective_config.repo_urls = ()
-    item.mapping.effective_config.unavailable_repo_urls = (url,)
-    item.mapping.effective_config.unavailable_since = datetime.now(UTC) - timedelta(minutes=61)
+    item.mapping.effective_config.unavailable_repos = (
+        (url, datetime.now(UTC) - timedelta(minutes=61)),
+    )
     _, rotate, archive = await _refresh_mapped(
         db_session_factory,
         monkeypatch,

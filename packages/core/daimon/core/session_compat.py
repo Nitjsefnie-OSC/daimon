@@ -136,16 +136,17 @@ class ReplaceSession:
 type CompatibilityDecision = ReuseAsIs | UpdateInPlace | ReplaceSession
 
 
-UNAVAILABLE_RETRY_AFTER = timedelta(minutes=60)  # One GitHub installation token lifetime.
+UNAVAILABLE_RETRY_AFTER = timedelta(minutes=60)  # First refusal expires after one token lifetime.
 
 
 def valid_unavailable_repo_urls(recorded: SessionSnapshot, *, now: datetime) -> tuple[str, ...]:
-    since = getattr(recorded, "unavailable_since", None)
-    if since is None or since.tzinfo is None or since.tzinfo.utcoffset(since) is None:
-        return ()
-    if now - since >= UNAVAILABLE_RETRY_AFTER:
-        return ()
-    return recorded.unavailable_repo_urls
+    return tuple(
+        url
+        for url, since in recorded.unavailable_repos
+        if since.tzinfo is not None
+        and since.tzinfo.utcoffset(since) is not None
+        and now - since < UNAVAILABLE_RETRY_AFTER
+    )
 
 
 def _without(urls: tuple[str, ...], excluded: tuple[str, ...]) -> tuple[str, ...]:

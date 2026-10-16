@@ -110,9 +110,9 @@ class SessionSnapshot(BaseModel):
     # Every repo the session's App tokens cover, mounted or not. A new grant
     # changes this set, and the session must be replaced to receive the token.
     token_repo_urls: tuple[str, ...] = ()
-    unavailable_repo_urls: tuple[str, ...] = ()
-    unavailable_since: datetime | None = None
-    unavailable_notice_announced: bool = False
+    unavailable_repos: tuple[tuple[str, datetime], ...] = ()
+    unavailable_notice_pending: tuple[str, ...] = ()
+    unavailable_notice_sent: tuple[str, ...] = ()
     repo_url: str | None
     repo_branch: str | None
     memory_store_id: str | None
@@ -141,6 +141,31 @@ class SessionSnapshot(BaseModel):
     # is not a configuration change to the session that already froze it.
     agent_version: int
     agent_name: str
+
+
+def refreshed_unavailable_state(
+    previous: SessionSnapshot,
+    refused_urls: tuple[str, ...],
+    *,
+    now: datetime,
+) -> dict[str, tuple[tuple[str, datetime], ...] | tuple[str, ...]]:
+    """Keep first refusal times and deliver each continuous refusal once."""
+    previous_times = dict(previous.unavailable_repos)
+    refused = set(refused_urls)
+    sent = tuple(url for url in previous.unavailable_notice_sent if url in refused)
+    pending = tuple(
+        dict.fromkeys(
+            (
+                *previous.unavailable_notice_pending,
+                *(url for url in refused_urls if url not in sent),
+            )
+        )
+    )
+    return {
+        "unavailable_repos": tuple((url, previous_times.get(url, now)) for url in refused_urls),
+        "unavailable_notice_pending": pending,
+        "unavailable_notice_sent": sent,
+    }
 
 
 def canonical_json(obj: JsonValue) -> str:

@@ -700,9 +700,10 @@ async def create_ma_session(
     ).model_copy(
         update={
             "token_repo_urls": token_repo_urls,
-            "unavailable_repo_urls": excluded_repo_urls,
-            "unavailable_since": dt.datetime.now(dt.UTC) if excluded_repo_urls else None,
-            "unavailable_notice_announced": bool(excluded_repo_urls),
+            "unavailable_repos": tuple(
+                (url, dt.datetime.now(dt.UTC)) for url in excluded_repo_urls
+            ),
+            "unavailable_notice_pending": excluded_repo_urls,
         }
     )
     return CreatedSession(

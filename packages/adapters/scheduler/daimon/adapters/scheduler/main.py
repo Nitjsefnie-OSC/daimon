@@ -851,6 +851,7 @@ async def _refresh_github_app_sessions(
                     is_external=item.mapping.is_external,
                     vault_id=snapshot.vault_id,
                     resource_ids=snapshot.repo_resource_ids,
+                    unavailable_repos=snapshot.unavailable_repos,
                     config=settings.github_app,
                     fernet=fernet,
                     active_turn=active_turn,

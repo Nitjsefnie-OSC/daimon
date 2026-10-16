@@ -219,9 +219,11 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
         )
     monkeypatch.setattr("daimon.core.github_app_session.build_app_jwt", lambda *a, **k: "jwt")
     real_prepare = prepare_app_access
+    minted_ids: list[list[int]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         ids = json.loads(request.content)["repository_ids"]
+        minted_ids.append(ids)
         return (
             httpx.Response(404)
             if ids == [101]
@@ -273,9 +275,31 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
         current = await get_thread_session_by_id(session, id=mapped.id)
         assert current is not None and current.effective_config is not None
         assert current.effective_config.token_repo_urls == (write_url,)
-        assert current.effective_config.unavailable_repo_urls == (read_url,)
-        assert current.effective_config.unavailable_since is not None
-        assert not current.effective_config.unavailable_notice_announced
+        assert tuple(url for url, _ in current.effective_config.unavailable_repos) == (read_url,)
+        assert current.effective_config.unavailable_notice_pending == (read_url,)
+        first_refused = current.effective_config.unavailable_repos[0][1]
+
+    minted_ids.clear()
+    await rotate_live_app_tokens(
+        None,  # type: ignore[arg-type]
+        db_session_factory,
+        session_id="live-session",
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=None,
+        is_external=False,
+        vault_id="vault",
+        resource_ids={write_url: "resource"},
+        config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
+        fernet=fernet,
+        unavailable_repos=((read_url, first_refused),),
+    )
+    assert minted_ids == [[102]]
+    async with db_session_factory() as session:
+        current = await get_thread_session_by_id(session, id=mapped.id)
+        assert current is not None and current.effective_config is not None
+        assert current.effective_config.unavailable_repos == ((read_url, first_refused),)
+        assert current.effective_config.unavailable_notice_pending == (read_url,)
 
 
 def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:
@@ -295,15 +319,16 @@ def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:
         update={
             **common,
             "token_repo_urls": ("https://github.com/acme/kept",),
-            "unavailable_repo_urls": ("https://github.com/acme/refused",),
-            "unavailable_since": datetime(2026, 10, 16, 12, tzinfo=UTC),
+            "unavailable_repos": (
+                ("https://github.com/acme/refused", datetime(2026, 10, 16, 12, tzinfo=UTC)),
+            ),
         }
     )
     still_covered = base.model_copy(
         update={
             **common,
             "token_repo_urls": ("https://github.com/acme/kept", "https://github.com/acme/refused"),
-            "unavailable_repo_urls": (),
+            "unavailable_repos": (),
         }
     )
     reconciled = base.model_copy(
@@ -316,7 +341,7 @@ def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:
         }
     )
 
-    now = recorded.unavailable_since + timedelta(minutes=30)
+    now = recorded.unavailable_repos[0][1] + timedelta(minutes=30)
     assert "repo_set" not in identity_change_reasons(recorded, still_covered, now=now)
     assert "repo_set" not in identity_change_reasons(recorded, reconciled, now=now)
     assert "repo_set" in identity_change_reasons(recorded, newly_granted, now=now)
@@ -324,5 +349,5 @@ def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:
         recorded, still_covered, now=now + timedelta(minutes=30)
     )
     assert "repo_set" in identity_change_reasons(
-        recorded.model_copy(update={"unavailable_since": None}), still_covered, now=now
+        recorded.model_copy(update={"unavailable_repos": ()}), still_covered, now=now
     )

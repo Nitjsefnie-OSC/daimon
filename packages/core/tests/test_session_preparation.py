@@ -1304,9 +1304,11 @@ async def test_a_marked_active_session_is_not_returned_for_reuse(
     assert row is not None and row.fresh_start_requested_at is not None
 
 
+@pytest.mark.parametrize("removed", [False, True])
 async def test_reused_session_announces_new_rotation_exclusion_once(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    removed: bool,
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -1320,9 +1322,8 @@ async def test_reused_session_announces_new_rotation_exclusion_once(
     url = "https://github.com/acme/refused"
     rotated = row.effective_config.model_copy(
         update={
-            "unavailable_repo_urls": (url,),
-            "unavailable_since": _NOW,
-            "unavailable_notice_announced": False,
+            "unavailable_repos": () if removed else ((url, _NOW - timedelta(minutes=61)),),
+            "unavailable_notice_pending": (url,),
         }
     )
     async with db_session_factory.begin() as session:
@@ -1338,6 +1339,10 @@ async def test_reused_session_announces_new_rotation_exclusion_once(
     third = await _prepare(deps, admission, tenant=tenant, account=account)
     assert isinstance(third, PreparedTurn)
     assert "<github_access_notice>" not in third.continuity.user_prefix
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None and row.effective_config is not None
+    assert row.effective_config.unavailable_notice_pending == ()
+    assert row.effective_config.unavailable_notice_sent == (() if removed else (url,))
 
 
 async def test_the_transfer_hook_is_given_the_old_session_and_its_result_is_mounted(

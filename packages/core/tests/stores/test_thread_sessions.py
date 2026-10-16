@@ -915,9 +915,8 @@ async def test_partial_app_rotation_records_exclusion_in_live_snapshot(
     assert updated is not None and updated.effective_config is not None
     assert updated.effective_config.repo_urls == ()
     assert updated.effective_config.token_repo_urls == ()
-    assert updated.effective_config.unavailable_repo_urls == (url,)
-    assert updated.effective_config.unavailable_since == now
-    assert not updated.effective_config.unavailable_notice_announced
+    assert updated.effective_config.unavailable_repos == ((url, now),)
+    assert updated.effective_config.unavailable_notice_pending == (url,)
     assert updated.identity_fingerprint == fingerprint_identity(updated.effective_config)
 
 
