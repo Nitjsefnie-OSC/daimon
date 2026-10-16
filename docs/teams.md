@@ -497,8 +497,10 @@ gets a retry-later reply without starting a turn, and due timers and handoffs
 from the wake poller wait until a turn finishes. A post or edit Teams throttles
 (HTTP 429) is retried once after the wait Teams asks for, up to 10 seconds.
 Reactions (👀, ✅, ⌛) are spaced to Bot Framework's limit of two a second per
-bot, sent in the background, and dropped when they would wait over five
-seconds or fail: they never hold up a turn.
+bot and sent in the background, so they never hold up a turn. An add that
+would wait over five seconds, or fails, is dropped; a removal always waits its
+turn, so ⌛ and 👀 never stay behind, and is skipped only when its add never
+landed.
 
 ### Restart behaviour
 

@@ -121,7 +121,7 @@ async def test_the_same_activity_id_in_two_chats_keeps_two_hourglasses() -> None
 
 
 async def test_a_throttled_reaction_is_dropped_and_the_next_still_runs() -> None:
-    calls = Calls(fail=frozenset({EYES}))
+    calls = Calls(fail=frozenset({CHECK}))
     harness = Harness(calls)
     target = reaction_target(make_inbound())
     assert target is not None, "a person's message can be reacted to"
@@ -142,6 +142,57 @@ async def test_reactions_past_the_wait_budget_are_skipped_not_queued() -> None:
         harness.reactions.mark_queued(make_inbound())
     await harness.settle()
     assert len(calls.made) == budget, "a burst beyond the bounded wait drops its extra reactions"
+
+
+async def test_a_removal_whose_add_was_sent_runs_even_past_the_wait_budget() -> None:
+    """A burst of ⌛ fills the wait budget; the removal still comes off message one."""
+    calls = Calls()
+    harness = Harness(calls)
+    burst = [make_inbound(str(n)) for n in range(int(MAX_WAIT_S / MIN_INTERVAL_S) + 1)]
+    for inbound in burst:
+        harness.reactions.mark_queued(inbound)
+    harness.reactions.clear_queued(burst[:1])
+    await harness.settle()
+    first = burst[0].activity_id
+    assert (first, HOURGLASS, True) in calls.made, "the first ⌛ went out"
+    assert (first, HOURGLASS, False) in calls.made, "so its removal is never dropped"
+
+
+async def test_eyes_come_off_an_answered_message_under_a_burst() -> None:
+    """👀 went out before the burst: its removal runs though the ✅ add may be dropped."""
+    calls = Calls()
+    harness = Harness(calls)
+    target = reaction_target(make_inbound())
+    assert target is not None, "a person's message can be reacted to"
+    harness.reactions.acknowledge(target, "accepted")
+    for n in range(int(MAX_WAIT_S / MIN_INTERVAL_S) + 1):
+        harness.reactions.mark_queued(make_inbound(str(n)))
+    harness.reactions.acknowledge(target, "done")
+    await harness.settle()
+    key = target.activity_id
+    assert (key, EYES, True) in calls.made, "👀 went out first"
+    assert (key, EYES, False) in calls.made, "👀 never outlives the answer"
+    assert (key, CHECK, True) not in calls.made, "an add past the budget is still dropped"
+
+
+async def test_a_removal_is_skipped_when_its_add_was_dropped_or_refused() -> None:
+    calls = Calls(fail=frozenset({EYES}))
+    harness = Harness(calls)
+    burst = [make_inbound(str(n)) for n in range(int(MAX_WAIT_S / MIN_INTERVAL_S) + 2)]
+    for inbound in burst:
+        harness.reactions.mark_queued(inbound)
+    harness.reactions.clear_queued(burst[-1:])
+    refused = reaction_target(make_inbound())
+    assert refused is not None, "a person's message can be reacted to"
+    harness.reactions.acknowledge(refused, "accepted")
+    await harness.settle()
+    harness.now = 60.0  # the burst is long gone
+    harness.reactions.acknowledge(refused, "done")
+    await harness.settle()
+    dropped = burst[-1].activity_id
+    assert all(key != dropped for key, _, _ in calls.made), "no ⌛ went out, so none comes off"
+    removals = [(key, reaction) for key, reaction, add in calls.made if not add]
+    assert removals == [], "a refused 👀 is not removed either"
 
 
 async def test_nothing_reacts_to_a_form_a_reply_nobody_addressed_or_without_a_client() -> None:

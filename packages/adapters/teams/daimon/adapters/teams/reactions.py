@@ -3,10 +3,13 @@
 Bot Framework rate-limits a bot's reactions to two a second across every
 conversation, answering 429 past that. A reaction is a nicety, so none may fail
 or delay a turn or intake: each call runs in the background, spaced to that
-limit in this process, and one that would wait longer than `MAX_WAIT_S` for its
-slot is dropped rather than queued behind a burst. Calls on one message run in
-order, so a removal never overtakes the add it undoes. A failure, a 429
-included, is logged and dropped; nothing retries it.
+limit in this process. An add that would wait longer than `MAX_WAIT_S` for its
+slot is dropped rather than queued behind a burst. A removal is never dropped,
+since a lost one would leave ⌛ or 👀 on the message for good; it only waits
+its turn, and is skipped when its add was dropped or refused, as there is
+nothing to remove. Calls on one message run in order, so a removal never
+overtakes the add it undoes. A failure, a 429 included, is logged and dropped;
+nothing retries it.
 """
 
 from __future__ import annotations
@@ -14,10 +17,12 @@ from __future__ import annotations
 import asyncio
 import functools
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
 
+import httpx
 import structlog
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
@@ -33,6 +38,9 @@ HOURGLASS: Final = "231b_hourglassdone"
 MIN_INTERVAL_S = 0.5
 MAX_WAIT_S = 5.0
 CALL_TIMEOUT_S = 5.0
+# Adds dropped or refused, remembered until their removal comes. A turn that never
+# answers never removes its 👀, so the oldest are forgotten past this many.
+MAX_ABSENT = 1024
 
 
 # Activity ids are unique only within a conversation, as the app's delivery dedupe keys them.
@@ -91,6 +99,8 @@ class TeamsReactions:
         self._chains: dict[MessageKey, asyncio.Task[None]] = {}
         # Messages showing ⌛.
         self._queued: dict[MessageKey, ReactionTarget] = {}
+        # Reactions whose add never reached the message: their removal is skipped.
+        self._absent: OrderedDict[tuple[MessageKey, str], None] = OrderedDict()
 
     def acknowledger(self, inbound: TeamsInbound) -> Callable[[Acknowledgment], None] | None:
         """The lifecycle's `acknowledge` for a turn answering `inbound`, if it can react."""
@@ -146,11 +156,18 @@ class TeamsReactions:
     ) -> None:
         if previous is not None:
             await asyncio.wait([previous])  # never raises: its outcome is its own
+        mark = (target.key, reaction)
+        if not add and mark in self._absent:
+            del self._absent[mark]
+            log.debug("teams.reaction.skipped", reaction=reaction, add=add, reason="not_added")
+            return
         now = self._clock()
         slot = max(now, self._next_slot)
-        if slot - now > MAX_WAIT_S:
+        if add and slot - now > MAX_WAIT_S:
+            self._remember_absent(mark)
             log.debug("teams.reaction.skipped", reaction=reaction, add=add, reason="rate")
             return
+        self._absent.pop(mark, None)
         self._next_slot = slot + MIN_INTERVAL_S
         if slot > now:
             await self._sleep(slot - now)
@@ -158,6 +175,9 @@ class TeamsReactions:
             async with asyncio.timeout(CALL_TIMEOUT_S):
                 await react(target, reaction, add=add)
         except (*TEAMS_SEND_ERRORS, TimeoutError) as err:
+            # Only a refusal is known not to have landed; a timeout may have.
+            if add and isinstance(err, httpx.HTTPStatusError):
+                self._remember_absent(mark)
             status = getattr(getattr(err, "response", None), "status_code", None)
             log.debug(
                 "teams.reaction.failed",
@@ -166,3 +186,8 @@ class TeamsReactions:
                 status=status,
                 error=type(err).__name__,
             )
+
+    def _remember_absent(self, mark: tuple[MessageKey, str]) -> None:
+        self._absent[mark] = None
+        if len(self._absent) > MAX_ABSENT:
+            self._absent.popitem(last=False)
