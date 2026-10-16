@@ -142,7 +142,10 @@ class _Offer:
 def consent_card(name: str, size_bytes: int, token: str) -> MessageActivityInput:
     context = {"offer": token}
     card = FileConsentCard(
-        description=name, size_in_bytes=size_bytes, accept_context=context, decline_context=context
+        description=f"Save {name} to your OneDrive?",
+        size_in_bytes=size_bytes,
+        accept_context=context,
+        decline_context=context,
     )
     attachment = Attachment(content_type=FILE_CONSENT_CONTENT_TYPE, name=name, content=card)
     return MessageActivityInput().add_attachments(attachment)
