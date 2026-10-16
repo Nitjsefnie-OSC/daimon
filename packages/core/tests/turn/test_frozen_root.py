@@ -1996,7 +1996,7 @@ async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesi
         def session(self):
             return {**super().session(), "metadata": {"mux_tenant": str(tenant_id)}}
 
-    wire = OwnedWire()
+    wire = OwnedWire(session_id="fresh-openai-" + str(uuid4()))
     wire.expected_spend_limit = None
 
     def openai_request(request):
@@ -2087,6 +2087,8 @@ async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesi
                 turn_card_intent_id=intent.id,
             )
             assert not prepared.reused and prepared.session_ref.provider == provider
+            if provider == "openai":
+                assert prepared.session_ref.id == wire.session_id
 
             async def reseed():
                 pytest.fail("fresh foreign turn attempted native root recovery")
