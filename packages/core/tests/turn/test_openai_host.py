@@ -62,7 +62,7 @@ class Stream(httpx.AsyncByteStream):
                 "turn": {**root, "status": "completed"},
             },
         ):
-            event["session_id"] = SESSION_ID
+            event["session_id"] = self.wire.session_id
             yield ("data: " + json.dumps(event) + "\n\n").encode()
         await asyncio.Event().wait()
 
@@ -71,7 +71,8 @@ class Stream(httpx.AsyncByteStream):
 
 
 class Wire:
-    def __init__(self) -> None:
+    def __init__(self, *, session_id: str | None = None) -> None:
+        self.session_id = SESSION_ID if session_id is None else session_id
         self.requests: list[httpx.Request] = []
         self.turns: list[dict] = []
         self.items: list[dict] = []
@@ -92,7 +93,7 @@ class Wire:
                 if self.expected_spend_limit is not None
                 else {}
             ),
-            "id": SESSION_ID,
+            "id": self.session_id,
             "agent": {
                 "id": "native-agent",
                 "model": "different" if self.bad_model else "gpt-6-luna",
@@ -108,10 +109,10 @@ class Wire:
         self.requests.append(req)
         assert req.headers["OpenAI-Beta"] == "agents=v1"
         path = req.url.path.removeprefix("/v1")
-        if path == "/agents/sessions/" + SESSION_ID:
+        if path == "/agents/sessions/" + self.session_id:
             if req.method == "DELETE":
                 self.deleted = True
-                return httpx.Response(200, json={"id": SESSION_ID, "deleted": True})
+                return httpx.Response(200, json={"id": self.session_id, "deleted": True})
             if self.deleted:
                 return httpx.Response(
                     404, json={"error": {"message": "session deleted", "type": "not_found"}}
@@ -137,7 +138,7 @@ class Wire:
             if self.fail_create:
                 raise httpx.ReadError("offline lost acknowledgment")
             return httpx.Response(200, json=self.session())
-        assert path.startswith("/agents/sessions/" + SESSION_ID)
+        assert path.startswith("/agents/sessions/" + self.session_id)
         if path.endswith("/events"):
             if req.method == "GET":
                 assert req.url.params["stream"] == "true"
@@ -161,7 +162,7 @@ class Wire:
                 self.turns.append(
                     {
                         "id": root,
-                        "session_id": SESSION_ID,
+                        "session_id": self.session_id,
                         "agent_id": "native-agent",
                         "subagent_id": None,
                         "status": "completed",
