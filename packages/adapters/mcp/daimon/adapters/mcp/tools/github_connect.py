@@ -59,6 +59,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class ConnectResult(BaseModel):
@@ -184,6 +185,8 @@ async def _post_personal_link(
     runtime: McpRuntime, auth: AuthIdentity, *, url: str, channel_id: str, thread_id: str
 ) -> None:
     """Keep the one-use link in a private button, never in the model result."""
+    if auth.platform_user_id is None:
+        raise ToolError("GitHub linking needs a chat requester.")
     if auth.platform == "discord":
         view = discord.ui.View(timeout=None)
         view.add_item(
@@ -229,6 +232,7 @@ async def _github_connect_impl(
 ) -> ConnectResult:
     if auth.platform not in ("discord", "slack", "teams") or auth.platform_user_id is None:
         raise ToolError("GitHub setup from chat is available in Discord, Slack and Teams.")
+    platform = auth.platform
     if auth.is_external:
         raise ToolError("GitHub setup is for members of this workspace.")
     root = runtime.settings.mcp.app_root_url
@@ -380,7 +384,7 @@ async def _github_connect_impl(
                         ),
                     )
 
-            async def manages_now(current_session):  # type: ignore[no-untyped-def]
+            async def manages_now(current_session: AsyncSession) -> bool:
                 current_account = await get_account(current_session, auth.account_id)
                 if (
                     current_account is None
@@ -402,7 +406,7 @@ async def _github_connect_impl(
                     default=runtime.deployment_default,
                     is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
                     members=(
-                        runtime.group_lookups.live_members(auth.platform, auth.external_id)
+                        runtime.group_lookups.live_members(platform, auth.external_id)
                         if runtime.group_lookups is not None and auth.external_id is not None
                         else None
                     ),

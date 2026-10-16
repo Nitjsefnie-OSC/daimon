@@ -10,9 +10,9 @@ from typing import Literal
 
 import httpx
 from cryptography.fernet import MultiFernet
-from daimon.core._models import GitHubUserLink
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.stores.github_links import (
+    GitHubUser,
     bump_link_generation,
     get_user,
     get_user_for_update,
@@ -278,7 +278,7 @@ async def _linked_access_token_once(
     client: httpx.AsyncClient,
     *,
     user_id: int,
-    row: GitHubUserLink,
+    row: GitHubUser,
     fernet: MultiFernet,
     client_id: str,
     client_secret: str,

@@ -119,6 +119,47 @@ async def list_authorized_repos(
     return list(picked.values())
 
 
+async def upsert_linked_agent_authorization(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    repo_id: int,
+    owner_id: int,
+    installation_id: int,
+    repo_full_name: str,
+    access: Literal["read", "write"],
+    github_user_id: int,
+    account_id: uuid.UUID,
+    permission: str,
+) -> None:
+    """Record the linked person's grant-time authority for one agent repo."""
+    row = await session.scalar(
+        select(TenantGitHubRepo)
+        .where(
+            TenantGitHubRepo.tenant_id == tenant_id,
+            TenantGitHubRepo.repo_id == repo_id,
+            TenantGitHubRepo.scope_agent_id == agent_id,
+        )
+        .with_for_update()
+    )
+    if row is None:
+        row = TenantGitHubRepo(tenant_id=tenant_id, repo_id=repo_id, scope_agent_id=agent_id)
+        session.add(row)
+    elif row.status != "active":
+        row.version += 1
+    row.owner_id = owner_id
+    row.installation_id = installation_id
+    row.repo_full_name = repo_full_name
+    row.max_access = access
+    row.authorized_by_github_user_id = github_user_id
+    row.authorized_by_account_id = account_id
+    row.authorized_permission = permission
+    row.status = "active"
+    row.status_reason = None
+    await session.flush()
+
+
 async def list_agent_grants(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> list[AgentGrant]:

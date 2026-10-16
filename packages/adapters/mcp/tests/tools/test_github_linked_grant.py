@@ -1,4 +1,4 @@
-"""Disposable linked-grant journey with synthetic GitHub responses."""
+"""Linked-grant journey with synthetic GitHub responses."""
 
 from __future__ import annotations
 
@@ -18,12 +18,6 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import github_connect as connect_tool
 from daimon.adapters.mcp.tools import github_linked_grant as linked
 from daimon.adapters.mcp.tools import github_linked_pending as linked_pending
-from daimon.core._models import (
-    Account,
-    GitHubAppInstallation,
-    GitHubLinkedConnectPending,
-    TenantGitHubRepo,
-)
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -35,13 +29,15 @@ from daimon.core.config import (
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.accounts import set_role
+from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import list_agent_grants, list_authorized_repos
+from daimon.core.stores.github_app_installations import get as get_installation
+from daimon.core.stores.github_installation_reconciliation import get as get_reconciliation
 from daimon.core.stores.github_links import get_account_link, save_verified_link, unlink_account
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
-from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -96,9 +92,9 @@ def github_http(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
                     "suspended_at": (
                         "2026-10-16T00:00:00Z" if state.installation_suspended else None
                     ),
-                "permissions": {
-                    "metadata": "read",
-                    "contents": "write",
+                    "permissions": {
+                        "metadata": "read",
+                        "contents": "write",
                         "issues": "write",
                         "pull_requests": "write",
                     },
@@ -156,30 +152,25 @@ async def setup_linked(committing_sessionmaker: async_sessionmaker[AsyncSession]
         await make_platform_principal(
             session, platform="discord", external_id="person", tenant=tenant, account=account
         )
-        session.add(
-            GitHubAppInstallation(
-                installation_id=201,
-                account_login="acme",
-                app="github_app",
-                account_id=12,
-                account_type="Organization",
-                repository_selection="selected",
-                repo_full_names=["acme/base", "acme/widgets"],
+        await session.execute(
+            text(
+                "INSERT INTO github_app_installations "
+                "(installation_id, account_login, app, account_id, account_type, "
+                "repository_selection, repo_full_names) VALUES "
+                "(201, 'acme', 'github_app', 12, 'Organization', 'selected', "
+                "ARRAY['acme/base', 'acme/widgets'])"
             )
         )
-        session.add(
-            TenantGitHubRepo(
-                tenant_id=tenant.id,
-                repo_id=100,
-                scope_agent_id=agent_id,
-                owner_id=12,
-                installation_id=201,
-                repo_full_name="acme/base",
-                max_access="read",
-                authorized_by_github_user_id=300,
-                authorized_by_account_id=account.id,
-                status="active",
-            )
+        await session.execute(
+            text(
+                "INSERT INTO tenant_github_repos "
+                "(tenant_id, repo_id, scope_agent_id, owner_id, installation_id, "
+                "repo_full_name, max_access, authorized_by_github_user_id, "
+                "authorized_by_account_id, status) VALUES "
+                "(:tenant_id, 100, :agent_id, 12, 201, 'acme/base', 'read', 300, "
+                ":account_id, 'active')"
+            ),
+            {"tenant_id": tenant.id, "agent_id": agent_id, "account_id": account.id},
         )
         await save_verified_link(
             session,
@@ -197,7 +188,7 @@ async def setup_linked(committing_sessionmaker: async_sessionmaker[AsyncSession]
         assert await get_account_link(session, account_id=account.id) is not None
 
     async def manages(session: AsyncSession) -> bool:
-        current = await session.get(Account, account.id)
+        current = await get_account(session, account.id)
         return current is not None and current.role == Role.ADMIN
 
     async def grant(*, account_id: uuid.UUID | None = None):
@@ -326,6 +317,9 @@ async def test_linked_manager_grants_without_browser(setup_linked, github_http) 
             )
             == 1
         )
+        reconciliation = await get_reconciliation(session, installation_id=201)
+        assert reconciliation is not None
+        assert (reconciliation.state, reconciliation.generation) == ("pending", 2)
 
 
 @pytest.mark.asyncio
@@ -401,10 +395,10 @@ async def test_other_tenant_installation_is_visible_to_linked_caller(
 ) -> None:
     async with setup_linked.sessionmaker.begin() as session:
         other = await make_tenant(session, workspace_id=f"other-{uuid.uuid4().hex[:8]}")
-        for row in await session.scalars(
-            select(TenantGitHubRepo).where(TenantGitHubRepo.tenant_id == setup_linked.tenant.id)
-        ):
-            row.tenant_id = other.id
+        await session.execute(
+            text("UPDATE tenant_github_repos SET tenant_id = :other WHERE tenant_id = :own"),
+            {"other": other.id, "own": setup_linked.tenant.id},
+        )
     assert (await setup_linked.grant()).status == "granted"
     async with setup_linked.sessionmaker() as session:
         rows = await list_authorized_repos(
@@ -416,12 +410,13 @@ async def test_other_tenant_installation_is_visible_to_linked_caller(
 @pytest.mark.asyncio
 async def test_new_selected_installation_needs_no_prior_rows(setup_linked, github_http) -> None:
     async with setup_linked.sessionmaker.begin() as session:
-        for row in await session.scalars(select(TenantGitHubRepo)):
-            await session.delete(row)
-        await session.delete(await session.get(GitHubAppInstallation, 201))
+        await session.execute(text("DELETE FROM tenant_github_repos"))
+        await session.execute(
+            text("DELETE FROM github_app_installations WHERE installation_id = 201")
+        )
     assert (await setup_linked.grant()).status == "granted"
     async with setup_linked.sessionmaker() as session:
-        installation = await session.get(GitHubAppInstallation, 201)
+        installation = await get_installation(session, installation_id=201)
         assert installation is not None
         assert installation.repository_selection == "selected"
         assert "acme/widgets" in installation.repo_full_names
@@ -436,8 +431,34 @@ async def test_selected_installation_needs_install(setup_linked, github_http) ->
 @pytest.mark.asyncio
 async def test_suspended_installation_never_grants(setup_linked, github_http) -> None:
     async with setup_linked.sessionmaker.begin() as session:
-        installation = await session.get(GitHubAppInstallation, 201)
-        installation.suspended_at = datetime.now(UTC)
+        await session.execute(
+            text(
+                "UPDATE github_app_installations SET suspended_at = :now WHERE installation_id = 201"
+            ),
+            {"now": datetime.now(UTC)},
+        )
+    assert (await setup_linked.grant()).status == "changed_try_again"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["snapshot_removed", "installation_removed"])
+async def test_github_coverage_loss_never_grants(setup_linked, github_http, change) -> None:
+    async with setup_linked.sessionmaker.begin() as session:
+        if change == "snapshot_removed":
+            await session.execute(
+                text(
+                    "UPDATE github_app_installations SET github_repo_full_names = "
+                    "ARRAY['acme/base'] WHERE installation_id = 201"
+                )
+            )
+        else:
+            await session.execute(
+                text(
+                    "UPDATE github_app_installations SET github_removed_at = :now "
+                    "WHERE installation_id = 201"
+                ),
+                {"now": datetime.now(UTC)},
+            )
     assert (await setup_linked.grant()).status == "changed_try_again"
 
 
@@ -450,11 +471,13 @@ async def test_new_suspended_installation_never_grants(setup_linked, github_http
 @pytest.mark.asyncio
 async def test_failed_refresh_returns_relink(setup_linked, github_http) -> None:
     github_http.refresh_fail = True
-    from daimon.core._models import GitHubUserLink
-
     async with setup_linked.sessionmaker.begin() as session:
-        user = await session.get(GitHubUserLink, 300)
-        user.access_expires_at = datetime.now(UTC) - timedelta(minutes=1)
+        await session.execute(
+            text(
+                "UPDATE github_user_links SET access_expires_at = :past WHERE github_user_id = 300"
+            ),
+            {"past": datetime.now(UTC) - timedelta(minutes=1)},
+        )
     assert (await setup_linked.grant()).status == "relink"
 
 
@@ -482,17 +505,44 @@ async def test_revocation_between_lookup_and_commit(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["removed", "suspended"])
+@pytest.mark.parametrize(
+    "change", ["removed", "suspended", "snapshot_removed", "installation_removed"]
+)
 async def test_installation_change_before_commit_retries(
     setup_linked, github_http, monkeypatch, change
 ) -> None:
     async def change_installation() -> None:
         async with setup_linked.sessionmaker.begin() as session:
-            installation = await session.get(GitHubAppInstallation, 201)
             if change == "removed":
-                installation.repo_full_names = ["acme/base"]
+                await session.execute(
+                    text(
+                        "UPDATE github_app_installations SET repo_full_names = "
+                        "ARRAY['acme/base'] WHERE installation_id = 201"
+                    )
+                )
+            elif change == "snapshot_removed":
+                await session.execute(
+                    text(
+                        "UPDATE github_app_installations SET github_repo_full_names = "
+                        "ARRAY['acme/base'] WHERE installation_id = 201"
+                    )
+                )
+            elif change == "suspended":
+                await session.execute(
+                    text(
+                        "UPDATE github_app_installations SET suspended_at = :now "
+                        "WHERE installation_id = 201"
+                    ),
+                    {"now": datetime.now(UTC)},
+                )
             else:
-                installation.suspended_at = datetime.now(UTC)
+                await session.execute(
+                    text(
+                        "UPDATE github_app_installations SET github_removed_at = :now "
+                        "WHERE installation_id = 201"
+                    ),
+                    {"now": datetime.now(UTC)},
+                )
 
     monkeypatch.setattr(linked, "_before_commit", change_installation)
     assert (await setup_linked.grant()).status == "changed_try_again"
@@ -600,8 +650,10 @@ async def test_pending_grant_resumes_from_personal_link_callback(
     url = post_link.await_args.kwargs["url"]
     if scenario == "expired_pending":
         async with setup_linked.sessionmaker.begin() as session:
-            [pending] = (await session.scalars(select(GitHubLinkedConnectPending))).all()
-            pending.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.execute(
+                text("UPDATE github_linked_connect_pending SET expires_at = :past"),
+                {"past": datetime.now(UTC) - timedelta(seconds=1)},
+            )
 
     discord_user = "another" if scenario == "wrong_person" else "person"
 

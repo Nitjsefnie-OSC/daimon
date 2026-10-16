@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
 
 import discord
 import httpx
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools.discord._client import _require_bot_token, rest_client
+from daimon.adapters.mcp.tools.discord._client import (
+    _require_bot_token,  # pyright: ignore[reportPrivateUsage]
+    rest_client,
+)
 from daimon.adapters.mcp.tools.github_linked_grant import linked_grant
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
-from daimon.core._models import Account, GitHubLinkedConnectPending
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
-from sqlalchemy import delete, select
+from daimon.core.stores.github_linked_pending import PendingGrant, save, take
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,23 +40,20 @@ async def save_pending(
     parent_channel_id: str,
     thread_id: str,
 ) -> None:
-    session.add(
-        GitHubLinkedConnectPending(
-            tenant_id=tenant_id,
-            account_id=account_id,
-            agent_id=agent_id,
-            ma_agent_id=ma_agent_id,
-            agent_name=agent_name,
-            repo_name=repo_name,
-            platform=platform,
-            platform_user_id=platform_user_id,
-            workspace_id=workspace_id,
-            parent_channel_id=parent_channel_id,
-            thread_id=thread_id,
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
-        )
+    await save(
+        session,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        agent_id=agent_id,
+        ma_agent_id=ma_agent_id,
+        agent_name=agent_name,
+        repo_name=repo_name,
+        platform=platform,
+        platform_user_id=platform_user_id,
+        workspace_id=workspace_id,
+        parent_channel_id=parent_channel_id,
+        thread_id=thread_id,
     )
-    await session.flush()
 
 
 async def _take_pending(
@@ -63,41 +63,26 @@ async def _take_pending(
     account_id: uuid.UUID,
     platform: str,
     platform_user_id: str,
-) -> list[GitHubLinkedConnectPending]:
+) -> list[PendingGrant]:
     async with runtime.session_factory.begin() as session:
-        rows = (
-            await session.scalars(
-                select(GitHubLinkedConnectPending)
-                .where(
-                    GitHubLinkedConnectPending.tenant_id == tenant_id,
-                    GitHubLinkedConnectPending.account_id == account_id,
-                    GitHubLinkedConnectPending.platform == platform,
-                    GitHubLinkedConnectPending.platform_user_id == platform_user_id,
-                    GitHubLinkedConnectPending.expires_at > datetime.now(UTC),
-                )
-                .with_for_update(skip_locked=True)
-            )
-        ).all()
-        for row in rows:
-            await session.delete(row)
-        await session.execute(
-            delete(GitHubLinkedConnectPending).where(
-                GitHubLinkedConnectPending.expires_at <= datetime.now(UTC)
-            )
+        rows = await take(
+            session,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            platform=platform,
+            platform_user_id=platform_user_id,
         )
         return rows
 
 
-async def _deliver_result(
-    runtime: McpRuntime, pending: GitHubLinkedConnectPending, message: str
-) -> None:
+async def _deliver_result(runtime: McpRuntime, pending: PendingGrant, message: str) -> None:
     if pending.platform == "discord":
         async with rest_client(_require_bot_token(runtime)) as client:
             user = await client.fetch_user(int(pending.platform_user_id))
             await user.send(message, allowed_mentions=discord.AllowedMentions.none())
     elif pending.platform == "slack":
         client = await slack_web_client(runtime, team_id=pending.workspace_id)
-        await client.chat_postEphemeral(
+        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=pending.parent_channel_id,
             thread_ts=pending.thread_id,
             user=pending.platform_user_id,
@@ -133,8 +118,13 @@ async def resume_pending(
             message = "Agent access changed. Ask again in chat."
         else:
 
-            async def manages_now(session: AsyncSession, *, agent=agent, row=row) -> bool:
-                account = await session.get(Account, account_id)
+            async def manages_now(
+                session: AsyncSession,
+                *,
+                agent: BetaManagedAgentsAgent = agent,
+                row: PendingGrant = row,
+            ) -> bool:
+                account = await get_account(session, account_id)
                 if account is None or account.tenant_id != tenant_id or account.is_external:
                     return False
                 if account.role == Role.ADMIN:

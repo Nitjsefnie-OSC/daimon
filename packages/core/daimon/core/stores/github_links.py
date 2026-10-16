@@ -229,6 +229,13 @@ async def get_account_link(session: AsyncSession, *, account_id: uuid.UUID) -> A
     return AccountLink.model_validate(row) if row is not None else None
 
 
+async def get_account_link_for_update(
+    session: AsyncSession, *, account_id: uuid.UUID
+) -> AccountLink | None:
+    row = await session.get(AccountGitHubLink, account_id, with_for_update=True)
+    return AccountLink.model_validate(row) if row is not None else None
+
+
 async def unlink_account(session: AsyncSession, *, account_id: uuid.UUID) -> int | None:
     """Remove an account link and invalidate tokens minted from the user's old generation."""
     row = await session.get(AccountGitHubLink, account_id, with_for_update=True)

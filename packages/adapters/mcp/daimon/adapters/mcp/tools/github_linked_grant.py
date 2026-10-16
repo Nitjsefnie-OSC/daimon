@@ -1,32 +1,40 @@
-"""Experimental, agent-scoped grants from a verified personal GitHub link."""
+"""Agent-scoped grants from a verified personal GitHub link."""
 
 from __future__ import annotations
 
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Literal
 
 import httpx
-from daimon.adapters.mcp.oauth_github import _installations
-from daimon.core._models import (
-    Account,
-    AccountGitHubLink,
-    GitHubAppInstallation,
-    GitHubUserLink,
-    TenantGitHubRepo,
-)
+from cryptography.fernet import MultiFernet
+from daimon.adapters.mcp.oauth_github import _installations  # pyright: ignore[reportPrivateUsage]
 from daimon.core.github_app_auth import (
     build_app_jwt,
     get_app_installation_details,
     installation_supports_write,
 )
 from daimon.core.github_requester_access import linked_access_token
-from daimon.core.stores.github_access import list_agent_grants, stage_grant
-from daimon.core.stores.github_app_installations import upsert_github_app
-from daimon.core.stores.github_links import get_account_link, get_user
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select, text
+from daimon.core.stores.accounts import get_account
+from daimon.core.stores.github_access import (
+    list_agent_grants,
+    stage_grant,
+    upsert_linked_agent_authorization,
+)
+from daimon.core.stores.github_app_installations import get as get_installation
+from daimon.core.stores.github_app_installations import get_for_update, upsert_github_app
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
+from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
+from daimon.core.stores.github_links import (
+    get_account_link,
+    get_account_link_for_update,
+    get_user,
+    get_user_for_update,
+)
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 LinkedStatus = Literal[
@@ -47,8 +55,21 @@ class LinkedOutcome(BaseModel):
     message: str
 
 
-def proposed_linked_grant_policy(permissions: dict[str, bool]) -> tuple[str, str] | None:
-    """PROPOSED: push/maintain/admin grants write; triage/pull grants read."""
+class _RepoOwner(BaseModel):
+    id: int
+
+
+class _RepoPayload(BaseModel):
+    id: int
+    full_name: str
+    owner: _RepoOwner
+    permissions: dict[str, bool] = Field(default_factory=dict)
+
+
+def proposed_linked_grant_policy(
+    permissions: dict[str, bool],
+) -> tuple[Literal["read", "write"], str] | None:
+    """Push, maintain or admin grants write; triage or pull grants read."""
     for key in ("admin", "maintain", "push", "triage", "pull"):
         if permissions.get(key) is True:
             return ("write" if key in ("admin", "maintain", "push") else "read", key)
@@ -67,15 +88,17 @@ async def linked_grant(
     agent_id: uuid.UUID,
     agent_name: str,
     repo_name: str,
-    fernet: object,
+    fernet: MultiFernet | None,
     client_id: str,
     client_secret: str,
     app_id: str,
     private_key: str,
     manages_now: Callable[[AsyncSession], Awaitable[bool]],
 ) -> LinkedOutcome:
+    if fernet is None:
+        return LinkedOutcome(status="changed_try_again", message="GitHub setup is unavailable.")
     async with sessionmaker() as session:
-        account = await session.get(Account, account_id)
+        account = await get_account(session, account_id)
         if account is None or account.tenant_id != tenant_id or account.is_external:
             return LinkedOutcome(
                 status="needs_link", message="Link GitHub to check your repo access."
@@ -132,6 +155,7 @@ async def linked_grant(
                 or detail.account_login.casefold() != installation.owner_login.casefold()
                 or detail.suspended_at is not None
                 or not installation_supports_write(detail.permissions)
+                or installation.repository_selection not in ("all", "selected")
             ):
                 return LinkedOutcome(
                     status="needs_install",
@@ -156,7 +180,7 @@ async def linked_grant(
                     message="Your GitHub account cannot access this repo.",
                 )
             response.raise_for_status()
-            repo = response.json()
+            repo_payload: object = response.json()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
                 return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
@@ -171,26 +195,23 @@ async def linked_grant(
                     message="Your GitHub account cannot access this repo.",
                 )
             raise
-    if not isinstance(repo, dict) or repo.get("full_name", "").casefold() != repo_name.casefold():
+    try:
+        repo = _RepoPayload.model_validate(repo_payload)
+    except ValidationError:
         return LinkedOutcome(
             status="no_github_access", message="Your GitHub account cannot access this repo."
         )
-    repo_id = repo.get("id")
-    owner_data = repo.get("owner")
-    owner_id = owner_data.get("id") if isinstance(owner_data, dict) else None
-    if (
-        not isinstance(repo_id, int)
-        or not isinstance(owner_id, int)
-        or repo_id != listed_repo.id
-        or owner_id != installation.owner_id
-    ):
+    if repo.full_name.casefold() != repo_name.casefold():
         return LinkedOutcome(
             status="no_github_access", message="Your GitHub account cannot access this repo."
         )
-    raw_permissions = repo.get("permissions")
-    policy = proposed_linked_grant_policy(
-        raw_permissions if isinstance(raw_permissions, dict) else {}
-    )
+    repo_id = repo.id
+    owner_id = repo.owner.id
+    if repo_id != listed_repo.id or owner_id != installation.owner_id:
+        return LinkedOutcome(
+            status="no_github_access", message="Your GitHub account cannot access this repo."
+        )
+    policy = proposed_linked_grant_policy(repo.permissions)
     if policy is None:
         return LinkedOutcome(
             status="no_github_access", message="Your GitHub account cannot access this repo."
@@ -200,22 +221,22 @@ async def linked_grant(
         access = "read"
     checked_generation = fresh_user.link_generation
     async with sessionmaker() as session:
-        original_installation = await session.get(GitHubAppInstallation, installation.id)
+        original_installation = await get_installation(session, installation_id=installation.id)
         originally_present = original_installation is not None
-        original_names = (
+        original_names: set[str] = (
             set(original_installation.repo_full_names) if original_installation else set()
         )
-        if originally_present and original_installation.suspended_at is not None:
+        if originally_present and not installation_covers_repo(
+            original_installation, repo.full_name
+        ):
             return LinkedOutcome(status="changed_try_again", message="Access changed. Try again.")
     await _before_commit()
 
     async with sessionmaker.begin() as session:
         await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-        current_link = await session.get(AccountGitHubLink, account_id, with_for_update=True)
-        current_user = await session.get(GitHubUserLink, link.github_user_id, with_for_update=True)
-        current_installation = await session.get(
-            GitHubAppInstallation, installation.id, with_for_update=True
-        )
+        current_link = await get_account_link_for_update(session, account_id=account_id)
+        current_user = await get_user_for_update(session, github_user_id=link.github_user_id)
+        current_installation = await get_for_update(session, installation_id=installation.id)
         if (
             current_link is None
             or current_link.github_user_id != link.github_user_id
@@ -226,7 +247,7 @@ async def linked_grant(
                 current_installation is not None
                 and (
                     not originally_present
-                    or current_installation.suspended_at is not None
+                    or not installation_covers_repo(current_installation, repo.full_name)
                     or set(current_installation.repo_full_names) != original_names
                 )
             )
@@ -234,32 +255,19 @@ async def linked_grant(
             or not await manages_now(session)
         ):
             return LinkedOutcome(status="changed_try_again", message="Access changed. Try again.")
-        current = await session.scalar(
-            select(TenantGitHubRepo)
-            .where(
-                TenantGitHubRepo.tenant_id == tenant_id,
-                TenantGitHubRepo.repo_id == repo_id,
-                TenantGitHubRepo.scope_agent_id == agent_id,
-            )
-            .with_for_update()
+        await upsert_linked_agent_authorization(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=repo_id,
+            owner_id=owner_id,
+            installation_id=installation.id,
+            repo_full_name=repo.full_name,
+            access=access,
+            github_user_id=link.github_user_id,
+            account_id=account_id,
+            permission=permission,
         )
-        if current is None:
-            current = TenantGitHubRepo(
-                tenant_id=tenant_id, repo_id=repo_id, scope_agent_id=agent_id
-            )
-            session.add(current)
-        elif current.status != "active":
-            current.version += 1
-        current.owner_id = owner_id
-        current.installation_id = installation.id
-        current.repo_full_name = repo["full_name"]
-        current.max_access = access
-        current.authorized_by_github_user_id = link.github_user_id
-        current.authorized_by_account_id = account_id
-        current.authorized_permission = permission
-        current.status = "active"
-        current.status_reason = None
-        await session.flush()
         await upsert_github_app(
             session,
             installation_id=installation.id,
@@ -268,6 +276,14 @@ async def linked_grant(
             account_type=installation.owner_type,
             repository_selection=installation.repository_selection,
             suspended_at=None,
+        )
+        await enqueue_reconciliation(
+            session,
+            installation_id=installation.id,
+            delivery_id=f"connect:{uuid.uuid4()}",
+            event="connect",
+            deleted=False,
+            now=datetime.now(UTC),
         )
         existing = next(
             (
