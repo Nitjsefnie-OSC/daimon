@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from datetime import timedelta
 from decimal import Decimal
 from functools import partial
@@ -16,6 +15,8 @@ from uuid import UUID
 from daimon.core import pricing
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.mcp_auth import read_private_credential as _private_credential
+from daimon.core.mcp_auth import resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
 from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
 from daimon.core.stores.domain import BackendAgent
@@ -75,30 +76,6 @@ from pydantic import (
 )
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
-
-
-def _private_credential(path: Path) -> str:
-    """Read one explicitly owned, bounded bearer file without following links."""
-    from mux.drivers.gemini.mcp_auth import credential
-
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        info = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or stat.S_IMODE(info.st_mode) != 0o600
-            or info.st_uid != os.getuid()
-        ):
-            raise ValueError("credential file must be private and owned")
-        with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            raw = stream.read(16_385)
-        if len(raw) > 16_384:
-            raise ValueError("invalid credential")
-        return credential(raw.decode().strip())
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
 
 
 class GeminiPlan(BaseModel):
@@ -467,9 +444,6 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         )
 
     async def resolve_mcp(authorized: Scope, reference: str, destination: str) -> str:
-        from daimon.core.mcp_auth import validate_agent_mcp_token
-        from daimon.core.mcp_oauth.discovery import list_mcp_tools
-
         expected = f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{plan.source_agent_id}"
         public_url = request.deps.mcp.public_url
         if (
@@ -484,19 +458,17 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         ):
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
         try:
-            token = _private_credential(plan.mcp_credential_file)
-            await validate_agent_mcp_token(
+            assert plan.source_capabilities is not None
+            token = await resolve_agent_mcp_credential(
                 request.deps.sessionmaker,
-                token=token,
+                path=plan.mcp_credential_file,
                 secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
                 scope=scope,
                 agent_id=plan.source_agent_id,
+                destination=destination,
+                tools=plan.source_capabilities.mcp_tools,
                 now=request.now(),
             )
-            catalogue = await list_mcp_tools(destination, token)
-            assert plan.source_capabilities is not None
-            if catalogue != frozenset(plan.source_capabilities.mcp_tools):
-                raise ValueError("target MCP catalogue differs from captured source")
             await verify_storage()
             return token
         except (OSError, ValueError):

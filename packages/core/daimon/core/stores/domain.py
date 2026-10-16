@@ -18,7 +18,14 @@ import structlog
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.ids import PROVIDERS, Provider, Scope
 from mux.contracts.profile import Capability
-from mux.contracts.resources import Agent, AgentSpec, Environment, ResourceBinding, WorkspaceSource
+from mux.contracts.resources import (
+    Agent,
+    AgentSpec,
+    Environment,
+    EnvironmentSpec,
+    ResourceBinding,
+    WorkspaceSource,
+)
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -1132,6 +1139,7 @@ class SourceRepresentation(_Facts):
     source_pin: str = Field(pattern=r"^[0-9a-f]{64}$")
     target: AgentSpec
     credential_refs: tuple[str, ...] = ()
+    environment: EnvironmentSpec | None = None
 
 
 class BackendAgent(_Facts):

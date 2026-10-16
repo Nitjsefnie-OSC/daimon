@@ -101,10 +101,14 @@ def represented_execution_tools(
     MCP remains a separate capability. Unknown tools and permission prompts
     cannot acquire an execution mapping by resembling a known tool name.
     """
-    if profile.profile_id != INLINE_REUSE.profile_id:
+    if profile.profile_id not in (INLINE_REUSE.profile_id, PERSISTENT_WORKSPACE.profile_id):
         raise InvalidConfig("profile has no source execution mapping")
     names = {"bash", "read", "edit", "grep", "glob", "write"}
-    web_tools = {"web_fetch": "url_context", "web_search": "google_search"}
+    web_tools = (
+        {"web_fetch": "url_context", "web_search": "google_search"}
+        if profile.profile_id == INLINE_REUSE.profile_id
+        else {"web_search": "web_search"}
+    )
     actual = {tool.name for tool in tools}
     if (
         len(tools) != len(actual)

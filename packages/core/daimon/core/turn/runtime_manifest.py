@@ -1213,7 +1213,7 @@ class SourceSkillMapping(BaseModel):
             not self.archive.is_absolute()
             or self.source.version in (None, "latest")
             or self.target.version in (None, "latest")
-            or self.target.digest != self.target.version
+            or self.target.digest is None
         ):
             raise ValueError("skill representation requires a concrete version and full archive")
         return self
@@ -1227,6 +1227,7 @@ class SourceCapabilities(BaseModel):
     model: ModelRef
     skills: tuple[SourceSkillMapping, ...]
     mcp_tools: tuple[str, ...] = Field(min_length=1)
+    environment: EnvironmentSpec | None = None
 
     @model_validator(mode="after")
     def _unique(self) -> Self:
@@ -1412,7 +1413,7 @@ async def _capture_source_capabilities(
             if (
                 inputs.source_pin != pin
                 or profile.provider != inputs.model.provider
-                or profile.skill_digest != "version"
+                or profile.skill_digest not in ("version", "content")
                 or row.get("platform") != request.platform
                 or row.get("channel_id") != request.admission.origin_channel_id
                 and row.get("channel_id")
@@ -1423,6 +1424,20 @@ async def _capture_source_capabilities(
                 )
             ):
                 raise ValueError("representation differs from captured source")
+            if profile.skill_digest == "version" and any(
+                item.target.digest != item.target.version for item in inputs.skills
+            ):
+                raise ValueError("target skill version must pin its digest")
+            if inputs.environment is not None and (
+                not profile.implicit_execution
+                or source.environment is None
+                or inputs.environment != source.environment.spec
+                or inputs.environment.native_config is not None
+                or inputs.environment.execution != "hosted"
+                or inputs.environment.network is None
+                or inputs.environment.packages is None
+            ):
+                raise ValueError("environment representation differs from captured policy")
             if request.deps.mcp.public_url is None or request.deps.mcp.jwt_secret is None:
                 raise ValueError("MCP catalogue requires the captured caller")
             catalogue_token = mint_jwt(
@@ -1564,7 +1579,7 @@ async def _capture_source_capabilities(
                         for path, body in sorted(retained.items())
                     )
                 )
-                if request_digest(canonical.model_dump(mode="json")) != item.target.version:
+                if request_digest(canonical.model_dump(mode="json")) != item.target.digest:
                     raise ValueError("target skill digest differs from source bytes")
 
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
@@ -1579,7 +1594,12 @@ async def _capture_source_capabilities(
                 mcp_servers=(connection,),
             )
             represented.append(
-                SourceRepresentation(source_pin=pin, target=target, credential_refs=(reference,))
+                SourceRepresentation(
+                    source_pin=pin,
+                    target=target,
+                    credential_refs=(reference,),
+                    environment=inputs.environment,
+                )
             )
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
             raise ValueError("ambiguous source representation")
@@ -2032,8 +2052,13 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
         ):
             raise UnsupportedCapability(("source_representation",), profile)
         target = representations[0].target
+    represented = represented_source(source, target)
+    environment = represented.environment if represented is not None else None
     missing = classify_source_obligations(
-        source, target, environment=None, asks_before_publishing=source.asks_before_publishing
+        source,
+        target,
+        environment=environment,
+        asks_before_publishing=source.asks_before_publishing,
     )
     try:
         target = AgentSpec.model_validate(
@@ -2047,7 +2072,10 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
     except ValueError:
         raise UnsupportedCapability(tuple(sorted(missing)), profile) from None
     missing = classify_source_obligations(
-        source, target, environment=None, asks_before_publishing=source.asks_before_publishing
+        source,
+        target,
+        environment=environment,
+        asks_before_publishing=source.asks_before_publishing,
     )
     if missing:
         raise UnsupportedCapability(tuple(sorted(missing)), profile)
@@ -2253,6 +2281,8 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         if retain_native and source.environment
         else worker.environment
         if worker
+        else represented.environment
+        if (represented := represented_source(source, target)) is not None
         else None,
         resources=source.resource_requirements
         if retain_native

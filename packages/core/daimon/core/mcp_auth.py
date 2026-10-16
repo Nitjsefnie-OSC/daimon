@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
+import stat
 import uuid
 from decimal import Decimal
+from pathlib import Path
 
 import jwt as pyjwt
 from daimon.core.access_policy import TenantAccessPolicy
@@ -39,6 +42,52 @@ from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+def read_private_credential(path: Path) -> str:
+    """Read a bounded, explicitly owned bearer file without following links."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.getuid()
+        ):
+            raise ValueError("credential file must be private and owned")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(16_385)
+        if len(raw) > 16_384:
+            raise ValueError("invalid credential")
+        token = raw.decode().strip()
+        if not token or any(character.isspace() for character in token):
+            raise ValueError("invalid credential")
+        return token
+    finally:
+        os.close(descriptor)
+
+
+async def resolve_agent_mcp_credential(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    path: Path,
+    secret: bytes,
+    scope: Scope,
+    agent_id: uuid.UUID,
+    destination: str,
+    tools: tuple[str, ...],
+    now: dt.datetime,
+) -> str:
+    """Recheck registered caller authority and its exact remote catalogue before exposure."""
+    from daimon.core.mcp_oauth.discovery import list_mcp_tools
+
+    token = read_private_credential(path)
+    await validate_agent_mcp_token(
+        sessionmaker, token=token, secret=secret, scope=scope, agent_id=agent_id, now=now
+    )
+    if await list_mcp_tools(destination, token) != frozenset(tools):
+        raise ValueError("target MCP catalogue differs from captured source")
+    return token
 
 
 def mint_jwt(
