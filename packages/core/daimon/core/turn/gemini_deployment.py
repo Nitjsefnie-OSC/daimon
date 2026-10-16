@@ -362,6 +362,12 @@ class GeminiPlan(BaseModel):
                 )
             ):
                 raise AdmissionDenied(reason="backend_unsupported")
+            if self.source_capabilities is not None:
+                mounted = await adapter.skill_deployments(request.scope, checked.agent)
+                if set(mounted) != set(self.skill_deployments) or len(mounted) != len(
+                    self.skill_deployments
+                ):
+                    raise AdmissionDenied(reason="backend_unsupported")
 
         return await read_counterpart(
             self,

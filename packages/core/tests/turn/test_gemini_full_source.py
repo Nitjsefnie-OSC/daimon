@@ -67,7 +67,7 @@ PARAMS = {
     "tools": [
         {
             "type": "agent_toolset_20260401",
-            "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
             "configs": [
                 {"name": t["name"], "enabled": True, "permission_policy": {"type": "always_allow"}}
                 for t in DEFAULT["tools"][0]["configs"]
@@ -87,6 +87,33 @@ PARAMS = {
 }
 
 LATEST_PARAMS = {**PARAMS, "skills": [{**skill, "version": "latest"} for skill in PARAMS["skills"]]}
+
+# The recorded F2 source explicitly disables web tools and enumerates its MCP
+# tools; the recorded root above instead enables both builtin defaults.
+F2_PARAMS = {
+    **PARAMS,
+    "tools": [
+        {
+            **PARAMS["tools"][0],
+            "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                *PARAMS["tools"][0]["configs"],
+                *[
+                    {"name": name, "enabled": False, "permission_policy": {"type": "always_allow"}}
+                    for name in ("web_fetch", "web_search")
+                ],
+            ],
+        },
+        {
+            **PARAMS["tools"][1],
+            "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {"name": name, "enabled": True, "permission_policy": {"type": "always_allow"}}
+                for name in ("describe_agent", "list_my_sessions")
+            ],
+        },
+    ],
+}
 
 
 def archive(files):
@@ -446,6 +473,7 @@ async def full(consent_request, monkeypatch, tmp_path):
             router,
             storage,
             catalogue_state,
+            readback_calls,
         )
     finally:
         await binding.close()
@@ -453,11 +481,19 @@ async def full(consent_request, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "consent_request", [PARAMS, LATEST_PARAMS], indirect=True, ids=["concrete", "latest"]
+    "consent_request",
+    [PARAMS, LATEST_PARAMS, F2_PARAMS],
+    indirect=True,
+    ids=["root-concrete", "root-latest", "recorded-f2"],
 )
 async def test_full_default_preparation_and_fresh_followup_turns(full):
     request, plan, canonical, native, calls, posts, token, *_ = full
     assert len(canonical.target_spec.skills) == 11
+    # Assert the native request carries the complete represented authority.
+    expected_tools = {tool.name for tool in canonical.target_spec.tools}
+    assert {
+        tool["type"] for tool in native["tools"] if tool["type"] != "mcp_server"
+    } == expected_tools
     assert len(native["base_environment"]["sources"]) == 11
     assert all(s["type"] == "gcs" for s in native["base_environment"]["sources"])
     selected = await read_preparation_counterpart(scope_channel_runtimes(request)[0])
@@ -713,3 +749,21 @@ async def test_scoped_mcp_validator_retains_the_shorter_provisioning_deadline(fu
         now=request.now(),
         max_ttl_s=600,
     )
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_readback_cannot_verify_a_receipt_for_an_unmounted_directory(full):
+    request, plan, _, _, _, posts, *_ = full
+    foreign = replace(
+        plan.skill_deployments[0],
+        source=plan.skill_deployments[0].source.replace("owned-offline", "unmounted-copy"),
+    )
+    wrong_plan = plan.model_copy(
+        update={"skill_deployments": (foreign, *plan.skill_deployments[1:])}
+    )
+    path = Path(os.environ["DAIMON_TURN__PROVIDER_RUNTIME_FILE"])
+    path.write_text(json.dumps([wrong_plan.model_dump(mode="json")]))
+    with pytest.raises(AdmissionDenied):
+        await read_preparation_counterpart(scope_channel_runtimes(request)[0])
+    assert not any(call.url.host == "storage.googleapis.com" for call in full[12])
+    assert not posts
