@@ -163,11 +163,11 @@ def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
             )
         ]
     )
-    assert "never call it or create_file_upload_url for a file" in teams, (
-        "Teams send_message refuses files; the agent must not reach for the Discord path"
+    assert "never call it or create_file_upload_url for one" in teams, (
+        "send_message cannot attach a file where files are unavailable"
     )
     assert "follow the `files` attribute on `<channel>`" in teams, (
-        "whether a channel takes files depends on the team's SharePoint grant"
+        "whether a channel takes files depends on what Graph allows there"
     )
     assert "saves each output to the channel's Files and links it" in teams, (
         "with access, outputs are delivered as links, so the agent may reference them"
@@ -181,11 +181,21 @@ def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
     assert "Say so once in your reply" in teams, (
         "the adapter no longer posts a note per file, so the reply carries the message"
     )
-    assert "Follow the channel's `files_hint` first" in teams and "enable_channel_files" in teams, (
-        "the per-turn hint, which asks an admin's agent to post the Enable files card, comes first"
+    assert "Follow the channel's `files_hint`: it says what an admin must grant" in teams, (
+        "the per-turn hint names the permission an admin must grant"
     )
+    assert "enable_channel_files" not in teams, "no card or tool turns files on any more"
     assert "separate conversation, so the file would be made again there" in teams, (
         "a 1:1 chat does not share the channel thread's workspace"
+    )
+    # Regression for a channel turn whose agent copied daimon's footer from replayed
+    # answers ("Saved to this channel's files: ...") into its own reply, and hedged.
+    assert 'never write that list, a file link or a "Saved to" line yourself' in teams, (
+        "daimon adds the saved-files list; the agent must not imitate it from history"
+    )
+    assert "never hedge about delivery" in teams, "the delivery is daimon's, not a maybe"
+    assert "come back as attachments of your replayed messages, with a download URL" in teams, (
+        "earlier deliveries are readable from history"
     )
 
 

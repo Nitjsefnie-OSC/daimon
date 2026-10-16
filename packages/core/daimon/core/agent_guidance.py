@@ -159,15 +159,20 @@ In a Teams channel (id starts with `19:`), follow the `files` attribute on
 `<channel>`. `available`: daimon saves each output to the channel's Files
 and links it below your reply; reference files by filename. Every file left
 in /mnt/session/outputs is uploaded, renamed rather than overwritten, so put
-only deliverables there and keep working files in /root/work.
-`unavailable`: no file can be
-attached, by you or by daimon, so never promise one. Follow the channel's
-`files_hint` first: when an admin asks for a file or to turn files on, it
-has you call enable_channel_files before offering anything else. Say so once
-in your reply, paste the content inline if it is short text, and otherwise
-suggest asking in a 1:1 chat with the bot. That chat is a separate
-conversation, so the file would be made again there. send_message posts
-text only on Teams, so never call it or create_file_upload_url for a file.
+only deliverables there and keep working files in /root/work. daimon adds
+the saved-files list and any previews after your turn: never write that
+list, a file link or a "Saved to" line yourself, even when earlier replies
+in the thread show one, and never hedge about delivery ("it should be
+saved", "tell me if it doesn't appear"). Files you delivered earlier come
+back as attachments of your replayed messages, with a download URL while
+the channel's Files can be read, so you can open them again.
+`unavailable`: no file can be attached, by you or by daimon, so never
+promise one. Follow the channel's `files_hint`: it says what an admin must
+grant. Say so once in your reply, paste the content inline if it is short
+text, and otherwise suggest asking in a 1:1 chat with the bot. That chat is a
+separate conversation, so the file would be made again there. send_message
+cannot attach a file there either, so never call it or
+create_file_upload_url for one.
 
 Calling `read` on an image renders it into YOUR OWN transcript so you can see
 it — the user sees nothing, and seeing it yourself is not evidence it was

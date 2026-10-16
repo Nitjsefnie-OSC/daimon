@@ -16,10 +16,8 @@ Discord (gateway) and Slack (Socket Mode) dial out; Teams does not. The
 adapter runs a FastAPI listener on `DAIMON_TEAMS__PORT` (default `3978`). The
 Microsoft SDK owns `POST /api/messages` and validates the Bot Framework JWT
 before Daimon code runs; tokens from any other issuer (such as Entra ID) are
-refused with 401 first. The same listener serves `/healthz` and `/readyz`,
-and, with `DAIMON_TEAMS__PUBLIC_URL` set, `GET /oauth/teams/files/callback`
-(below); a reverse proxy in front must pass that path too. With
-`DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED=true` it also serves
+refused with 401 first. The same listener serves `/healthz` and `/readyz`.
+With `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED=true` it also serves
 `POST /api/graph/notifications` and `/api/graph/lifecycle` for Microsoft Graph
 (see [Private and shared channels](#private-and-shared-channels-optional)).
 `DAIMON_TEAMS__ENABLED=false` makes `/api/messages` answer 503, and bodies over
@@ -271,7 +269,12 @@ replies. One page is read per turn, marked `truncated` when there is more.
 Each message carries its sender and time, and the turn names its channel. System events, deleted
 posts and the bot's own cards are left out; mentions read as `@name`. The
 newest 4 images in the replay are passed to the agent, and up to 10 shared
-files get a download link where channel files work (below). When Graph cannot
+files get a download link where channel files work (below). daimon's own
+answers read back with their previews as images and the files they saved
+as attachments with download links, so the agent can open what it delivered
+earlier; the "Saved to this channel's files" list itself is left out of the
+replayed text, so the agent does not copy it into its own reply. The MCP
+Teams read tools resolve those saved-file links too. When Graph cannot
 be read, the agent is told history is unavailable and why, rather than
 guessing from nothing.
 
@@ -385,10 +388,11 @@ setting off the routes answer 404 and nothing is subscribed.
   reads each message it answers from Graph and passes its images to the agent.
   Files live in SharePoint: a standard channel's on the team's site, a private
   or shared channel's on a site of its own. No team-scoped permission reaches
-  either, so files work only in channels whose site an admin granted (below).
-  There, a shared file from that site (never another one, so not the team's
-  in a private or shared channel whose own site is granted) reaches the agent
-  as a short-lived download link, and each file the agent writes is uploaded to the channel's Files tab (never overwriting) and linked
+  either, so files work once an admin grants the app `Files.ReadWrite.All`
+  (below). Then a shared file inside the channel's own Files folder (never one
+  from another site, library or folder) reaches the agent as a short-lived
+  download link, and each file the agent writes is uploaded to the channel's
+  Files tab (never overwriting) and linked
   below its answer, or in one message when the answer has no room (never
   after an unprompted answer); a failed upload is only logged.
   Elsewhere, or when Graph refuses, the agent is told the shared file's name
@@ -398,19 +402,26 @@ setting off the routes answer 404 and nothing is subscribed.
   workspace. The turn context tells the agent which case applies
   (`files="available"` or `"unavailable"`), learned per channel from the last
   folder lookup or upload and rechecked every 10 minutes while unavailable.
-  Where they are unavailable, `files_hint` tells the agent, asked for a file or
-  to turn files on, to call `enable_channel_files` first rather than offer an
-  artifact, report or notebook; the bot posts the Enable files card (below)
-  after that answer, for a Daimon admin who asked.
-- **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as
-  Teams renders a base64 image attachment: downscaled to fit 1024x1024 and
-  re-encoded under 512 KiB (PNG, else JPEG). Up to four, in delivery order,
-  are added to the answer's last message, beside its text: in a channel in the
-  same edit as the file links (not after an unprompted answer), in a 1:1 chat
-  above the consent cards. When the answer cannot take them (a closing notice
-  card, or Teams refuses the edit, as it may when the message gets too large),
-  they come in a message of their own after it; in a 1:1 chat, one message
-  each below the consent cards, as do any beyond four. A channel without file
+  Where they are unavailable, `files_hint` tells the agent that an admin must
+  grant `Files.ReadWrite.All`, rather than offer an artifact, report or
+  notebook.
+- **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as a
+  base64 data URI downscaled to fit 1024x1024 and re-encoded under 512 KiB
+  (PNG, else JPEG). Up to four, in delivery order, are added to the answer's
+  last message as markdown images after its text, `![name](data:…)`: in a
+  channel in the same edit as the file links (not after an unprompted
+  answer), in a 1:1 chat above the consent cards. Teams refuses an edit that
+  carries text and an image attachment (400 `BadSyntax`, "Activity resulted
+  into multiple skype activities") and splits such a new post into two
+  messages, so no activity carries both. The message is then sent as plain
+  markdown, which Teams stores with each image as hosted content that Graph
+  reads back; an Extended Markdown message keeps a link no app token can
+  fetch. Plain markdown shows no math, so an answer whose last message has
+  math, a closing notice card, or an edit Teams refuses (as it may when the
+  message gets too large) gets them in an image-only message of its own after
+  it; in a 1:1 chat, one message each below the consent cards, as do any
+  beyond four. Every later edit of the answer, such as a notice above it,
+  sends its images again; the 4,000-character limit counts its text alone. A channel without file
   access shows no previews. Animated GIFs get no preview, and a preview Teams
   refuses is only logged (`teams.output_preview.send_failed`).
 - **Document previews.** Up to four Word, PowerPoint, Excel or PDF outputs
@@ -451,45 +462,26 @@ channel it is pinned to.
 
 ### Channel files (optional)
 
-Grant the app `Sites.Selected`, which reaches only the sites granted to it,
-then grant each channel's site. The manifest does not change and no restart is
-needed.
+Grant the app the Microsoft Graph application permission
+`Files.ReadWrite.All`. The manifest does not change and no restart is needed:
+a channel's files turn on within 10 minutes of consent.
 
 1. Entra portal → App registrations → the bot's app → API permissions → Add
    a permission → Microsoft Graph → Application permissions →
-   `Sites.Selected` → Grant admin consent.
-2. Set `DAIMON_TEAMS__PUBLIC_URL` to the Teams service's public base URL
-   (the messaging endpoint without `/api/messages`). Same app →
-   Authentication → Add a platform → Web → redirect URI
-   `<DAIMON_TEAMS__PUBLIC_URL>/oauth/teams/files/callback`.
-3. When a Daimon admin asks Daimon to turn files on in a channel (or for a
-   file there), or shares a file it cannot open, the bot posts an **Enable
-   files** card (unasked, at most every 15 minutes per channel). A SharePoint
-   or global admin who is a member of the channel clicks it and signs in once,
-   granting the delegated `Sites.FullControl.All` and `Files.Read.All` (the
-   first in the organisation must be a global admin, who consents for
-   everyone). The Teams service finds the channel's Files folder with that
-   sign-in, grants the app write on the site holding it (the team's, or a
-   private or shared channel's own) and stores the folder; the channel's next
-   message sees the files. A new channel's Files tab must be opened once
-   first; until then the channel has no folder to find.
+   `Files.ReadWrite.All` → Grant admin consent.
+2. That covers every channel, standard, private and shared alike: Daimon
+   finds each one's Files folder through Graph (`filesFolder`). A new
+   channel's Files tab must be opened once first; until then the channel has
+   no folder to find.
 
-Or grant a site by hand as a SharePoint or global admin holding
-`Sites.FullControl.All`:
-
-```http
-GET https://graph.microsoft.com/v1.0/groups/{group-id}/sites/root
-POST https://graph.microsoft.com/v1.0/sites/{site-id}/permissions
-
-{"roles": ["write"],
- "grantedToIdentities": [{"application": {"id": "<DAIMON_TEAMS__CLIENT_ID>", "displayName": "daimon"}}]}
-```
-
-The group id is in the team's link (team → ⋯ → Get link to team → `groupId=`).
-This covers the team's standard channels only: the app cannot look up a
-private or shared channel's folder, so those need the card. Removing the site
-permission (`DELETE /sites/{site-id}/permissions/{id}`) returns its channels to
-names only.
+`Files.ReadWrite.All` reaches every file in the organisation, past
+SharePoint's per-file permissions. Daimon therefore only reads a shared file
+inside the channel's own Files folder, which the channel's members share, and
+only writes to that folder; a link to anything else, or to a file more than
+seven subfolders down, stays a name. Removing the
+permission returns every channel to names only. Uploads go up in one request
+(Graph takes up to 250 MB; Daimon's outputs are capped at 20 MiB), since
+upload sessions need `Sites.ReadWrite.All`.
 
 ### Keys and sign-ins
 
@@ -518,15 +510,15 @@ registration:
   channel is read only from a turn inside it. Graph has no message search for
   an app, so `search_messages` scans recent posts, bounded, and says when it
   stopped short. A 1:1 chat cannot be read back. A message's files come with
-  a download link where the channel's site is granted and the file is in the
-  channel's own Files folder, else by name: the site grant ignores
-  SharePoint's per-file permissions, so a file from a restricted library or
-  folder elsewhere on the site is never linked. The link lasts about an hour
+  a download link where `Files.ReadWrite.All` is granted and the file is in
+  the channel's own Files folder, else by name: the permission ignores
+  SharePoint's per-file permissions, so a file from another site, library or
+  folder is never linked. The link lasts about an hour
   and anyone holding it can fetch the file, so only messages the read returns
   get one.
 - **Posting.** `send_message` and `create_thread` (up to 6,000 characters,
   only into a conversation the requester belongs to). Files ride along: in a
-  channel whose site is granted they are saved to its Files tab and linked; in
+  channel with `Files.ReadWrite.All` they are saved to its Files tab and linked; in
   a 1:1 chat they are offered with a file consent card. An agent can edit or
   delete what it posted (`edit_message`, `delete_message`); closing a thread
   (`delete_thread`, `archive_thread`) is not on Teams.
@@ -597,8 +589,11 @@ landed.
 
 ### Restart behaviour
 
-On shutdown the adapter stops admitting, gives running turns 15 seconds, then
-cancels them. The next boot edits every card a restart cut off to an
+On shutdown the adapter stops admitting, gives running turns and output
+sweeps 60 seconds, including a sweep that a turn ending meanwhile starts,
+then cancels them; give the container a longer stop grace (90 seconds, see
+the self-hosting guide). A cancelled sweep leaves its files listed, and the
+session's next sweep delivers them. The next boot edits every card a restart cut off to an
 interrupted notice before admitting new turns. A channel card whose send never
 returned an id is found by reading its thread through Graph; one in a 1:1 chat,
 which cannot be read back, is left as is.
@@ -606,7 +601,7 @@ which cannot be read back, is left as is.
 Every incoming message is admitted once, by Teams activity id, in a database
 receipt shared by every adapter process, so a redelivery, a second process or
 a restart never runs it twice. A message whose turn had not started when the
-restart began (queued behind a running turn, or arriving during the 15
+restart began (queued behind a running turn, or arriving during the 60
 seconds) is kept: its chat gets one "I'm restarting for an update. I'll pick
 this up as soon as I'm back." note, and the next process runs it once, in
 order, through the usual admission checks. One more than 10 minutes old by

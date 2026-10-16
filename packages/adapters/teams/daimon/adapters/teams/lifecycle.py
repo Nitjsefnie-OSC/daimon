@@ -39,6 +39,7 @@ from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.teams_markdown import has_math
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
@@ -200,7 +201,9 @@ class TeamsTurnLifecycle:
         # Shown messages that are notice cards, not answers: edited as cards,
         # with their buttons, whether they carry 👍/👎, and their summary line.
         self._notices: dict[str, tuple[tuple[Action, ...], str | None]] = {}
-        # Images edited into an answer message: every later edit sends them again.
+        # Previews edited into an answer message as markdown images, kept apart
+        # from `_shown` (TEAMS_LIMIT counts the text alone): every later edit
+        # sends them again.
         self._attached: dict[str, tuple[Attachment, ...]] = {}
         # Edits of a shown answer, from the turn and the output sweep, one at a time.
         self._answer_edits = asyncio.Lock()
@@ -499,12 +502,13 @@ class TeamsTurnLifecycle:
     async def append_to_answer(
         self, text: str | None = None, attachments: Sequence[Attachment] = ()
     ) -> bool:
-        """Edit `text` and `attachments` in below the answer's last message.
+        """Edit `text` and data-URI previews in below the answer's last message.
 
-        The attachments follow any already there. False if they cannot go
-        there: no answer shown, a notice card given attachments, too long, more
-        than MAX_PREVIEWS in all, or the edit refused; the caller then sends
-        them on their own.
+        The previews go in as markdown images after the text and any already
+        there: Teams refuses an edit with text and an attachment. False if
+        they cannot go there: no answer shown, a notice card given previews,
+        math in the message, too long, more than MAX_PREVIEWS in all, or the
+        edit refused (400, 413); the caller then sends them on their own.
         """
         return await self._amend(
             self.final_message_id,
@@ -525,10 +529,13 @@ class TeamsTurnLifecycle:
             if message_id is None or (shown := self._shown.get(message_id)) is None:
                 return False
             if attachments and message_id in self._notices:
-                return False  # A notice is a card: images beside it would be a second message.
+                return False  # A notice is a card, whose TextBlock shows no image.
             updated = change(shown)
             if len(updated) > card.TEAMS_LIMIT:
                 return False
+            mention = self._requester if message_id == self._answer_id else None
+            if attachments and mention is None and has_math(updated):
+                return False  # Previews make it plain markdown, which would show the math raw.
             attached = (*self._attached.get(message_id, ()), *attachments)
             if len(attached) > MAX_PREVIEWS:
                 return False  # image_preview's size budget is MAX_PREVIEWS per message.
@@ -536,10 +543,7 @@ class TeamsTurnLifecycle:
                 actions, summary = self._notices[message_id]
                 rendered = card.notice_card(updated, actions=actions, summary=summary)
             else:
-                mention = self._requester if message_id == self._answer_id else None
-                rendered = card.answer_message(updated, mention=mention)
-                if attached:
-                    rendered.add_attachments(*attached)
+                rendered = card.answer_message(updated, mention=mention, images=attached)
             try:
                 await self._edit(rendered, message_id)
             except _TIMEOUTS:

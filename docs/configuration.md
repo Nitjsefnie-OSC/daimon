@@ -778,9 +778,8 @@ keeps running so ingress can be re-enabled without a redeploy.
 `HttpUrl | None` · optional · default unset
 
 Externally reachable base URL of the Teams service (the Bot Framework messaging endpoint
-without /api/messages). Enables the admin sign-in that grants Daimon a team's SharePoint
-site; its callback is &lt;public_url&gt;/oauth/teams/files/callback, which must be a Web
-redirect URI on the app registration.
+without /api/messages). Graph's change notifications for private and shared channels
+post to it.
 
 ### `DAIMON_TEAMS__ADMIN_TEAM_ID`
 

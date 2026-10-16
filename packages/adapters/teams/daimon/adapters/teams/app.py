@@ -18,7 +18,6 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
-import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
@@ -40,7 +39,7 @@ from daimon.adapters.teams.admissions import (
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
-from daimon.adapters.teams.card import CANCELLED_NOTICE, enable_files_card
+from daimon.adapters.teams.card import CANCELLED_NOTICE
 from daimon.adapters.teams.card_actions import stored_external, toast
 from daimon.adapters.teams.channel_admin_groups import owned_team_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
@@ -85,13 +84,6 @@ from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.reactions import React, TeamsReactions
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
-from daimon.adapters.teams.site_grant import (
-    STATE_TTL_S,
-    GrantTarget,
-    authorize_url,
-    redirect_uri,
-    sign_state,
-)
 from daimon.adapters.teams.thread_handoff import hand_over_button
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
@@ -137,8 +129,7 @@ from daimon.core.stores.turn_card_intents import (
     record_turn_card_message,
     retire_turn_card_intent,
 )
-from daimon.core.teams_graph import GraphMessage, GraphUnavailable
-from daimon.core.teams_sharepoint import ENABLE_FILES_TOOL
+from daimon.core.teams_graph import GraphMessage
 from daimon.core.teams_threads import conversation_of
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn import turn_deadline
@@ -168,7 +159,7 @@ from daimon.core.turn.slots import (
     release_turn_slot,
     wait_for_slot,
 )
-from daimon.core.turn.state import ToolUseBlock, daimon_tool_arguments
+from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
     ThreadQueue,
     claim_dispatch,
@@ -200,6 +191,9 @@ log = structlog.get_logger()
 
 _SEEN_ACTIVITY_CAP = 10_000
 _RECOVERY_RETRY_DELAY_S = 1.0
+# A turn's output sweep polls the listing for up to 14 s, then uploads: 15 s cut a
+# sweep that began 14 s before a deploy's SIGTERM. Within the documented 90 s grace.
+DRAIN_GRACE_S = 60.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
@@ -384,8 +378,6 @@ class TeamsApp:
         # Bot Framework retries a slow delivery with the same activity id.
         # Not durable: a retry landing after a restart runs a second turn.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
-        # Channel id -> when its enable-files sign-in was offered (monotonic).
-        self._files_offered: dict[str, float] = {}
         self._recovery: asyncio.Task[None] | None = None
         self._wake_poller: asyncio.Task[None] | None = None
         self._delivery_poller: asyncio.Task[None] | None = None
@@ -715,10 +707,14 @@ class TeamsApp:
         )
 
     async def drain(self, timeout: float) -> None:
-        """Stop admitting, give turns and the sweep `timeout`, then cancel the rest.
+        """Stop admitting, give turns, output sweeps and the boot sweep `timeout`, then
+        cancel the rest.
 
-        A cancelled turn keeps its marker and card intent, so the next boot's
-        sweep edits its card to interrupted.
+        Work spawned meanwhile, such as the output sweep of a turn that ends
+        during the drain, gets the same deadline. A cancelled turn keeps its
+        marker and card intent, so the next boot's sweep edits its card to
+        interrupted; a cancelled output sweep leaves its files listed for the
+        session's next sweep.
         """
         self.draining = True
         if self._participation is not None:
@@ -730,15 +726,21 @@ class TeamsApp:
                 # a delivery cut short settles as interrupted, never posted twice.
                 poller.cancel()
                 await asyncio.gather(poller, return_exceptions=True)
-        tasks = set(self._tasks)
-        if self._recovery is not None and not self._recovery.done():
-            tasks.add(self._recovery)
-        if tasks:
-            _done, pending = await asyncio.wait(tasks, timeout=timeout)
-            for task in pending:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            tasks = set(self._tasks)
+            if self._recovery is not None and not self._recovery.done():
+                tasks.add(self._recovery)
+            if not tasks:
+                break
+            if (left := deadline - loop.time()) > 0:
+                await asyncio.wait(tasks, timeout=left)
+                continue
+            for task in tasks:
                 task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            break
         # A held message keeps its ⌛ until the next boot replays it (`_replay_chat`).
         await self._reactions.close()
         self.outputs.close()
@@ -1631,7 +1633,6 @@ class TeamsApp:
                 keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
                 prefix=attachments.prefix,
                 channel_files=await self._files_reachable(inbound),
-                can_enable_files=self._teams.public_url is not None,
             )
             message = render(history=history)
 
@@ -1697,55 +1698,6 @@ class TeamsApp:
         if prepared.continuity.pending:
             # The change was saved where it was made; the next turn applies it.
             log.info("teams.turn.change_pending", reasons=prepared.continuity.pending)
-        asked = any(
-            daimon_tool_arguments(block, ENABLE_FILES_TOOL) is not None
-            for block in outcome.state.content
-            if isinstance(block, ToolUseBlock)
-        )
-        if asked or (media is not None and any(f.refused for f in media.files)):
-            await self._offer_enable_files(inbound, asked=asked)
-
-    async def _offer_enable_files(self, inbound: TeamsInbound, *, asked: bool) -> None:
-        """An admin gets the sign-in that grants this channel's files.
-
-        Offered when the agent asked for it (`ENABLE_FILES_TOOL`), or when the
-        admin's shared file was refused. A card, not a status line: unasked, never
-        on an unprompted message, and again only once the last offer's sign-in has expired.
-        """
-        teams, files = self._teams, self._channel_files
-        now = time.monotonic()
-        last = self._files_offered.get(inbound.channel_id, -STATE_TTL_S)
-        if (
-            files is None
-            or inbound.kind != "channel"
-            or teams.public_url is None
-            or (inbound.unprompted and not asked)
-            or not await self._is_admin(inbound)
-            or (not asked and now - last < STATE_TTL_S)
-        ):
-            if asked:
-                log.info("teams.enable_files.not_offered")
-            return
-        try:
-            target = GrantTarget(await files.team_group(inbound), inbound.channel_id)
-        except GraphUnavailable as err:
-            log.warning("teams.enable_files.no_group", status=err.status, reason=err.reason)
-            return
-        self._files_offered[inbound.channel_id] = now
-        state = sign_state(target, secret=teams.client_secret.get_secret_value(), now=time.time())
-        url = authorize_url(
-            tenant_id=teams.tenant_id,
-            client_id=teams.client_id,
-            redirect_uri=redirect_uri(teams.public_url),
-            state=state,
-        )
-        try:
-            await self._sender.send(
-                inbound.conversation_id, enable_files_card(url), service_url=inbound.service_url
-            )
-        except TEAMS_SEND_ERRORS:
-            self._files_offered.pop(inbound.channel_id, None)
-            log.warning("teams.enable_files.send_failed", exc_info=True)
 
     async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:
         if inbound.kind != "channel":

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["escape_dollars"]
+__all__ = ["escape_dollars", "has_math"]
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _TICKS = re.compile(r"`+")
@@ -44,9 +44,9 @@ def _inline_end(text: str, start: int) -> int | None:
     return None
 
 
-def _escape_prose(text: str) -> str:
+def _escape_prose(text: str) -> tuple[str, bool]:
     out: list[str] = []
-    index = 0
+    index, math = 0, False
     while index < len(text):
         char = text[index]
         if char == "\\":
@@ -62,21 +62,22 @@ def _escape_prose(text: str) -> str:
             end = text.find("$$", index + 2)
             if end > index + 2:
                 out.append(text[index : end + 2])
-                index = end + 2
+                index, math = end + 2, True
             else:
                 out.append("\\$\\$")
                 index += 2
         elif (end := _inline_end(text, index)) is not None:
             out.append(text[index : end + 1])
-            index = end + 1
+            index, math = end + 1, True
         else:
             out.append("\\$")
             index += 1
-    return "".join(out)
+    return "".join(out), math
 
 
-def _escape_outside_code_spans(text: str) -> str:
+def _escape_outside_code_spans(text: str) -> tuple[str, bool]:
     out: list[str] = []
+    math = False
     prose_start = index = 0
     while (match := _TICKS.search(text, index)) is not None:
         ticks = match.group()
@@ -84,22 +85,26 @@ def _escape_outside_code_spans(text: str) -> str:
         if close is None:
             index = match.end()  # An unmatched run is literal text.
             continue
-        out.append(_escape_prose(text[prose_start : match.start()]))
-        out.append(text[match.start() : close.end()])
+        prose, found = _escape_prose(text[prose_start : match.start()])
+        out.extend((prose, text[match.start() : close.end()]))
+        math |= found
         prose_start = index = close.end()
-    out.append(_escape_prose(text[prose_start:]))
-    return "".join(out)
+    prose, found = _escape_prose(text[prose_start:])
+    out.append(prose)
+    return "".join(out), math | found
 
 
-def escape_dollars(text: str) -> str:
-    """`text` with every `$` outside math spans and code escaped as `\\$`."""
+def _escape(text: str) -> tuple[str, bool]:
     out: list[str] = []
+    math = False
     prose: list[str] = []
     fence: str | None = None
     for line in text.splitlines(keepends=True):
         match = _FENCE.match(line)
         if fence is None and match is not None:
-            out.append(_escape_outside_code_spans("".join(prose)))
+            escaped, found = _escape_outside_code_spans("".join(prose))
+            out.append(escaped)
+            math |= found
             prose = []
             fence = match.group(1)
             out.append(line)
@@ -115,5 +120,16 @@ def escape_dollars(text: str) -> str:
                 fence = None
         else:
             prose.append(line)
-    out.append(_escape_outside_code_spans("".join(prose)))
-    return "".join(out)
+    escaped, found = _escape_outside_code_spans("".join(prose))
+    out.append(escaped)
+    return "".join(out), math | found
+
+
+def escape_dollars(text: str) -> str:
+    """`text` with every `$` outside math spans and code escaped as `\\$`."""
+    return _escape(text)[0]
+
+
+def has_math(text: str) -> bool:
+    """Whether Extended Markdown would render a `$…$` or `$$…$$` span of `text` as math."""
+    return _escape(text)[1]
