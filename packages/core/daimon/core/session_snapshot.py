@@ -30,7 +30,7 @@ import hashlib
 import json
 from collections.abc import Collection, Sequence
 from datetime import datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -60,7 +60,15 @@ from daimon.core.tool_safety import (
     session_tools_for_policy,
     trusted_servers_for,
 )
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    model_serializer,
+)
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type MaSkill = BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill
@@ -96,6 +104,18 @@ class SessionSnapshot(BaseModel):
     """What one MA session is running. Persisted as JSONB on `thread_sessions`."""
 
     model_config = ConfigDict(frozen=True)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_refusal_state(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> dict[str, Any]:
+        # Refusal fields are absent from every snapshot written before them; keep
+        # stored and compared JSON unchanged while they are empty.
+        data: dict[str, Any] = handler(self)
+        for name in ("unavailable_repos", "unavailable_notice_pending", "unavailable_notice_sent"):
+            if not data.get(name):
+                data.pop(name, None)
+        return data
 
     schema_version: Literal[1] = 1
 
