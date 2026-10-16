@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -26,7 +25,6 @@ from daimon.core.config import (
     Settings,
     TeamsSettings,
 )
-from daimon.core.mcp_auth import mint_jwt
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
@@ -36,6 +34,8 @@ from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import registered_account_token
 
 _ENTRA = "99999999-8888-7777-6666-555555555555"
 _CALLER = "11111111-2222-3333-4444-555555555555"
@@ -325,7 +325,9 @@ async def test_teams_caller_reaches_only_teams_tagged_channel_tools(
         ),
         sessionmaker=sessionmaker,
     )
-    token = mint_jwt(account_id=account.id, secret=secret.encode(), now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(
+        sessionmaker, account_id=account.id, secret=secret.encode()
+    )
 
     async def call(name: str, arguments: dict[str, object]) -> str:
         result = (await call_mcp_tool(app, token=token, name=name, arguments=arguments))["result"]

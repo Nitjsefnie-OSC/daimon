@@ -31,7 +31,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_auth import mint_panel_mcp_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role, RoutineRow
@@ -1839,11 +1839,13 @@ async def test_required_destination_on_authenticated_public_mcp_surface(
             sessionmaker=committing_sessionmaker,
             anthropic=client,
         )
-        token = mint_jwt(
-            account_id=account.id,
-            secret=secret if valid_token else b"different-synthetic-signing-key",
-            now=datetime.now(UTC),
-        )
+        async with committing_sessionmaker.begin() as token_db:
+            token = await mint_panel_mcp_token(
+                token_db,
+                account_id=account.id,
+                secret=secret if valid_token else b"different-synthetic-signing-key",
+                now=datetime.now(UTC),
+            )
         if valid_token:
             response = await call_mcp_tool(
                 app,

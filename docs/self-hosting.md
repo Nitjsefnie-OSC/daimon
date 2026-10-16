@@ -4,6 +4,70 @@ This guide expands the README quickstart. It covers the full Docker Compose
 setup, running the processes by hand, Slack, Microsoft Teams, the Claude Code
 login mounts, chart storage and connecting MCP servers.
 
+## Upgrading an existing installation
+
+The new MCP server is strict immediately by default: credentials need a live
+registry entry. Re-mint old CLI or MCP-client tokens that do not contain a `jti`
+with the updated `daimon mcp mint-token` command, then replace them in the
+clients that use them. Use the updated agent/operator mint commands for those
+credential types. Treat command output as a credential and store it privately.
+
+Chat credentials renew automatically on session reuse and agent-chat or hub
+continuation. Existing turns using older vault credentials can stop reaching
+MCP if the verifier is upgraded before their minters. Use a staged upgrade when
+preserving those turns matters.
+
+### Staged MCP upgrade
+
+1. Apply migrations with the existing migration procedure. Deploy the updated
+   MCP service first: it also creates credentials for agent-chat, hub and OAuth
+   sessions. For the initial rollout only, explicitly set
+   `DAIMON_MCP__ALLOW_LEGACY_TOKENS=true` and
+   `DAIMON_MCP__LEGACY_TOKEN_CUTOFF` to a timezone-aware UTC deadline five hours
+   ahead. Only non-internal legacy credentials qualify. Unregistered internal
+   credentials are refused immediately, including during this window; replace
+   any external callers with registered credentials before updating MCP.
+2. Update every credential minter, including platform workers, the scheduler
+   and any separately installed CLI. Refresh notebook services too. Record when
+   worker refresh completes and when the new MCP revision finishes deploying.
+   Old MCP requests can still create credentials after traffic switches, so
+   add the old revision's request timeout to its deployment completion time.
+3. From the later of worker completion and that last possible old MCP mint,
+   allow the existing 45-minute turn ceiling plus one minute. Complete this
+   drain before the original deadline.
+4. Set `DAIMON_MCP__ALLOW_LEGACY_TOKENS=false` on every MCP replica. After this
+   flip, or when the deadline passes, every unregistered credential is refused
+   regardless of issuance time. Keep clients on the updated minters.
+
+The deployment workflow automates this order for an existing MCP service. A
+retry preserves the original deadline; it never extends or reopens the window.
+An expired deadline allows boot but remains strict. Configuration refuses dates
+before 2026-10-16 UTC, naive/invalid dates and deadlines over six hours ahead.
+Enabling compatibility without an explicit deadline is also refused.
+
+A missing MCP service needs deliberate provisioning before this workflow. A
+stopped worker cannot provide a refresh receipt; resume and update it before
+attempting the first cutover. Do not fabricate a receipt. Rolling back to old
+minters after strict admission is unsupported: their output will be refused.
+
+### Interrupted rollout and recovery
+
+If rollout stops after the MCP update but before worker refresh, the deadline
+still closes admission automatically. Old workers can then lose MCP access
+until they are updated. Alert on the failed rollout and authentication failures;
+finish worker refresh promptly, using the original deadline. If it has already
+expired, repair the minters while leaving admission strict. Do not reset the
+window to hide an interrupted upgrade.
+
+A provider or database error during credential renewal prevents a continued
+turn from sending. Check those dependencies and retry; renewal keeps the
+existing session mutation fence. Renewal never creates a missing credential
+slot or replaces a person's OAuth credential.
+
+Billing checkout revokes its temporary credential after the HTTP hop. Cleanup
+failure is logged without credential values and preserves the checkout URL or
+original HTTP error; the original ten-minute expiry remains its upper bound.
+
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) 23 or later (the image build

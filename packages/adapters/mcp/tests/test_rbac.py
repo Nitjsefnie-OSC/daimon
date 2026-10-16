@@ -42,7 +42,12 @@ def _make_app(sessionmaker: async_sessionmaker[AsyncSession]) -> ASGIApp:
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
-            mcp=McpSettings(jwt_secret=SecretStr(SECRET), public_url=HttpUrl("https://x/mcp")),
+            mcp=McpSettings(
+                legacy_token_cutoff=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
+                allow_legacy_tokens=True,
+                jwt_secret=SecretStr(SECRET),
+                public_url=HttpUrl("https://x/mcp"),
+            ),
         ),
         sessionmaker=sessionmaker,
     )

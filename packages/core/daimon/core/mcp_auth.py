@@ -4,15 +4,15 @@ Shared primitive between `daimon.core.mcp_vault.ensure_mcp_vault` and the
 CLI's `daimon mcp mint-token` command — both need to sign, neither should
 cross the core/adapter boundary to reach the FastMCP verifier.
 
-`now` is injected. Registered tokens use the supplied database session;
-short-lived remote credentials are read back before provider exposure.
+Signing functions are pure; registered mint functions use the injected session.
+The injected `now` keeps lifetimes deterministic in tests. Short-lived remote
+credentials are read back before provider exposure.
 
 Server-side verification lives in `daimon.adapters.mcp.auth.verifier`
 (FastMCP's `JWTVerifier`, which is authlib-backed). It owns tool authorization.
 
-`mint_internal_mcp_token` is a v1.1 seam used by the headless routine runner
-and the `/mcp-token mint` command. A future variant may
-supersede it with a tenant-aware variant — keep the signature stable.
+Historical internal credentials have no production minter and are rejected by
+the verifier. Chat workers and CLI commands use registered mint functions.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import json
 import os
 import stat
 import uuid
+from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from daimon.core.authz import (
 )
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
+from daimon.core.stores.domain import McpTokenRow
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -109,19 +111,23 @@ def mint_jwt(
     now: dt.datetime,
     agent_id: uuid.UUID | None = None,
     is_admin: bool = False,
+    jti: uuid.UUID | None = None,
+    expires_at: dt.datetime | None = None,
     chat_agent_id: uuid.UUID | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
-    This is the Discord/CLI mint path. It intentionally NEVER emits the ``internal``
-    claim, so a Discord vault token cannot be treated as a trusted internal token
+    This low-level compatibility signer never emits the ``internal`` claim.
+    Registered chat minting supplies both a jti and expiry, so a vault token
+    cannot be treated as a trusted internal token
     by the MCP admin gate. Admin elevation for Discord tokens
     comes exclusively from the live DB ``role`` re-read by the verifier each turn.
 
     - ``sub`` is the string form of the account UUID (stable across principal renames).
     - ``iat`` is ``int(now.timestamp())`` (UTC assumed; caller owns tz).
-    - No ``exp`` — role is resolved live from the DB on each request.
+    - Registry-backed callers supply ``jti`` and ``expires_at``; vault chat always does.
+    - Role is resolved live from the DB on each request.
     - When ``agent_id`` is supplied, the optional ``"agent_id"`` claim is added
       Used by the MCP ``get_cli_token`` tool to mint per-service tokens
       scoped to the agent without trusting tool-supplied parameters.
@@ -132,13 +138,21 @@ def mint_jwt(
     - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
       Omitted when ``False`` to keep non-admin tokens minimal. Note: the MCP
       admin gate only trusts ``is_admin`` when the token also carries ``internal=True``
-      (minted only by ``mint_internal_mcp_token``), so a Discord vault token's baked
+      (historical unregistered internal tokens are refused by the verifier), so a
+      Discord vault token's baked
       ``is_admin`` claim alone never elevates a non-admin caller.
     """
     claims: dict[str, str | int | bool] = {
         "sub": str(account_id),
         "iat": int(now.timestamp()),
     }
+    if (jti is None) != (expires_at is None):
+        raise ValueError("registered tokens require both jti and expiry")
+    if jti is not None and expires_at is not None:
+        if expires_at <= now:
+            raise ValueError("token expiry must be in the future")
+        claims["jti"] = str(jti)
+        claims["exp"] = int(expires_at.timestamp())
     if agent_id is not None:
         claims["agent_id"] = str(agent_id)
     if chat_agent_id is not None:
@@ -150,42 +164,63 @@ def mint_jwt(
     return pyjwt.encode(claims, secret, algorithm="HS256")
 
 
-def mint_internal_mcp_token(
+# One hour covers the existing 45-minute turn ceiling plus vault propagation.
+CHAT_TOKEN_TTL = dt.timedelta(hours=1)
+CHAT_TOKEN_REFRESH_MARGIN = dt.timedelta(minutes=50)
+CHAT_TOKEN_LABEL_PREFIX = "vault-chat:"
+PANEL_TOKEN_LABEL = "billing-panel"
+EPHEMERAL_TOKEN_RETENTION = dt.timedelta(days=1)
+
+
+def chat_token_label(jti: uuid.UUID) -> str:
+    """Bind the registry discriminator to a generated id, leaving user labels free."""
+    return f"{CHAT_TOKEN_LABEL_PREFIX}{jti}"
+
+
+async def mint_chat_mcp_token(
+    session: AsyncSession,
     *,
     account_id: uuid.UUID,
+    agent_id: uuid.UUID,
     secret: bytes,
     now: dt.datetime,
-) -> str:
-    """Sign a token for headless (routine-driven) MCP calls.
+    slack_turn_context_id: uuid.UUID | None = None,
+) -> tuple[str, uuid.UUID, dt.datetime]:
+    """Register one expiring ordinary-chat credential with the existing token owner.
 
-    Claims: ``{sub: <account_uuid>, iat, is_admin: True, internal: True}``.
-    Signed HS256 with ``secret``. ``sub`` is the stringified account UUID (stable
-    across principal renames); ``iat`` is ``int(now.timestamp())``.
-
-    ``is_admin: True`` is always minted — headless/routine tokens run with
-    admin privileges.
-
-    ``internal: True`` is the trusted-token discriminator. The MCP admin
-    gate keys on ``is_admin AND internal`` together: a Discord vault token minted by
-    ``mint_jwt`` never carries ``internal``, so a stale pre-sweep Discord vault cred
-    with ``is_admin=True`` and ``role=user`` is DENIED admin elevation at the gate.
-    Only tokens minted here (CLI/scheduler/headless) carry both claims and can gain
-    admin via the claim path.
-
-    A future variant may supersede this with a tenant-aware
-    variant — the signature is the seam, keep it stable. The
-    ``/mcp-token mint`` reuses this helper directly.
+    An agent-kind row binds the executing agent, but the JWT deliberately uses
+    chat_agent_id rather than the restricted external agent-chat agent_id claim.
+    Old tokens remain independently revocable until their bounded expiry; rotating
+    a shared vault does not revoke credentials of an already-running turn.
     """
-    return pyjwt.encode(
-        {
-            "sub": str(account_id),
-            "iat": int(now.timestamp()),
-            "is_admin": True,
-            "internal": True,
-        },
-        secret,
-        algorithm="HS256",
+    from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.stores.mcp_tokens import create_mcp_token_row
+
+    identity = await get_account_with_tenant(session, account_id=account_id)
+    if identity is None:
+        raise ValueError("chat credential requires a live account")
+    jti = uuid.uuid4()
+    expires_at = now + CHAT_TOKEN_TTL
+    await create_mcp_token_row(
+        session,
+        jti=jti,
+        account_id=account_id,
+        tenant_id=identity.tenant_id,
+        agent_id=str(agent_id),
+        label=chat_token_label(jti),
+        created_at=now,
+        expires_at=expires_at,
     )
+    token = mint_jwt(
+        account_id=account_id,
+        chat_agent_id=agent_id,
+        secret=secret,
+        now=now,
+        slack_turn_context_id=slack_turn_context_id,
+        jti=jti,
+        expires_at=expires_at,
+    )
+    return token, jti, expires_at
 
 
 async def mint_agent_mcp_token(
@@ -259,6 +294,37 @@ async def mint_agent_mcp_token(
     )
 
 
+def registered_agent_claims_match(
+    row: McpTokenRow,
+    claims: Mapping[str, object],
+    *,
+    now: dt.datetime,
+    chat_execution: bool,
+    max_ttl_s: int = 900,
+) -> bool:
+    """Share the remote credential's exact mint shape with server admission.
+
+    Vault chat credentials have their own label, issuance claim and lifetime.
+    Remote chat credentials retain the mint owner's four-claim template and
+    bounded registry lifetime; an arbitrary label cannot select the vault mode.
+    """
+    identity_claim = "chat_agent_id" if chat_execution else "agent_id"
+    expiry = claims.get("exp")
+    return (
+        0 < max_ttl_s <= 900
+        and set(claims) == {"sub", identity_claim, "jti", "exp"}
+        and claims["sub"] == str(row.account_id)
+        and claims[identity_claim] == row.agent_id
+        and claims["jti"] == str(row.jti)
+        and type(expiry) is int
+        and row.expires_at is not None
+        and expiry == int(row.expires_at.timestamp())
+        and now.timestamp() < expiry <= now.timestamp() + max_ttl_s
+        and row.created_at <= now
+        and (not chat_execution or 0 < (row.expires_at - row.created_at).total_seconds() <= 900)
+    )
+
+
 async def validate_agent_mcp_token(
     sessions: async_sessionmaker[AsyncSession],
     *,
@@ -292,16 +358,11 @@ async def validate_agent_mcp_token(
                 "require": ["sub", identity_claim, "jti", "exp"],
             },
         )
-        expiry = claims.get("exp")
         if (
-            not 0 < max_ttl_s <= 900
-            or scope.is_platform
+            scope.is_platform
             or scope.is_legacy_host_authorized
-            or set(claims) != {"sub", identity_claim, "jti", "exp"}
             or claims["sub"] != scope.account_id
             or claims[identity_claim] != str(agent_id)
-            or type(expiry) is not int
-            or not now.timestamp() < expiry <= now.timestamp() + max_ttl_s
         ):
             raise ValueError("invalid scoped agent token")
         jti = uuid.UUID(claims["jti"])
@@ -320,10 +381,9 @@ async def validate_agent_mcp_token(
             or str(row.tenant_id) != scope.tenant_id
             or row.agent_id != str(agent_id)
             or row.revoked_at is not None
-            or row.expires_at is None
-            or row.expires_at <= now
-            or row.created_at > now
-            or int(row.expires_at.timestamp()) != expiry
+            or not registered_agent_claims_match(
+                row, claims, now=now, chat_execution=chat_execution, max_ttl_s=max_ttl_s
+            )
         ):
             raise ValueError("invalid scoped agent token")
     except (pyjwt.InvalidTokenError, KeyError, TypeError, ValueError):
@@ -392,10 +452,54 @@ async def mint_cli_mcp_token(
     Unlike the jti-less tokens `mint_jwt` signs, this one expires and
     `daimon mcp revoke-token` can revoke it.
     """
+    return await _mint_account_mcp_token(
+        session,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        secret=secret,
+        now=now,
+        expires_at=now + dt.timedelta(days=ttl_days),
+        label=None,
+    )
+
+
+async def mint_panel_mcp_token(
+    session: AsyncSession,
+    *,
+    account_id: uuid.UUID,
+    secret: bytes,
+    now: dt.datetime,
+) -> str:
+    """Register a ten-minute non-admin account token for the checkout HTTP hop."""
+    from daimon.core.stores.accounts import get_account_with_tenant
+
+    identity = await get_account_with_tenant(session, account_id=account_id)
+    if identity is None:
+        raise ValueError("checkout requires a live account")
+    return await _mint_account_mcp_token(
+        session,
+        account_id=account_id,
+        tenant_id=identity.tenant_id,
+        secret=secret,
+        now=now,
+        expires_at=now + dt.timedelta(minutes=10),
+        label=PANEL_TOKEN_LABEL,
+    )
+
+
+async def _mint_account_mcp_token(
+    session: AsyncSession,
+    *,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    secret: bytes,
+    now: dt.datetime,
+    expires_at: dt.datetime,
+    label: str | None,
+) -> str:
     from daimon.core.stores.mcp_tokens import create_mcp_token_row
 
     jti = uuid.uuid4()
-    expires_at = now + dt.timedelta(days=ttl_days)
     await create_mcp_token_row(
         session,
         jti=jti,
@@ -403,7 +507,7 @@ async def mint_cli_mcp_token(
         tenant_id=tenant_id,
         agent_id=None,
         kind="cli",
-        label=None,
+        label=label,
         created_at=now,
         expires_at=expires_at,
     )

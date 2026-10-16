@@ -419,3 +419,70 @@ async def test_agent_kind_row_requires_an_agent_id(db_session: AsyncSession) -> 
                 label=None,
                 created_at=datetime.now(tz=UTC),
             )
+
+
+async def test_ephemeral_token_retention_preserves_grace_and_external_history(
+    db_session: AsyncSession,
+) -> None:
+    from datetime import timedelta
+
+    from daimon.core.mcp_auth import CHAT_TOKEN_LABEL_PREFIX, PANEL_TOKEN_LABEL, chat_token_label
+
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    now = datetime.now(UTC)
+    old = now - timedelta(days=2)
+    ids: dict[str, uuid.UUID] = {}
+    for name, kind, expiry in (
+        ("chat", "agent", old),
+        ("revoked_chat", "agent", old),
+        ("panel", "cli", old),
+        ("grace", "agent", now - timedelta(hours=1)),
+        ("live", "agent", now + timedelta(hours=1)),
+        ("external", "agent", old),
+        ("operator", "operator", old),
+        ("cli", "cli", old),
+    ):
+        jti = ids[name] = uuid.uuid4()
+        label = (
+            PANEL_TOKEN_LABEL
+            if name == "panel"
+            else "vault-chat:operator-label"
+            if name == "external"
+            else None
+            if name in {"cli", "operator"}
+            else chat_token_label(jti)
+        )
+        await store.create_mcp_token_row(
+            db_session,
+            jti=jti,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=str(uuid.uuid4()) if kind == "agent" else None,
+            kind=kind,
+            label=label,
+            created_at=old - timedelta(hours=1),
+            expires_at=expiry,
+        )
+        if name == "revoked_chat":
+            await store.revoke_mcp_token(db_session, jti=jti, now=old)
+    assert (
+        await store.prune_expired_ephemeral_tokens(
+            db_session,
+            expires_before=now - timedelta(days=1),
+            chat_label_prefix=CHAT_TOKEN_LABEL_PREFIX,
+            panel_label=PANEL_TOKEN_LABEL,
+        )
+        == 3
+    )
+    for name, jti in ids.items():
+        row = await store.get_mcp_token(db_session, jti=jti)
+        assert (row is None) == (name in {"chat", "revoked_chat", "panel"})
+    assert (
+        await store.prune_expired_ephemeral_tokens(
+            db_session,
+            expires_before=now - timedelta(days=1),
+            chat_label_prefix=CHAT_TOKEN_LABEL_PREFIX,
+            panel_label=PANEL_TOKEN_LABEL,
+        )
+        == 0
+    )

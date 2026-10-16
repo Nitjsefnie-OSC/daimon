@@ -1015,6 +1015,7 @@ async def _prepare_session_for_turn_locked(
                 tenant_id=tenant_id,
                 agent_uuid=agent_uuid,
                 account_id=admission.shared_owner or admission.account_id,
+                shared_owner=admission.shared_owner,
                 mcp=deps.mcp,
                 tool_safety=deps.tool_safety,
                 fernet=deps.fernet,

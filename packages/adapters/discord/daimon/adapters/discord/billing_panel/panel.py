@@ -24,7 +24,6 @@ includes timed credit.
 
 from __future__ import annotations
 
-import datetime as dt
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -67,6 +66,7 @@ from daimon.core.billing_panel import (
     caller_line,
     channel_budget_line,
     channel_budget_phrase,
+    create_checkout,
     credit_headline,
     expiry_rows,
     lookup_line,
@@ -78,7 +78,6 @@ from daimon.core.billing_panel import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.mcp_auth import mint_jwt
 from daimon.core.platform_names import remember_user_name
 from daimon.core.stores.usage_events import (
     cost_for_user_in_tenant_since,
@@ -522,37 +521,19 @@ async def _create_checkout(
     sends a bearer-authed HTTP POST to the MCP billing route. The URL
     returned is the ephemeral Stripe Checkout Session URL.
 
-    The bearer is a plain non-admin account token (mint_jwt): the checkout route
+    The bearer is a registered expiring non-admin account token: the checkout route
     only authenticates the account and uses the verifier-derived tenant — it never
     checks admin. Minting an is_admin+internal token here would hand an arbitrary
     platform account a non-revocable admin bearer at the MCP gate.
     """
-    settings = view.runtime.settings
-    # The /billing/checkout route is add_route'd at the app root, not under the
-    # /mcp streamable endpoint — use app_root_url (strips the /mcp suffix).
-    app_root_url = settings.mcp.app_root_url
-    jwt_secret = settings.mcp.jwt_secret
-    assert app_root_url is not None and jwt_secret is not None, (
-        "MCP public_url + jwt_secret required for top-up; "
-        "check DAIMON_MCP__PUBLIC_URL / DAIMON_MCP__JWT_SECRET"
-    )
-    # Tenant ids are derived deterministically from (platform, guild) — the same
-    # uuid the turn pipeline bills against. The panel only renders for registered
-    # guilds (require_registered_guild).
-    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
-    token = mint_jwt(
-        account_id=view.account_id,
-        secret=jwt_secret.get_secret_value().encode(),
-        now=dt.datetime.now(dt.UTC),
-    )
     async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{app_root_url.rstrip('/')}/billing/checkout",
-            json={"tenant_id": str(tenant_id), "guild_id": guild_id, "amount": amount},
-            headers={"Authorization": f"Bearer {token}"},
+        return await create_checkout(
+            client,
+            settings=view.runtime.settings.mcp,
+            session_factory=view.runtime.sessionmaker,
+            account_id=view.account_id,
+            amount=amount,
         )
-        resp.raise_for_status()
-        return str(resp.json()["url"])
 
 
 async def _rerender(

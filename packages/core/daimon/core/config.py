@@ -11,6 +11,7 @@ import binascii
 import json
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, cast
@@ -19,6 +20,7 @@ from uuid import UUID
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -165,6 +167,37 @@ class McpSettings(BaseModel):
             "Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter."
         ),
     )
+    legacy_token_cutoff: AwareDatetime | None = Field(
+        default=None,
+        description=(
+            "UTC deadline for a temporary legacy-token deployment window. Dates before "
+            "2026-10-16 or over six hours in the future are refused. At/after the deadline "
+            "all unregistered tokens are rejected, regardless of issuance time. Internal "
+            "tokens are always rejected without a registry row."
+        ),
+    )
+    allow_legacy_tokens: bool = Field(
+        default=False,
+        description=(
+            "Temporary minters-first deployment compatibility only. Requires a bounded "
+            "legacy_token_cutoff; only non-internal legacy tokens qualify and stop working at that "
+            "deadline even if the deployment is interrupted. Default false requires "
+            "registered tokens immediately."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def bounded_legacy_window(self) -> McpSettings:
+        cutoff = self.legacy_token_cutoff
+        now = datetime.now(UTC)
+        if cutoff is not None and cutoff < datetime(2026, 10, 16, tzinfo=UTC):
+            raise ValueError("legacy_token_cutoff must be on or after 2026-10-16 UTC")
+        if cutoff is not None and cutoff > now + timedelta(hours=6):
+            raise ValueError("legacy_token_cutoff cannot be more than six hours ahead")
+        if self.allow_legacy_tokens and cutoff is None:
+            raise ValueError("legacy compatibility requires an explicit cutoff")
+        return self
+
     require_routine_destination: bool = Field(
         default=False,
         description=(
