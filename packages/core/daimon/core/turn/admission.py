@@ -1370,7 +1370,9 @@ async def capture_backend_source(
                 datetime.now(UTC) + timedelta(seconds=30),
                 lambda: datetime.now(UTC),
             )
-            captured = await capture_preparation_source(request, fresh=True)
+            captured = await capture_preparation_source(
+                request, fresh=True, capability_preview=True
+            )
             if (captured.tenant_id, captured.agent_id) != (source.tenant_id, source.agent_id):
                 raise channel_backend.AgentBackendRefused("source_unavailable")
             return captured
