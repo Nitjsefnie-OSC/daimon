@@ -185,6 +185,10 @@ authorization:
       # another organisation (shared channels' external participants, guests).
       - name: ChannelMember.Read.Group
         type: Application
-      # Read the group chats the bot is mentioned in, and their images.
+      # Read the messages and images of the group chats the app is added to.
       - name: ChatMessage.Read.Chat
+        type: Application
+      # Send activity feed notices for routine results and cards waiting on
+      # someone in the team's channels.
+      - name: TeamsActivity.Send.Group
         type: Application

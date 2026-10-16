@@ -29,6 +29,7 @@ import anthropic
 import daimon.core.turn.bookkeeping as turn_bookkeeping
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.admissions import (
     HOLDING,
     NOT_HELD,
@@ -323,6 +324,7 @@ class TeamsApp:
         ask_human: bool = False,
         subscriptions: ChannelSubscriptions | None = None,
         react: React | None = None,
+        feed: ActivityFeed | None = None,
     ) -> None:
         teams = runtime.settings.teams
         if teams is None:
@@ -366,8 +368,8 @@ class TeamsApp:
             dispatch=self.dispatch_after_input,
         )
         # Tool-write confirmation cards awaiting a click.
-        self.confirmations = TeamsConfirmationCards(self._sender)
-        self.provider_actions = TeamsProviderActions(self._sender)
+        self.confirmations = TeamsConfirmationCards(self._sender, feed=feed)
+        self.provider_actions = TeamsProviderActions(self._sender, feed=feed)
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
         # Per-tenant turn slots, with the queue a turn waits in at the cap.

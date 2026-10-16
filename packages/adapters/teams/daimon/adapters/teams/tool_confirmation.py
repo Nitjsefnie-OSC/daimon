@@ -3,6 +3,8 @@
 Draws core's `posted_controls.confirmation` card as an Adaptive Card and routes
 the click to the waiting turn through `PendingConfirmations`. The registry is
 in-process, like the cancel registry: a restart ends the card and its turn together.
+A card posted in a channel thread also sends the requester, the one person who
+may answer it, an activity feed notice (`activity_feed`).
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from datetime import UTC
 from typing import TYPE_CHECKING
 
 import structlog
+from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.card_actions import (
     button,
     submitted_fields,
@@ -88,6 +91,9 @@ _ANSWER_TOASTS: dict[ConfirmationAnswer, str] = {
     "denied": "Denied",
     "expired": "Expired",
 }
+
+#: The activity feed line for a card waiting on its requester.
+APPROVAL_NOTICE = "Waiting for your approval"
 
 #: Most time a card edit may take.
 EDIT_TIMEOUT_S = 2.0
@@ -183,8 +189,9 @@ class _PostedCard:
 class TeamsConfirmationCards:
     """Posted confirmation cards awaiting a click, keyed by token."""
 
-    def __init__(self, sender: TeamsSender) -> None:
+    def __init__(self, sender: TeamsSender, *, feed: ActivityFeed | None = None) -> None:
         self._sender = sender
+        self._feed = feed
         self._controls = PostedConfirmations[_PostedCard]()
         self._always_tasks: set[asyncio.Task[None]] = set()
 
@@ -276,6 +283,14 @@ class TeamsConfirmationCards:
                 )
                 message = MessageActivityInput().add_card(confirmation_adaptive_card(card, prompt))
                 sent = await self._sender.send(conversation_id, message, service_url=service_url)
+                if self._feed is not None:
+                    self._feed.notify(
+                        conversation_id,
+                        sent.id,
+                        recipient_id=prompt.requester_platform_user_id,
+                        text=APPROVAL_NOTICE,
+                        preview=card.headline,
+                    )
                 posted = _PostedCard(
                     prompt,
                     conversation_id,

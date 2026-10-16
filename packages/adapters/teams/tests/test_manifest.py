@@ -103,8 +103,8 @@ def test_manifest_requests_channel_message_consent_for_the_bot_app() -> None:
         {"name": "TeamMember.Read.Group", "type": "Application"},
         {"name": "ChannelMember.Read.Group", "type": "Application"},
         {"name": "ChatMessage.Read.Chat", "type": "Application"},
+        {"name": "TeamsActivity.Send.Group", "type": "Application"},
     ], (
-        "channel and group chat messages, the team's owners and a channel's members only; "
-        "files need "
-        "tenant-wide consent, which daimon does not ask"
+        "channel and group chat messages, the team's owners, a channel's members and feed "
+        "notices only; files need tenant-wide consent, which daimon does not ask"
     )

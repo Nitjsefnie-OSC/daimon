@@ -1,4 +1,8 @@
-"""Turn-local typed provider cards and requester-only Teams action routing."""
+"""Turn-local typed provider cards and requester-only Teams action routing.
+
+A card posted in a channel thread also sends the requester an activity feed
+notice (`activity_feed`).
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ from datetime import UTC, datetime
 from typing import TypedDict
 
 import structlog
+from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.card_actions import button, submitted_fields, toast
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
@@ -84,8 +89,9 @@ class PendingAction:
 
 
 class TeamsProviderActions:
-    def __init__(self, sender: TeamsSender) -> None:
+    def __init__(self, sender: TeamsSender, *, feed: ActivityFeed | None = None) -> None:
         self.sender = sender
+        self.feed = feed
         self.pending: dict[str, PendingAction] = {}
 
     def hook(
@@ -111,6 +117,14 @@ class TeamsProviderActions:
                 )
                 sent = await self.sender.send(conversation_id, activity, service_url=service_url)
                 posted.message_id = sent.id
+                if self.feed is not None:
+                    self.feed.notify(
+                        conversation_id,
+                        sent.id,
+                        recipient_id=prompt.context.requester.platform_user_id,
+                        text="Waiting for your answer",
+                        preview=_words(prompt)[0],
+                    )
                 remaining = max(
                     0.0, (prompt.context.expires_at - datetime.now(UTC)).total_seconds()
                 )

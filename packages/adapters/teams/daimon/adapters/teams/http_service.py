@@ -25,6 +25,7 @@ from daimon.adapters.teams import (
     tool_confirmation,
     wizard,
 )
+from daimon.adapters.teams.activity_feed import ActivityFeed, ChannelHomes
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
 from daimon.adapters.teams.channel_admin_groups import fetch_team_owner_ids
@@ -70,11 +71,16 @@ from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.domain import TeamsChannelSiteRow, TeamsChannelSubscriptionRow
+from daimon.core.stores.domain import (
+    TeamsChannelSiteRow,
+    TeamsChannelSubscriptionRow,
+    TeamsInstallationRow,
+)
 from daimon.core.stores.teams_channel_sites import (
     get_teams_channel_site,
     upsert_teams_channel_site,
 )
+from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, GraphMessage, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
@@ -403,6 +409,12 @@ def create_teams_http_service(
         change = api.add_reaction if add else api.delete_reaction
         await change(target.conversation_id, target.activity_id, reaction)
 
+    async def installed_teams() -> list[TeamsInstallationRow]:
+        async with runtime.sessionmaker() as session:
+            return await list_teams_installations(session, tenant_id=teams_tenant)
+
+    homes = ChannelHomes(installed_teams, billing_panel.sdk_team_channels(teams_app))
+    feed = ActivityFeed(graph, homes, entra_tenant_id=settings.tenant_id, spawn=spawn)
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
     turns = TeamsApp(
         runtime=runtime,
@@ -416,11 +428,13 @@ def create_teams_http_service(
         ask_human=support is not None,
         subscriptions=subscriptions,
         react=react,
+        feed=feed,
         routine_poster=make_teams_routine_poster(
             runtime.sessionmaker,
             direct,
             tenant_id=installs.tenant_id,
             dm_policies=runtime.settings.direct_message_policies,
+            feed=feed,
         ),
     )
 
