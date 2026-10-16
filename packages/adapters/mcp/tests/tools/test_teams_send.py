@@ -121,14 +121,18 @@ async def test_token_is_cached_then_refreshed_before_expiry() -> None:
     assert b"scope=https%3A%2F%2Fapi.botframework.com%2F.default" in token_calls[0].content
 
 
-async def test_send_posts_markdown_with_ai_label() -> None:
+async def test_send_posts_extended_markdown_with_ai_label() -> None:
+    """Agent text goes out as Extended Markdown, a price's `$` escaped, math kept."""
     fake = _Fake()
-    assert await _client(fake).send(_THREAD, "**hi**") == "act-1"
+    assert await _client(fake).send(_THREAD, "**hi** $5 and $x$") == "act-1"
     (post,) = fake.posts()
     assert str(post.url) == f"{_BASE}/{_THREAD}/activities"
     assert post.headers["Authorization"] == "Bearer tok"
     body = json.loads(post.content)
-    assert (body["text"], body["textFormat"]) == ("**hi**", "markdown")
+    assert (body["text"], body["textFormat"]) == (
+        "**hi** \\$5 and $x$",
+        "extendedmarkdown",
+    ), "currency escaped, math left for KaTeX"
     assert body["entities"][0]["additionalType"] == ["AIGeneratedContent"]
 
 
