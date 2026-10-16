@@ -47,7 +47,7 @@ def db_preflight(db_schema: str) -> DatabasePreflight:
 
 
 @pytest.fixture(autouse=True)
-def _reset_channel_admins_switch() -> Iterator[None]:
+def reset_channel_admins_switch() -> Iterator[None]:
     """Keep one test's channel-admin switch, primed or cached, out of the next test."""
     from daimon.core.config import reset_channel_admins_enabled
 
