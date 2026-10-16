@@ -191,6 +191,9 @@ log = structlog.get_logger()
 
 _SEEN_ACTIVITY_CAP = 10_000
 _RECOVERY_RETRY_DELAY_S = 1.0
+# A turn's output sweep polls the listing for up to 14 s, then uploads: 15 s cut a
+# sweep that began 14 s before a deploy's SIGTERM. Within the documented 90 s grace.
+DRAIN_GRACE_S = 60.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
@@ -704,10 +707,14 @@ class TeamsApp:
         )
 
     async def drain(self, timeout: float) -> None:
-        """Stop admitting, give turns and the sweep `timeout`, then cancel the rest.
+        """Stop admitting, give turns, output sweeps and the boot sweep `timeout`, then
+        cancel the rest.
 
-        A cancelled turn keeps its marker and card intent, so the next boot's
-        sweep edits its card to interrupted.
+        Work spawned meanwhile, such as the output sweep of a turn that ends
+        during the drain, gets the same deadline. A cancelled turn keeps its
+        marker and card intent, so the next boot's sweep edits its card to
+        interrupted; a cancelled output sweep leaves its files listed for the
+        session's next sweep.
         """
         self.draining = True
         if self._participation is not None:
@@ -719,15 +726,21 @@ class TeamsApp:
                 # a delivery cut short settles as interrupted, never posted twice.
                 poller.cancel()
                 await asyncio.gather(poller, return_exceptions=True)
-        tasks = set(self._tasks)
-        if self._recovery is not None and not self._recovery.done():
-            tasks.add(self._recovery)
-        if tasks:
-            _done, pending = await asyncio.wait(tasks, timeout=timeout)
-            for task in pending:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            tasks = set(self._tasks)
+            if self._recovery is not None and not self._recovery.done():
+                tasks.add(self._recovery)
+            if not tasks:
+                break
+            if (left := deadline - loop.time()) > 0:
+                await asyncio.wait(tasks, timeout=left)
+                continue
+            for task in tasks:
                 task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            break
         # A held message keeps its ⌛ until the next boot replays it (`_replay_chat`).
         await self._reactions.close()
         self.outputs.close()

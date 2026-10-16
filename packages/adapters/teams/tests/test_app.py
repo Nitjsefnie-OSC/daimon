@@ -297,6 +297,35 @@ async def test_a_reaction_in_flight_does_not_hold_up_a_drain(
     assert teams._reactions._running == set(), "the unanswered reaction was cancelled"
 
 
+async def test_a_drain_waits_for_an_output_sweep_spawned_while_it_runs(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A turn ending mid-drain spawns its sweep then: it gets the drain's deadline too.
+
+    Regression: a restart soon after a turn ended lost the file its sweep was delivering.
+    """
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+    )
+    delivered = asyncio.Event()
+
+    async def sweep() -> None:
+        await asyncio.sleep(0.05)
+        delivered.set()
+
+    async def turn() -> None:
+        await asyncio.sleep(0.05)
+        teams.spawn(sweep(), name="teams.output-sweep")
+
+    teams.spawn(turn(), name="turn")
+    async with asyncio.timeout(5):
+        await teams.drain(timeout=app_module.DRAIN_GRACE_S)
+    assert delivered.is_set(), "the sweep spawned during the drain ran to the end"
+
+
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_mention_drops_the_threads_waiting_batch_only_once_its_turn_runs(
     db_session_factory: async_sessionmaker[AsyncSession],

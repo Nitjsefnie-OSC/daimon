@@ -26,7 +26,7 @@ from daimon.adapters.teams import (
     wizard,
 )
 from daimon.adapters.teams.activity_feed import ActivityFeed, ChannelHomes
-from daimon.adapters.teams.app import TeamsApp
+from daimon.adapters.teams.app import DRAIN_GRACE_S, TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
 from daimon.adapters.teams.channel_admin_groups import fetch_team_owner_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
@@ -202,7 +202,7 @@ def create_teams_http_service(
             yield
         finally:
             ready.clear()
-            await turns.drain(timeout=15.0)
+            await turns.drain(timeout=DRAIN_GRACE_S)
             await teams_app.stop()
 
     async def _healthz() -> dict[str, str]:
