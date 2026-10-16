@@ -1670,7 +1670,34 @@ account and project. The two paths must be absolute and distinct, so a durable
 hold can commit before native dispatch without deadlocking a record transaction.
 These files are created only when the configured provider uses them; no store,
 manifest or provider key is read on the default path. Newly created files are
-private to the process owner. Multi-host storage requires a separate adapter.
+private to the process owner. For multiple hosts, select
+`"storage_backend": "postgres"` and omit both file paths. This uses the existing
+application state database and requires migration
+`0106_gemini_runtime_state`; it creates no separate database URL or credential.
+SQLite remains the default on hosts with durable local storage. Configured Gemini
+runtimes refuse SQLite when Cloud Run's `K_SERVICE` or `CLOUD_RUN_JOB` marker is
+present, before credential discovery. A PostgreSQL plan with SQLite paths refuses
+rather than silently abandoning the original state.
+
+PostgreSQL writers use the existing nonblocking fence retries, release pooled
+connections between acquisition attempts. Pre-dispatch acquisition returns
+retryable session busy after five seconds; recording accepted results or definite
+refusals after dispatch uses the existing turn ceiling instead. Only the active
+record writer keeps a connection during provider
+I/O; its account lineage locks are released beforehand. Records and holds commit
+independently, and commits finish before cancellation propagates. Unchanged record
+payloads are not rewritten. Account privacy purge previews and removes conversation
+records; conservative financial holds are deliberately retained as financial
+evidence, contain no conversation/artifact payload, and never replenish a cap.
+
+Known storage limitation: each namespace still stores one complete Records blob,
+including artifact bytes, and the conservative hold map grows with attempts. There
+is currently no payload-size bound or automatic hold compaction/reconciliation.
+Operators must monitor payload bytes and database storage before increasing
+workload or admitting large artifacts; this change does not authorize unlimited
+storage, deleting unknown holds, or truncating records. Reconciliation and any
+historical SQLite transfer remain explicit existing-owner operations. Do not switch
+an active namespace to an empty PostgreSQL row and call it a migration.
 
 Each Flash attempt first persists an explicit operator hold, then retains its
 accepted/refused/unknown receipt. Holds are estimates, not actual spend. They

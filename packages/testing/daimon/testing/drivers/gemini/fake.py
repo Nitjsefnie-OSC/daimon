@@ -19,7 +19,7 @@ class MemoryStorage:
         self._lock = asyncio.Lock()
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Records]:
+    async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Records]:
         async with self._lock:
             snapshot = deepcopy(self._records)
             yield snapshot

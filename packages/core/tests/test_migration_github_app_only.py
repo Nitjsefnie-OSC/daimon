@@ -1028,7 +1028,8 @@ async def test_retire_legacy_rows_and_keep_grants(
 
 @pytest.mark.fresh_schema
 @pytest.mark.parametrize(
-    "owner_case", ["known_session", "unresolved", "cross_tenant_link", "mode_conflict"]
+    "owner_case",
+    ["known_session", "unresolved", "cross_tenant_link", "mode_conflict", "orphan"],
 )
 async def test_retired_credential_owner_resolution(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, owner_case: str
@@ -1147,9 +1148,14 @@ async def test_retired_credential_owner_resolution(
         )
     if owner_case == "mode_conflict":
         assert await db_session.scalar(text("SELECT count(*) FROM agent_github_binding")) == 0
+    if owner_case == "orphan":
+        # Every live session's agent is known, so none can be the orphan key's.
+        await db_session.execute(
+            text("UPDATE thread_sessions SET status = 'dead' WHERE ma_agent_id IS NULL")
+        )
     monkeypatch.setenv("DAIMON_GITHUB_APP_ONLY_ACCEPTED_LOSS", str(agent))
     report = io.StringIO()
-    if owner_case == "known_session":
+    if owner_case in ("known_session", "orphan"):
         await preview_legacy_retirement(
             db_session, Console(file=report, force_terminal=False, width=1000)
         )
@@ -1166,6 +1172,19 @@ async def test_retired_credential_owner_resolution(
     def upgrade(sync_conn: Connection) -> None:
         with Operations.context(MigrationContext.configure(sync_conn)):
             migration.upgrade()
+
+    if owner_case == "orphan":
+        await conn.run_sync(upgrade)
+        assert await db_session.scalar(text("SELECT count(*) FROM agent_github_binding")) == 0
+        assert (
+            await db_session.scalar(
+                text(
+                    "SELECT count(*) FROM thread_sessions WHERE fresh_start_requested_at IS NOT NULL"
+                )
+            )
+            == 0
+        )
+        return
 
     if owner_case != "known_session":
         with pytest.raises(RuntimeError, match=str(agent)):

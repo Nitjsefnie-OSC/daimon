@@ -33,7 +33,12 @@ from daimon.core.turn.gemini import (
     gemini_backend,
 )
 from daimon.core.turn.gemini_prepare import prepare_gemini_turn
-from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiStorage
+from daimon.core.turn.gemini_state import (
+    PostgresFlashAccounting,
+    PostgresGeminiStorage,
+    SQLiteFlashAccounting,
+    SQLiteGeminiStorage,
+)
 from daimon.core.turn.io import register_turn_codec
 from daimon.core.turn.persistence import TurnPersistence, current_persistence
 from daimon.core.turn.prepare import ProviderPreparationRequest, register_turn_preparation
@@ -54,12 +59,13 @@ from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.core import compile_agent, compile_environment
-from mux.drivers.gemini.flash import FLASH_PRIMARY
+from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAccounting
 from mux.drivers.gemini.skill_deployment import (
     GCSBundleDeployment,
     RetainedSkillDeployments,
     verify_retained_deployments,
 )
+from mux.drivers.gemini.storage import Storage
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import (
     INLINE_REUSE,
@@ -110,8 +116,11 @@ class GeminiPlan(BaseModel):
     configuration_grant: ConfigurationGrant | None = None
     project: Nonblank
     api_key_env: ApiKeyEnvironment
-    records_path: Path
-    holds_path: Path
+    storage_backend: Literal["sqlite", "postgres"] = Field(
+        default="sqlite", exclude_if=lambda value: value == "sqlite"
+    )
+    records_path: Path | None = Field(default=None, exclude_if=lambda value: value is None)
+    holds_path: Path | None = Field(default=None, exclude_if=lambda value: value is None)
     hold_usd: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
     cap_usd: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
     agent_name: Nonblank
@@ -186,15 +195,19 @@ class GeminiPlan(BaseModel):
             or self.skill_deployments
         ):
             raise ValueError("capability dependencies require a verified source capability plan")
-        if (
-            not self.records_path.is_absolute()
-            or not self.holds_path.is_absolute()
-            or self.records_path.resolve() == self.holds_path.resolve()
-            or self.hold_usd > self.cap_usd
-        ):
-            raise ValueError(
-                "a deployment requires distinct absolute accounting paths and a bounded hold"
-            )
+        if self.hold_usd > self.cap_usd:
+            raise ValueError("a deployment requires a bounded hold")
+        if self.storage_backend == "sqlite":
+            if (
+                self.records_path is None
+                or self.holds_path is None
+                or not self.records_path.is_absolute()
+                or not self.holds_path.is_absolute()
+                or self.records_path.resolve() == self.holds_path.resolve()
+            ):
+                raise ValueError("SQLite requires distinct absolute records and accounting paths")
+        elif self.records_path is not None or self.holds_path is not None:
+            raise ValueError("PostgreSQL state cannot silently replace supplied SQLite paths")
         return self
 
     def worker_deployment(
@@ -415,6 +428,10 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     plan = load_gemini_deployment(request)
+    if plan.storage_backend == "sqlite" and (
+        os.environ.get("K_SERVICE") or os.environ.get("CLOUD_RUN_JOB")
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
     if plan.max_output_tokens is not None and (
         request.worker is not None
         or request.admission.backend_revision_origin == "agent"
@@ -608,19 +625,37 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
 
         return await materialize_counterpart(plan, preparation, request, resources=host)
 
+    records: Storage
+    accounting: FlashAccounting
+    if plan.storage_backend == "postgres":
+        records = PostgresGeminiStorage(
+            request.deps.sessionmaker, scope=scope, project=plan.project
+        )
+        accounting = PostgresFlashAccounting(
+            request.deps.sessionmaker,
+            scope=scope,
+            project=plan.project,
+            hold_usd=plan.hold_usd,
+            cap_usd=plan.cap_usd,
+        )
+    else:
+        assert plan.records_path is not None and plan.holds_path is not None
+        records = SQLiteGeminiStorage(plan.records_path, namespace=namespace)
+        accounting = SQLiteFlashAccounting(
+            plan.holds_path, namespace=namespace, hold_usd=plan.hold_usd, cap_usd=plan.cap_usd
+        )
+
     runtime = TurnRuntime(
         transport_factory=transport,
         read_agent_counterpart=read,
         materialize_worker=materialize if plan.worker_materialization else None,
         journal=GeminiJournal(
-            SQLiteGeminiStorage(plan.records_path, namespace=namespace),
+            records,
             request.deps.state_store,
             deployment,
         ),
         usage_store=GeminiUsageRuntime(
-            SQLiteFlashAccounting(
-                plan.holds_path, namespace=namespace, hold_usd=plan.hold_usd, cap_usd=plan.cap_usd
-            ),
+            accounting,
             MappingProxyType(
                 {model: price for (_, model), price in pricing.provider_prices(PROFILE).items()}
             ),
