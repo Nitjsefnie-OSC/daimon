@@ -58,7 +58,7 @@ is supported; government and China clouds use other Bot Framework hosts.
   not seen, and a followed thread gets no unprompted replies; an operator can
   turn all three on (see
   [Private and shared channels](#private-and-shared-channels-optional)). The
-  package declares `supportsChannelFeatures: tier1` (manifest 1.25), but
+  package declares `supportsChannelFeatures: tier1` (manifest 1.30), but
   adding the app to a team does not add it to these channels: each one's
   owner adds it from the channel.
 - **Group chats** get a short refusal.
@@ -147,14 +147,24 @@ members, and the lookups only their kind needs are skipped.
 
 ### Commands and admins
 
-Commands answer in the 1:1 chat, since their replies can carry account
-details and Teams has no message only its sender sees. One typed in a channel
-is answered in the sender's 1:1 chat, opened if needed, with a short pointer
-in the channel; `new` there says each post is its own conversation. A message
-is a command only when it is the bare word (or `memory /<path>`); anything
+In a 1:1 chat a command answers there. In a channel, `help`, `here`,
+`memory`, `routines`, `billing` and `privacy` answer in the thread as a
+private message only the sender sees, and their panels stay private when
+clicked. Teams expires a private message after 24 hours, which closes its
+panel. `setup` and `support` keep their flows in the sender's 1:1 chat,
+opened if needed, with a private pointer in the thread; so does any command
+Teams will not deliver privately, and any command in a channel read through
+Graph. `new` there says each post is its own conversation. Typing `/` in a
+channel lists the in-thread commands. A message is a command only when it is
+the bare word (or `memory /<path>`), with or without a leading `/`; anything
 longer goes to the agent. A message that is exactly a command word runs the
 command, so a reply of just `here` shows the status card rather than reaching
 the agent. None of them runs an agent turn.
+
+A private message sent to Daimon in a thread runs no turn: a command answers
+privately, and anything else gets one private line saying private questions
+are not supported yet. The prompt starters in the compose box (personal
+chat) and after an @mention (channels) fill in a ready-made request to send.
 
 | Command | Does |
 | --- | --- |
@@ -163,7 +173,7 @@ the agent. None of them runs an agent turn.
 | `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
 | `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
-| `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Typed in a channel whose readers are limited, it says so instead, since the answer would leave the channel. |
+| `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Answered in a 1:1 chat instead of a channel whose readers are limited, it says so, since the answer would leave the channel. |
 | `privacy` | See, export or delete what Daimon stores about you. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
 | `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`); Teams requests never go to Discord's or Slack's channel. The post links to where it was asked; one from a channel with channel admins goes to them first (above). |
@@ -177,8 +187,8 @@ Entra object ID in `DAIMON_TEAMS__ADMIN_USER_IDS`. Their turns run with the
 admin role, and the panels unlock the admin actions for them. Every card click
 and dialog re-checks the organisation, the clicker and their role. The list
 is read at boot, which also takes the stored admin role, used by routines and
-MCP clients, from anyone no longer on it. There are no ephemeral messages:
-refusals come as toasts, dialog messages or card edits only the clicker sees.
+MCP clients, from anyone no longer on it. A refusal in a channel is a private
+message, toast, dialog message or card edit only its sender or clicker sees.
 Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
 group ID in `role_ids` to admit that team's owners), channel budgets
 (`set_channel_budget`) and channel environments (`set_channel_environment`)

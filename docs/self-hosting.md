@@ -520,7 +520,8 @@ Teams installs apps from a zip file holding three files at its top level:
 
 The manifest template is
 [`teams-app-manifest.yaml`](teams-app-manifest.yaml), in manifest version
-1.25 so the app can be added to private and shared channels. Fill in your client ID
+1.30 so the app can be added to private and shared channels and answer
+privately in a thread. Fill in your client ID
 and hostname and convert it to JSON. From the repository root, with any
 Python 3 that has PyYAML:
 
@@ -704,7 +705,8 @@ Changes to the manifest only reach Teams in a new package. Bump `version` in
 `manifest.json`, zip it again and upload it over the existing app in the
 Teams admin center (the app → **Upload file**). Teams that already have the
 app pick up the update, and a team owner may be asked to accept new
-permissions.
+permissions. A package from before template version 0.5.0 has no `/`
+commands, prompt starters or private messages to Daimon: rebuild it.
 
 ## Claude Code login mounts
 

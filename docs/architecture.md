@@ -118,7 +118,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.core` | `packages/core/daimon/core/` | Schema and migrations, stores, MA helpers, the turn pipeline. Imports no adapter. |
 | `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
-| `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text commands and panels, file consent delivery, channel files through SharePoint. |
+| `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text and `/` commands answered privately (`private_replies.py`) and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
@@ -1716,8 +1716,8 @@ admission before any of this runs.
   writes nothing. Details keeps
   visibility and cache guidance off the main row.
 
-- **`/here`** in Discord and Slack, and `here` in Teams (answered in the 1:1
-  chat), reads routing and access policy, then shows a private card built from
+- **`/here`** in Discord and Slack, and `here` in Teams (answered privately in
+  the thread, or in the 1:1 chat), reads routing and access policy, then shows a private card built from
   `daimon.core.here_card`: who answers here,
   reading scope, and whether publishing needs approval. Discord uses an embed;
   Slack uses Block Kit with a state colour and notes that threads can differ;
