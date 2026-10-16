@@ -397,6 +397,29 @@ async def test_a_failing_command_is_answered(
     assert [a.text for a in sender.activities] == [app_module._FAILED]
 
 
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_failing_channel_command_is_answered_to_its_sender_alone(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A command is the sender's own, so its failure is too, even typed as a mention."""
+    sender = FakeSender()
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=sender,
+        commands={"help": AsyncMock(side_effect=DaimonError("database unavailable"))},
+        bot_token=bot_token,
+    )
+    inbound = dataclasses.replace(
+        make_inbound("help", conversation=THREAD_ID, kind="channel"),
+        channel_id=CHANNEL_ID,
+        sender_id="29:sender",
+    )
+    await teams._handle(inbound)
+    [failed] = sender.activities
+    assert failed.text == app_module._FAILED
+    assert failed.recipient is not None and failed.recipient.is_targeted, "for the sender only"
+
+
 @dataclasses.dataclass
 class _Direct:
     """A `DirectChats` whose member lookup finds the person only when `present`."""

@@ -1085,8 +1085,9 @@ class TeamsApp:
             log.error("teams.message.failed", conversation_id=inbound.conversation_id, exc_info=exc)
             capture_exception_with_scope(exc)
             if await self._finish([inbound]):  # unfinished, it replays: say nothing
+                command = self._private.command(inbound) is not None  # its sender's alone
                 with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                    await self._say(inbound, _FAILED)
+                    await self._say(inbound, _FAILED, sender_only=command)
 
     async def _route(self, inbound: TeamsInbound) -> None:
         if self._recovery is not None:
