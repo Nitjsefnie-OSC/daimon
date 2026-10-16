@@ -1027,3 +1027,47 @@ async def test_registered_chat_runtime_refuses_foreign_revoked_or_expanded_autho
             chat_execution=defect != "external_mode",
         )
     assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("fault", ["register", "revoke"])
+async def test_optional_catalogue_registry_outage_preserves_native_preview(
+    full, monkeypatch, fault
+):
+    from daimon.core import mcp_auth
+    from daimon.core.stores import mcp_tokens
+    from sqlalchemy.exc import SQLAlchemyError
+
+    request, _, canonical, _, _, posts, *_ = full
+    original_revoke = mcp_tokens.revoke_mcp_token
+
+    async def unavailable(*args, **kwargs):
+        raise SQLAlchemyError("fixture registry unavailable")
+
+    try:
+        with monkeypatch.context() as patch:
+            if fault == "register":
+                patch.setattr(mcp_auth, "mint_agent_mcp_token", unavailable)
+            else:
+                patch.setattr(mcp_tokens, "revoke_mcp_token", unavailable)
+            captured = await capture_preparation_source(request, fresh=True)
+            assert not captured.representations
+            from daimon.core.channel_backend import AgentBackendService
+
+            service = AgentBackendService(
+                request.deps.sessionmaker, enabled=True, capture_source=full[13]
+            )
+            quote = await service.preview(canonical.source, "anthropic")
+            assert quote.allowed and "tools" not in quote.declared_drops
+            with pytest.raises(AgentBackendRefused, match="re confirm"):
+                await prepare_source(request)
+            assert not posts
+    finally:
+        # Simulate registry recovery and revoke every token owned by this test's
+        # isolated tenant. No failed-cleanup credential was ever exported.
+        async with request.deps.sessionmaker.begin() as db:
+            pending = await mcp_tokens.list_live_tokens_by_label(
+                db, tenant_id=request.tenant_id, label="source-catalogue"
+            )
+            for row in pending:
+                await original_revoke(db, jti=row.jti, now=request.now())

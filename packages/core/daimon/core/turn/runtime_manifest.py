@@ -1352,6 +1352,7 @@ async def _capture_source_capabilities(
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
     from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
     from mux.profiles import represented_execution_tools
+    from sqlalchemy.exc import SQLAlchemyError
 
     source = source.model_copy(update={"representations": ()})
     path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
@@ -1617,7 +1618,7 @@ async def _capture_source_capabilities(
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
             raise ValueError("ambiguous source representation")
         return source.model_copy(update={"representations": tuple(represented)})
-    except (OSError, ValueError, DaimonError, MuxError, AnthropicError):
+    except (OSError, ValueError, DaimonError, MuxError, AnthropicError, SQLAlchemyError):
         # Representations are optional capture evidence, never a new failure
         # mode for native callers or worker ceilings. Full deployments require
         # this evidence independently and refuse before any provider exposure.
