@@ -156,11 +156,13 @@ class _Fake:
             # A private channel's folder is on a site of its own.
             drive = "b!p" if f"/channels/{_PRIVATE}/" in path else "b!d"
             return httpx.Response(200, json={"id": "f1", "parentReference": {"driveId": drive}})
-        if path in ("/v1.0/drives/b!d/items/f1", "/v1.0/drives/b!p/items/f1"):
-            parent = {"driveId": path.split("/")[3], "path": f"/drives/{path.split('/')[3]}/root:"}
-            return httpx.Response(
-                200, json={"id": "f1", "name": "research", "parentReference": parent}
-            )
+        if path in ("/v1.0/drives/b!d/items/f1", "/v1.0/drives/b!d/items/f2"):
+            # `research` (the channel's) and `Board` sit at the library's root.
+            folder = path.rsplit("/", 1)[1]
+            parent = {"driveId": "b!d", "id": "root"}
+            return httpx.Response(200, json={"id": folder, "parentReference": parent})
+        if path == "/v1.0/drives/b!d/items/root":
+            return httpx.Response(200, json={"id": "root", "parentReference": {"driveId": "b!d"}})
         if path.startswith("/v1.0/shares/u!") and path.endswith("/driveItem"):
             share = path.removeprefix("/v1.0/shares/u!").removesuffix("/driveItem")
             url = base64.urlsafe_b64decode(share + "=" * (-len(share) % 4)).decode()
@@ -170,7 +172,7 @@ class _Fake:
         if path.startswith("/v1.0/drives/b!d/items/"):
             name = path.removeprefix("/v1.0/drives/b!d/items/")
             download = f"https://example.sharepoint.com/download/{name}?tempauth=t"
-            parent = {"driveId": "b!d", "path": f"/drives/b!d/root:/{self._folders[name]}"}
+            parent = {"driveId": "b!d", "id": "f1" if self._folders[name] == "research" else "f2"}
             item = {"id": name, "parentReference": parent, "@microsoft.graph.downloadUrl": download}
             return httpx.Response(200, json=item)
         return None

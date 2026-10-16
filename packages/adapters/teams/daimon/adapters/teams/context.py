@@ -4,7 +4,7 @@ Mirrors the Discord and Slack `context.py`: a first turn replays the thread
 (root plus the newest replies), a continuation only what came after the
 session watermark, and a top-level mention the channel's recent posts with
 their newest replies. The newest replayed images are inlined and shared files
-get a download URL when the team's site is granted. Every replayed message
+in the channel's Files folder get a download URL. Every replayed message
 rides in the shared untrusted envelope, every value escaped.
 Graph bodies are HTML; `teams_graph.html_to_text` keeps the words, names `<at>` mentions
 and marks images. System events, deleted posts and the bot's own cards (the

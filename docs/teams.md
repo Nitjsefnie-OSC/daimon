@@ -464,7 +464,8 @@ a channel's files turn on within 10 minutes of consent.
 `Files.ReadWrite.All` reaches every file in the organisation, past
 SharePoint's per-file permissions. Daimon therefore only reads a shared file
 inside the channel's own Files folder, which the channel's members share, and
-only writes to that folder; a link to anything else stays a name. Removing the
+only writes to that folder; a link to anything else, or to a file more than
+seven subfolders down, stays a name. Removing the
 permission returns every channel to names only. Uploads go up in one request
 (Graph takes up to 250 MB; Daimon's outputs are capped at 20 MiB), since
 upload sessions need `Sites.ReadWrite.All`.

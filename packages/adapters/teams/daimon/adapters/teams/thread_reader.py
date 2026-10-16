@@ -210,7 +210,7 @@ class ThreadReader:
     async def read_media(self, inbound: TeamsInbound) -> ChannelMedia | None:
         """The images and files of every message the turn answers, or None if one is unreadable.
 
-        Shared files get a download URL when the channel's site is granted.
+        Shared files inside the channel's Files folder get a download URL.
         """
         if inbound.kind == "group":
             return await self._chat_media(inbound)

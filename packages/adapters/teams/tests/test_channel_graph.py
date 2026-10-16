@@ -112,11 +112,6 @@ FILES_GRANTED = {
         "name": "General",
         "parentReference": {"driveId": "b!drive-1"},
     },
-    "/v1.0/drives/b!drive-1/items/01FOLDER": {
-        "id": "01FOLDER",
-        "name": "General",
-        "parentReference": {"driveId": "b!drive-1", "path": "/drives/b!drive-1/root:"},
-    },
     f"/v1.0/shares/u!{_SHARE}/driveItem": {
         "id": "01Q3",
         "parentReference": {"driveId": "b!drive-1"},
@@ -124,7 +119,7 @@ FILES_GRANTED = {
     "/v1.0/drives/b!drive-1/items/01Q3": {
         "id": "01Q3",
         "name": "q3.xlsx",
-        "parentReference": {"driveId": "b!drive-1", "path": "/drives/b!drive-1/root:/General"},
+        "parentReference": {"driveId": "b!drive-1", "id": "01FOLDER"},
         "@microsoft.graph.downloadUrl": DOWNLOAD_URL,
     },
 }

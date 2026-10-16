@@ -37,15 +37,12 @@ ITEM = {
 DOWNLOAD_URL = (
     "https://example.sharepoint.com/sites/team/_layouts/15/download.aspx?UniqueId=1&tempauth=x"
 )
-# The channel's folder as Graph reads it by id: `Planning` at the library's root.
-FOLDER_BY_ID = (
-    "/v1.0/drives/b!drive-1/items/01FOLDER",
-    {
-        "id": "01FOLDER",
-        "name": "Planning",
-        "parentReference": {"driveId": "b!drive-1", "path": "/drives/b!drive-1/root:"},
-    },
-)
+# Folders of the team site's library by id, each read for its parent: the channel's
+# `Planning` and its siblings at the library's root, which has no parent.
+FOLDERS = {
+    folder: {"id": folder, "parentReference": {"driveId": "b!drive-1", "id": "01ROOT"}}
+    for folder in ("01FOLDER", "01BOARD", "01PLANNING2")
+} | {"01ROOT": {"id": "01ROOT", "parentReference": {"driveId": "b!drive-1"}}}
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -85,19 +82,20 @@ def _shares(url: str) -> str:
 
 
 def _file_routes(
-    url: str, *, drive: str = "b!drive-1", parent: str = "/drives/b!drive-1/root:/Planning"
+    url: str, *, drive: str = "b!drive-1", parent: str = "01FOLDER"
 ) -> dict[tuple[str, str], Handler]:
-    """A shared file at `url`, in `drive` under Graph path `parent`, plus the channel's folder."""
+    """A shared file at `url`, in `drive` under the folder with id `parent`, plus `FOLDERS`."""
     found = {"id": "01Q3", "parentReference": {"driveId": drive}}
     item = {
         "id": "01Q3",
-        "parentReference": {"driveId": drive, "path": parent},
+        "parentReference": {"driveId": drive, "id": parent},
         "@microsoft.graph.downloadUrl": DOWNLOAD_URL,
     }
+    folders = {("GET", f"/v1.0/drives/b!drive-1/items/{k}"): _ok(v) for k, v in FOLDERS.items()}
     return {
         ("GET", _shares(url)): _ok(found),
         ("GET", f"/v1.0/drives/{drive}/items/01Q3"): _ok(item),
-        ("GET", FOLDER_BY_ID[0]): _ok(FOLDER_BY_ID[1]),
+        **folders,
     }
 
 
@@ -177,7 +175,8 @@ async def test_download_url_finds_a_shared_file_in_the_channels_folder_through_s
     assert not any(p.startswith(("/v1.0/sites", "/v1.0/groups")) for p in paths), (
         "only Files.ReadWrite.All calls"
     )
-    assert paths.count(FOLDER_BY_ID[0]) == 1, "the folder's path is looked up once"
+    assert paths.count("/v1.0/drives/b!drive-1/items/01Q3") == 2, "each link reads the item anew"
+    assert "/v1.0/drives/b!drive-1/items/01FOLDER" not in paths, "its parent's id answers"
 
 
 async def test_download_url_shares_the_encoded_form_of_the_unencoded_path_teams_sends() -> None:
@@ -193,11 +192,11 @@ async def test_download_url_shares_the_encoded_form_of_the_unencoded_path_teams_
 @pytest.mark.parametrize(
     ("drive", "parent", "where"),
     [
-        ("b!finance", "/drives/b!finance/root:/Payroll", "another site"),
-        ("b!drive-2", "/drives/b!drive-2/root:/Planning", "another library of the team site"),
-        ("b!drive-1", "/drives/b!drive-1/root:/Board", "another folder of the same library"),
-        ("b!drive-1", "/drives/b!drive-1/root:/Planning 2", "a sibling sharing its name"),
-        ("b!drive-1", "/drives/b!drive-1/root:", "the library's root"),
+        ("b!finance", "01PAYROLL", "another site"),
+        ("b!drive-2", "01FOLDER", "another library of the team site"),
+        ("b!drive-1", "01BOARD", "another folder of the same library"),
+        ("b!drive-1", "01PLANNING2", "a sibling sharing its name"),
+        ("b!drive-1", "01ROOT", "the library's root"),
     ],
 )
 async def test_download_url_refuses_a_file_outside_the_channels_folder(
@@ -251,7 +250,7 @@ async def test_download_url_refuses_a_download_url_off_sharepoint() -> None:
     routes = _file_routes(url)
     item = {
         "id": "01Q3",
-        "parentReference": {"driveId": "b!drive-1", "path": "/drives/b!drive-1/root:/Planning"},
+        "parentReference": {"driveId": "b!drive-1", "id": "01FOLDER"},
         "@microsoft.graph.downloadUrl": "https://evil.example/q3.xlsx",
     }
     routes["GET", "/v1.0/drives/b!drive-1/items/01Q3"] = _ok(item)

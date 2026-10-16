@@ -6,7 +6,9 @@ A channel's folder is `filesFolder`, standard, private and shared channels
 alike. A shared file is found by its URL through `/shares`, then read again
 by drive and id; its short-lived `downloadUrl` is pre-authorised, so only a
 file inside the channel's folder, which the channel's members share, gets
-one, never one from another site, library or folder. Uploads never overwrite
+one, never one from another site, library or folder. Inside means the
+folder's id is among the file's parents' ids, which survive a rename and need
+no case folding or percent-decoding. Uploads never overwrite
 (`conflictBehavior=rename`) and go up in one `PUT`: upload sessions need
 `Sites.ReadWrite.All` app-only. An uploaded item's first-page thumbnail is a
 pre-authorised URL too, which its caller fetches without a token. Any
@@ -31,6 +33,9 @@ from pydantic.alias_generators import to_camel
 # One PUT takes up to 250 MB; files are capped far below that (`MAX_BYTES_PER_FILE`, 20 MiB),
 # which this allows at about 175 KB/s.
 UPLOAD_TIMEOUT_S = 120.0
+# A shared file's parents checked for the channel's folder, each past the first one read;
+# a file deeper than that stays a name.
+MAX_FOLDER_DEPTH = 8
 _CONFLICT = "@microsoft.graph.conflictBehavior"
 
 
@@ -40,8 +45,8 @@ class _Model(BaseModel):
 
 class _Parent(_Model):
     drive_id: str | None = None
-    # Graph's path of the parent folder (`/drives/x/root:/General`); absent for a library's root.
-    path: str | None = None
+    # The parent folder's item id; absent for a library's root.
+    id: str | None = None
 
 
 class DriveItem(_Model):
@@ -83,8 +88,6 @@ class SharePoint:
 
     def __init__(self, graph: GraphClient) -> None:
         self._graph = graph
-        # (drive id, folder id) -> the folder's Graph path, `None` for a library's root.
-        self._folder_paths: dict[tuple[str, str], str | None] = {}
 
     async def channel_folder(self, group_id: str, channel_id: str) -> DriveFolder:
         """The channel's Files folder, on its own site for a private or shared channel."""
@@ -137,44 +140,32 @@ class SharePoint:
         )
         if found.parent_reference is None or found.parent_reference.drive_id != folder.drive_id:
             raise GraphUnavailable("outside the channel's folder", status=200)
-        # Read again by drive and id, so its parent's path has the folder path's form.
+        # Read again by drive and id: the item, not the share's view of it, is checked.
         drive, item_id = path_segment(folder.drive_id), path_segment(found.id)
         data = await self._graph.send("GET", f"{GRAPH_ROOT}/drives/{drive}/items/{item_id}")
         item = _parse(DriveItem, data)
         # The permission reads past per-item permissions: a file outside the channel's
         # folder may be one its members cannot open, and the URL works for anyone.
-        if not is_inside(item, folder, await self._folder_path(folder)):
+        if not await self._is_inside(item, folder):
             raise GraphUnavailable("outside the channel's folder", status=200)
         download = item.download_url
         if download is None or not is_sharepoint_host(_url(download)):
             raise GraphUnavailable("no SharePoint download URL", status=200)
         return download
 
-    async def _folder_path(self, folder: DriveFolder) -> str | None:
-        key = (folder.drive_id, folder.item_id)
-        if key not in self._folder_paths:
-            drive, item_id = path_segment(folder.drive_id), path_segment(folder.item_id)
-            data = await self._graph.send("GET", f"{GRAPH_ROOT}/drives/{drive}/items/{item_id}")
-            item = _parse(DriveItem, data)
-            parent = item.parent_reference
-            if parent is not None and parent.path is not None and not item.name:
-                raise GraphUnavailable("folder without a name", status=200)
-            self._folder_paths[key] = (
-                None if parent is None or parent.path is None else f"{parent.path}/{item.name}"
+    async def _is_inside(self, item: DriveItem, folder: DriveFolder) -> bool:
+        """Whether `folder` is among `item`'s parents, up to `MAX_FOLDER_DEPTH` levels."""
+        drive, parent = path_segment(folder.drive_id), item.parent_reference
+        for _ in range(MAX_FOLDER_DEPTH):
+            if parent is None or parent.drive_id != folder.drive_id or parent.id is None:
+                return False
+            if parent.id == folder.item_id:
+                return True
+            data = await self._graph.send(
+                "GET", f"{GRAPH_ROOT}/drives/{drive}/items/{path_segment(parent.id)}"
             )
-        return self._folder_paths[key]
-
-
-def is_inside(item: DriveItem, folder: DriveFolder, folder_path: str | None) -> bool:
-    """Whether `item` sits in `folder` (Graph path `folder_path`, `None` for a library's root)."""
-    parent = item.parent_reference
-    if parent is None or parent.drive_id != folder.drive_id:
+            parent = _parse(DriveItem, data).parent_reference
         return False
-    if folder_path is None:
-        return True
-    # SharePoint paths are case-insensitive; the `/` keeps `General 2` out of `General`.
-    path, root = (parent.path or "").casefold(), folder_path.casefold()
-    return path == root or path.startswith(f"{root}/")
 
 
 def file_link(name: str, web_url: str | None) -> str:
