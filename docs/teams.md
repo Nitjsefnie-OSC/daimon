@@ -211,9 +211,9 @@ demotion; support requests and budget notices for "the admins" reach the team's 
 and the deprecated list. A refusal in a channel is a private
 message, toast, dialog message or card edit only its sender or clicker sees.
 Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
-group ID in `role_ids` to admit that team's owners), channel budgets
-(`set_channel_budget`) and channel environments (`set_channel_environment`)
-work as on Discord and Slack. Who answers where lists each channel's
+group ID in `role_ids` to admit that team's owners, guests left out), channel
+budgets (`set_channel_budget`) and channel environments
+(`set_channel_environment`) work as on Discord and Slack. Who answers where lists each channel's
 environment, and its **Channel settings** dialog changes one channel picked
 there, since the panel lives in the 1:1 chat: its environment (server admins,
 or that channel's admins), and its permissions (readers and writers), admins by

@@ -19,13 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another organisation never are. A failed owner read falls back to the last
   good one for up to an hour, then grants nothing and demotes no one.
   Support requests and channel budget notices for the admins reach these
-  owners.
+  owners. Guest owners no longer count for channel-admin team grants
+  (`role_ids`) either.
 
 ### Deprecated
 
-- **`DAIMON_TEAMS__ADMIN_USER_IDS`.** Still honoured, on top of the admin
-  team's owners, with a warning at startup. Make those people owners of the
-  admin team, then remove it.
+- **`DAIMON_TEAMS__ADMIN_USER_IDS`.** Still honoured: the Entra object IDs
+  it lists are admins on top of the admin team's owners, and Daimon logs
+  `teams.admin_user_ids_deprecated` at startup while it is set. Make those
+  people owners of the admin team, then remove it; their stored admin role
+  carries over, and anyone neither listed nor an owner loses it at the next
+  owner read.
 
 ### Fixed
 
