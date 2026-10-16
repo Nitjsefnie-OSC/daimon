@@ -46,7 +46,8 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
 
     resolved_tools = None
     kwargs = {}
-    effort = getattr(request, "param", None) == "live_root_effort"
+    paid_w1 = getattr(request, "param", None) == "paid_w1"
+    effort = paid_w1 or getattr(request, "param", None) == "live_root_effort"
     live = effort or getattr(request, "param", None) == "live_root_readback"
     if live or getattr(request, "param", None) == "resolved_readback":
         # Recorded response-only builtin types, reordered configs and resolved defaults.
@@ -222,9 +223,20 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
         assert len(root.environment.packages["python"]) == 3
         assert root.environment.scope == "organization"
         resolved_tools = [capture["tools"][0]]
+    requested = root.spec
+    if paid_w1:
+        from mux.contracts.resources import AgentSpec
+
+        # Actual persisted W1 intent from r5; rebind ownership to this owned DB.
+        requested = AgentSpec.model_validate_json(
+            (
+                Path(__file__).resolve().parents[1] / "fixtures/i7_r5_persisted_w1_spec.json"
+            ).read_text()
+        ).model_copy(update={"metadata": root.spec.metadata})
+        resolved_tools = None  # The scripted ACK must echo this worker's compiled grant.
     resolved = resolve_worker_spec(
         root,
-        root.spec,
+        requested,
         policy=POLICY,
         now=datetime.now(UTC),
         resources=root.resources,
@@ -448,6 +460,10 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
 
 @pytest.mark.parametrize("fault", [None, "lost_session_ack", "interrupted_proof"])
 async def test_session_receipt_public_caller_uses_real_scope_guard_and_sdk(native_worker, fault):
+    await _exercise_session_receipt(native_worker, fault)
+
+
+async def _exercise_session_receipt(native_worker, fault):
     from daimon.core.channel_budget import admit_fleet_worker, require_fleet_worker_admission
     from daimon.core.fleet import spawn_operation_key, worker_slot
     from daimon.core.mux_backend import managed_agents
@@ -542,3 +558,31 @@ async def test_session_receipt_public_caller_uses_real_scope_guard_and_sdk(nativ
         sum(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests) == 1
     )
     assert not any(call.path.endswith("/events") for call in trace.requests)
+
+
+@pytest.mark.parametrize("source_read_only", [False, True], indirect=True)
+@pytest.mark.parametrize("native_worker", ["paid_w1"], indirect=True)
+async def test_paid_w1_declared_tool_and_skill_losses_keep_native_memory_binding(native_worker):
+    request, _, _, trace, _ = native_worker
+    resolved = request.worker
+    assert resolved is not None
+    assert resolved.spec.declared_drops == ("skills", "tools")
+    assert not resolved.spec.tools and not resolved.spec.skills and not resolved.spec.mcp_servers
+    await _exercise_session_receipt(native_worker, None)
+    compiled = next(
+        json.loads(call.body)
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/agents"
+    )
+    assert compiled["tools"] == [] and compiled["skills"] == []
+    assert compiled["mcp_servers"] == []
+    assert compiled["model"]["speed"] == "standard"
+    assert compiled["model"]["effort"] == {"type": "medium"}
+    payload = next(
+        json.loads(call.body)
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/sessions"
+    )
+    assert len(payload["resources"]) == 1
+    assert payload["resources"][0]["memory_store_id"] == resolved.resources[0].resource.id
+    assert payload["resources"][0]["access"] == "read_only"
