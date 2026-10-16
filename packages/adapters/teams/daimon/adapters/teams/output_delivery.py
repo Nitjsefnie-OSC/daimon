@@ -73,7 +73,12 @@ from daimon.core.output_delivery import (
     sweep_session_outputs,
 )
 from daimon.core.stores.file_uploads import get_upload
-from daimon.core.teams_file_offers import FILE_CONSENT_CONTENT_TYPE, UPLOAD_KEY, verify_offer
+from daimon.core.teams_file_offers import (
+    FILE_CONSENT_CONTENT_TYPE,
+    UPLOAD_KEY,
+    consent_description,
+    verify_offer,
+)
 from daimon.core.teams_graph import GraphUnavailable, is_sharepoint_host
 from daimon.core.teams_sharepoint import DriveItem, file_link
 from microsoft_teams.api import (
@@ -185,7 +190,7 @@ class _Offer:
 def consent_card(name: str, size_bytes: int, token: str) -> MessageActivityInput:
     context = {"offer": token}
     card = FileConsentCard(
-        description=f"Save {name} to your OneDrive?",
+        description=consent_description(name),
         size_in_bytes=size_bytes,
         accept_context=context,
         decline_context=context,
