@@ -34,7 +34,7 @@ from daimon.core.config import (
 )
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import mint_chat_mcp_token, mint_jwt
+from daimon.core.mcp_auth import mint_chat_mcp_token, mint_panel_mcp_token
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
@@ -146,8 +146,8 @@ async def _caller(
             db_session, team_id=workspace_id, encrypted_token=encrypt_token(fernet, "xoxb-x")
         )
     if chat_agent is None:
-        token = mint_jwt(
-            account_id=principal.account_id, secret=_SECRET, now=dt.datetime.now(dt.UTC)
+        token = await mint_panel_mcp_token(
+            db_session, account_id=principal.account_id, secret=_SECRET, now=dt.datetime.now(dt.UTC)
         )
     else:
         token, _jti, _expiry = await mint_chat_mcp_token(

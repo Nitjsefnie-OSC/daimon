@@ -1117,7 +1117,7 @@ async def test_internal_legacy_refusals_log_only_age_and_shape(
     assert len(events) == 1
     event = events[0]
     assert event["reason"] == "unregistered_internal"
-    assert event["token_age_bucket"] == bucket
+    assert event["age_bucket"] == bucket
     assert event["internal_true"] is True
     assert event["has_jti"] is False
     assert event["has_exp"] is False
@@ -1125,7 +1125,7 @@ async def test_internal_legacy_refusals_log_only_age_and_shape(
     assert all(
         isinstance(value, bool)
         for key, value in event.items()
-        if key not in {"reason", "event", "log_level", "token_age_bucket"}
+        if key not in {"reason", "event", "log_level", "age_bucket"}
     )
     assert not {"sub", "token", "secret", "jti", "iat", "exp"} & event.keys()
     rendered = repr(logs)
@@ -1151,7 +1151,7 @@ async def test_untrusted_rejection_does_not_log_unverified_claim_values(
     events = [event for event in logs if event.get("event") == "mcp.token_rejected"]
     assert len(events) == 1
     assert events[0]["reason"] == "signature_or_expiry"
-    assert events[0]["token_age_bucket"] == "unknown"
+    assert events[0]["age_bucket"] == "unknown"
     assert events[0]["has_sub"] is False
     assert account not in repr(logs)
     assert token not in repr(logs)
@@ -1179,4 +1179,15 @@ async def test_expired_token_rejection_never_logs_the_dependency_subject(
     assert token not in caplog.text + repr(logs)
     assert logs[-1]["event"] == "mcp.token_rejected"
     assert logs[-1]["reason"] == "signature_or_expiry"
-    assert logs[-1]["token_age_bucket"] == "unknown"
+    assert logs[-1]["age_bucket"] == "unknown"
+
+
+def test_refusal_diagnostics_survive_the_production_redaction_processor() -> None:
+    from daimon.adapters.mcp.auth.verifier import _token_diagnostics
+    from daimon.core.observability import redact_log_event
+
+    diagnostics = _token_diagnostics({"iat": 0, "sub": "must-not-log", "internal": True})
+    event = {"event": "mcp.token_rejected", "reason": "unregistered_internal", **diagnostics}
+    assert redact_log_event(None, "warning", event) == event
+    assert event["age_bucket"] == ">90d"
+    assert "must-not-log" not in repr(event)

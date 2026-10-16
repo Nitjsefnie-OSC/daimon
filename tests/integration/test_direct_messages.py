@@ -1170,7 +1170,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
     from daimon.adapters.mcp.tools.slack._read import _slack_read_channel_impl
     from daimon.core.headless_runner import run_turn as headless_turn
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.mcp_auth import mint_jwt
+    from daimon.core.mcp_auth import mint_agent_mcp_token, mint_jwt, mint_panel_mcp_token
     from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
     from daimon.testing.asgi import call_mcp_tool
     from daimon.testing.legacy_mcp_tokens import mint_internal_mcp_token
@@ -1186,6 +1186,12 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
     other_tokens = []
     mcp_runtime = MagicMock(session_factory=db_session_factory)
     mcp_runtime.fernet = MultiFernet([Fernet(Fernet.generate_key())])
+
+    async def account_bearer(account_id):
+        async with db_session_factory.begin() as token_db:
+            return await mint_panel_mcp_token(
+                token_db, account_id=account_id, secret=secret, now=datetime.now(UTC)
+            )
 
     async def check(token, *, allowed, agent=False):
         result = await call_mcp_tool(app, token=token, name="agent_probe" if agent else "probe")
@@ -1278,21 +1284,28 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
             session_factory=db_session_factory,
             mcp_settings=deps.mcp,
         )
-        for other in (
+        # Retired bearer families fail authentication, even with a valid signature.
+        for legacy in (
             mint_jwt(account_id=admission.account_id, secret=secret, now=datetime.now(UTC)),
             mint_internal_mcp_token(
                 account_id=admission.account_id, secret=secret, now=datetime.now(UTC)
             ),
         ):
-            await check(other, allowed=False)
-            await check_sessions(other, handle)
-            other_tokens.append((other, False))
-        agent_token = mint_jwt(
-            account_id=admission.account_id,
-            secret=secret,
-            now=datetime.now(UTC),
-            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=admission.agent.id),
-        )
+            assert await verifier.verify_token(legacy) is None
+        other = await account_bearer(admission.account_id)
+        await check(other, allowed=False)
+        await check_sessions(other, handle)
+        other_tokens.append((other, False))
+        async with db_session_factory.begin() as token_db:
+            agent_token = await mint_agent_mcp_token(
+                token_db,
+                account_id=admission.account_id,
+                tenant_id=tenant.id,
+                secret=secret,
+                now=datetime.now(UTC),
+                agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=admission.agent.id),
+                label=None,
+            )
         await check(agent_token, allowed=False, agent=True)
         await check_sessions(agent_token, handle, agent=True)
         other_tokens.append((agent_token, True))
@@ -1399,10 +1412,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
             repeat=True,
             payload={"ok": True, "messages": [{"ts": "1", "text": "private source content"}]},
         )
-        await check(
-            mint_jwt(account_id=admission.account_id, secret=secret, now=datetime.now(UTC)),
-            allowed=False,
-        )
+        await check(await account_bearer(admission.account_id), allowed=False)
         await _reply(deps, route)
         await _reply(deps, route, message_id="2")
         for token in private_tokens:

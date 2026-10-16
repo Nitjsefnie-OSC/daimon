@@ -27,7 +27,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.errors import DaimonError
-from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_auth import mint_agent_mcp_token
 from daimon.core.reports.host_client import Recipient, ReportHostError
 from daimon.core.reports.publish import (
     DeleteResult,
@@ -430,9 +430,16 @@ async def test_agent_scoped_token_does_not_discover_publish_or_delete_report_too
     async with sessionmaker() as s, s.begin():
         tenant = await make_tenant(s, platform="discord", workspace_id="publish-reachability-agent")
         account = await make_account(s, tenant=tenant)
-    token = mint_jwt(
-        account_id=account.id, secret=SECRET.encode(), now=datetime.now(UTC), agent_id=uuid.uuid4()
-    )
+    async with sessionmaker.begin() as session:
+        token = await mint_agent_mcp_token(
+            session,
+            account_id=account.id,
+            tenant_id=tenant.id,
+            secret=SECRET.encode(),
+            now=datetime.now(UTC),
+            agent_id=uuid.uuid4(),
+            label=None,
+        )
     app = _make_app(sessionmaker)
 
     result = await mcp_session(app, token=token, method="tools/list")

@@ -130,7 +130,7 @@ def _token_diagnostics(claims: Mapping[str, object]) -> dict[str, object]:
                     age_bucket = label
                     break
     return {
-        "token_age_bucket": age_bucket,
+        "age_bucket": age_bucket,
         "has_sub": "sub" in claims,
         "sub_is_str": isinstance(claims.get("sub"), str),
         "has_jti": "jti" in claims,
