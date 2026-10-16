@@ -13,6 +13,7 @@ from daimon.core.teams_graph import (
     GraphMessage,
     GraphUnavailable,
     TeamGroups,
+    linked_files,
     message_references,
     skiptoken_of,
 )
@@ -346,3 +347,25 @@ def test_message_references_read_the_quoted_sender_and_skip_bad_json() -> None:
         "bot-app",
         "the answer",
     ), "the quote names the bot's app id and keeps its preview"
+
+
+def _linking(body: dict[str, str], *, app: bool = True) -> GraphMessage:
+    sender = {"application": {"id": "bot"}} if app else {"user": {"id": "u-1"}}
+    return GraphMessage.model_validate(
+        {"id": "1", "messageType": "message", "from": sender, "body": body}
+    )
+
+
+def test_linked_files_reads_a_bots_sharepoint_links_from_text_or_html() -> None:
+    """daimon's saved-file footer reads back as markdown text or as HTML links."""
+    site = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General"
+    text = f"Saved:\n- [a\\]b.pdf]({site}/a%5Db.pdf)\n- [x](https://example.com/x)"
+    html = f'<p>Saved:</p><ul><li><a href="{site}/c.png">c.png</a></li></ul>'
+    assert linked_files(_linking({"contentType": "text", "content": text})) == [
+        ("a]b.pdf", f"{site}/a%5Db.pdf")
+    ], "the label is unescaped and a non-SharePoint link skipped"
+    assert linked_files(_linking({"contentType": "html", "content": html})) == [
+        ("c.png", f"{site}/c.png")
+    ]
+    person = _linking({"contentType": "html", "content": html}, app=False)
+    assert linked_files(person) == [], "a person's links are theirs to share as attachments"
