@@ -15,6 +15,7 @@ import zipfile
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import parse_qs, unquote
 
 import httpx
 import pytest
@@ -268,6 +269,31 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
     native, calls, posts = {}, [], []
 
     def handle(call):
+        if call.url.host == "sts.googleapis.com":
+            assert call.method == "POST" and call.url.path == "/v1/token"
+            body = parse_qs(call.content.decode())
+            assert body["subject_token"] == ["offline-storage-token"]
+            boundary = json.loads(unquote(body["options"][0]))
+            rules = boundary["accessBoundary"]["accessBoundaryRules"]
+            assert len(rules) == 1
+            rule = rules[0]
+            assert (
+                rule["availableResource"]
+                == "//storage.googleapis.com/projects/_/buckets/owned-offline"
+            )
+            assert rule["availablePermissions"] == ["inRole:roles/storage.objectViewer"]
+            assert (
+                f".startsWith('{scope.tenant_id}/{scope.account_id}/')"
+                in rule["availabilityCondition"]["expression"]
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "offline-downscoped-token",
+                    "expires_in": 3300,
+                    "token_type": "Bearer",
+                },
+            )
         calls.append(call)
         if call.url.path.startswith("/v1beta/agents"):
             if call.method == "POST":
@@ -323,6 +349,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
                     }
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
         assert call.url.host == "storage.googleapis.com" and call.method == "GET"
+        assert call.headers["Authorization"] == "Bearer offline-downscoped-token"
         if call.url.params.get("alt") == "media":
             assert call.url.params["generation"] == "123"
             return httpx.Response(200, content=storage[call.url.path.split("/o/", 1)[1]])
@@ -531,7 +558,14 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
     credential.write_text(token)
     credential.chmod(0o600)
     gcs_credential = tmp_path / "gcs.token"
-    gcs_credential.write_text("offline-storage-token")
+    gcs_credential.write_text(
+        json.dumps(
+            {
+                "access_token": "offline-storage-token",
+                "expires_at": (request.now() + timedelta(minutes=55)).isoformat(),
+            }
+        )
+    )
     gcs_credential.chmod(0o600)
     plan = GeminiPlan(
         profile=revision.profile,
@@ -558,6 +592,8 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
         source_capabilities=capabilities,
         mcp_credential_file=credential,
         gcs_credential_file=gcs_credential,
+        gcs_mount_bucket="owned-offline",
+        gcs_mount_prefix=f"{scope.tenant_id}/{scope.account_id}/",
         skill_deployments=tuple(deployments),
     )
     manifest.write_text(json.dumps([plan.model_dump(mode="json")]))
@@ -641,15 +677,33 @@ async def test_full_default_preparation_and_fresh_followup_turns(full):
         assert outcome.state.error is None and not outcome.recovered
     assert len(posts) == 2
     assert posts[0]["environment"]["sources"] == native["base_environment"]["sources"]
-    assert posts[1]["environment"] == "workspace"
+    assert posts[1]["environment"]["environment_id"] == "workspace"
+    assert "sources" not in posts[1]["environment"]
     assert posts[1]["previous_interaction_id"] == "turn-1"
     for body in posts:
+        assert body["environment"]["network"] == {
+            "allowlist": [
+                {
+                    "domain": "storage.googleapis.com",
+                    "transform": {"Authorization": "Bearer offline-downscoped-token"},
+                }
+            ]
+        }
         assert body["agent"] == native["id"]
         assert body["system_instruction"] == canonical.target_spec.system
         assert token in json.dumps(body["tools"])
         remote = next(tool for tool in body["tools"] if tool["type"] == "mcp_server")
         assert set(remote["allowed_tools"][0]["tools"]) == {"search_tools", "call_tool"}
     assert token not in json.dumps(native) and token not in plan.model_dump_json()
+    assert (
+        "offline-storage-token" not in json.dumps(native)
+        and "offline-storage-token" not in plan.model_dump_json()
+    )
+    assert all(
+        b"offline-storage-token" not in path.read_bytes()
+        and b"offline-downscoped-token" not in path.read_bytes()
+        for path in plan.records_path.parent.glob("records.sqlite*")
+    )
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
@@ -1073,3 +1127,44 @@ async def test_optional_catalogue_registry_outage_preserves_native_preview(
             )
             for row in pending:
                 await original_revoke(db, jti=row.jti, now=request.now())
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("defect", ["missing", "expired", "short", "unknown", "permissions"])
+async def test_private_skill_mount_requires_fresh_bounded_storage_credential(full, defect):
+    request, plan, canonical, _, _, posts, *_ = full
+    if defect == "missing":
+        plan.gcs_credential_file.unlink()
+    elif defect == "permissions":
+        plan.gcs_credential_file.chmod(0o644)
+    else:
+        value = json.loads(plan.gcs_credential_file.read_text())
+        if defect == "expired":
+            value["expires_at"] = (request.now() - timedelta(seconds=1)).isoformat()
+        elif defect == "short":
+            value["expires_at"] = (request.deadline - timedelta(seconds=1)).isoformat()
+        else:
+            value["unknown"] = True
+        plan.gcs_credential_file.write_text(json.dumps(value))
+    with pytest.raises(AdmissionDenied):
+        await read_preparation_counterpart(scope_channel_runtimes(canonical)[0])
+    assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_storage_mount_resolver_requires_verified_exact_counterpart_and_sources(full):
+    request, plan, canonical, _, _, posts, *_ = full
+    runtime = build_gemini_runtime(canonical)
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    sources = tuple(item.source for item in plan.skill_deployments)
+    assert transport.gcs_secrets is not None
+    with pytest.raises(ScopeViolation):
+        await transport.gcs_secrets(request.scope, sources)
+    await runtime.read_agent_counterpart(canonical)
+    with pytest.raises(ScopeViolation):
+        await transport.gcs_secrets(request.scope, ("gs://other/version/",))
+    with pytest.raises(ScopeViolation):
+        await transport.gcs_secrets(
+            request.scope.model_copy(update={"account_id": "foreign"}), sources
+        )
+    assert not posts

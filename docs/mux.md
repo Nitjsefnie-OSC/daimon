@@ -3180,7 +3180,25 @@ therefore cannot count as preserved capabilities.
 
 Full plans additionally require an absolute `gcs_credential_file`, read using the
 same owned regular 0600/no-follow credential reader as MCP. It supplies an explicit
-read-only OAuth access token; there is no ambient credential discovery. On each
+source OAuth access token in an exact JSON object with `access_token` and
+timezone-aware RFC3339 `expires_at`. Its expiry must cover the admitted turn plus
+30 seconds and be no more than one hour from the current check; a raw token,
+unknown field, missing file or expired/insufficient lifetime refuses. The owner
+rotates the protected file explicitly; there is no ambient credential discovery
+or source-token minting. Full plans also require explicit `gcs_mount_bucket` and
+`gcs_mount_prefix`; every verified deployment must lie inside that exact boundary.
+The prefix must equal the complete component-wise common directory of the
+verified deployment sources; an operator cannot widen it to an ancestor prefix.
+The private transport uses `google.auth.downscoped.Credentials` to exchange the
+source token at Google's STS for a token with exactly one Credential Access
+Boundary rule: `inRole:roles/storage.objectViewer` on that bucket, conditioned on
+object names and `storage.googleapis.com/objectListPrefix` starting with the
+approved nonempty prefix. No permission is available on other buckets or prefixes,
+even if the source worker has broader roles. The source bearer never goes to the
+sandbox. Exchange failure, unsupported scope, an unchanged/missing result, or
+insufficient returned lifetime refuses; there is no unscoped fallback. STS uses
+one explicit TLS-verified POST with no ambient proxy, redirect, ADC or retry.
+On each
 native counterpart read and each provider credential exposure, the runtime lists
 every configured GCS prefix, rejects missing/extra/duplicate objects, requires
 locked object retention through the admitted deadline plus the seven-day inline
@@ -3192,8 +3210,43 @@ permissions under published prefixes before final inventory verification. Retain
 read-back bucket/project/inherited IAM evidence that the provisioner and runtime
 principals cannot append objects through cleanup. Locked retention prevents
 replacement/deletion, not new objects. A readback is a point-in-time observation,
-not a transactional directory mount. Private-bucket mount authentication must be verified separately against the
-provider's documented network credentials before live provisioning.
+not a transactional directory mount.
+
+Private mounts use only the exchanged downscoped token in Gemini's
+managed environment egress proxy, scoped to the exact `storage.googleapis.com`
+domain through `environment.network.allowlist[].transform.Authorization`. The
+existing bound session credential seam refreshes and revalidates both MCP and
+GCS credentials at each SDK dispatch, including fallback attempts. It binds the
+exact admitted GCS sources and caller scope; unsupported or modified network
+rules refuse. Credentials exist only in transient, repr-redacted dispatch memory,
+never in retained native definitions or host session requests. Follow-up turns
+refresh the same environment using `type=remote`, its actual `environment_id`,
+and the fresh network rule, without remounting or resetting files. Ordinary
+turns without the full-source resolver retain their existing request shape.
+The credential's actual identity needs only bucket-scoped read authority; a
+Gemini-project service agent is not required for this explicit OAuth mechanism.
+Storage-owner IAM evidence must establish the principal and read-only scope;
+local source-token expiry metadata is not an IAM attestation. CAB restricts the
+exchanged authority regardless of those broader source permissions; the actual
+exchange and access boundary must still be checked in the authorized preflight.
+The one-domain allowlist blocks all other sandbox egress, including pip installs
+and external URL fetches. This is an explicit sandbox restriction: the canonical
+default-capability scenario only reads its skill, performs local file operations
+and bash printf, and invokes provider-side MCP; it needs no other sandbox egress.
+Other skill workflows must not assume unrestricted networking. Verify MCP and
+local builtin operations on the exact image.
+
+For protected interactions the SDK edge inspects the raw create/GET JSON before
+SDK parsing/serialization. Any `network.transform` presence refuses with a fixed
+error, preventing serializer warnings or host records from echoing a bearer.
+The zero-dollar preflight's existing HTTP response observer asserts the same
+presence-only check and records a boolean, never bodies or credentials. A POST
+stopped at the paid-send fence produces no response and proves no echo property;
+never report an unobserved response as a negative observation.
+Verify the real mount on
+the exact deployed image before any paid send. See Google's
+[private-source and credential refresh documentation](https://ai.google.dev/gemini-api/docs/agent-environment#private-sources)
+and [Credential Access Boundary listing conditions](https://cloud.google.com/iam/docs/downscoping-short-lived-credentials#limit_permissions_when_listing_objects).
 
 Capture currently re-downloads the attached source versions and verifies the
 retained archives on every matching capture, including preview and follow-up.

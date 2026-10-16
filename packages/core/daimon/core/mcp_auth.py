@@ -44,8 +44,8 @@ from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-def read_private_credential(path: Path) -> str:
-    """Read a bounded, explicitly owned bearer file without following links."""
+def read_private_credential_bytes(path: Path) -> bytes:
+    """Read bounded, explicitly owned credential bytes without following links."""
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
         info = os.fstat(descriptor)
@@ -59,12 +59,17 @@ def read_private_credential(path: Path) -> str:
             raw = stream.read(16_385)
         if len(raw) > 16_384:
             raise ValueError("invalid credential")
-        token = raw.decode().strip()
-        if not token or any(ord(character) < 33 or ord(character) > 126 for character in token):
-            raise ValueError("invalid credential")
-        return token
+        return raw
     finally:
         os.close(descriptor)
+
+
+def read_private_credential(path: Path) -> str:
+    """Read a bounded, explicitly owned bearer file without following links."""
+    token = read_private_credential_bytes(path).decode().strip()
+    if not token or any(ord(character) < 33 or ord(character) > 126 for character in token):
+        raise ValueError("invalid credential")
+    return token
 
 
 async def resolve_agent_mcp_credential(
