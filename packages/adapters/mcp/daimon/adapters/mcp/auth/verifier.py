@@ -34,6 +34,7 @@ from daimon.core.channel_admins import (
     grant_group_ids,
 )
 from daimon.core.channel_admins import administered_channel_ids as administered_channel_ids_for
+from daimon.core.mcp_auth import CHAT_TOKEN_LABEL, CHAT_TOKEN_TTL
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
@@ -77,7 +78,26 @@ def token_row_refusal(
     if row.platform is not None and row.platform != identity.platform:
         return "platform_mismatch"  # a channel binding this deployment never minted
     if row.kind == "agent":
-        return None  # agent keys verify exactly as before this check existed
+        if row.account_id != identity.account_id or row.tenant_id != identity.tenant_id:
+            return "account_mismatch"
+        chat = claims.get("chat_agent_id")
+        if chat is not None or row.label == CHAT_TOKEN_LABEL:
+            expiry, issued = claims.get("exp"), claims.get("iat")
+            if (
+                row.label != CHAT_TOKEN_LABEL
+                or chat != row.agent_id
+                or claims.get("agent_id") is not None
+                or claims.get("internal") is not None
+                or type(expiry) is not int
+                or type(issued) is not int
+                or row.expires_at is None
+                or expiry != int(row.expires_at.timestamp())
+                or not 0 < expiry - issued <= int(CHAT_TOKEN_TTL.total_seconds())
+            ):
+                return "chat_binding_mismatch"
+        elif claims.get("agent_id") != row.agent_id:
+            return "agent_mismatch"
+        return None
     if claims.get("kind") != row.kind:
         return "kind_mismatch"
     if row.account_id != identity.account_id or row.tenant_id != identity.tenant_id:
@@ -142,6 +162,10 @@ class DaimonJWTVerifier(JWTVerifier):
                 return None
             row: McpTokenRow | None = None
             jti = access.claims.get("jti")
+            if access.claims.get("chat_agent_id") is not None and (
+                not isinstance(jti, str) or type(access.claims.get("exp")) is not int
+            ):
+                return None
             if isinstance(jti, str):
                 try:
                     jti_uuid = uuid.UUID(jti)

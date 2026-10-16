@@ -19,12 +19,37 @@ import httpx
 import jwt as pyjwt
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.core.mcp_vault import add_external_mcp_credential, ensure_agent_mcp_vault
+from daimon.core.mcp_vault import (
+    add_external_mcp_credential,
+    chat_mcp_credential,
+    ensure_agent_mcp_vault,
+)
+from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+
+
+async def _account(factory):
+    async with factory() as db, db.begin():
+        tenant = await make_tenant(db, platform="discord")
+        account = await make_account(db, tenant=tenant)
+    return account.id
+
+
+async def _metadata(factory, account_id, agent_id):
+    async with factory() as db, db.begin():
+        payload = await chat_mcp_credential(
+            db,
+            account_id=account_id,
+            agent_id=agent_id,
+            jwt_secret=b"a" * 32,
+            public_url="https://mcp.example.com/mcp",
+            now=dt.datetime(2026, 4, 24, tzinfo=dt.UTC),
+        )
+    return payload["metadata"]
 
 
 def _make_client(handler: httpx.MockTransport) -> AsyncAnthropic:
@@ -50,8 +75,9 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
     db_session_factory: async_sessionmaker[AsyncSession],
     legacy: bool,
 ) -> None:
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
+    fresh_metadata = await _metadata(db_session_factory, account_id, agent_id)
     display = f"daimon-mcp:{account_id}:{agent_id}"
     calls: list[str] = []
 
@@ -78,7 +104,7 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
                     "data": [
                         {
                             "id": "vcrd_existing",
-                            "metadata": {} if legacy else {"daimon_chat_identity": str(agent_id)},
+                            "metadata": {} if legacy else fresh_metadata,
                             "type": "credential",
                             "vault_id": "vlt_old",
                             "auth": {
@@ -92,11 +118,17 @@ async def test_ensure_agent_mcp_vault_returns_existing_oldest_when_present(
             )
         if req.method == "POST" and req.url.path == "/v1/vaults/vlt_old/credentials/vcrd_existing":
             body = json.loads(req.content)
-            claims = pyjwt.decode(body["auth"]["token"], b"a" * 32, algorithms=["HS256"])
+            claims = pyjwt.decode(
+                body["auth"]["token"],
+                b"a" * 32,
+                algorithms=["HS256"],
+                options={"verify_exp": False},
+            )
             assert claims["chat_agent_id"] == str(agent_id)
             assert claims["sub"] == str(account_id)
             assert "agent_id" not in claims and "internal" not in claims
-            assert body["metadata"] == {"daimon_chat_identity": str(agent_id)}
+            assert body["metadata"]["daimon_chat_identity"] == str(agent_id)
+            assert body["metadata"]["daimon_chat_jti"] == claims["jti"]
             return httpx.Response(
                 200,
                 json={
@@ -136,8 +168,9 @@ async def test_ensure_agent_mcp_vault_walks_vault_pages_at_max_page_size(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The vault lookup asks for 100-vault pages and finds a match past page one."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
+    fresh_metadata = await _metadata(db_session_factory, account_id, agent_id)
     display = f"daimon-mcp:{account_id}:{agent_id}"
     list_params: list[dict[str, str]] = []
 
@@ -152,7 +185,7 @@ async def test_ensure_agent_mcp_vault_walks_vault_pages_at_max_page_size(
         if req.method == "GET" and req.url.path == "/v1/vaults/vlt_mine/credentials":
             credential = {
                 "id": "vcrd_existing",
-                "metadata": {"daimon_chat_identity": str(agent_id)},
+                "metadata": fresh_metadata,
                 "type": "credential",
                 "vault_id": "vlt_mine",
                 "auth": {"type": "static_bearer", "mcp_server_url": "https://mcp.example.com/mcp"},
@@ -179,7 +212,7 @@ async def test_ensure_agent_mcp_vault_walks_vault_pages_at_max_page_size(
 async def test_ensure_agent_mcp_vault_cold_path_creates_vault_and_credential(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     created_bodies: list[dict[str, Any]] = []
@@ -271,7 +304,7 @@ async def test_ensure_agent_mcp_vault_cold_path_mints_chat_identity_jwt(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Cold-path credentials identify the executing agent without platform wire claims."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     captured: list[dict[str, Any]] = []
@@ -291,7 +324,7 @@ async def test_ensure_agent_mcp_vault_cold_path_mints_chat_identity_jwt(
     assert len(captured) == 1, "exactly one credential POST on cold path"
     token = captured[0]["auth"]["token"]
     # Inspect-only: signature verification is the MCP verifier's job; here we assert claim shape.
-    claims = pyjwt.decode(token, secret, algorithms=["HS256"])
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
     assert claims["chat_agent_id"] == str(agent_id)
     assert "agent_id" not in claims
     assert "platform" not in claims, "minted token must carry no platform wire claim"
@@ -332,7 +365,7 @@ async def test_ensure_agent_mcp_vault_warm_path_url_drift_creates_at_new_url_wit
     the vault is shared with user-added external MCP credentials whose URLs we cannot
     authenticate as "ours" — sweeping would silently nuke user data on the first deploy-URL
     change."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     public_url = "https://mcp.example.com/mcp"
@@ -413,8 +446,9 @@ async def test_ensure_agent_mcp_vault_warm_path_with_matching_url_skips_rebind(
 ) -> None:
     """When the existing credential already matches public_url, no rebind happens —
     list creds to verify match, then return without mutation."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
+    fresh_metadata = await _metadata(db_session_factory, account_id, agent_id)
     display = f"daimon-mcp:{account_id}:{agent_id}"
     public_url = "https://mcp.example.com/mcp"
 
@@ -437,7 +471,7 @@ async def test_ensure_agent_mcp_vault_warm_path_with_matching_url_skips_rebind(
                     "data": [
                         {
                             "id": "vcrd_ok",
-                            "metadata": {"daimon_chat_identity": str(agent_id)},
+                            "metadata": fresh_metadata,
                             "type": "credential",
                             "vault_id": "vlt_warm",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -481,7 +515,7 @@ async def test_ensure_agent_mcp_vault_rebind_preserves_external_mcp_credentials(
     any external MCP would silently nuke their creds. The fix is to not
     sweep at all on URL drift (we cannot authenticate "ours" vs theirs).
     """
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     public_url = "https://mcp.example.com/mcp"
@@ -571,7 +605,7 @@ async def test_ensure_agent_mcp_vault_oauth_callback_path_mints_claimless_jwt(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """oauth_github.py call path — must mint a claim-less JWT (account-scoped only)."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     captured: list[dict[str, Any]] = []
@@ -591,7 +625,7 @@ async def test_ensure_agent_mcp_vault_oauth_callback_path_mints_claimless_jwt(
     assert len(captured) == 1
     token = captured[0]["auth"]["token"]
     # Inspect-only: signature verification is the MCP verifier's job; here we assert claim shape.
-    claims = pyjwt.decode(token, secret, algorithms=["HS256"])
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
     assert "platform" not in claims, "oauth callback path stays claim-less"
     assert "guild_id" not in claims, "oauth callback path stays claim-less"
 
@@ -656,7 +690,7 @@ async def test_add_external_mcp_credential_creates_when_no_prior_credential(
 ) -> None:
     """Vault exists for agent; no prior credential at target URL.
     Lists vault, lists creds, POSTs new credential. No DELETEs."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     target_url = "https://ga4.example.com/mcp"
@@ -713,7 +747,7 @@ async def test_add_external_mcp_credential_replaces_existing_credential_at_same_
 ) -> None:
     """Replace path: an existing static_bearer credential at the same URL is DELETEd,
     then a new one POSTed. Credentials at OTHER URLs are not touched."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     target_url = "https://ga4.example.com/mcp"
@@ -771,7 +805,7 @@ async def test_add_external_mcp_credential_bootstraps_vault_when_missing(
     """If no vault exists matching daimon-mcp:{account_id}:{agent_id}, the helper
     bootstraps the per-agent vault (creates it + daimon-mcp JWT) then writes the cred.
     No DaimonError is raised."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     target_url = "https://ext.example.com/mcp"
@@ -827,7 +861,7 @@ async def test_ensure_agent_mcp_vault_cold_path_creates_per_agent_vault(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """SC-1: cold path creates vault named daimon-mcp:{account_id}:{agent_id}."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     expected_display = f"daimon-mcp:{account_id}:{agent_id}"
     created_vault_bodies: list[dict[str, Any]] = []
@@ -882,7 +916,7 @@ async def test_two_agents_one_account_get_distinct_vaults(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """SC-1: two distinct agent_ids under one account_id produce two distinct vault create calls."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_a = uuid.uuid4()
     agent_b = uuid.uuid4()
 
@@ -965,7 +999,7 @@ async def test_agent_x_vault_never_holds_agent_y_external_cred(
 
     The handler models per-vault credential lists as dict[vault_id, list[cred]].
     """
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_a = uuid.uuid4()
     agent_b = uuid.uuid4()
     display_a = f"daimon-mcp:{account_id}:{agent_a}"
@@ -1025,8 +1059,9 @@ async def test_ensure_agent_mcp_vault_does_not_restamp_matching_url_credential(
     The warm re-stamp race (A3) is eliminated: the long-lived credential is
     identity-stable and nothing per-turn mutates it.
     """
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
+    fresh_metadata = await _metadata(db_session_factory, account_id, agent_id)
     display = f"daimon-mcp:{account_id}:{agent_id}"
     public_url = "https://mcp.example.com/mcp"
     call_log: list[tuple[str, str]] = []
@@ -1048,7 +1083,7 @@ async def test_ensure_agent_mcp_vault_does_not_restamp_matching_url_credential(
                     "data": [
                         {
                             "id": "vcrd_existing",
-                            "metadata": {"daimon_chat_identity": str(agent_id)},
+                            "metadata": fresh_metadata,
                             "type": "credential",
                             "vault_id": "vlt_warm",
                             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -1087,7 +1122,7 @@ async def test_ensure_agent_mcp_vault_long_lived_credential_never_carries_is_adm
     escalation into the daimon-mcp credential that an in-flight session or future
     turn reuses. is_admin must never appear on the cold-path minted token.
     """
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     captured: list[dict[str, object]] = []
@@ -1106,7 +1141,7 @@ async def test_ensure_agent_mcp_vault_long_lived_credential_never_carries_is_adm
 
     assert len(captured) == 1, "exactly one credential POST on cold path"
     token = captured[0]["auth"]["token"]  # type: ignore[index]
-    claims = pyjwt.decode(token, secret, algorithms=["HS256"])  # type: ignore[arg-type]
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})  # type: ignore[arg-type]
     assert "is_admin" not in claims, (
         "long-lived vault credential must NEVER carry is_admin; "
         "a non-admin acting in a thread the creator started must not inherit admin "
@@ -1122,7 +1157,7 @@ async def test_minted_jwt_has_chat_identity_without_restricted_agent_claim(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Chat execution identity must not select the external agent-chat surface."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     captured: list[dict[str, Any]] = []
@@ -1141,7 +1176,7 @@ async def test_minted_jwt_has_chat_identity_without_restricted_agent_claim(
 
     assert len(captured) == 1, "exactly one credential POST on cold path"
     token = captured[0]["auth"]["token"]
-    claims = pyjwt.decode(token, secret, algorithms=["HS256"])
+    claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
 
     assert claims["chat_agent_id"] == str(agent_id)
     assert "agent" not in claims, "daimon-mcp JWT must NOT carry an 'agent' claim (SC-4)"
@@ -1194,7 +1229,7 @@ async def test_ensure_agent_mcp_vault_concurrent_calls_create_exactly_one_vault(
     session_factory_a = async_sessionmaker(engine_a, expire_on_commit=False)
     session_factory_b = async_sessionmaker(engine_b, expire_on_commit=False)
 
-    account_id = uuid.uuid4()
+    account_id = await _account(session_factory_a)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     public_url = "https://mcp.example.com/mcp"
@@ -1276,7 +1311,7 @@ async def test_add_external_mcp_credential_replaces_the_callers_oauth_grant_at_t
 ) -> None:
     """A pasted token for a server the person had signed in to replaces the
     grant: one credential per URL, and the create would otherwise be a 409."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     target_url = "https://mcp.notion.com/mcp"
@@ -1331,7 +1366,7 @@ async def test_ensure_agent_mcp_vault_warm_path_counts_a_grant_at_public_url_as_
     """A vault holds one credential per URL: a grant sitting at `public_url` means
     the slot is taken, and creating the JWT next to it would 409 on every session
     create with nothing to heal it."""
-    account_id = uuid.uuid4()
+    account_id = await _account(db_session_factory)
     agent_id = uuid.uuid4()
     display = f"daimon-mcp:{account_id}:{agent_id}"
     public_url = "https://mcp.example.com/mcp"

@@ -66,7 +66,7 @@ from daimon.core.errors import TurnError
 from daimon.core.headless_runner import run_turn
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.stores.agent_files import put_agent_file
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
@@ -656,7 +656,10 @@ async def test_run_turn_attaches_vault_when_mcp_settings(
     """Cold-path: ensure_agent_mcp_vault performs vaults.list → vaults.create, then
     run_turn passes the new per-agent vault id into beta.sessions.create as vault_ids.
     """
-    account_id = uuid.uuid4()
+    async with db_session_factory() as db, db.begin():
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    account_id = account.id
     agent_uuid = uuid.uuid4()
     public_url = "https://mcp.example.local/mcp"
     visited_paths: list[tuple[str, str]] = []
@@ -1083,7 +1086,8 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
     """resources must compose with the vault_ids branch, not replace it."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    account_id = uuid.uuid4()
+    account = await make_account(db_session, tenant=tenant)
+    account_id = account.id
     public_url = "https://mcp.example.local/mcp"
     await put_agent_file(
         db_session,

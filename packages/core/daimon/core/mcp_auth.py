@@ -1,11 +1,11 @@
-"""Pure JWT minting for daimon-mcp tokens.
+"""JWT signing and registered credential minting for daimon-mcp tokens.
 
 Shared primitive between `daimon.core.mcp_vault.ensure_mcp_vault` and the
 CLI's `daimon mcp mint-token` command — both need to sign, neither should
 cross the core/adapter boundary to reach the FastMCP verifier.
 
-No I/O, no globals. `now` is injected per guideline:architecture so tests
-are deterministic and the function stays pure.
+Signing functions are pure; registered mint functions use the injected session.
+The injected `now` keeps lifetimes deterministic in tests.
 
 Server-side verification lives in `daimon.adapters.mcp.auth.verifier`
 (FastMCP's `JWTVerifier`, which is authlib-backed). We don't verify here.
@@ -47,6 +47,8 @@ def mint_jwt(
     now: dt.datetime,
     agent_id: uuid.UUID | None = None,
     is_admin: bool = False,
+    jti: uuid.UUID | None = None,
+    expires_at: dt.datetime | None = None,
     chat_agent_id: uuid.UUID | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
 ) -> str:
@@ -59,7 +61,8 @@ def mint_jwt(
 
     - ``sub`` is the string form of the account UUID (stable across principal renames).
     - ``iat`` is ``int(now.timestamp())`` (UTC assumed; caller owns tz).
-    - No ``exp`` — role is resolved live from the DB on each request.
+    - Registry-backed callers supply ``jti`` and ``expires_at``; vault chat always does.
+    - Role is resolved live from the DB on each request.
     - When ``agent_id`` is supplied, the optional ``"agent_id"`` claim is added
       Used by the MCP ``get_cli_token`` tool to mint per-service tokens
       scoped to the agent without trusting tool-supplied parameters.
@@ -77,6 +80,13 @@ def mint_jwt(
         "sub": str(account_id),
         "iat": int(now.timestamp()),
     }
+    if (jti is None) != (expires_at is None):
+        raise ValueError("registered tokens require both jti and expiry")
+    if jti is not None and expires_at is not None:
+        if expires_at <= now:
+            raise ValueError("token expiry must be in the future")
+        claims["jti"] = str(jti)
+        claims["exp"] = int(expires_at.timestamp())
     if agent_id is not None:
         claims["agent_id"] = str(agent_id)
     if chat_agent_id is not None:
@@ -86,6 +96,58 @@ def mint_jwt(
     if is_admin:
         claims["is_admin"] = True
     return pyjwt.encode(claims, secret, algorithm="HS256")
+
+
+# One hour covers the existing 45-minute turn ceiling plus vault propagation.
+CHAT_TOKEN_TTL = dt.timedelta(hours=1)
+CHAT_TOKEN_REFRESH_MARGIN = dt.timedelta(minutes=50)
+CHAT_TOKEN_LABEL = "vault-chat"
+
+
+async def mint_chat_mcp_token(
+    session: AsyncSession,
+    *,
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    secret: bytes,
+    now: dt.datetime,
+    slack_turn_context_id: uuid.UUID | None = None,
+) -> tuple[str, uuid.UUID, dt.datetime]:
+    """Register one expiring ordinary-chat credential with the existing token owner.
+
+    An agent-kind row binds the executing agent, but the JWT deliberately uses
+    chat_agent_id rather than the restricted external agent-chat agent_id claim.
+    Old tokens remain independently revocable until their bounded expiry; rotating
+    a shared vault does not revoke credentials of an already-running turn.
+    """
+    from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.stores.mcp_tokens import create_mcp_token_row
+
+    identity = await get_account_with_tenant(session, account_id=account_id)
+    if identity is None:
+        raise ValueError("chat credential requires a live account")
+    jti = uuid.uuid4()
+    expires_at = now + CHAT_TOKEN_TTL
+    await create_mcp_token_row(
+        session,
+        jti=jti,
+        account_id=account_id,
+        tenant_id=identity.tenant_id,
+        agent_id=str(agent_id),
+        label=CHAT_TOKEN_LABEL,
+        created_at=now,
+        expires_at=expires_at,
+    )
+    token = mint_jwt(
+        account_id=account_id,
+        chat_agent_id=agent_id,
+        secret=secret,
+        now=now,
+        slack_turn_context_id=slack_turn_context_id,
+        jti=jti,
+        expires_at=expires_at,
+    )
+    return token, jti, expires_at
 
 
 def mint_internal_mcp_token(

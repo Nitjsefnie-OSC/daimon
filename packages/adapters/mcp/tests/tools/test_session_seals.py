@@ -38,7 +38,7 @@ from daimon.adapters.mcp.tools.sessions import (
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_auth import mint_chat_mcp_token, mint_jwt
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.thread_sessions import create_thread_session
@@ -560,12 +560,14 @@ async def test_a_chat_turn_token_does_not_reach_the_agent_chat_turn_tools(
         ),
         sessionmaker=world.sessionmaker,
     )
-    token = mint_jwt(
-        account_id=world.account_id,
-        secret=_SECRET,
-        now=dt.datetime.now(dt.UTC),
-        chat_agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
-    )
+    async with world.sessionmaker() as db, db.begin():
+        token, _, _ = await mint_chat_mcp_token(
+            db,
+            account_id=world.account_id,
+            agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
+            secret=_SECRET,
+            now=dt.datetime.now(dt.UTC),
+        )
 
     result = await call_mcp_tool(app, token=token, name=tool, arguments=arguments)
 

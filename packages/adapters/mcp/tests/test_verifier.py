@@ -765,3 +765,55 @@ async def test_a_turn_held_as_external_holds_its_tool_calls_while_it_runs(
     await _origin(is_external=True, expires_at=now + dt.timedelta(hours=1))
     held = await verifier.verify_token(token)
     assert held is not None and held.claims[EXTERNAL_CLAIM] is True
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        None,
+        "unknown",
+        "revoked",
+        "expired",
+        "foreign_account",
+        "foreign_agent",
+        "missing_jti",
+        "missing_exp",
+        "external_agent_claim",
+    ],
+)
+async def test_vault_chat_jwt_requires_its_live_bound_registry_row(sessionmaker, corruption):
+    from daimon.core.mcp_auth import mint_chat_mcp_token
+
+    now = dt.datetime.now(dt.UTC)
+    async with sessionmaker() as db, db.begin():
+        _tenant, account = await seed_tenant_and_account(db)
+        token, jti, _expiry = await mint_chat_mcp_token(
+            db, account_id=account, agent_id=uuid.uuid4(), secret=SECRET, now=now
+        )
+        if corruption == "revoked":
+            await revoke_mcp_token(db, jti=jti, now=now)
+        if corruption == "foreign_account":
+            _, other = await seed_tenant_and_account(db)
+    claims = pyjwt.decode(token, SECRET, algorithms=["HS256"])
+    if corruption == "unknown":
+        claims["jti"] = str(uuid.uuid4())
+    if corruption == "expired":
+        claims["exp"] = int((now - dt.timedelta(seconds=1)).timestamp())
+    if corruption == "foreign_account":
+        claims["sub"] = str(other)
+    if corruption == "foreign_agent":
+        claims["chat_agent_id"] = str(uuid.uuid4())
+    if corruption == "missing_jti":
+        claims.pop("jti")
+    if corruption == "missing_exp":
+        claims.pop("exp")
+    if corruption == "external_agent_claim":
+        claims["agent_id"] = claims.pop("chat_agent_id")
+    candidate = pyjwt.encode(claims, SECRET, algorithm="HS256")
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    result = await verifier.verify_token(candidate)
+    assert (result is not None) == (corruption is None)
+    if result is not None:
+        assert result.claims["chat_agent_id"] == claims["chat_agent_id"]
+        assert "agent_id" not in result.claims
+        assert result.claims["daimon_token_jti"] == str(jti)
