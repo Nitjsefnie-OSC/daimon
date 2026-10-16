@@ -22,11 +22,12 @@ from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.externals import Membership
 from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.accounts import set_external
+from daimon.core.stores.accounts import get_account, set_external, set_role
 from daimon.core.stores.domain import Role, TurnCardIntentRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.tenants import set_plain_text_mentions, set_turn_cap
@@ -66,6 +67,7 @@ from .conftest import (
 )
 
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+ADMIN_TEAM = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
 
 
 def test_agent_name_prefix_follows_deployment_switch() -> None:
@@ -839,7 +841,7 @@ async def test_an_external_participant_is_never_an_admin(
 async def test_an_owner_of_the_admin_team_gets_the_admin_role(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    team = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
+    team = ADMIN_TEAM
     teams = _app(db_session_factory, FakeSender())
     teams._teams = teams._teams.model_copy(update={"admin_team_id": team})
     owners = AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
@@ -847,6 +849,35 @@ async def test_an_owner_of_the_admin_team_gets_the_admin_role(
     assert await teams._role(make_inbound()) is Role.ADMIN, "an owner of the admin team"
     assert await teams._role(_external()) is Role.USER, "an owner, but held as from outside"
     owners.assert_awaited_with(team)
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_turn_while_the_owners_cannot_be_read_keeps_a_stored_admin_role(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An outage runs the turn as a user's but must not write USER over the stored ADMIN."""
+    teams = _app(db_session_factory, FakeSender())
+    teams._teams = teams._teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
+    failing = AsyncMock(side_effect=GroupLookupFailed("http error (status 503)"))
+    teams.runtime = dataclasses.replace(teams.runtime, team_owners=failing)
+    async with db_session_factory.begin() as session:
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=TENANT, platform="teams", external_id=AAD_OBJECT_ID
+        )
+        await set_role(session, principal.account_id, Role.ADMIN)
+    roles: list[Role | None] = []
+    real_admit = app_module.admit
+
+    async def recording_admit(*args: Any, **kwargs: Any) -> Any:
+        roles.append(kwargs["role"])
+        return await real_admit(*args, **kwargs)
+
+    with patched_turns("done"), patch.object(app_module, "admit", recording_admit):
+        await teams._run_turn(make_inbound(), TENANT)
+    assert roles == [None], "admission records no role, so the turn is a user's"
+    async with db_session_factory() as session:
+        account = await get_account(session, principal.account_id)
+    assert account is not None and account.role is Role.ADMIN, "the stored role stands"
 
 
 @dataclasses.dataclass

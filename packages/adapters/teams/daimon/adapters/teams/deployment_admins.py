@@ -7,11 +7,15 @@ also demotes their stored role, which routines and tools act on. The
 deprecated `admin_user_ids` still counts, on top. Someone from another
 organisation (a guest held as one, an external participant, a group chat with
 outsiders) is never an admin, and Graph leaves guests out of the owners. A
-failed owner read grants nothing and is logged once per lookup.
+failed owner read is logged once per lookup and answered by the last
+successful one for up to an hour (`STALE_OWNERS_S`); after that, team
+ownership grants nothing and a turn records no role, so stored admin roles
+stand until a read succeeds.
 """
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -22,12 +26,16 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.channel_admins import GroupLookupFailed, GroupMembers, ServerAdminIds
 from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.domain import Role
 
 log = structlog.get_logger()
 
+#: How long the last successful owner read stands in for failed ones.
+STALE_OWNERS_S = 3600.0
+
 
 class AdminTeamReads:
-    """The Graph owner read, telling `after_read` the admin team's owners at each success.
+    """The Graph owner read, keeping the admin team's last owners and telling `after_read`.
 
     It wraps the read the shared cache makes, so a read made first for a
     channel grant naming the same team counts too, and each read counts once.
@@ -39,16 +47,26 @@ class AdminTeamReads:
         *,
         team_id: str,
         after_read: Callable[[frozenset[str]], object],
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._lookup = lookup
         self._team_id = team_id
         self._after_read = after_read
+        self._clock = clock
+        self._last: tuple[float, frozenset[str]] | None = None
 
     async def __call__(self, group_id: str) -> frozenset[str]:
         owners = await self._lookup(group_id)
         if group_id == self._team_id:
+            self._last = (self._clock(), owners)
             self._after_read(owners)
         return owners
+
+    def last_owners(self) -> frozenset[str] | None:
+        """The last successful read's owners, or None once it is `STALE_OWNERS_S` old."""
+        if self._last is None or self._clock() - self._last[0] >= STALE_OWNERS_S:
+            return None
+        return self._last[1]
 
 
 def demoting_owner_reads(
@@ -78,10 +96,11 @@ def demoting_owner_reads(
 
 
 def admin_team_owners(runtime: TeamsRuntime, *, fresh: bool = False) -> GroupMembers | None:
-    """A team's live owners through the shared cache, logging a failed read; None without Graph."""
+    """Live owners through the shared cache, or the last ones for an hour; None without Graph."""
     lookup = runtime.team_owners
     if lookup is None:
         return None
+    reads = lookup if isinstance(lookup, AdminTeamReads) else None
 
     async def fetch(group_id: str) -> frozenset[str]:
         try:
@@ -92,20 +111,50 @@ def admin_team_owners(runtime: TeamsRuntime, *, fresh: bool = False) -> GroupMem
             raise
 
     async def owners(group_id: str) -> frozenset[str]:
-        return await runtime.group_members.members(
-            ("teams", group_id), lambda: fetch(group_id), fresh=fresh
-        )
+        try:
+            return await runtime.group_members.members(
+                ("teams", group_id), lambda: fetch(group_id), fresh=fresh
+            )
+        except GroupLookupFailed:
+            # An outage, or the app removed from the team, keeps the admins for an hour.
+            last = None if reads is None else reads.last_owners()
+            if last is None:
+                raise
+            return last
 
     return owners
 
 
 async def _owner_ids(settings: TeamsSettings, owners: GroupMembers | None) -> frozenset[str]:
+    """The admin team's owners; raises `GroupLookupFailed` when they cannot be read."""
     if settings.admin_team_id is None or owners is None:
         return frozenset()
+    return await owners(settings.admin_team_id)
+
+
+async def deployment_role(
+    settings: TeamsSettings,
+    owners: GroupMembers | None,
+    *,
+    user_id: str,
+    is_external: bool,
+    home_tenant_id: str | None = None,
+) -> Role | None:
+    """ADMIN if listed or an owner of the admin team, else USER; None if the owners are unknown.
+
+    None is a user's turn that records no role (`admit`): an outage must not
+    write USER over the stored ADMIN that an owner's routines and tools use.
+    """
+    if is_external or (home_tenant_id is not None and home_tenant_id.lower() != settings.tenant_id):
+        return Role.USER
+    user = user_id.lower()
+    if user in settings.admin_user_ids:
+        return Role.ADMIN
     try:
-        return await owners(settings.admin_team_id)
+        owner_ids = await _owner_ids(settings, owners)
     except GroupLookupFailed:
-        return frozenset()  # fail closed; the deprecated list still applies
+        return None
+    return Role.ADMIN if user in owner_ids else Role.USER
 
 
 async def is_deployment_admin(
@@ -117,17 +166,17 @@ async def is_deployment_admin(
     home_tenant_id: str | None = None,
 ) -> bool:
     """Whether `user_id` administers the deployment: listed, or an owner of the admin team."""
-    if is_external or (home_tenant_id is not None and home_tenant_id.lower() != settings.tenant_id):
-        return False
-    user = user_id.lower()
-    return user in settings.admin_user_ids or user in await _owner_ids(settings, owners)
+    role = await deployment_role(
+        settings, owners, user_id=user_id, is_external=is_external, home_tenant_id=home_tenant_id
+    )
+    return role is Role.ADMIN
 
 
-async def inbound_is_admin(
+async def inbound_role(
     runtime: TeamsRuntime, settings: TeamsSettings, inbound: TeamsInbound
-) -> bool:
-    """Whether a message's sender administers the deployment, as classified (`is_external`)."""
-    return await is_deployment_admin(
+) -> Role | None:
+    """A message sender's `deployment_role`, as classified (`is_external`)."""
+    return await deployment_role(
         settings,
         admin_team_owners(runtime),
         user_id=inbound.user_id,
@@ -136,11 +185,22 @@ async def inbound_is_admin(
     )
 
 
+async def inbound_is_admin(
+    runtime: TeamsRuntime, settings: TeamsSettings, inbound: TeamsInbound
+) -> bool:
+    """Whether a message's sender administers the deployment, as classified (`is_external`)."""
+    return await inbound_role(runtime, settings, inbound) is Role.ADMIN
+
+
 async def deployment_admin_ids(
     settings: TeamsSettings, owners: GroupMembers | None
 ) -> tuple[str, ...]:
     """Every admin, sorted: the admin team's owners and the deprecated list; () for none."""
-    return tuple(sorted({*settings.admin_user_ids, *await _owner_ids(settings, owners)}))
+    try:
+        owner_ids = await _owner_ids(settings, owners)
+    except GroupLookupFailed:
+        owner_ids = frozenset[str]()  # fail closed; the deprecated list still applies
+    return tuple(sorted({*settings.admin_user_ids, *owner_ids}))
 
 
 def live_admin_ids(runtime: TeamsRuntime) -> ServerAdminIds:
@@ -155,12 +215,19 @@ def live_admin_ids(runtime: TeamsRuntime) -> ServerAdminIds:
     return admin_ids
 
 
-async def boot_admin_ids(runtime: TeamsRuntime, settings: TeamsSettings) -> tuple[str, ...]:
-    """The admins at boot, for demoting everyone else; warns once if the old list is set."""
+async def boot_admin_ids(runtime: TeamsRuntime, settings: TeamsSettings) -> tuple[str, ...] | None:
+    """The admins at boot, for demoting everyone else; None if the owners can't be read.
+
+    Warns once if the old list is set.
+    """
     if settings.admin_user_ids:
         log.warning(
             "teams.admin_user_ids_deprecated",
             count=len(settings.admin_user_ids),
             hint="make these people owners of the DAIMON_TEAMS__ADMIN_TEAM_ID team",
         )
-    return await deployment_admin_ids(settings, admin_team_owners(runtime))
+    try:
+        owner_ids = await _owner_ids(settings, admin_team_owners(runtime))
+    except GroupLookupFailed:
+        return None  # demoting on a failed read would take every owner's role
+    return tuple(sorted({*settings.admin_user_ids, *owner_ids}))

@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to that team; its owners, read live and cached for a minute, are Daimon's
   admins, so adding one needs no redeploy, and a removed one loses admin
   within about a minute, routines and tools included. Guests and people from
-  another organisation never are, and a failed owner read grants nothing.
+  another organisation never are. A failed owner read falls back to the last
+  good one for up to an hour, then grants nothing and demotes no one.
   Support requests and channel budget notices for the admins reach these
   owners.
 

@@ -12,10 +12,13 @@ from unittest.mock import MagicMock
 import structlog
 from daimon.adapters.teams.budget_notice import with_budget_notifier
 from daimon.adapters.teams.deployment_admins import (
+    STALE_OWNERS_S,
+    AdminTeamReads,
     admin_team_owners,
     boot_admin_ids,
     demoting_owner_reads,
     deployment_admin_ids,
+    deployment_role,
     is_deployment_admin,
     live_admin_ids,
 )
@@ -231,3 +234,30 @@ async def test_each_owner_read_demotes_a_removed_owners_stored_role_in_the_backg
     graph.failure, clock[0] = "http error (status 503)", 61.0
     await _is_admin(runtime, settings, AAD_OBJECT_ID)
     assert len(background.tasks) == 1, "a failed read demotes no one"
+
+
+async def test_an_outage_keeps_the_last_owners_for_an_hour_then_grants_nothing() -> None:
+    """Graph failing, or the app removed from the team, is not an instant lockout."""
+    graph, clock = _Owners(AAD_OBJECT_ID), [0.0]
+    runtime = _runtime(graph, clock=clock)
+    runtime.team_owners = AdminTeamReads(
+        graph, team_id=TEAM, after_read=lambda _owners: None, clock=lambda: clock[0]
+    )
+    settings = _settings(admins=(OTHER_AAD_OBJECT_ID,))
+    assert await _is_admin(runtime, settings, AAD_OBJECT_ID), "read while Graph answers"
+    graph.failure, clock[0] = "http error (status 403)", 61.0
+    assert await _is_admin(runtime, settings, AAD_OBJECT_ID), "the last read stands in"
+    clock[0] = STALE_OWNERS_S
+    owners = admin_team_owners(runtime)
+    role = await deployment_role(settings, owners, user_id=AAD_OBJECT_ID, is_external=False)
+    assert role is None, "past the hour, ownership is unknown: no role to record"
+    assert await deployment_admin_ids(settings, owners) == (OTHER_AAD_OBJECT_ID,), "list only"
+    listed = await deployment_role(settings, owners, user_id=OTHER_AAD_OBJECT_ID, is_external=False)
+    assert listed is Role.ADMIN, "the deprecated list still answers"
+
+
+async def test_boot_demotes_no_one_when_the_owners_cannot_be_read() -> None:
+    graph = _Owners(AAD_OBJECT_ID)
+    graph.failure = "http error (status 503)"
+    boot = await boot_admin_ids(_runtime(graph), _settings(admins=(OTHER_AAD_OBJECT_ID,)))
+    assert boot is None, "a failed read must not take every owner's stored role"

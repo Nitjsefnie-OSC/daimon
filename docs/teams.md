@@ -197,8 +197,12 @@ someone an owner makes them an admin, with no redeploy; the owner list is
 cached for a minute, so a removed owner loses admin within about a minute,
 everywhere: each owner read also takes the stored admin role, which routines,
 tools and MCP clients act on, from anyone no longer an admin. A failed read
-grants nothing. Guests, people from another organisation and anyone in a
-group chat with outsiders are never admins. The deprecated
+falls back to the last successful one for up to an hour, and demotes no one. If
+the app is removed from the admin team, or Graph can't be read for over an
+hour, only the deprecated list grants admin in chats and cards, while stored
+admin roles stand until a read succeeds; re-adding the app restores the
+owners. Guests, people from another organisation and anyone in a group chat
+with outsiders are never admins. The deprecated
 `DAIMON_TEAMS__ADMIN_USER_IDS` still adds admins by Entra object ID, and logs a
 warning at startup while set. Admins' turns run with the admin role, and the
 panels unlock the admin actions for them. Every card click and dialog

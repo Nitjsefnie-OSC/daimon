@@ -53,7 +53,7 @@ from daimon.adapters.teams.context import (
     render_user_message,
 )
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
-from daimon.adapters.teams.deployment_admins import boot_admin_ids, inbound_is_admin
+from daimon.adapters.teams.deployment_admins import boot_admin_ids, inbound_is_admin, inbound_role
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.group_chats import OUTSIDERS_PRESENT, RosterCheck, placed, turn_guard
 from daimon.adapters.teams.identity import (
@@ -746,8 +746,8 @@ class TeamsApp:
     async def _is_admin(self, inbound: TeamsInbound) -> bool:
         return await inbound_is_admin(self.runtime, self._teams, inbound)
 
-    async def _role(self, inbound: TeamsInbound) -> Role:
-        return Role.ADMIN if await self._is_admin(inbound) else Role.USER
+    async def _role(self, inbound: TeamsInbound) -> Role | None:  # None: owners unknown
+        return await inbound_role(self.runtime, self._teams, inbound)
 
     async def _classified(self, inbound: TeamsInbound) -> TeamsInbound:
         """`inbound` with what its member lists say about the sender (`externals`)."""
@@ -1525,7 +1525,7 @@ class TeamsApp:
         reraise: bool,
         roster_open: RosterCheck | None,
     ) -> None:
-        deps, role = self.runtime.turn_deps, await self._role(inbound)
+        deps, role = self.runtime.turn_deps, await self._role(inbound) or Role.USER
         lifecycle = holder[-1]
         bare = _bare_mention(inbound)
         if bare and self._reader is None:
