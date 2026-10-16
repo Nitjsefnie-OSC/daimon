@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import pytest
 import structlog
 from daimon.adapters.teams.activity_feed import ActivityFeed, ChannelHomes, chain_id
+from daimon.adapters.teams.provider_actions import TeamsProviderActions
 from daimon.adapters.teams.tool_confirmation import APPROVAL_NOTICE, TeamsConfirmationCards
+from daimon.adapters.teams.turn_hooks import turn_hooks
+from daimon.core.config import TurnSettings
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.stores.domain import TeamsInstallationRow
 from daimon.core.teams_graph import GraphClient
@@ -27,7 +34,10 @@ from .conftest import (
     TEAM_GROUP_ID,
     THREAD_ID,
     FakeSender,
+    make_inbound,
 )
+from .test_provider_actions import SESSION
+from .test_turn_hooks import question
 
 TEAM_ID = "19:general@thread.tacv2"
 REPLY_ID = "1700000000555"
@@ -297,6 +307,39 @@ async def test_an_approval_card_passes_the_inbound_team_to_its_notice() -> None:
     [request] = fake.requests
     assert request.url.path == "/v1.0/teams/g-inbound/sendActivityNotification", "that team"
     assert fake.stored_reads == [], "no stored read"
+
+
+@pytest.mark.parametrize("card", ["confirmation", "question"])
+async def test_a_turns_cards_notify_the_inbound_team_without_a_lookup(card: str) -> None:
+    """A turn's hooks pass its activity's team: neither the stored rows nor a list is read."""
+    fake = _Feed(channels={})
+    sender = FakeSender()
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings()
+    inbound = make_inbound(kind="channel", conversation=THREAD_ID)
+    hooks = turn_hooks(
+        TeamsConfirmationCards(sender, feed=fake.feed),
+        TeamsProviderActions(sender, feed=fake.feed),
+        runtime=runtime,
+        inbound=dataclasses.replace(inbound, team_group_id="g-inbound"),
+        prepared=SimpleNamespace(session_ref=SESSION),
+        admission=SimpleNamespace(account_id=uuid.uuid4()),
+        tenant_id=uuid.uuid4(),
+        roster_open=None,
+    )
+    now = datetime.now(UTC)
+    if card == "confirmation":
+        call = ToolCall(tool_use_id="tu_1", server_name="linear", tool_name="x", input={})
+        prompt = prompt_for_tool_call(call, requester_platform_user_id=AAD_OBJECT_ID, now=now)
+        await hooks["confirm_write"](
+            prompt.model_copy(update={"expires_at": now + timedelta(milliseconds=10)})
+        )
+    else:
+        await hooks["provider_action"](question(THREAD_ID))
+    await fake.settle()
+    [request] = fake.requests
+    assert request.url.path == "/v1.0/teams/g-inbound/sendActivityNotification", "that team"
+    assert fake.stored_reads == [] and fake.channel_lists == [], "no lookup"
 
 
 async def test_an_approval_card_in_a_chat_sends_no_notice() -> None:
