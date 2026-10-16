@@ -1,0 +1,6 @@
+config	verdict	distinct_states
+Safe	clean	40493
+NoGenerationCheck	violates:NoStaleOverwrite	1577
+LegacyOnlyWrite	violates:EventuallyConsistent	24851
+NoLeaseOwnerCheck	violates:NoStaleOverwrite	1606
+ReorderDuplicateWitness	witness:ReorderDuplicateConverges	4358

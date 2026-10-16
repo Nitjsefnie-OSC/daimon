@@ -9,6 +9,7 @@ from typing import Literal
 from cryptography.fernet import MultiFernet
 from daimon.core._models import Account, GitHubAppSessionVault, GitHubIssuedToken, ThreadSession
 from daimon.core.github_credentials import decrypt_token, encrypt_token
+from daimon.core.github_installation_coverage import installation_covers_repo_sql
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.domain import ThreadSessionRow
 from pydantic import BaseModel, ConfigDict
@@ -200,6 +201,7 @@ async def select_stale_tokens(
     """
     current = now or datetime.now(UTC)
     token_filter = "AND token.token_id = :token_id" if token_id is not None else ""
+    coverage_sql = installation_covers_repo_sql("auth_row.repo_full_name", "installation")
     statement = (
         select(GitHubIssuedToken)
         .from_statement(
@@ -220,6 +222,7 @@ async def select_stale_tokens(
               AND (
                 installation.installation_id IS NULL
                 OR installation.suspended_at IS NOT NULL
+                OR installation.github_removed_at IS NOT NULL
                 OR EXISTS (
                   SELECT 1
                   FROM unnest(token.repo_ids) AS repo(repo_id)
@@ -245,7 +248,7 @@ async def select_stale_tokens(
                      OR auth_row.repo_id IS NULL
                      OR auth_row.status <> 'active'
                      OR auth_row.installation_id <> token.installation_id
-                     OR NOT (auth_row.repo_full_name = ANY(installation.repo_full_names))
+                     OR NOT ({coverage_sql})
                      OR (
                        token.superseded_at IS NULL
                        AND :include_live_version_bumps

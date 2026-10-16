@@ -22,6 +22,7 @@ from daimon.adapters.mcp.tools.github_request_delivery import (
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.github_app_session import effective_repo_state
+from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.github_request_cards import RequestCard, requester_card
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.github_access import list_agent_grants, list_authorized_repos
@@ -166,7 +167,7 @@ async def request_github_access_impl(
             else None
         )
         if connected is not None and (
-            installation is None or connected.repo_full_name not in installation.repo_full_names
+            not installation_covers_repo(installation, connected.repo_full_name)
         ):
             connected = None
         grant = None

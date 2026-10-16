@@ -28,6 +28,7 @@ from daimon.core._models import (
 )
 from daimon.core.continuity.continuation import sanitize_requested_work
 from daimon.core.github_credentials import decrypt_token, encrypt_token
+from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.stores import github_access
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.security_audit import append_event
@@ -479,8 +480,7 @@ async def _drop_stale_grants(
         if (
             repo is None
             or repo.status != "active"
-            or installation is None
-            or installation.suspended_at is not None
+            or not installation_covers_repo(installation, repo.repo_full_name)
         ):
             await session.delete(grant)
     await session.flush()

@@ -14,6 +14,7 @@ from alembic.operations import Operations
 from daimon.adapters.cli.commands.github import preview_legacy_retirement
 from daimon.core._models import AgentGitHubGrant
 from daimon.core.github_retirement import (
+    RETIREMENT_LIVE_GRANTS_SQL,
     RETIREMENT_LOSS_SQL,
     RETIREMENT_PENDING_SESSIONS_SQL,
     RETIREMENT_POST_MARK_TURNS_SQL,
@@ -129,6 +130,24 @@ async def test_retained_grant_gets_app_mode_before_installation_recovers(
         """),
         params,
     )
+    if installation_issue == "repo_missing":
+        await db_session.execute(text("""
+            UPDATE github_app_installations
+            SET repo_full_names = ARRAY['example/widgets'],
+                github_repo_full_names = ARRAY[]::text[]
+            WHERE installation_id = 11
+        """))
+        assert (await db_session.execute(text(RETIREMENT_LIVE_GRANTS_SQL))).all() == []
+        await db_session.execute(text("""
+            UPDATE github_app_installations SET github_repo_full_names = NULL
+            WHERE installation_id = 11
+        """))
+        assert len((await db_session.execute(text(RETIREMENT_LIVE_GRANTS_SQL))).all()) == 1
+        await db_session.execute(text("""
+            UPDATE github_app_installations
+            SET repo_full_names = ARRAY['example/other']
+            WHERE installation_id = 11
+        """))
     assert set((await db_session.execute(text(RETIREMENT_LOSS_SQL))).scalars()) == set()
     conn = await db_session.connection()
 

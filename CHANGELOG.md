@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- GitHub App grants stop covering repositories removed from an installation, suspended installations, and installations GitHub confirms deleted. A refreshed GitHub repository snapshot is intersected with the tenant's confirmed Connect set; webhook changes and existing installations queue a refresh.
+
 - Require fleet reviewers to use a different backend from the primary, including retained reviews checked before summary delivery.
 
 - Allow fresh Gemini preparation for a new mention thread while preserving an existing session when replacement is unsupported.

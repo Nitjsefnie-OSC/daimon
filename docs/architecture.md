@@ -1176,7 +1176,13 @@ against the fingerprints stored on the mapping row; the outcome rides back on
 GitHub App mode uses the agent's live grants when assembling a turn. External
 askers get no App token. Each session gets one write token scoped to the agent's
 live repositories in one installation. The token is recorded before minting
-and checked again after delivery. The session mounts only the selected working
+and checked again after delivery. A repository is live when it remains in both
+the tenant-confirmed Connect set and the
+latest complete GitHub installation snapshot. Until the first refresh, the
+confirmed set applies. A GitHub-confirmed uninstall or suspension disables
+coverage; later refreshes can restore it when the repo is still confirmed.
+The refresh never adds repos to the tenant-confirmed set.
+The session mounts only the selected working
 repository, if there is one, and uses its own vault for `GH_TOKEN` and Copilot.
 Other granted repos are available through that token
 for cloning by name. A change to the working mount or the token repository

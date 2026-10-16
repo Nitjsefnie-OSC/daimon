@@ -29,6 +29,7 @@ from daimon.core.github_connect_cards import (
     teams_connect_card,
 )
 from daimon.core.github_credentials import encrypt_token
+from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
@@ -289,8 +290,7 @@ async def _github_connect_impl(
                 )
                 grantable = (
                     installation is not None
-                    and installation.suspended_at is None
-                    and repo.repo_full_name in installation.repo_full_names
+                    and installation_covers_repo(installation, repo.repo_full_name)
                     and (is_admin or repo.scope_agent_id == agent_id)
                 )
                 if grantable:

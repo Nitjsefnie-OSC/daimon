@@ -213,7 +213,13 @@ async def _handle_installation(
 ) -> Response:
     """Queue an authoritative installation refresh; delete clears cache now."""
     action = _get(payload, "action")
-    if action not in ("created", "deleted"):
+    if action not in (
+        "created",
+        "deleted",
+        "suspend",
+        "unsuspend",
+        "new_permissions_accepted",
+    ):
         log.info(
             "github.webhook.installation_action_ignored",
             action=action,

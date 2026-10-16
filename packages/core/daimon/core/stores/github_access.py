@@ -13,6 +13,7 @@ from daimon.core._models import (
     GitHubAppInstallation,
     TenantGitHubRepo,
 )
+from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import ColumnElement, or_, select, text
@@ -144,11 +145,7 @@ async def list_live_grant_repositories(
         if row is None or row.status != "active":
             continue
         installation = await session.get(GitHubAppInstallation, row.installation_id)
-        if (
-            installation is None
-            or installation.suspended_at is not None
-            or row.repo_full_name not in installation.repo_full_names
-        ):
+        if not installation_covers_repo(installation, row.repo_full_name):
             continue
         result.append((grant, AuthorizedRepo.model_validate(row)))
     return result
@@ -276,7 +273,7 @@ async def set_working_repo(
             if repo is None or repo.status != "active":
                 continue
             installation = await session.get(GitHubAppInstallation, repo.installation_id)
-            if installation is None or installation.suspended_at is not None:
+            if not installation_covers_repo(installation, repo.repo_full_name):
                 continue
             if repo.repo_full_name.casefold() == repo_name.casefold():
                 selected, selected_name = grant, repo.repo_full_name
@@ -414,7 +411,7 @@ async def stage_grant(
         raise ValueError("repository is not actively authorized for this workspace")
     await require_may_grant(session, repo=authorized, account_id=granted_by_account_id)
     installation = await session.get(GitHubAppInstallation, authorized.installation_id)
-    if installation is None or installation.suspended_at is not None:
+    if not installation_covers_repo(installation, authorized.repo_full_name):
         raise ValueError("GitHub App installation is not active")
     for grant in await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id):
         if grant.repo_id == repo_id:

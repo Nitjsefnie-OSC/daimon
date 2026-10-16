@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from daimon.core._models import GitHubAppInstallation
 from daimon.core.stores import github_app_installations as store
 from daimon.core.stores.domain import GitHubAppInstallationRow
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,3 +133,24 @@ async def test_get_for_repo_returns_none_on_miss(db_session: AsyncSession) -> No
     row = await store.get_for_repo(db_session, repo_full_name="org/not-installed")
 
     assert row is None, "get_for_repo should return None for a repo not in any installation"
+
+
+@pytest.mark.asyncio
+async def test_get_for_repo_requires_github_snapshot_for_new_app(db_session: AsyncSession) -> None:
+    await store.upsert_github_app(
+        db_session,
+        installation_id=6003,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+    )
+    installation = await db_session.get(GitHubAppInstallation, 6003)
+    assert installation is not None
+    installation.repo_full_names = ["org/repo"]
+    await db_session.flush()
+    assert await store.get_for_repo(db_session, repo_full_name="org/repo") is not None
+    installation.github_repo_full_names = []
+    await db_session.flush()
+    assert await store.get_for_repo(db_session, repo_full_name="org/repo") is None

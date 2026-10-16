@@ -124,7 +124,7 @@ async def _post_github(
 
 
 def _installation_api_transport(
-    repositories: list[str], *, installed: bool = True
+    repositories: list[str], *, installed: bool = True, suspended_at: str | None = None
 ) -> httpx.MockTransport:
     """Fake the App installation lookup, list-only token exchange, and list endpoint."""
 
@@ -137,13 +137,16 @@ def _installation_api_transport(
         }:
             if not installed:
                 return httpx.Response(404, json={"message": "Not Found"})
-            return httpx.Response(200, json={"account": {"login": "test-owner"}})
+            return httpx.Response(
+                200, json={"account": {"login": "test-owner"}, "suspended_at": suspended_at}
+            )
         if request.url.path in {
             "/app/installations/9901/access_tokens",
             "/app/installations/9902/access_tokens",
             "/app/installations/9905/access_tokens",
             "/app/installations/9906/access_tokens",
         }:
+            assert suspended_at is None, "a suspended App installation cannot mint a listing token"
             assert request.read() == b'{"permissions":{"metadata":"read"}}', (
                 "reconciliation token must request metadata only and must not scope normal clone auth"
             )
@@ -184,9 +187,12 @@ async def _drain_installation_reconciliation(
     repositories: list[str],
     *,
     installed: bool = True,
+    suspended_at: str | None = None,
 ) -> None:
     async with httpx.AsyncClient(
-        transport=_installation_api_transport(repositories, installed=installed)
+        transport=_installation_api_transport(
+            repositories, installed=installed, suspended_at=suspended_at
+        )
     ) as client:
         await drain_github_installation_reconciliations(
             sessionmaker=sessionmaker,
@@ -406,6 +412,63 @@ async def test_deleted_notification_clears_cache_then_current_api_state_can_rest
     assert refreshed is not None and refreshed.repo_full_names == ("test-owner/current-repo",), (
         "the App API should restore an installation still present despite a stale delete delivery"
     )
+
+
+@pytest.mark.parametrize("action", ["suspend", "unsuspend", "new_permissions_accepted"])
+async def test_installation_state_events_enqueue_refresh(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession],
+    action: str,
+) -> None:
+    response = await _post_github(
+        _build_app(sessionmaker),
+        payload_dict={"action": action, "installation": {"id": 9977}},
+        event="installation",
+        delivery_id=f"installation-{action}",
+    )
+    assert response.status_code == 200
+    async with db_session_factory() as session:
+        job = await github_installation_reconciliation.get(session, installation_id=9977)
+    assert job is not None and job.state == "pending"
+
+
+async def test_github_app_suspension_refreshes_without_listing_token(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        await install_store.upsert_github_app(
+            session,
+            installation_id=9901,
+            account_id=19,
+            account_login="test-owner",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+        )
+    app = _build_app(sessionmaker)
+    for action, suspended_at in (
+        ("suspend", "2026-10-16T12:00:00Z"),
+        ("unsuspend", None),
+    ):
+        response = await _post_github(
+            app,
+            payload_dict={"action": action, "installation": {"id": 9901}},
+            event="installation",
+            delivery_id=f"9901-{action}",
+        )
+        assert response.status_code == 200
+        await _drain_installation_reconciliation(
+            sessionmaker, ["test-owner/repo"], suspended_at=suspended_at
+        )
+        async with db_session_factory() as session:
+            row = await install_store.get(session, installation_id=9901)
+        assert row is not None and row.github_refreshed_at is not None
+        assert (row.suspended_at is not None) == (action == "suspend")
+        assert row.github_repo_full_names == (
+            None if action == "suspend" else ("test-owner/repo",)
+        )
+        assert row.repo_full_names == (), "refresh must not confirm repositories for Connect"
 
 
 async def test_deleted_installation_confirmed_by_github_stays_absent(

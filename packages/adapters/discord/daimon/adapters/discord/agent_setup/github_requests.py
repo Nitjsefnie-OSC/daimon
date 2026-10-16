@@ -13,6 +13,7 @@ from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, resolve_connect_card
+from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.stores.github_access import list_authorized_repos
@@ -232,7 +233,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                     installation = await get_app_installation(
                         session, installation_id=repo.installation_id
                     )
-                    if installation and repo.repo_full_name in installation.repo_full_names:
+                    if installation_covers_repo(installation, repo.repo_full_name):
                         connected[repo.repo_full_name.casefold()] = repo.repo_full_name
             connected_names = [
                 connected[name.casefold()]

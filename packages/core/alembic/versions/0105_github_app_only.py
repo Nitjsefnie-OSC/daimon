@@ -7,13 +7,17 @@ import sqlalchemy as sa
 from alembic import op
 from daimon.core.github_retirement import (
     RETIREMENT_AFFECTED_AGENTS_SQL,
-    RETIREMENT_LIVE_GRANTS_SQL,
     RETIREMENT_LIVE_SESSIONS_SQL,
-    RETIREMENT_LOSS_SQL,
     RETIREMENT_TENANT_EVIDENCE_SQL,
     accepted_loss_agent_ids,
     resolve_retirement_tenants,
     retirement_repo_name_sql,
+)
+from daimon.core.github_retirement import (
+    RETIREMENT_LIVE_GRANTS_SQL as LIVE_GRANTS_CURRENT,
+)
+from daimon.core.github_retirement import (
+    RETIREMENT_LOSS_SQL as LOSS_CURRENT,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 
@@ -21,6 +25,28 @@ revision: str = "0105_github_app_only"
 down_revision: str | None = "0104_agent_tool_rules"
 branch_labels: str | None = None
 depends_on: str | None = None
+
+# Freeze the pre-0106 coverage query. Migration 0105 runs before the GitHub
+# snapshot columns exist, even when installed with a newer application image.
+RETIREMENT_LIVE_GRANTS_SQL = """
+    SELECT g.tenant_id, g.agent_id, g.repo_id, g.is_working_repo,
+           lower(r.repo_full_name) AS repo_name, r.repo_full_name
+    FROM agent_github_grants g
+    JOIN LATERAL (
+        SELECT r.repo_full_name, r.status, r.installation_id
+        FROM tenant_github_repos r
+        WHERE r.tenant_id = g.tenant_id AND r.repo_id = g.repo_id
+          AND (r.scope_agent_id = g.agent_id OR r.scope_agent_id IS NULL)
+        ORDER BY r.scope_agent_id IS NULL
+        LIMIT 1
+    ) r ON true
+    JOIN github_app_installations i ON i.installation_id = r.installation_id
+    WHERE NOT g.staged AND r.status = 'active' AND i.suspended_at IS NULL
+      AND r.repo_full_name = ANY(i.repo_full_names)
+"""
+if LIVE_GRANTS_CURRENT not in LOSS_CURRENT:
+    raise RuntimeError("0105 cannot freeze the retirement loss query")
+RETIREMENT_LOSS_SQL = LOSS_CURRENT.replace(LIVE_GRANTS_CURRENT, RETIREMENT_LIVE_GRANTS_SQL)
 
 
 def upgrade() -> None:

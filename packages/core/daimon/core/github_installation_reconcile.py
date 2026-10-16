@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import structlog
+from daimon.core._models import GitHubAppInstallation
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     build_app_jwt,
@@ -70,22 +71,28 @@ async def drain_github_installation_reconciliations(
                 github_app.app_id,
                 now=int(current_time.timestamp()),
             )
-            account_login = await get_app_installation_account(
+            installation_state = await get_app_installation_account(
                 http_client,
                 jwt=app_jwt,
                 installation_id=job.installation_id,
             )
-            if account_login is None:
+            if installation_state is None:
                 repositories = None
             else:
-                listing_token = await mint_installation_listing_token(
-                    http_client,
-                    jwt=app_jwt,
-                    installation_id=job.installation_id,
-                )
-                repositories = await list_installation_repositories(
-                    http_client, token=listing_token
-                )
+                async with sessionmaker() as session:
+                    existing = await session.get(GitHubAppInstallation, job.installation_id)
+                    is_github_app = existing is not None and existing.app == "github_app"
+                if is_github_app and installation_state.suspended_at is not None:
+                    repositories = None
+                else:
+                    listing_token = await mint_installation_listing_token(
+                        http_client,
+                        jwt=app_jwt,
+                        installation_id=job.installation_id,
+                    )
+                    repositories = await list_installation_repositories(
+                        http_client, token=listing_token
+                    )
 
             finished_at = datetime.now(UTC)
             async with sessionmaker.begin() as session:
@@ -93,8 +100,13 @@ async def drain_github_installation_reconciliations(
                     session,
                     job=job,
                     lease_owner=lease_owner,
-                    account_login=account_login,
+                    account_login=(
+                        installation_state.account_login if installation_state is not None else None
+                    ),
                     repos=repositories,
+                    suspended_at=(
+                        installation_state.suspended_at if installation_state is not None else None
+                    ),
                     now=finished_at,
                 )
             _log.info(

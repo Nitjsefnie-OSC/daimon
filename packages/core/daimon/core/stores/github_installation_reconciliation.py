@@ -152,6 +152,7 @@ async def claim_due(
     row.attempts += 1
     row.updated_at = now
     await session.flush()
+    await session.refresh(row)
     return GitHubInstallationReconciliationRow.model_validate(row)
 
 
@@ -184,6 +185,7 @@ async def finish(
     account_login: str | None,
     repos: list[str] | None,
     now: datetime,
+    suspended_at: datetime | None = None,
 ) -> bool:
     """Write a complete snapshot only for the current claim and generation.
 
@@ -227,6 +229,9 @@ async def finish(
                 confirmed=True,
             )
         await confirm_removal(session, installation_id=job.installation_id, now=now)
+        if previous is not None and previous.app == "github_app":
+            previous.github_removed_at = now
+            previous.github_refreshed_at = now
         await session.execute(
             delete(GitHubAppInstallation).where(
                 GitHubAppInstallation.installation_id == job.installation_id,
@@ -235,10 +240,19 @@ async def finish(
         )
     else:
         await cancel_unconfirmed_removal(session, installation_id=job.installation_id)
-        if repos is None:
-            raise ValueError("a live installation requires a complete repository snapshot")
         previous = await session.get(GitHubAppInstallation, job.installation_id)
-        if previous is not None and previous.app == "legacy":
+        if previous is not None and previous.app == "github_app":
+            if repos is None and suspended_at is None:
+                raise ValueError("a live installation requires a complete repository snapshot")
+            if repos is not None:
+                previous.github_repo_full_names = repos
+            previous.github_refreshed_at = now
+            previous.github_removed_at = None
+            previous.suspended_at = suspended_at
+        else:
+            if repos is None:
+                raise ValueError("a live installation requires a complete repository snapshot")
+        if previous is not None and previous.app == "legacy" and repos is not None:
             await queue_new_repos(
                 session,
                 installation_id=job.installation_id,
@@ -246,24 +260,25 @@ async def finish(
                 new_names=set(repos),
                 now=now,
             )
-        stmt = (
-            pg_insert(GitHubAppInstallation)
-            .values(
-                installation_id=job.installation_id,
-                account_login=account_login,
-                repo_full_names=repos,
+        if repos is not None:
+            stmt = (
+                pg_insert(GitHubAppInstallation)
+                .values(
+                    installation_id=job.installation_id,
+                    account_login=account_login,
+                    repo_full_names=repos,
+                )
+                .on_conflict_do_update(
+                    index_elements=["installation_id"],
+                    set_={
+                        "account_login": account_login,
+                        "repo_full_names": repos,
+                        "updated_at": now,
+                    },
+                    where=GitHubAppInstallation.app == "legacy",
+                )
             )
-            .on_conflict_do_update(
-                index_elements=["installation_id"],
-                set_={
-                    "account_login": account_login,
-                    "repo_full_names": repos,
-                    "updated_at": now,
-                },
-                where=GitHubAppInstallation.app == "legacy",
-            )
-        )
-        await session.execute(stmt)
+            await session.execute(stmt)
 
     row.state = "done"
     row.claimed_generation = None

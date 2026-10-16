@@ -13,8 +13,9 @@ from datetime import datetime
 from typing import Literal
 
 from daimon.core._models import GitHubAppInstallation, TenantGitHubRepo
+from daimon.core.github_installation_coverage import installation_covers_repo_sql
 from daimon.core.stores.domain import GitHubAppInstallationRow
-from sqlalchemy import any_, func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -116,11 +117,12 @@ async def get_for_repo(
     a given repo (credential priority: App token -> PAT -> anon).
     Returns the first matching row or None.
     """
-    stmt = select(GitHubAppInstallation).where(
-        GitHubAppInstallation.app == "legacy",
-        any_(GitHubAppInstallation.repo_full_names) == repo_full_name,
+    stmt = (
+        select(GitHubAppInstallation)
+        .where(text(installation_covers_repo_sql(":repo_full_name", "github_app_installations")))
+        .limit(1)
     )
-    result = await session.execute(stmt)
+    result = await session.execute(stmt, {"repo_full_name": repo_full_name})
     orm = result.scalar_one_or_none()
     if orm is None:
         return None

@@ -18,6 +18,7 @@ from daimon.core.github_connect_cards import (
     connect_button_blocks,
     resolve_connect_card,
 )
+from daimon.core.github_installation_coverage import installation_covers_repo
 from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import slack_mrkdwn_escape
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -318,7 +319,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 installation = await get_app_installation(
                     session, installation_id=repo.installation_id
                 )
-                if installation and repo.repo_full_name in installation.repo_full_names:
+                if installation_covers_repo(installation, repo.repo_full_name):
                     connected[repo.repo_full_name.casefold()] = repo.repo_full_name
         connected_names = [
             connected[name.casefold()]

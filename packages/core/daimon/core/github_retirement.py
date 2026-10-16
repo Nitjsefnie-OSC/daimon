@@ -6,6 +6,7 @@ import os
 import uuid
 from collections.abc import Iterable
 
+from daimon.core.github_installation_coverage import installation_covers_repo_sql
 from daimon.core.ma_identity import derive_agent_uuid
 
 ACCEPTED_LOSS_ENV = "DAIMON_GITHUB_APP_ONLY_ACCEPTED_LOSS"
@@ -24,7 +25,7 @@ def retirement_repo_name_sql(column: str) -> str:
 # Select the confirmation before testing its status, as repo_for_agent does.
 # The installation checks mirror list_live_grant_repositories. Keep this CTE
 # shared by the guard, the working-repo carry, and preview diagnostics.
-RETIREMENT_LIVE_GRANTS_SQL = """
+RETIREMENT_LIVE_GRANTS_SQL = f"""
     SELECT g.tenant_id, g.agent_id, g.repo_id, g.is_working_repo,
            lower(r.repo_full_name) AS repo_name, r.repo_full_name
     FROM agent_github_grants g
@@ -37,8 +38,8 @@ RETIREMENT_LIVE_GRANTS_SQL = """
         LIMIT 1
     ) r ON true
     JOIN github_app_installations i ON i.installation_id = r.installation_id
-    WHERE NOT g.staged AND r.status = 'active' AND i.suspended_at IS NULL
-      AND r.repo_full_name = ANY(i.repo_full_names)
+    WHERE NOT g.staged AND r.status = 'active'
+      AND {installation_covers_repo_sql("r.repo_full_name", "i")}
 """
 
 # Use the same credential inventory for the loss guard and the sessions that

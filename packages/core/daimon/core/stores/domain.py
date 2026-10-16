@@ -811,6 +811,9 @@ class GitHubAppInstallationRow(BaseModel):
     installation_id: int
     account_login: str
     repo_full_names: tuple[str, ...]
+    github_repo_full_names: tuple[str, ...] | None = None
+    github_refreshed_at: datetime | None = None
+    github_removed_at: datetime | None = None
     app: Literal["legacy", "github_app"] = "legacy"
     account_id: int | None = None
     account_type: str | None = None
