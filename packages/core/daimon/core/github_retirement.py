@@ -98,7 +98,14 @@ def resolve_retirement_tenants(
     scoped_evidence: Iterable[tuple[uuid.UUID, uuid.UUID]],
     live_sessions: Iterable[tuple[uuid.UUID, str | None]],
 ) -> tuple[dict[uuid.UUID, uuid.UUID], set[uuid.UUID]]:
-    """Resolve every retired credential to one tenant, or report its agent UUID."""
+    """Resolve every retired credential to one tenant, or report its agent UUID.
+
+    A credential with no tenant evidence at all, such as a saved key left behind
+    by a deleted agent, has no session to mark when every live session's agent
+    is known: any of its sessions would have named a tenant. It is left out of
+    both results. While a live session's agent is unknown, it could be that
+    agent's, so the credential stays unresolved.
+    """
     candidates: dict[uuid.UUID, set[uuid.UUID]] = {}
     for tenant_id, agent_id in affected:
         tenants = candidates.setdefault(agent_id, set())
@@ -107,8 +114,10 @@ def resolve_retirement_tenants(
     for tenant_id, agent_id in scoped_evidence:
         if agent_id in candidates:
             candidates[agent_id].add(tenant_id)
+    unknown_identity = False
     for tenant_id, ma_agent_id in live_sessions:
         if ma_agent_id is None:
+            unknown_identity = True
             continue
         agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id)
         if agent_id in candidates:
@@ -116,7 +125,11 @@ def resolve_retirement_tenants(
     resolved = {
         agent: next(iter(tenants)) for agent, tenants in candidates.items() if len(tenants) == 1
     }
-    unresolved = {agent for agent, tenants in candidates.items() if len(tenants) != 1}
+    unresolved = {
+        agent
+        for agent, tenants in candidates.items()
+        if len(tenants) > 1 or (not tenants and unknown_identity)
+    }
     return resolved, unresolved
 
 
