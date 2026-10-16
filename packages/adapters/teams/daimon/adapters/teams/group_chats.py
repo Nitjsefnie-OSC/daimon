@@ -6,8 +6,9 @@ whole roster is the host organisation's: members with our tenant and the
 policy lists them or guests are unrestricted, an anonymous or unidentified
 member) closes the chat, as does a roster that cannot be read. Bots are not
 counted. Rosters are cached for a minute, and dropped when someone joins. A
-running turn checks again before it shows any of its work, and afresh before
-its answer: a chat that has closed meanwhile stops the turn (`turn_guard`).
+running turn checks again before it shows any of its work (a draft, tool
+lines, a confirmation or question card), and afresh before its answer: a chat
+that has closed meanwhile stops the turn (`turn_guard`).
 """
 
 from __future__ import annotations
@@ -123,21 +124,32 @@ class GroupChatRoster:
         await ctx.next()
 
 
+# A turn's `turn_guard`: True while the chat is still ours (`fresh`: uncached).
+RosterCheck = Callable[[bool], Awaitable[bool]]
+
+
 def turn_guard(
     roster: GroupChatRoster | None,
     chat_id: str,
     cancel: asyncio.Event,
     tell: Callable[[], Awaitable[None]],
-) -> Callable[[bool], Awaitable[bool]]:
-    """A group-chat turn's check before it shows its work (`fresh`: uncached).
+) -> RosterCheck:
+    """A group-chat turn's check before it shows its work, card or answer.
 
-    False once anyone from outside is in the chat, after stopping the turn and
-    telling the asker (`tell`); the caller then shows nothing more.
+    False once anyone from outside is in the chat, and from then on: the first
+    such check stops the turn and tells the asker (`tell`), once per turn.
     """
+    closed = False
 
     async def still_ours(fresh: bool) -> bool:
+        nonlocal closed
+        if closed:
+            return False
         if roster is not None and not await roster.has_outsiders(chat_id, fresh=fresh):
             return True
+        if closed:  # Another check closed it meanwhile and told the asker.
+            return False
+        closed = True
         cancel.set()
         with contextlib.suppress(*TEAMS_SEND_ERRORS):
             await tell()

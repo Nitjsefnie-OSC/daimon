@@ -139,3 +139,29 @@ async def test_a_turn_guard_stops_the_turn_and_tells_the_asker_once_the_chat_clo
     assert not await turn_guard(None, "19:c@thread.v2", asyncio.Event(), tell)(False), (
         "no roster fails closed"
     )
+
+
+async def test_a_turn_guard_tells_the_asker_once_and_stays_closed() -> None:
+    """Every later check of a closed turn fails at once: no second read, no second notice."""
+    reads: list[str] = []
+    told: list[bool] = []
+
+    async def members(chat_id: str) -> list[ChatMember]:
+        reads.append(chat_id)
+        return [ADA, GUEST]
+
+    async def guests() -> frozenset[str]:
+        return frozenset()
+
+    async def tell() -> None:
+        told.append(True)
+
+    roster = GroupChatRoster(tenant_id=OURS, members=members, member_guests=guests)
+    still_ours = turn_guard(roster, "19:c@thread.v2", asyncio.Event(), tell)
+    assert [await still_ours(False), await still_ours(True), await still_ours(False)] == [
+        False,
+        False,
+        False,
+    ], "closed for the rest of the turn"
+    assert told == [True], "the asker is told once per turn"
+    assert reads == ["19:c@thread.v2"], "a closed turn reads the roster no more"

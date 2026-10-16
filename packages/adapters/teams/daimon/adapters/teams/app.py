@@ -54,7 +54,7 @@ from daimon.adapters.teams.context import (
 )
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
 from daimon.adapters.teams.direct_chats import DirectChats
-from daimon.adapters.teams.group_chats import OUTSIDERS_PRESENT, placed, turn_guard
+from daimon.adapters.teams.group_chats import OUTSIDERS_PRESENT, RosterCheck, placed, turn_guard
 from daimon.adapters.teams.identity import (
     DENIED,
     Refusal,
@@ -79,7 +79,7 @@ from daimon.adapters.teams.names import remember_inbound
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.participation import TeamsParticipation
 from daimon.adapters.teams.private_replies import SENDER_ONLY, PrivateReplies, reply_privately
-from daimon.adapters.teams.provider_actions import TeamsProviderActions, provider_action_options
+from daimon.adapters.teams.provider_actions import TeamsProviderActions
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.reactions import React, TeamsReactions
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -94,6 +94,7 @@ from daimon.adapters.teams.site_grant import (
 from daimon.adapters.teams.thread_handoff import hand_over_button
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
+from daimon.adapters.teams.turn_hooks import turn_hooks
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
@@ -1390,14 +1391,18 @@ class TeamsApp:
                 sessionmaker=self.runtime.sessionmaker,
                 budget_channel_id=admission.budget_channel_id,
                 acknowledge=None if continuation else self._reactions.acknowledger(inbound),
-                roster_open=None
-                if inbound.kind != "group"
-                else turn_guard(self.runtime.group_chats, inbound.channel_id, cancel, outsiders),
+                roster_open=roster_open,
             )
             holder.append(attempt)
             return attempt
 
         cancel = asyncio.Event()
+        # One per turn, shared by every card it posts: the asker is told once.
+        roster_open = (
+            None
+            if inbound.kind != "group"
+            else turn_guard(self.runtime.group_chats, inbound.channel_id, cancel, outsiders)
+        )
         lifecycle = new_lifecycle(cancel, None)
         markers: set[uuid.UUID] = set()
         try:
@@ -1450,6 +1455,7 @@ class TeamsApp:
                     new_lifecycle,
                     handoff=handoff,
                     reraise=reraise,
+                    roster_open=roster_open,
                 )
             except asyncio.CancelledError:
                 raise
@@ -1516,6 +1522,7 @@ class TeamsApp:
         *,
         handoff: HandoffFactory | None,
         reraise: bool,
+        roster_open: RosterCheck | None,
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
@@ -1648,22 +1655,15 @@ class TeamsApp:
                 recovery_lifecycle=recovery_lifecycle,
                 image_blocks=attachments.image_blocks or None,
                 deadline=deadline,
-                confirm_write=self.confirmations.hook(
+                **turn_hooks(
+                    self.confirmations,
+                    self.provider_actions,
                     runtime=self.runtime,
-                    tenant_id=tenant_id,
-                    account_id=admission.account_id,
+                    inbound=inbound,
+                    prepared=prepared,
                     admission=admission,
-                    conversation_id=inbound.conversation_id,
-                    service_url=inbound.service_url,
-                    requester_display_name=inbound.user_name,
-                ),
-                **provider_action_options(
-                    prepared,
-                    lambda: self.provider_actions.hook(
-                        conversation_id=inbound.conversation_id,
-                        service_url=inbound.service_url,
-                        thread_id=inbound.thread_id,
-                    ),
+                    tenant_id=tenant_id,
+                    roster_open=roster_open,
                 ),
             )
         if outcome.mapping_id is not None:
