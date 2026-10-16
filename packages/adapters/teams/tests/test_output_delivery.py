@@ -1226,3 +1226,32 @@ async def test_channel_preview_output_is_shown_not_uploaded_and_stands_in_for_th
     assert sent == [["deck.pptx"]], "the agent's picture is the one preview"
     assert asked == [], "a pictured document needs no Graph thumbnail"
     assert sorted(harness.deletes) == ["file_deck", "file_pic"], "both leave the listing"
+
+
+@pytest.mark.parametrize(
+    ("document", "mime_type", "picture"),
+    [
+        ("Q3 report.pdf", "application/pdf", "Q3 report.pdf.preview.png"),
+        ("Bericht-Ü.pdf", "application/pdf", "Bericht-Ü.pdf.preview.png"),
+        ("report", "application/pdf", "report.preview.png"),
+        ("report", "application/pdf", "report.pdf.preview.png"),
+    ],
+)
+async def test_a_preview_output_matches_its_document_by_the_saved_name(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    document: str,
+    mime_type: str,
+    picture: str,
+) -> None:
+    """A space, a non-ASCII letter or an added extension still pairs picture and document."""
+    doc = _csv("file_doc", filename=document).model_copy(update={"mime_type": mime_type})
+    preview, preview_bytes = _png("file_pic", picture)
+    asked: list[httpx.Request] = []
+    files = _channel_files(_uploaded, _thumbnail_sets(THUMBNAIL_URL, asked=asked))
+    harness = _harness(db_session_factory, [doc, preview], files, {"file_pic": preview_bytes})
+
+    await harness.delivery.sweep(_in_channel(), "sesn_1", append=_append)
+
+    sent = [[a.name for a in message.attachments or []] for _, message, _ in harness.sender.sent]
+    assert sent == [[picture.removesuffix(".preview.png")]], "the agent's picture alone"
+    assert asked == [], "a pictured document needs no Graph thumbnail"

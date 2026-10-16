@@ -125,6 +125,11 @@ def preview_label(filename: str) -> str:
     return filename[: -len(PREVIEW_SUFFIX)] or filename
 
 
+def picture_key(filename: str) -> str:
+    """Matches a preview output's label to its document, as saved (`sanitize_title`)."""
+    return sanitize_title(filename).lower()
+
+
 async def _log_channel_skip(file: SkippedFile) -> None:
     log.info("teams.channel_output.skipped", file_id=file.file_id, size_bytes=file.size_bytes)
 
@@ -310,12 +315,12 @@ class TeamsOutputDelivery:
         previews: list[Attachment] = []
         # Uploaded documents, by the name asked for, whose first page is looked up once
         # every file is in; one the agent made a preview output of needs none.
-        documents: list[tuple[str, DriveItem]] = []
+        documents: list[tuple[set[str], DriveItem]] = []
         pictured: set[str] = set()
 
         async def upload(file: DeliverableFile) -> None:
             if is_preview_output(file.filename):
-                pictured.add(preview_label(file.filename).lower())
+                pictured.add(picture_key(preview_label(file.filename)))
                 if (
                     not inbound.unprompted
                     and len(previews) < MAX_PREVIEWS
@@ -352,7 +357,8 @@ class TeamsOutputDelivery:
                 and len(documents) < MAX_PREVIEWS
                 and (item.name or name).lower().endswith(THUMBNAIL_SUFFIXES)
             ):
-                documents.append((name.lower(), item))
+                # The name asked for, or as saved: a mime type may have added an extension.
+                documents.append(({picture_key(file.filename), picture_key(name)}, item))
 
         await sweep_session_outputs(
             self._runtime.anthropic,
@@ -366,7 +372,7 @@ class TeamsOutputDelivery:
         # Images first, as they are ready: a thumbnail may take seconds or never come,
         # so documents get their own message rather than images' places.
         await self._send_previews(inbound, previews)
-        unpictured = [item for name, item in documents if name not in pictured]
+        unpictured = [item for keys, item in documents if not keys & pictured]
         await self._send_previews(inbound, await self._thumbnails(files, unpictured))
 
     async def _sweep_unsaved(self, inbound: TeamsInbound, session_id: str) -> None:
