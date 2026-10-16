@@ -295,6 +295,59 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
         unavailable_repos=((read_url, first_refused),),
     )
     assert minted_ids == [[102]]
+
+    # A newly granted repo sharing the refused repo's profile is minted alone.
+    async with db_session_factory.begin() as session:
+        session.add(
+            TenantGitHubRepo(
+                tenant_id=tenant_id,
+                repo_id=103,
+                owner_id=1,
+                installation_id=771,
+                repo_full_name="example/new-read",
+                max_access="read",
+                authorized_by_github_user_id=2,
+                status="active",
+                version=1,
+            )
+        )
+        await session.flush()
+        await github_app_installations.upsert_github_app(
+            session,
+            installation_id=771,
+            account_id=1,
+            account_login="example",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+        )
+        await github_access.stage_grant(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            repo_id=103,
+            baseline_access="read",
+            ceiling_access="read",
+            granted_by_account_id=None,
+            is_working_repo=False,
+        )
+    minted_ids.clear()
+    newly_rotated = await rotate_live_app_tokens(
+        None,  # type: ignore[arg-type]
+        db_session_factory,
+        session_id="live-session",
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=None,
+        is_external=False,
+        vault_id="vault",
+        resource_ids={write_url: "resource"},
+        config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
+        fernet=fernet,
+        unavailable_repos=((read_url, first_refused),),
+    )
+    assert minted_ids == [[103], [102]]
+    assert newly_rotated.excluded_repo_urls == (read_url,)
     async with db_session_factory() as session:
         current = await get_thread_session_by_id(session, id=mapped.id)
         assert current is not None and current.effective_config is not None
@@ -319,7 +372,7 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
         fernet=fernet,
         unavailable_repos=((read_url, expired),),
     )
-    assert minted_ids == [[102]]
+    assert minted_ids == [[103], [102]]
 
 
 def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:

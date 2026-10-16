@@ -973,8 +973,9 @@ async def _refresh_github_app_sessions(
                     _last_app_access_checks[current.session_id] = now
                     _app_refresh_failures.pop(current.session_id, None)
                     continue
+                access = None
                 if current.expires_at is not None or current.repo_urls or desired_permissions:
-                    await rotate_live_app_tokens(
+                    access = await rotate_live_app_tokens(
                         anthropic_client,
                         sm,
                         session_id=current.session_id,
@@ -989,7 +990,10 @@ async def _refresh_github_app_sessions(
                         active_turn=active_turn,
                     )
                 _last_app_access_checks[current.session_id] = now
-                _app_refresh_failures.pop(current.session_id, None)
+                if access is not None and access.excluded_repo_urls:
+                    _record_refresh_failure(current.session_id, now)
+                else:
+                    _app_refresh_failures.pop(current.session_id, None)
         except Exception:
             _last_app_access_checks[candidate.session_id] = now
             _record_refresh_failure(candidate.session_id, now)

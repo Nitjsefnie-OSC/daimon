@@ -397,20 +397,18 @@ async def prepare_app_access(
     )
     if not rows:
         return AppSessionAccess((), (), None)
-    groups = group_repository_access(
-        [(repo.installation_id, repo.repo_id, access) for _, repo, access in rows]
-    )
-    groups.sort(key=lambda group: (group[0], group[1], group[2]))
     repo_urls = {repo.repo_id: f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows}
     skipped_repo_ids = {
-        repo_id
-        for _, _, repo_ids in groups
-        if all(repo_urls[repo_id] in excluded_repo_urls for repo_id in repo_ids)
-        for repo_id in repo_ids
+        repo.repo_id for _, repo, _ in rows if repo_urls[repo.repo_id] in excluded_repo_urls
     }
-    active_groups = tuple(
-        group for group in groups if not all(repo_id in skipped_repo_ids for repo_id in group[2])
+    active_groups = group_repository_access(
+        [
+            (repo.installation_id, repo.repo_id, access)
+            for _, repo, access in rows
+            if repo.repo_id not in skipped_repo_ids
+        ]
     )
+    active_groups.sort(key=lambda group: (group[0], group[1], group[2]))
     if len(active_groups) + 1 > 15:
         raise ValueError("GitHub App access exceeds the session vault credential limit")
     jwt = build_app_jwt(

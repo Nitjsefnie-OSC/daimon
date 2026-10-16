@@ -41,6 +41,7 @@ from daimon.adapters.scheduler.main import (
 )
 from daimon.core.billing import BillingConfig
 from daimon.core.config import Settings
+from daimon.core.github_app_session import AppSessionAccess
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -187,7 +188,7 @@ async def test_mcp_app_session_refreshes_before_token_expiry(
     desired = unittest.mock.AsyncMock(
         return_value=(("https://github.com/acme/repo",), {11: {"contents": "read"}})
     )
-    rotate = unittest.mock.AsyncMock()
+    rotate = unittest.mock.AsyncMock(return_value=AppSessionAccess((), (), None))
     monkeypatch.setattr("daimon.adapters.scheduler.main.effective_repo_state", desired)
     monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
     checks: dict[str, datetime] = {}
@@ -225,6 +226,58 @@ async def test_mcp_app_session_refreshes_before_token_expiry(
         )
     assert rotate.await_count == 1
     assert "mcp-refresh" in checks
+
+
+async def test_mcp_coverage_refusal_backs_off_next_tick_during_active_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    session_id = f"mcp-refused-{uuid.uuid4()}"
+    url = "https://github.com/acme/refused"
+    await github_issued_tokens.register_app_session_vault(
+        db_session,
+        session_id=session_id,
+        tenant_id=tenant.id,
+        vault_id="refused-vault",
+        is_unmapped=True,
+        is_mcp=True,
+        agent_id=uuid.uuid4(),
+        account_id=account.id,
+        repo_urls=(url,),
+    )
+    await db_session.commit()
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.effective_repo_state",
+        unittest.mock.AsyncMock(return_value=((url,), {11: {"contents": "read"}})),
+    )
+    rotate = unittest.mock.AsyncMock(return_value=SimpleNamespace(excluded_repo_urls=(url,)))
+    monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
+    retrieve = unittest.mock.AsyncMock(return_value=SimpleNamespace(status="running"))
+    anthropic = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(retrieve=retrieve)))
+    settings = Settings.model_validate(
+        {
+            "database": {"url": "postgresql+asyncpg://localhost/test"},
+            "anthropic": {"api_key": "test"},
+        }
+    )
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    before = datetime.now(UTC)
+    await _refresh_github_app_sessions(
+        anthropic, db_session_factory, settings=settings, fernet=fernet
+    )
+    rotate.assert_awaited_once()
+    assert rotate.await_args.kwargs["active_turn"] is True
+    count, retry_at = fresh_refresh_state[session_id]
+    assert count == 1
+    assert before + timedelta(minutes=1) <= retry_at <= datetime.now(UTC) + timedelta(minutes=1)
+    await _refresh_github_app_sessions(
+        anthropic, db_session_factory, settings=settings, fernet=fernet
+    )
+    assert rotate.await_count == 1
 
 
 async def test_running_mcp_turn_refreshes_across_three_token_expiries(

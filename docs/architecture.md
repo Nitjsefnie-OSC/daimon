@@ -1204,6 +1204,10 @@ no new token. Issued installation tokens remain valid for up to one hour, so
 reconciliation does not immediately revoke access already delivered to a
 session. GitHub does not document a unique status code for an uncovered or
 suspended repository; HTTP 422 can also mean spam detection.
+MCP and headless sessions do not store refusal history. When their token
+rotation reports a refused repository, the scheduler backs off later mint
+attempts using the same delay as transient refresh failures, including while a
+turn is active.
 The session mounts only the selected working
 repository, if there is one, and uses its own vault for `GH_TOKEN` and Copilot.
 Other granted repos are available through that token
