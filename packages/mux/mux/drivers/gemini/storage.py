@@ -89,8 +89,8 @@ class Records:
 
 
 class Storage(Protocol):
-    def transaction(self) -> AbstractAsyncContextManager[Records]:
-        """Commit atomically on success, rollback on exception; serialize writers."""
+    def transaction(self, *, after_dispatch: bool = False) -> AbstractAsyncContextManager[Records]:
+        """Serialize atomic writes; post-dispatch outcomes need the long wait budget."""
         ...
 
 

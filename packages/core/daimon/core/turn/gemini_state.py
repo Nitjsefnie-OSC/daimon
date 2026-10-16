@@ -1,9 +1,10 @@
 """Operator-selected durable Gemini records and conservative attempt holds.
 
-SQLite serializes complete driver transactions across local app workers. The
-holds use a separate database so accounting can commit before a native request
-inside a driver-record transaction. Accepted/refused/unknown receipts retain
-holds until actual accounting reconciliation; a refusal never means a free call.
+SQLite serializes local workers; PostgreSQL serializes application instances.
+Records and holds use independent transactions so accounting commits before a
+native request even inside an open driver-record transaction. Accepted, refused
+and unknown receipts retain holds until actual accounting reconciliation; a
+refusal never means a free call.
 """
 
 from __future__ import annotations
@@ -22,11 +23,18 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
+from daimon.core.stores.gemini_runtime_state import (
+    Payload,
+    PayloadDatabase,
+    PostgresPayloadDatabase,
+    complete,
+)
 from daimon.core.turn.errors import AdmissionDenied
-from mux.contracts.ids import ModelRef
+from mux.contracts.ids import ModelRef, Scope
 from mux.drivers.gemini.flash import FLASH_MODELS, FlashAttempt
 from mux.drivers.gemini.storage import Records
 from pydantic import BaseModel, JsonValue, TypeAdapter
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _RECORDS = TypeAdapter(Records)
 _JSON = TypeAdapter[JsonValue](JsonValue)
@@ -85,12 +93,7 @@ def _decode(value: JsonValue) -> object:
 
 
 async def _finish(operation: Callable[[], None]) -> None:
-    task = asyncio.create_task(asyncio.to_thread(operation))
-    try:
-        await asyncio.shield(task)
-    except BaseException:
-        await task
-        raise
+    await complete(asyncio.to_thread(operation))
 
 
 class _Database:
@@ -120,7 +123,7 @@ class _Database:
             raise
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[tuple[sqlite3.Connection, str | None]]:
+    async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Payload]:
         opening = asyncio.create_task(asyncio.to_thread(self._open))
         try:
             connection, body = await asyncio.shield(opening)
@@ -130,7 +133,11 @@ class _Database:
             await asyncio.to_thread(connection.close)
             raise
         try:
-            yield connection, body
+
+            async def save(value: str) -> None:
+                await _finish(lambda: self.save(connection, value))
+
+            yield Payload(body, save)
         except BaseException:
             await asyncio.to_thread(connection.rollback)
             raise
@@ -146,15 +153,16 @@ class _Database:
         connection.commit()
 
 
-class SQLiteGeminiStorage:
+class _GeminiStorage:
     """Full Records transactions scoped to the authorized provider account."""
 
-    def __init__(self, path: Path, *, namespace: str) -> None:
-        self._database = _Database(path, namespace)
+    def __init__(self, database: PayloadDatabase) -> None:
+        self._database = database
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[Records]:
-        async with self._database.transaction() as (connection, body):
+    async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Records]:
+        async with self._database.transaction(after_dispatch=after_dispatch) as payload:
+            body = payload.body
             records = (
                 Records()
                 if body is None
@@ -162,26 +170,25 @@ class SQLiteGeminiStorage:
             )
             yield records
             encoded = json.dumps(_encode(_RECORDS.dump_python(records)), allow_nan=False)
-            await _finish(lambda: self._database.save(connection, encoded))
+            await payload.save(encoded)
 
 
-class SQLiteFlashAccounting:
+class _FlashAccounting:
     """Reserve explicit operator holds before dispatch; never guess actual cost."""
 
-    def __init__(self, path: Path, *, namespace: str, hold_usd: Decimal, cap_usd: Decimal) -> None:
+    def __init__(self, database: PayloadDatabase, *, hold_usd: Decimal, cap_usd: Decimal) -> None:
         if not hold_usd.is_finite() or not cap_usd.is_finite() or not 0 < hold_usd <= cap_usd:
             raise ValueError("positive bounded Gemini holds are required")
-        self._database = _Database(path, namespace)
+        self._database = database
         self._hold, self._cap = hold_usd, cap_usd
         self._pending: ContextVar[str | None] = ContextVar("gemini_attempt_hold", default=None)
 
     async def _update(self, update: Callable[[dict[str, JsonValue]], None]) -> None:
-        async with self._database.transaction() as (connection, body):
+        async with self._database.transaction() as payload:
+            body = payload.body
             rows = TypeAdapter(dict[str, JsonValue]).validate_json(body) if body is not None else {}
             update(rows)
-            await asyncio.to_thread(
-                self._database.save, connection, json.dumps(rows, allow_nan=False)
-            )
+            await payload.save(json.dumps(rows, allow_nan=False))
 
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
         if (
@@ -233,3 +240,47 @@ class SQLiteFlashAccounting:
 
         await self._update(publish)
         self._pending.set(None)
+
+
+class SQLiteGeminiStorage(_GeminiStorage):
+    """Full Records transactions in the explicitly selected local SQLite file."""
+
+    def __init__(self, path: Path, *, namespace: str) -> None:
+        super().__init__(_Database(path, namespace))
+
+
+class PostgresGeminiStorage(_GeminiStorage):
+    """Full Records transactions on the existing application state database."""
+
+    def __init__(
+        self, sessions: async_sessionmaker[AsyncSession], *, scope: Scope, project: str
+    ) -> None:
+        super().__init__(
+            PostgresPayloadDatabase(sessions, scope=scope, project=project, kind="records")
+        )
+
+
+class SQLiteFlashAccounting(_FlashAccounting):
+    """The existing conservative hold owner with local SQLite persistence."""
+
+    def __init__(self, path: Path, *, namespace: str, hold_usd: Decimal, cap_usd: Decimal) -> None:
+        super().__init__(_Database(path, namespace), hold_usd=hold_usd, cap_usd=cap_usd)
+
+
+class PostgresFlashAccounting(_FlashAccounting):
+    """The same conservative hold owner with shared PostgreSQL persistence."""
+
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        *,
+        scope: Scope,
+        project: str,
+        hold_usd: Decimal,
+        cap_usd: Decimal,
+    ) -> None:
+        super().__init__(
+            PostgresPayloadDatabase(sessions, scope=scope, project=project, kind="holds"),
+            hold_usd=hold_usd,
+            cap_usd=cap_usd,
+        )

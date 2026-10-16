@@ -962,7 +962,7 @@ class GeminiEvents(Base):
                 return unknown
             # Definite refusal permits a new operation, but never retries this key.
             await self._state_store.advance_operation(scope, key, "failed", now=now(), fence=None)
-            async with self._storage.transaction() as records:
+            async with self._storage.transaction(after_dispatch=True) as records:
                 record = self._record(records, scope, session)
                 record.unknown_delivery = False
             if exc.category == "not_found" and request.get("previous_interaction_id") is not None:
@@ -978,7 +978,7 @@ class GeminiEvents(Base):
             raise ProviderError(
                 "upstream", retryable=False, native_code="malformed_interaction"
             ) from None
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(after_dispatch=True) as records:
             record = self._record(records, scope, session)
             interaction = string(raw["id"])
             if not is_result:
