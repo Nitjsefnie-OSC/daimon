@@ -9,8 +9,10 @@ from dataclasses import MISSING, fields
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 import structlog
 from daimon.adapters.teams.budget_notice import with_budget_notifier
+from daimon.adapters.teams.channel_admin_groups import team_owner_lookup
 from daimon.adapters.teams.deployment_admins import (
     STALE_OWNERS_S,
     AdminTeamReads,
@@ -60,8 +62,10 @@ class _Owners:
 
 
 def _runtime(owners: _Owners, *, clock: list[float] | None = None) -> MagicMock:
+    """The runtime as `demoting_owner_reads` wires it, demoting no one."""
     now = clock if clock is not None else [0.0]
-    return MagicMock(team_owners=owners, group_members=GroupMembersCache(clock=lambda: now[0]))
+    reads = AdminTeamReads(owners, team_id=TEAM, after_read=lambda _: None, clock=lambda: now[0])
+    return MagicMock(team_owners=reads, group_members=GroupMembersCache(clock=lambda: now[0]))
 
 
 async def _is_admin(
@@ -240,9 +244,6 @@ async def test_an_outage_keeps_the_last_owners_for_an_hour_then_grants_nothing()
     """Graph failing, or the app removed from the team, is not an instant lockout."""
     graph, clock = _Owners(AAD_OBJECT_ID), [0.0]
     runtime = _runtime(graph, clock=clock)
-    runtime.team_owners = AdminTeamReads(
-        graph, team_id=TEAM, after_read=lambda _owners: None, clock=lambda: clock[0]
-    )
     settings = _settings(admins=(OTHER_AAD_OBJECT_ID,))
     assert await _is_admin(runtime, settings, AAD_OBJECT_ID), "read while Graph answers"
     graph.failure, clock[0] = "http error (status 403)", 61.0
@@ -261,3 +262,18 @@ async def test_boot_demotes_no_one_when_the_owners_cannot_be_read() -> None:
     graph.failure = "http error (status 503)"
     boot = await boot_admin_ids(_runtime(graph), _settings(admins=(OTHER_AAD_OBJECT_ID,)))
     assert boot is None, "a failed read must not take every owner's stored role"
+
+
+async def test_a_failed_read_is_logged_even_when_a_channel_grant_made_it() -> None:
+    """The grant path shares the cache key, so it may be the one that reads the admin team."""
+    graph = _Owners(AAD_OBJECT_ID)
+    graph.failure = "http error (status 403)"
+    runtime = _runtime(graph)
+    grant = team_owner_lookup(runtime)
+    assert grant is not None
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(GroupLookupFailed):
+            await grant(TEAM)  # a channel-admin grant naming the admin team, read first
+        assert not await _is_admin(runtime, _settings(), AAD_OBJECT_ID), "fails closed"
+    failed = [log for log in logs if log["event"] == "teams.admin_team.lookup_failed"]
+    assert len(failed) == 1 and graph.reads == 1, f"one read, logged once: {logs}"

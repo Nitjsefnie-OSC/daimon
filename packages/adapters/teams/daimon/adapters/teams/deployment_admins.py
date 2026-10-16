@@ -38,7 +38,8 @@ class AdminTeamReads:
     """The Graph owner read, keeping the admin team's last owners and telling `after_read`.
 
     It wraps the read the shared cache makes, so a read made first for a
-    channel grant naming the same team counts too, and each read counts once.
+    channel grant naming the same team counts too, and each read counts once:
+    a failure is logged here, and a cached one re-raises without a read.
     """
 
     def __init__(
@@ -56,10 +57,15 @@ class AdminTeamReads:
         self._last: tuple[float, frozenset[str]] | None = None
 
     async def __call__(self, group_id: str) -> frozenset[str]:
-        owners = await self._lookup(group_id)
-        if group_id == self._team_id:
-            self._last = (self._clock(), owners)
-            self._after_read(owners)
+        if group_id != self._team_id:
+            return await self._lookup(group_id)
+        try:
+            owners = await self._lookup(group_id)
+        except GroupLookupFailed as exc:
+            log.warning("teams.admin_team.lookup_failed", reason=str(exc))
+            raise
+        self._last = (self._clock(), owners)
+        self._after_read(owners)
         return owners
 
     def last_owners(self) -> frozenset[str] | None:
@@ -102,18 +108,10 @@ def admin_team_owners(runtime: TeamsRuntime, *, fresh: bool = False) -> GroupMem
         return None
     reads = lookup if isinstance(lookup, AdminTeamReads) else None
 
-    async def fetch(group_id: str) -> frozenset[str]:
-        try:
-            return await lookup(group_id)
-        except GroupLookupFailed as exc:
-            # Here, not at each check: a cached failure re-raises without a read.
-            log.warning("teams.admin_team.lookup_failed", reason=str(exc))
-            raise
-
     async def owners(group_id: str) -> frozenset[str]:
         try:
             return await runtime.group_members.members(
-                ("teams", group_id), lambda: fetch(group_id), fresh=fresh
+                ("teams", group_id), lambda: lookup(group_id), fresh=fresh
             )
         except GroupLookupFailed:
             # An outage, or the app removed from the team, keeps the admins for an hour.
