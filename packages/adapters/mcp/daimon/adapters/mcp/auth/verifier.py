@@ -36,7 +36,11 @@ from daimon.core.channel_admins import (
 )
 from daimon.core.channel_admins import administered_channel_ids as administered_channel_ids_for
 from daimon.core.config import McpSettings
-from daimon.core.mcp_auth import CHAT_TOKEN_TTL, chat_token_label
+from daimon.core.mcp_auth import (
+    CHAT_TOKEN_TTL,
+    chat_token_label,
+    registered_agent_claims_match,
+)
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
@@ -83,11 +87,10 @@ def token_row_refusal(
         if row.account_id != identity.account_id or row.tenant_id != identity.tenant_id:
             return "account_mismatch"
         chat = claims.get("chat_agent_id")
-        if chat is not None or row.label == chat_token_label(row.jti):
+        if row.label == chat_token_label(row.jti):
             expiry, issued = claims.get("exp"), claims.get("iat")
             if (
-                row.label != chat_token_label(row.jti)
-                or chat != row.agent_id
+                chat != row.agent_id
                 or claims.get("agent_id") is not None
                 or claims.get("internal") is not None
                 or type(expiry) is not int
@@ -95,6 +98,11 @@ def token_row_refusal(
                 or row.expires_at is None
                 or expiry != int(row.expires_at.timestamp())
                 or not 0 < expiry - issued <= int(CHAT_TOKEN_TTL.total_seconds())
+            ):
+                return "chat_binding_mismatch"
+        elif chat is not None:
+            if row.scopes or not registered_agent_claims_match(
+                row, claims, now=now, chat_execution=True
             ):
                 return "chat_binding_mismatch"
         elif claims.get("agent_id") != row.agent_id:

@@ -55,6 +55,7 @@ from daimon.core.mux_compat import (
     list_vaults,
 )
 from daimon.core.session_ports_compat import mounted_live_vault_ids
+from mux.contracts.ids import Scope
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -188,6 +189,7 @@ async def sweep_stale_admin_credentials(
         try:
             await _sweep_vault(
                 client,
+                scope=scope,
                 session_factory=session_factory,
                 jwt_secret=jwt_secret,
                 public_url=public_url,
@@ -220,6 +222,7 @@ async def sweep_stale_admin_credentials(
 async def _sweep_vault(
     client: AsyncAnthropic,
     *,
+    scope: Scope,
     session_factory: async_sessionmaker[AsyncSession],
     jwt_secret: bytes,
     public_url: str,
@@ -232,7 +235,6 @@ async def _sweep_vault(
     swept_pairs: list[tuple[str, str]],
     recreated_cred_ids: list[str],
 ) -> None:
-    scope = platform_scope("mcp_credential_sweep.sweep_stale_admin_credentials")
     # Find the static_bearer credential at public_url (skip all others).
     target_cred_id: str | None = None
     async for cred in list_credentials(client, vault_id, scope=scope):

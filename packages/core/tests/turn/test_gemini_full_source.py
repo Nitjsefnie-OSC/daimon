@@ -996,7 +996,11 @@ async def test_source_must_have_an_enabled_daimon_mcp_toolset(full):
 async def test_registered_chat_catalogue_matches_source_without_expanding_agent_keys(
     full, source_mcp
 ):
-    from daimon.core.mcp_auth import mint_agent_mcp_token, mint_jwt, validate_agent_mcp_token
+    from daimon.core.mcp_auth import (
+        mint_agent_mcp_token,
+        mint_chat_mcp_token,
+        validate_agent_mcp_token,
+    )
     from daimon.core.stores.mcp_tokens import list_live_tokens_by_label
     from daimon.testing.asgi import mcp_session
 
@@ -1013,12 +1017,13 @@ async def test_registered_chat_catalogue_matches_source_without_expanding_agent_
             secret=secret,
             now=now,
         )
-    ordinary = mint_jwt(
-        account_id=request.admission.account_id,
-        chat_agent_id=plan.source_agent_id,
-        secret=secret,
-        now=now,
-    )
+        ordinary, ordinary_jti, _ = await mint_chat_mcp_token(
+            db,
+            account_id=request.admission.account_id,
+            agent_id=plan.source_agent_id,
+            secret=secret,
+            now=now,
+        )
     try:
         visible = []
         for token in (ordinary, runtime_token, external):
@@ -1046,6 +1051,7 @@ async def test_registered_chat_catalogue_matches_source_without_expanding_agent_
     finally:
         async with request.deps.sessionmaker.begin() as db:
             await revoke_mcp_token(db, jti=token_jti(external), now=request.now())
+            await revoke_mcp_token(db, jti=ordinary_jti, now=request.now())
     assert not posts
 
 

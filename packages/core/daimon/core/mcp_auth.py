@@ -22,6 +22,7 @@ import json
 import os
 import stat
 import uuid
+from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from daimon.core.authz import (
 )
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
+from daimon.core.stores.domain import McpTokenRow
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -292,6 +294,37 @@ async def mint_agent_mcp_token(
     )
 
 
+def registered_agent_claims_match(
+    row: McpTokenRow,
+    claims: Mapping[str, object],
+    *,
+    now: dt.datetime,
+    chat_execution: bool,
+    max_ttl_s: int = 900,
+) -> bool:
+    """Share the remote credential's exact mint shape with server admission.
+
+    Vault chat credentials have their own label, issuance claim and lifetime.
+    Remote chat credentials retain the mint owner's four-claim template and
+    bounded registry lifetime; an arbitrary label cannot select the vault mode.
+    """
+    identity_claim = "chat_agent_id" if chat_execution else "agent_id"
+    expiry = claims.get("exp")
+    return (
+        0 < max_ttl_s <= 900
+        and set(claims) == {"sub", identity_claim, "jti", "exp"}
+        and claims["sub"] == str(row.account_id)
+        and claims[identity_claim] == row.agent_id
+        and claims["jti"] == str(row.jti)
+        and type(expiry) is int
+        and row.expires_at is not None
+        and expiry == int(row.expires_at.timestamp())
+        and now.timestamp() < expiry <= now.timestamp() + max_ttl_s
+        and row.created_at <= now
+        and (not chat_execution or 0 < (row.expires_at - row.created_at).total_seconds() <= 900)
+    )
+
+
 async def validate_agent_mcp_token(
     sessions: async_sessionmaker[AsyncSession],
     *,
@@ -325,16 +358,11 @@ async def validate_agent_mcp_token(
                 "require": ["sub", identity_claim, "jti", "exp"],
             },
         )
-        expiry = claims.get("exp")
         if (
-            not 0 < max_ttl_s <= 900
-            or scope.is_platform
+            scope.is_platform
             or scope.is_legacy_host_authorized
-            or set(claims) != {"sub", identity_claim, "jti", "exp"}
             or claims["sub"] != scope.account_id
             or claims[identity_claim] != str(agent_id)
-            or type(expiry) is not int
-            or not now.timestamp() < expiry <= now.timestamp() + max_ttl_s
         ):
             raise ValueError("invalid scoped agent token")
         jti = uuid.UUID(claims["jti"])
@@ -353,10 +381,9 @@ async def validate_agent_mcp_token(
             or str(row.tenant_id) != scope.tenant_id
             or row.agent_id != str(agent_id)
             or row.revoked_at is not None
-            or row.expires_at is None
-            or row.expires_at <= now
-            or row.created_at > now
-            or int(row.expires_at.timestamp()) != expiry
+            or not registered_agent_claims_match(
+                row, claims, now=now, chat_execution=chat_execution, max_ttl_s=max_ttl_s
+            )
         ):
             raise ValueError("invalid scoped agent token")
     except (pyjwt.InvalidTokenError, KeyError, TypeError, ValueError):

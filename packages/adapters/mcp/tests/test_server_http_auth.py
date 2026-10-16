@@ -7,6 +7,7 @@ Real ASGI app via httpx.ASGITransport, real DaimonJWTVerifier, real Postgres
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import httpx
 import jwt as pyjwt
@@ -17,6 +18,8 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
+from daimon.core.mcp_auth import mint_agent_mcp_token
+from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -193,4 +196,36 @@ async def test_default_verifier_refuses_pre_cutover_unregistered_account_bearer(
         sessionmaker=sessionmaker,
     )
     token = pyjwt.encode({"sub": str(account_id), "iat": 0}, SECRET, algorithm="HS256")
+    assert (await _post(app, token=token)).status_code == 401
+
+
+async def test_registered_remote_chat_handshake_and_revocation(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with sessionmaker() as db, db.begin():
+        tenant_id, account_id = await seed_tenant_and_account(db)
+        token = await mint_agent_mcp_token(
+            db,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=uuid.uuid4(),
+            label="source chat",
+            secret=SECRET.encode(),
+            now=now,
+            ttl_days=900 / 86400,
+            chat_execution=True,
+        )
+    app = create_mcp_app(
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+            anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+            mcp=McpSettings(jwt_secret=SecretStr(SECRET), public_url=HttpUrl("https://x/mcp")),
+        ),
+        sessionmaker=sessionmaker,
+    )
+    assert (await _post(app, token=token)).status_code == 200
+    claims = pyjwt.decode(token, SECRET, algorithms=["HS256"])
+    async with sessionmaker() as db, db.begin():
+        await revoke_mcp_token(db, jti=uuid.UUID(claims["jti"]), now=now)
     assert (await _post(app, token=token)).status_code == 401

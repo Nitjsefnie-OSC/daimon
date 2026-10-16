@@ -26,6 +26,7 @@ from anthropic.types.beta import (
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
+from anthropic.types.beta.vaults import BetaManagedAgentsCredential
 from cryptography.fernet import Fernet
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.config import McpSettings
@@ -671,24 +672,28 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
             },
         )
 
+    credential = {
+        "id": "vcrd_daimon_mcp",
+        "metadata": {"daimon_chat_identity": str(agent_uuid)},
+        "type": "vault_credential",
+        "vault_id": "vlt_caller",
+        "auth": {"type": "static_bearer", "mcp_server_url": public_url},
+        "created_at": "2026-04-01T00:00:00Z",
+        "updated_at": "2026-04-01T00:00:00Z",
+    }
+    refreshed: list[str] = []
+
     def _list_creds(_request: httpx.Request, _match: object) -> httpx.Response:
-        # Only this caller's own daimon-mcp credential — nothing for the
-        # external server, which is the state that used to fail the turn.
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "id": "vcrd_daimon_mcp",
-                        "metadata": {"daimon_chat_identity": str(agent_uuid)},
-                        "type": "credential",
-                        "vault_id": "vlt_caller",
-                        "auth": {"type": "static_bearer", "mcp_server_url": public_url},
-                    }
-                ],
-                "has_more": False,
-            },
-        )
+        # The caller's chat credential exists; the external server is still absent.
+        return httpx.Response(200, json={"data": [credential], "has_more": False})
+
+    def _refresh_cred(request: httpx.Request, _match: object) -> httpx.Response:
+        import json
+
+        credential["metadata"] = json.loads(request.content)["metadata"]
+        refreshed.append("vcrd_daimon_mcp")
+        response = BetaManagedAgentsCredential.model_validate(credential)
+        return httpx.Response(200, json=response.model_dump(mode="json"))
 
     def _create_cred(request: httpx.Request, _match: object) -> httpx.Response:
         import json
@@ -716,6 +721,7 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
     router.add("GET", r"/v1/vaults$", _vaults)
     router.add("GET", r"/v1/vaults/vlt_caller/credentials", _list_creds)
     router.add("POST", r"/v1/vaults/vlt_caller/credentials", _create_cred)
+    router.add("POST", r"/v1/vaults/vlt_caller/credentials/vcrd_daimon_mcp", _refresh_cred)
     router.add("DELETE", r"/v1/vaults/vlt_caller/credentials/.*", _delete_cred)
 
     deps = dataclasses.replace(
@@ -740,6 +746,7 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
     )
 
     assert prepared.reused is True, "this must still be the reuse path"
+    assert refreshed == ["vcrd_daimon_mcp"], "renew chat before adding the external credential"
     urls = [c["auth"]["mcp_server_url"] for c in created]  # pyright: ignore[reportIndexIssue]
     assert urls == ["https://internal.example.com/mcp"], (
         "the agent's external MCP credential must be created in this caller's vault"

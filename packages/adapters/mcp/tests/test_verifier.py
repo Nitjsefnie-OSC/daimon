@@ -1191,3 +1191,94 @@ def test_refusal_diagnostics_survive_the_production_redaction_processor() -> Non
     assert redact_log_event(None, "warning", event) == event
     assert event["age_bucket"] == ">90d"
     assert "must-not-log" not in repr(event)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        None,
+        "revoked",
+        "foreign_agent",
+        "foreign_account",
+        "missing_jti",
+        "missing_exp",
+        "extra_agent",
+        "extra_internal",
+        "extra_iat",
+        "extra_role",
+        "expiry_mismatch",
+        "overlong_registry",
+        "future_registry",
+        "system_label",
+    ],
+)
+async def test_registered_remote_chat_credential_reaches_real_verifier(sessionmaker, corruption):
+    now = dt.datetime.now(dt.UTC)
+    agent_id = uuid.uuid4()
+    async with sessionmaker() as db, db.begin():
+        tenant, account = await seed_tenant_and_account(db)
+        token = await mint_agent_mcp_token(
+            db,
+            account_id=account,
+            tenant_id=tenant,
+            agent_id=agent_id,
+            label="source chat",
+            secret=SECRET,
+            now=now,
+            ttl_days=900 / 86400,
+            chat_execution=True,
+        )
+        claims = pyjwt.decode(token, SECRET, algorithms=["HS256"])
+        jti = uuid.UUID(claims["jti"])
+        if corruption == "revoked":
+            await revoke_mcp_token(db, jti=jti, now=now)
+        if corruption == "foreign_account":
+            _, other = await seed_tenant_and_account(db)
+            claims["sub"] = str(other)
+        if corruption == "overlong_registry":
+            await db.execute(
+                text(
+                    "UPDATE mcp_tokens SET created_at = created_at - interval '1 second' WHERE jti = :jti"
+                ),
+                {"jti": jti},
+            )
+        if corruption == "future_registry":
+            await db.execute(
+                text(
+                    "UPDATE mcp_tokens SET created_at = created_at + interval '1 minute' WHERE jti = :jti"
+                ),
+                {"jti": jti},
+            )
+        if corruption == "system_label":
+            from daimon.core.mcp_auth import chat_token_label
+
+            await db.execute(
+                text("UPDATE mcp_tokens SET label = :label WHERE jti = :jti"),
+                {"jti": jti, "label": chat_token_label(jti)},
+            )
+    if corruption == "foreign_agent":
+        claims["chat_agent_id"] = str(uuid.uuid4())
+    if corruption == "missing_jti":
+        claims.pop("jti")
+    if corruption == "missing_exp":
+        claims.pop("exp")
+    if corruption == "extra_agent":
+        claims["agent_id"] = str(agent_id)
+    if corruption == "extra_internal":
+        claims["internal"] = False
+    if corruption == "extra_iat":
+        claims["iat"] = int(now.timestamp())
+    if corruption == "extra_role":
+        claims["role"] = "admin"
+    if corruption == "expiry_mismatch":
+        claims["exp"] -= 1
+    candidate = pyjwt.encode(claims, SECRET, algorithm="HS256")
+    result = await DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker).verify_token(
+        candidate
+    )
+    assert (result is not None) == (corruption is None)
+    if result is not None:
+        assert result.claims["chat_agent_id"] == str(agent_id)
+        assert "agent_id" not in result.claims
+        assert result.claims[TOKEN_JTI_CLAIM] == str(jti)
+        assert result.claims["role"] == "user"
