@@ -68,11 +68,6 @@ _DIRECT_FILES_HINT = (
     "PyMuPDF (pip install pymupdf): pymupdf.open(pdf)[0].get_pixmap(dpi=96).save(png). "
     "No office renderer is installed by default."
 )
-# Only where previews are sent: an unprompted answer posts none.
-_PREVIEW_NOTE = (
-    " An image among your session outputs still shows inline here as a preview, though it is "
-    "not saved."
-)
 
 
 @dataclass(frozen=True)
@@ -440,7 +435,6 @@ def render_user_message(
             files = f' files="{"available" if channel_files else "unavailable"}"'
         if channel_files is False:
             hint = _FILES_HINT if can_enable_files else _FILES_HINT_NO_CARD
-            hint += "" if inbound.unprompted else _PREVIEW_NOTE
             files += f" files_hint={quoteattr(hint)}"
         names = "".join(
             f" {attr}={quoteattr(value)}"
@@ -458,7 +452,7 @@ def render_user_message(
         ]
     elif inbound.kind == "group":
         name = f" name={quoteattr(inbound.channel_name)}" if inbound.channel_name else ""
-        hint = quoteattr(_GROUP_FILES_HINT + _PREVIEW_NOTE)
+        hint = quoteattr(_GROUP_FILES_HINT)
         context = [
             f'<channel platform="teams" id={quoteattr(inbound.channel_id)} role="group_chat"'
             f'{name} files="unavailable" files_hint={hint}/>'

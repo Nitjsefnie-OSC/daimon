@@ -34,7 +34,13 @@ from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import TerminationReason
-from microsoft_teams.api import Account, MentionEntity, MessageActivityInput, SentActivity
+from microsoft_teams.api import (
+    Account,
+    Attachment,
+    MentionEntity,
+    MessageActivityInput,
+    SentActivity,
+)
 from sqlalchemy.exc import OperationalError
 
 from .conftest import CONVERSATION_ID, SERVICE_URL, FakeSender
@@ -541,6 +547,56 @@ async def test_file_links_that_would_overflow_the_last_message_are_refused() -> 
 
     assert not await lifecycle.append_to_answer("Saved to this channel's files:")
     assert len(sender.sent) == 3, "no edit was tried"
+
+
+def _image(name: str) -> Attachment:
+    return Attachment(content_type="image/png", content_url="data:image/png;base64,AA==", name=name)
+
+
+def _names(activity: MessageActivityInput) -> list[str | None]:
+    return [a.name for a in activity.attachments or []]
+
+
+async def test_previews_ride_the_links_edit_and_later_edits_keep_them() -> None:
+    """One edit adds links and images; another adds more; a notice above sends them again."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+
+    assert await lifecycle.append_to_answer("Saved to this channel's files:", [_image("a.png")])
+    assert await lifecycle.append_to_answer(attachments=[_image("deck.pptx")])
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    links, thumbnails, notice = sender.activities[-3:]
+    assert {links.id, thumbnails.id, notice.id} == {"m-1"}, "each one an edit of the answer"
+    assert links.text == "The posterior mean is 3.\n\nSaved to this channel's files:"
+    assert _names(links) == ["a.png"], "the image rides the links' edit"
+    assert thumbnails.text == links.text, "no text added"
+    assert _names(thumbnails) == ["a.png", "deck.pptx"], "added after the one already there"
+    assert notice.text and notice.text.startswith("I lost the workspace.")
+    assert _names(notice) == ["a.png", "deck.pptx"], "an edit never drops a shown preview"
+
+
+async def test_previews_the_answer_cannot_take_are_refused() -> None:
+    """A notice card, an overflow or a refused edit: the caller sends the previews instead."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(TurnState(content=[_TOOL]))
+    posted = len(sender.sent)
+    assert not await lifecycle.append_to_answer(attachments=[_image("a.png")]), "a notice card"
+    assert len(sender.sent) == posted, "no edit was tried"
+    assert await lifecycle.append_to_answer("Saved to this channel's files:"), "links still fit"
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("x" * (card.TEAMS_LIMIT - 5)))
+    assert not await lifecycle.append_to_answer("Saved:", [_image("a.png")]), "too long"
+
+    sender = FakeSender(refuse_on={3})
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
+    assert not await lifecycle.append_to_answer(attachments=[_image("a.png")]), "a 413"
+    assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
+    assert not sender.activities[-1].attachments, "a refused preview is not sent again"
 
 
 async def test_no_answer_reads_as_cancelled_or_done() -> None:

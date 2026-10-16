@@ -52,7 +52,7 @@ from daimon.core.turn.state import (
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import termination_reason
 from daimon.core.usage_totals import ProviderUsageTotals
-from microsoft_teams.api import Account, MessageActivityInput, SentActivity
+from microsoft_teams.api import Account, Attachment, MessageActivityInput, SentActivity
 from microsoft_teams.cards import Action, ExecuteAction
 from mux.contracts.events import Event
 from mux.profiles import emits_legacy_events_for
@@ -199,6 +199,8 @@ class TeamsTurnLifecycle:
         # Shown messages that are notice cards, not answers: edited as cards,
         # with their buttons, whether they carry 👍/👎, and their summary line.
         self._notices: dict[str, tuple[tuple[Action, ...], str | None]] = {}
+        # Images edited into an answer message: every later edit sends them again.
+        self._attached: dict[str, tuple[Attachment, ...]] = {}
         # Edits of a shown answer, from the turn and the output sweep, one at a time.
         self._answer_edits = asyncio.Lock()
 
@@ -493,27 +495,47 @@ class TeamsTurnLifecycle:
             self._answer_id, lambda text: f"{notice}\n\n{text}", _PREFIX_EVENTS
         )
 
-    async def append_to_answer(self, text: str) -> bool:
-        """Edit `text` in below the answer's last message; False if it cannot go there."""
+    async def append_to_answer(
+        self, text: str | None = None, attachments: Sequence[Attachment] = ()
+    ) -> bool:
+        """Edit `text` and `attachments` in below the answer's last message.
+
+        The attachments follow any already there. False if they cannot go
+        there: no answer shown, a notice card given attachments, too long, or
+        the edit refused; the caller then sends them on their own.
+        """
         return await self._amend(
-            self.final_message_id, lambda shown: f"{shown}\n\n{text}", _SUFFIX_EVENTS
+            self.final_message_id,
+            lambda shown: shown if text is None else f"{shown}\n\n{text}",
+            _SUFFIX_EVENTS,
+            attachments=attachments,
         )
 
     async def _amend(
-        self, message_id: str | None, change: Callable[[str], str], events: tuple[str, str]
+        self,
+        message_id: str | None,
+        change: Callable[[str], str],
+        events: tuple[str, str],
+        *,
+        attachments: Sequence[Attachment] = (),
     ) -> bool:
         async with self._answer_edits:
             if message_id is None or (shown := self._shown.get(message_id)) is None:
                 return False
+            if attachments and message_id in self._notices:
+                return False  # A notice is a card: images beside it would be a second message.
             updated = change(shown)
             if len(updated) > card.TEAMS_LIMIT:
                 return False
+            attached = (*self._attached.get(message_id, ()), *attachments)
             if message_id in self._notices:
                 actions, summary = self._notices[message_id]
                 rendered = card.notice_card(updated, actions=actions, summary=summary)
             else:
                 mention = self._requester if message_id == self._answer_id else None
                 rendered = card.answer_message(updated, mention=mention)
+                if attached:
+                    rendered.add_attachments(*attached)
             try:
                 await self._edit(rendered, message_id)
             except _TIMEOUTS:
@@ -522,6 +544,8 @@ class TeamsTurnLifecycle:
                 log.warning(events[1], exc_info=True)
                 return False
             self._shown[message_id] = updated
+            if attached:
+                self._attached[message_id] = attached
             return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:

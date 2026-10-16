@@ -15,18 +15,19 @@ answer). A failed, oversize or declined file is only logged: status text
 around an answer is thread clutter. Without access a file goes down the
 skip path to be logged, and the agent guidance has the agent say so in its
 reply.
-Image outputs also travel as inline previews (`image_preview`): in a channel,
-up to MAX_PREVIEWS in delivery order in one message after the links, also
-where files cannot be saved (a data URI needs no SharePoint); in a 1:1 chat,
-each just before its first consent card. Up to MAX_PREVIEWS uploaded Office
-files and PDFs then show their first page, Graph's thumbnail of each, in a
-message of their own after the images. A failed preview is only logged.
+Image outputs also travel as inline previews (`image_preview`), up to
+MAX_PREVIEWS in delivery order, edited into the answer's last message: in a
+channel in the same edit as the links, in a 1:1 chat above the consent
+cards. Where files cannot be saved, a group chat included, none is shown.
+Up to MAX_PREVIEWS uploaded Office files and PDFs then show their first
+page, Graph's thumbnail of each, in a second edit. Previews the answer
+cannot take (a notice card, a refused edit) go in a message of their own,
+as with no answer to edit. A failed preview is only logged.
 An output named `<file>.preview.png` (`is_preview_output`) is the agent's own
 picture of `<file>`, such as a document's first page in a 1:1 chat, where
 Graph makes no thumbnail: it is only shown as a preview, never offered or
-uploaded, then deleted. In a 1:1 chat it comes just before its document's
-consent card, whatever the listing order; in a channel it stands in for
-Graph's thumbnail.
+uploaded, then deleted. In a 1:1 chat it shows with the other previews, in
+its document's place; in a channel it stands in for Graph's thumbnail.
 Transient channel upload failures leave the listing entry for a later sweep,
 and an oversize file stays listed on every path, including a channel without
 file access. Otherwise the listing entry, the delivery
@@ -54,11 +55,7 @@ from daimon.adapters.teams.attachments import FetchRefused, fetch_bytes
 from daimon.adapters.teams.card_actions import Actor, card_actor, submitted_fields
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.adapters.teams.image_preview import (
-    MAX_PREVIEWS,
-    PREVIEW_MIME_TYPES,
-    preview_attachment,
-)
+from daimon.adapters.teams.image_preview import MAX_PREVIEWS, preview_attachment
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.media.filenames import display_filename_for, sanitize_title
@@ -100,8 +97,8 @@ _UPLOAD_FAILED = "I couldn't upload `{name}`. Ask me again to retry."
 _SAVED = "Saved to this channel's files:"
 PREVIEW_SUFFIX = ".preview.png"
 
-# Edits a line in below the answer on screen; False if it cannot go there.
-AppendToAnswer = Callable[[str], Awaitable[bool]]
+# Edits text, attachments or both in below the answer on screen; False if they cannot go there.
+AppendToAnswer = Callable[[str | None, Sequence[Attachment]], Awaitable[bool]]
 
 # Graph renders a first-page thumbnail of these, often seconds after the upload.
 THUMBNAIL_SUFFIXES = (".docx", ".pptx", ".xlsx", ".pdf", ".doc", ".ppt", ".xls")
@@ -141,7 +138,7 @@ def previews_first(filenames: Sequence[str]) -> list[int]:
     """A 1:1 sweep's order: each preview output just before its document, else in place.
 
     The agent renders a document before picturing it, so the listing may name
-    the picture second; its consent card would then come before the picture.
+    the picture second; the previews then keep the order of the cards below.
     """
     documents = {picture_key(name) for name in filenames if not is_preview_output(name)}
     held: dict[str, list[int]] = {}
@@ -294,7 +291,7 @@ class TeamsOutputDelivery:
     ) -> None:
         """Deliver the session's outputs. Chained per session: two sweeps never overlap.
 
-        `append` puts a channel's file links below the turn's answer.
+        `append` puts file links and previews below the turn's answer.
         """
         previous = self._sweeps.get(session_id)
         current = asyncio.current_task()
@@ -304,30 +301,44 @@ class TeamsOutputDelivery:
             if previous is not None:
                 with contextlib.suppress(Exception):
                     await previous
-            if inbound.kind != "dm":  # a group chat has no files: previews only
+            if inbound.kind != "dm":  # a group chat has no files: each is skipped
                 await self._sweep_channel(inbound, session_id, append)
                 return
+            previews: list[Attachment] = []
             await sweep_session_outputs(
                 self._runtime.anthropic,
                 session_id=session_id,
-                post=functools.partial(self._post_direct, inbound, session_id),
+                post=functools.partial(self._post_direct, inbound, session_id, previews),
                 on_skip=_log_skip,
                 sleep=self._sleep,
                 order=previews_first,
             )
+            # In the answer, above the consent cards; else one message each.
+            inline = previews[:MAX_PREVIEWS]
+            if inline and append is not None and await append(None, inline):
+                previews = previews[MAX_PREVIEWS:]
+            for preview in previews:
+                await self._send_previews(inbound, [preview])
         finally:
             if self._sweeps.get(session_id) is current:
                 self._sweeps.pop(session_id, None)
 
     async def _post_direct(
-        self, inbound: TeamsInbound, session_id: str, file: DeliverableFile
+        self,
+        inbound: TeamsInbound,
+        session_id: str,
+        previews: list[Attachment],
+        file: DeliverableFile,
     ) -> None:
-        """A 1:1 chat's output: offered, or a preview output only shown and then deleted."""
+        """A 1:1 chat's output: offered, or a preview output only shown and then deleted.
+
+        Either one's preview goes into `previews`, shown once the sweep ends.
+        """
         if not is_preview_output(file.filename):
-            await self._offer(inbound, session_id, file)
+            await self._offer(inbound, session_id, file, previews=previews)
             return
         if (preview := await self._preview_output(file)) is not None:
-            await self._send_previews(inbound, [preview])
+            previews.append(preview)
 
     async def _preview_output(self, file: DeliverableFile) -> Attachment | None:
         mime_type = sniff_image_media_type(file.content) or file.mime_type
@@ -396,54 +407,41 @@ class TeamsOutputDelivery:
             on_skip=_log_skip,
             sleep=self._sleep,
         )
-        if links:
-            await self._post_links(inbound, links, append)
+        # Links and images in one edit of the answer; refused, each goes as on its own.
+        text = "\n".join([_SAVED, *links])
+        if not links:
+            await self._show_previews(inbound, previews, append)
+        elif not (previews and append is not None and await append(text, previews)):
+            await self._post_links(inbound, text, append)
+            await self._send_previews(inbound, previews)
         # Images first, as they are ready: a thumbnail may take seconds or never come,
-        # so documents get their own message rather than images' places.
-        await self._send_previews(inbound, previews)
+        # so documents get an edit of their own rather than images' places.
         unpictured = [item for keys, item in documents if not keys & pictured]
-        await self._send_previews(inbound, await self._thumbnails(files, unpictured))
+        await self._show_previews(inbound, await self._thumbnails(files, unpictured), append)
+
+    async def _show_previews(
+        self, inbound: TeamsInbound, previews: list[Attachment], append: AppendToAnswer | None
+    ) -> None:
+        """`previews` below the answer, else in a message of their own."""
+        if previews and append is not None and await append(None, previews):
+            return
+        await self._send_previews(inbound, previews)
 
     async def _sweep_unsaved(self, inbound: TeamsInbound, session_id: str) -> None:
-        """A channel whose files cannot be saved: every file takes the skip path.
+        """A channel or group chat whose files cannot be saved: every file takes the skip path.
 
         A skipped file is logged, then deleted if it fits the cap; one over it
-        is kept, as on every other path: no channel could take it either. The
-        first images are also downloaded for a preview, an extra that never
-        changes what is logged or deleted, a failed download included.
+        is kept, as on every other path: no channel could take it either.
         """
-        previews: list[Attachment] = []
-
-        async def skip(file: SkippedFile) -> None:
-            await _log_channel_skip(file)
-            if (
-                inbound.unprompted
-                or len(previews) >= MAX_PREVIEWS
-                or file.mime_type not in PREVIEW_MIME_TYPES
-                or file.size_bytes > MAX_BYTES_PER_FILE
-            ):
-                return
-            name = display_filename_for(file.filename, file.mime_type)
-            if is_preview_output(file.filename):
-                name = preview_label(file.filename)
-            try:
-                content = await download_output_file(self._runtime.anthropic, file.file_id)
-            except (anthropic.APIError, httpx.HTTPError) as err:
-                log.info("teams.output_preview.skipped", reason=type(err).__name__)
-                return
-            if (preview := await self._preview(name, content, file.mime_type)) is not None:
-                previews.append(preview)
-
         await sweep_session_outputs(
             self._runtime.anthropic,
             session_id=session_id,
             post=functools.partial(self._offer, inbound, session_id),
-            on_skip=skip,
+            on_skip=_log_channel_skip,
             sleep=self._sleep,
             max_bytes=0,
             discard_skipped_up_to=MAX_BYTES_PER_FILE,
         )
-        await self._send_previews(inbound, previews)
 
     async def _thumbnails(
         self, files: ChannelFiles, documents: list[DriveItem]
@@ -501,10 +499,9 @@ class TeamsOutputDelivery:
         return None
 
     async def _post_links(
-        self, inbound: TeamsInbound, links: list[str], append: AppendToAnswer | None
+        self, inbound: TeamsInbound, text: str, append: AppendToAnswer | None
     ) -> None:
-        text = "\n".join([_SAVED, *links])
-        if append is not None and await append(text):
+        if append is not None and await append(text, ()):
             return
         if inbound.unprompted:
             # Nobody asked: an unprompted turn posts its answer and nothing else.
@@ -575,7 +572,7 @@ class TeamsOutputDelivery:
         name = display_filename_for(file.filename, file.mime_type)
         item = await files.upload(inbound, name, file.content)
         text = f"{_SAVED}\n{file_link(sanitize_title(item.name or name), item.web_url)}"
-        if append is not None and await append(text):
+        if append is not None and await append(text, ()):
             return True
         if inbound.unprompted:
             return False
@@ -593,8 +590,12 @@ class TeamsOutputDelivery:
         file: DeliverableFile,
         *,
         content: bytes | None = None,
+        previews: list[Attachment] | None = None,
     ) -> None:
-        """Send a consent card, then defer: the click decides the file's fate."""
+        """Send a consent card, then defer: the click decides the file's fate.
+
+        The file's preview goes into `previews` when given, else just before the card.
+        """
         now = self._clock()
         self._offers = {k: v for k, v in self._offers.items() if v.expires_at > now}
         pending = {offer.file_id for offer in self._offers.values()} | self._claimed
@@ -603,7 +604,10 @@ class TeamsOutputDelivery:
         name = display_filename_for(file.filename, file.mime_type)
         if file.file_id not in self._previewed:
             self._previewed.add(file.file_id)
-            if (preview := await self._preview(name, file.content, file.mime_type)) is not None:
+            preview = await self._preview(name, file.content, file.mime_type)
+            if preview is not None and previews is not None:
+                previews.append(preview)
+            elif preview is not None:
                 await self._send_previews(inbound, [preview])
         token = secrets.token_urlsafe(24)
         self._offers[token] = _Offer(
