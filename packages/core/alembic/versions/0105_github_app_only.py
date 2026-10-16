@@ -26,7 +26,7 @@ down_revision: str | None = "0104_agent_tool_rules"
 branch_labels: str | None = None
 depends_on: str | None = None
 
-# Freeze the pre-0106 coverage query. Migration 0105 runs before the GitHub
+# Freeze the pre-0107 coverage query. Migration 0105 runs before the GitHub
 # snapshot columns exist, even when installed with a newer application image.
 RETIREMENT_LIVE_GRANTS_SQL = """
     SELECT g.tenant_id, g.agent_id, g.repo_id, g.is_working_repo,
