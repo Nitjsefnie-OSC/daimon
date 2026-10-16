@@ -665,8 +665,6 @@ async def create_session(
             raise ScopeViolation(
                 "worker-resources", "captured source and owned preparation required"
             )
-        if worker.declared_drops:
-            raise UnsupportedCapability(("native_worker_resource_drop",), worker.backend.profile)
         resource_agent = sdk_agent(resource_source.source)
         scope = resource_source.resource_scope
         _check_resource_source(

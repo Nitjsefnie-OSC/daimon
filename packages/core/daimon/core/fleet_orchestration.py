@@ -843,11 +843,14 @@ class HostFleetPorts:
                     self._tasks.pop(worker.id)
                 error = asyncio.CancelledError() if done.cancelled() else done.exception()
                 if error is not None:
+                    from daimon.core.channel_backend import backend_refusal_causes
+
                     log.warning(
                         "fleet.worker_task_failed",
                         run_id=str(worker.run_id),
                         worker_id=str(worker.id),
                         error_class=type(error).__name__,
+                        causes=backend_refusal_causes(error),
                     )
 
             task.add_done_callback(completed)

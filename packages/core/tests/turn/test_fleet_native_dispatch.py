@@ -946,3 +946,64 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
         release.set()
         await ports.close()
     assert request.deps.running_turns.count() == 0
+
+
+@pytest.mark.parametrize("kind", ["capability", "admission"])
+async def test_worker_failure_log_retains_closed_refusal_without_private_payloads(
+    worker_root, monkeypatch, kind
+):
+    import json
+
+    from daimon.core.turn.prepare import ProviderPreparationRequest
+    from mux.errors import UnsupportedCapability
+    from structlog.testing import capture_logs
+
+    request, root, _, resolved, prices, calls, _, _, _ = worker_root
+    private = "PRIVATE_PROVIDER_BODY_KEY_SQL"
+    error = (
+        UnsupportedCapability(("native_worker_resource_drop", private), private)
+        if kind == "capability"
+        else AdmissionDenied(reason="backend_unsupported")
+    )
+    error.__cause__ = RuntimeError(private)
+
+    async def refuse(self, parent, worker):
+        raise error
+
+    async def preparation(parent):
+        return request
+
+    monkeypatch.setattr(ProviderPreparationRequest, "for_worker", refuse)
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        preparation=preparation,
+        deps=request.deps,
+        pool=fleet.WorkerPool(max_concurrent_workers=2, max_concurrent_workers_per_tenant=2),
+    )
+    try:
+        with capture_logs() as logs:
+            result = await FleetOrchestrator(ports).spawn(
+                root, await _policy(request), **_spawn_terms(request, root, resolved, "refused-log")
+            )
+            async with asyncio.timeout(10):
+                while not any(row.get("event") == "fleet.worker_task_failed" for row in logs):
+                    await asyncio.sleep(0.01)
+        row = next(row for row in logs if row["event"] == "fleet.worker_task_failed")
+        expected = (
+            {
+                "type": "UnsupportedCapability",
+                "missing": ["native_worker_resource_drop", "redacted"],
+            }
+            if kind == "capability"
+            else {"type": "AdmissionDenied", "reason": "backend_unsupported"}
+        )
+        assert row["causes"] == [expected, {"type": "RuntimeError"}]
+        assert row["run_id"] == str(root.fleet.run_id)
+        assert row["worker_id"] == result["worker_id"]
+        assert row["error_class"] == type(error).__name__
+        assert private not in json.dumps(row)
+        assert not calls  # Refusal logging never creates/sends a native request.
+    finally:
+        await ports.close()
