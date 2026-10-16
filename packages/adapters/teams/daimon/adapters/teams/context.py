@@ -13,6 +13,7 @@ status card, notices) are dropped; its answers, plain messages, stay.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from xml.sax.saxutils import escape, quoteattr
@@ -26,8 +27,10 @@ from daimon.core.teams_graph import (
     GraphPage,
     image_sources,
     is_graph_url,
+    linked_files,
     message_text,
 )
+from daimon.core.teams_sharepoint import SAVED_FILES_HEADING
 from daimon.core.thread_participation import ClassifierMessage
 from daimon.core.untrusted import untrusted_block
 
@@ -104,11 +107,21 @@ def newest_message_id(ids: Iterable[str | None]) -> str | None:
 
 
 def _files(message: GraphMessage) -> list[SharedFile]:
-    return [
+    """Files shared in the message, and the SharePoint files a bot's message links to.
+
+    A link resolves only inside the channel's folder, like any shared file, so
+    the agent can open what it delivered earlier.
+    """
+    shared = [
         SharedFile(a.name or "file", a.content_url)
         for a in message.attachments
         if a.content_type in FILE_ATTACHMENT_TYPES
     ]
+    return shared + [SharedFile(name, url) for name, url in linked_files(message)]
+
+
+# daimon's own saved-files footer: replayed, the agent copied it into its next answer.
+_SAVED_FOOTER = re.compile(rf"\n*^{re.escape(SAVED_FILES_HEADING)}(?:\n+- [^\n]*)*", re.M)
 
 
 def channel_media(
@@ -180,6 +193,9 @@ def _render(
     author = user or app
     text, files = message_text(message), _files(message)
     is_bot = user is None and app is not None
+    if is_bot and app is not None and app.id == bot_app_id:
+        # Its files are listed as attachments below, not in its words.
+        text = _SAVED_FOOTER.sub("", text).strip()
     attrs = (
         f" author_name={quoteattr((author.display_name if author else None) or 'unknown')}"
         f" user_id={quoteattr((author.id if author else None) or '')}"
