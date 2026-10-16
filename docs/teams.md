@@ -346,12 +346,13 @@ setting off the routes answer 404 and nothing is subscribed.
   images themselves are logged and dropped like any other output there.
   Animated GIFs get no preview, and a preview Teams refuses is only logged
   (`teams.output_preview.send_failed`).
-- **Document previews.** A Word, PowerPoint, Excel or PDF output saved to a
-  channel's files takes one of those four places with its first page:
-  Graph's thumbnail of the uploaded file, asked for up to three times while
-  Graph renders it (ten seconds at most in all), fetched without a token and
-  re-encoded like an image. One that does not come is logged
-  (`teams.output_thumbnail.skipped`, no name) and left out.
+- **Document previews.** Up to four Word, PowerPoint, Excel or PDF outputs
+  saved to a channel's files show their first page, in delivery order, in one
+  message after the image previews, which never wait for them or give up a
+  place to them. Each is Graph's thumbnail of the uploaded file, asked for up
+  to three times while Graph renders it (ten seconds at most for them all),
+  fetched without a token and re-encoded like an image. One that does not come
+  is logged (`teams.output_thumbnail.skipped`, no name) and left out.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts (a

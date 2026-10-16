@@ -1043,7 +1043,7 @@ async def _append(_: str) -> bool:
     return True
 
 
-async def test_an_uploaded_document_previews_its_first_page_in_delivery_order(
+async def test_an_uploaded_document_previews_its_first_page_after_the_images(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Graph renders the thumbnail late: a missing one is asked for again, then fetched tokenless."""
@@ -1055,11 +1055,28 @@ async def test_an_uploaded_document_previews_its_first_page_in_delivery_order(
 
     await harness.delivery.sweep(_in_channel(), "sesn_1", append=_append)
 
-    [(_, message, _)] = harness.sender.sent
-    names = [a.name for a in message.attachments or []]
-    assert names == ["deck.pptx", "chart.png"], "the deck's first page keeps its place"
+    sent = [[a.name for a in message.attachments or []] for _, message, _ in harness.sender.sent]
+    assert sent == [["chart.png"], ["deck.pptx"]], "the image first, then the deck's first page"
     [fetch] = [r for r in harness.uploads if r.url.host.endswith(".svc.ms")]
     assert "Authorization" not in fetch.headers, "the pre-authorised URL gets no token"
+
+
+async def test_documents_never_take_an_images_preview_place(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Four documents ahead of a chart whose thumbnails never come: the chart still shows."""
+    decks = [
+        _csv(f"file_doc{n}", filename=name)
+        for n, name in enumerate(["deck.pptx", "a.pptx", "b.pdf", "c.docx"])
+    ]
+    chart, chart_bytes = _png("file_chart", "chart.png")
+    files = _channel_files(_uploaded, _thumbnail_sets(None))
+    harness = _harness(db_session_factory, [*decks, chart], files, {"file_chart": chart_bytes})
+
+    await harness.delivery.sweep(_in_channel(), "sesn_1", append=_append)
+
+    sent = [[a.name for a in message.attachments or []] for _, message, _ in harness.sender.sent]
+    assert sent == [["chart.png"]], "the image keeps its preview though no thumbnail came"
 
 
 @pytest.mark.parametrize(

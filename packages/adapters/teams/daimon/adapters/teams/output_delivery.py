@@ -18,9 +18,9 @@ reply.
 Image outputs also travel as inline previews (`image_preview`): in a channel,
 up to MAX_PREVIEWS in delivery order in one message after the links, also
 where files cannot be saved (a data URI needs no SharePoint); in a 1:1 chat,
-each just before its first consent card. An uploaded Office file or PDF takes
-one of those places with its first page, Graph's thumbnail of it. A failed
-preview is only logged.
+each just before its first consent card. Up to MAX_PREVIEWS uploaded Office
+files and PDFs then show their first page, Graph's thumbnail of each, in a
+message of their own after the images. A failed preview is only logged.
 Transient channel upload failures leave the listing entry for a later sweep,
 and an oversize file stays listed on every path, including a channel without
 file access. Otherwise the listing entry, the delivery
@@ -95,7 +95,7 @@ AppendToAnswer = Callable[[str], Awaitable[bool]]
 THUMBNAIL_SUFFIXES = (".docx", ".pptx", ".xlsx", ".pdf", ".doc", ".ppt", ".xls")
 THUMBNAIL_ATTEMPTS = 3
 THUMBNAIL_RETRY_S = 3.0
-# All thumbnails together: the previews they join wait at most this long.
+# All thumbnails together: the message they share waits at most this long.
 THUMBNAIL_BUDGET_S = 10.0
 THUMBNAIL_MAX_BYTES = 4 * 1024 * 1024
 # Graph serves SharePoint thumbnails from SharePoint or from Microsoft's media
@@ -275,14 +275,14 @@ class TeamsOutputDelivery:
             await self._sweep_unsaved(inbound, session_id)
             return
         links: list[str] = []
-        # An image's preview, or an uploaded document whose thumbnail is fetched last.
-        previews: list[Attachment | DriveItem] = []
+        previews: list[Attachment] = []
+        # Uploaded documents whose first page is looked up once every file is in.
+        documents: list[DriveItem] = []
 
         async def upload(file: DeliverableFile) -> None:
             name = display_filename_for(file.filename, file.mime_type)
             preview = None
-            wanted = not inbound.unprompted and len(previews) < MAX_PREVIEWS
-            if wanted:
+            if not inbound.unprompted and len(previews) < MAX_PREVIEWS:
                 # Before the upload: a preview error must never re-upload a saved file.
                 preview = await self._preview(name, file.content, file.mime_type)
             try:
@@ -304,8 +304,12 @@ class TeamsOutputDelivery:
             links.append(file_link(sanitize_title(item.name or name), item.web_url))
             if preview is not None:
                 previews.append(preview)
-            elif wanted and (item.name or name).lower().endswith(THUMBNAIL_SUFFIXES):
-                previews.append(item)
+            elif (
+                not inbound.unprompted
+                and len(documents) < MAX_PREVIEWS
+                and (item.name or name).lower().endswith(THUMBNAIL_SUFFIXES)
+            ):
+                documents.append(item)
 
         await sweep_session_outputs(
             self._runtime.anthropic,
@@ -316,7 +320,10 @@ class TeamsOutputDelivery:
         )
         if links:
             await self._post_links(inbound, links, append)
-        await self._send_previews(inbound, await self._with_thumbnails(files, previews))
+        # Images first, as they are ready: a thumbnail may take seconds or never come,
+        # so documents get their own message rather than images' places.
+        await self._send_previews(inbound, previews)
+        await self._send_previews(inbound, await self._thumbnails(files, documents))
 
     async def _sweep_unsaved(self, inbound: TeamsInbound, session_id: str) -> None:
         """A channel whose files cannot be saved: every file takes the skip path.
@@ -357,28 +364,23 @@ class TeamsOutputDelivery:
         )
         await self._send_previews(inbound, previews)
 
-    async def _with_thumbnails(
-        self, files: ChannelFiles, previews: list[Attachment | DriveItem]
+    async def _thumbnails(
+        self, files: ChannelFiles, documents: list[DriveItem]
     ) -> list[Attachment]:
-        """`previews` with each document's first-page thumbnail in its place, if it came."""
-        documents = [item for item in previews if isinstance(item, DriveItem)]
-        thumbnails: dict[str, Attachment] = {}
+        """The first-page thumbnails of `documents` that came within the budget, in order."""
+        thumbnails: dict[int, Attachment] = {}
 
-        async def fetch(item: DriveItem) -> None:
+        async def fetch(index: int, item: DriveItem) -> None:
             if (thumbnail := await self._thumbnail(files, item)) is not None:
-                thumbnails[item.id] = thumbnail
+                thumbnails[index] = thumbnail
 
         if documents:
             try:
                 async with asyncio.timeout(THUMBNAIL_BUDGET_S):
-                    await asyncio.gather(*(fetch(item) for item in documents))
+                    await asyncio.gather(*(fetch(n, item) for n, item in enumerate(documents)))
             except TimeoutError:
                 log.info("teams.output_thumbnail.skipped", reason="timed_out")
-        return [
-            preview
-            for item in previews
-            if (preview := thumbnails.get(item.id) if isinstance(item, DriveItem) else item)
-        ]
+        return [thumbnails[index] for index in sorted(thumbnails)]
 
     async def _thumbnail(self, files: ChannelFiles, item: DriveItem) -> Attachment | None:
         """Graph's first-page thumbnail of an uploaded document, re-encoded as a preview.

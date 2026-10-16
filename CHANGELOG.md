@@ -53,11 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Charts and other images an agent makes now show inline in Teams, as on Slack and Discord.** Before, every output reached Teams only as a file: a link under the answer in a channel, a consent card in a 1:1 chat. Each PNG, JPEG, GIF or WebP output now also comes with an inline preview, downscaled to fit 1024x1024, the largest Teams renders inline, and re-encoded under 512 KiB to keep the message small. In a 1:1 chat the preview comes right before the file's consent card, and comes again when the file is offered anew after a failed upload, but not when an unanswered card is resent. In a channel up to four previews follow the file links in one message, in delivery order, and are resent one per message if Teams refuses them together. The file itself is delivered exactly as before. Animated GIFs, images that cannot fit or are over 40 million pixels (a JPEG counted at the reduced size it decodes at), and unprompted answers get no preview, and a preview Teams refuses is only logged. A channel without file access gets the previews too, though the images, like its other outputs, are not saved.
 - **Word, PowerPoint, Excel and PDF outputs now preview their first page in
   Teams channels.** Before, a document saved to a channel's files showed only
-  as a link. Once uploaded, its first page, as Graph renders it, now joins the
-  image previews after the links, in delivery order and within the same four.
-  Graph often renders it seconds after the upload, so a missing thumbnail is
-  asked for up to three times, ten seconds at most in all; one that does not
-  come is logged and left out. The thumbnail is fetched without a token, only
+  as a link. Once uploaded, its first page, as Graph renders it, now follows
+  the image previews in a message of its own, up to four in delivery order;
+  images never wait for it or lose a place to it. Graph often renders it
+  seconds after the upload, so a missing thumbnail is asked for up to three
+  times, ten seconds at most in all; one that does not come is logged and left
+  out. The thumbnail is fetched without a token, only
   from SharePoint or Microsoft's media service. 1:1 chats are unchanged.
 - **GitHub setup now works from Teams.** Before, an agent asked to connect GitHub on Teams said "GitHub setup isn't in Teams yet" and sent people to Discord or Slack. Now an admin, or a channel admin who manages the agent, gets the Connect GitHub card in their 1:1 chat with Daimon, since Teams has no message only one person sees and the link is single-use. In the channel the agent only says the link went to that chat; if the chat cannot be opened, the link is withdrawn and the agent says so. Work that waited on the repo resumes once it is connected. Choosing an agent's working repo and removing a repo also work from Teams, the GitHub App install link is posted as a link, and the Connect GitHub pages no longer tell Teams users to run a Slack command. Access requests to admins are not on Teams yet.
 - Provider-neutral mux library, optional provider drivers and offline conformance tests. The host runtime remains unchanged; the library does not activate backend selection. Shared test helpers retain the current skill and conditional memory-delete routes.
