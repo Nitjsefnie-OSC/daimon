@@ -34,6 +34,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import list_agent_grants, list_authorized_repos
 from daimon.core.stores.github_app_installations import get as get_installation
 from daimon.core.stores.github_installation_reconciliation import get as get_reconciliation
+from daimon.core.stores.github_linked_pending import take as take_pending
 from daimon.core.stores.github_links import get_account_link, save_verified_link, unlink_account
 from daimon.core.stores.github_owner_grants import exclude_repo, list_owner_grants
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -271,11 +272,61 @@ async def test_tool_uses_verified_turn_account_and_private_link(
     )
     post_link = AsyncMock()
     monkeypatch.setattr(connect_tool, "_post_personal_link", post_link)
+    github_http.permission = "pull"
     result = await connect_tool._github_connect_impl(
         runtime, auth, origin_context_id="synthetic", repo_name="acme/widgets"
     )
-    assert result.status == "granted"
+    assert result.status == "granted_read_only"
+    assert "read and change" not in result.message
     post_link.assert_not_awaited()
+    async with setup_linked.sessionmaker() as session:
+        repo = next(
+            row
+            for row in await list_authorized_repos(
+                session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+            )
+            if row.repo_id == 101
+        )
+        [grant] = await list_agent_grants(
+            session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+        )
+        assert (repo.max_access, grant.ceiling_access) == ("read", "read")
+    github_http.permission = "push"
+    upgraded = await connect_tool._github_connect_impl(
+        runtime, auth, origin_context_id="synthetic", repo_name="acme/widgets", access="write"
+    )
+    assert upgraded.status == "granted"
+    assert "read and change" in upgraded.message
+    async with setup_linked.sessionmaker() as session:
+        repo = next(
+            row
+            for row in await list_authorized_repos(
+                session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+            )
+            if row.repo_id == 101
+        )
+        [grant] = await list_agent_grants(
+            session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+        )
+        assert (repo.max_access, grant.ceiling_access) == ("write", "write")
+    github_http.permission = "pull"
+    limited = await connect_tool._github_connect_impl(
+        runtime, auth, origin_context_id="synthetic", repo_name="acme/widgets", access="write"
+    )
+    assert limited.status == "granted_read_only"
+    assert "read and change" not in limited.message
+    async with setup_linked.sessionmaker() as session:
+        repo = next(
+            row
+            for row in await list_authorized_repos(
+                session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+            )
+            if row.repo_id == 101
+        )
+        [grant] = await list_agent_grants(
+            session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+        )
+        assert (repo.max_access, grant.ceiling_access) == ("read", "read")
     result = await connect_tool._github_connect_impl(
         runtime, auth, origin_context_id="synthetic", repo_name="acme/new"
     )
@@ -895,7 +946,7 @@ async def test_platform_membership_revoked_after_manages_now_returns(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["linked", "wrong_person", "expired_pending"])
+@pytest.mark.parametrize("scenario", ["linked", "needs_install", "wrong_person", "expired_pending"])
 async def test_pending_grant_resumes_from_personal_link_callback(
     setup_linked, github_http, monkeypatch: pytest.MonkeyPatch, scenario: str
 ) -> None:
@@ -954,6 +1005,8 @@ async def test_pending_grant_resumes_from_personal_link_callback(
     assert result.status == "needs_link"
     post_link.assert_awaited_once()
     url = post_link.await_args.kwargs["url"]
+    if scenario == "needs_install":
+        github_http.repo_visible = False
     if scenario == "expired_pending":
         async with setup_linked.sessionmaker.begin() as session:
             await session.execute(
@@ -1020,4 +1073,96 @@ async def test_pending_grant_resumes_from_personal_link_callback(
             session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
         )
     assert len(grants) == (1 if scenario == "linked" else 0)
-    assert delivery.await_count == (1 if scenario == "linked" else 0)
+    assert delivery.await_count == (1 if scenario in ("linked", "needs_install") else 0)
+    if scenario == "needs_install":
+        assert post_link.await_count == 2
+        assert post_link.await_args.kwargs["label"] == "Open GitHub setup"
+        assert post_link.await_args.kwargs["url"] == (
+            "https://github.com/apps/sample-app/installations/new"
+        )
+        assert "https://" not in delivery.await_args.args[2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["needs_install", "needs_link", "relink"])
+async def test_pending_resume_sends_private_recovery_button(
+    setup_linked, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    runtime = McpRuntime(
+        session_factory=setup_linked.sessionmaker,
+        client=AsyncMock(),
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
+            anthropic=AnthropicSettings(api_key=SecretStr("test")),
+            mcp=McpSettings(public_url=HttpUrl("https://mcp.test/mcp")),
+            github_app=GithubAppSettings(
+                app_id="42",
+                app_slug="sample-app",
+                private_key=SecretStr("pem"),
+                client_id="client",
+                client_secret=SecretStr("secret"),
+            ),
+        ),
+        deployment_default=DeploymentDefault(),
+        fernet=setup_linked.fernet,
+    )
+    async with setup_linked.sessionmaker.begin() as session:
+        await linked_pending.save_pending(
+            session,
+            tenant_id=setup_linked.tenant.id,
+            account_id=setup_linked.account.id,
+            agent_id=setup_linked.agent_id,
+            ma_agent_id="ma_agent",
+            agent_name="Agent",
+            repo_name="acme/widgets",
+            requested_access="write",
+            platform="discord",
+            platform_user_id="person",
+            workspace_id=setup_linked.tenant.external_id,
+            parent_channel_id="123",
+            thread_id="456",
+        )
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    monkeypatch.setattr(linked_pending, "requester_manages_agent", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        linked_pending,
+        "linked_grant",
+        AsyncMock(
+            return_value=linked.LinkedOutcome(status=status, message="Private setup needed.")
+        ),
+    )
+    delivery = AsyncMock()
+    private_button = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    monkeypatch.setattr(connect_tool, "_post_personal_link", private_button)
+    result = await linked_pending.resume_pending(
+        runtime,
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        platform="discord",
+        platform_user_id="person",
+    )
+    assert result == ["Private setup needed."]
+    delivery.assert_awaited_once()
+    assert delivery.await_args.args[2] == "Private setup needed."
+    private_button.assert_awaited_once()
+    button = private_button.await_args.kwargs
+    assert (button["channel_id"], button["thread_id"]) == ("123", "456")
+    if status == "needs_install":
+        assert button["label"] == "Open GitHub setup"
+        assert button["url"] == "https://github.com/apps/sample-app/installations/new"
+    else:
+        assert button["label"] == "Link GitHub"
+        assert button["url"].startswith("https://mcp.test/oauth/github/link/")
+    async with setup_linked.sessionmaker.begin() as session:
+        pending = await take_pending(
+            session,
+            tenant_id=setup_linked.tenant.id,
+            account_id=setup_linked.account.id,
+            platform="discord",
+            platform_user_id="person",
+        )
+    assert len(pending) == (0 if status == "needs_install" else 1)
+    if pending:
+        assert pending[0].requested_access == "write"

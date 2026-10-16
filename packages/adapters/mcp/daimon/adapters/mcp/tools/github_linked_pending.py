@@ -8,6 +8,7 @@ from typing import Literal
 import discord
 import httpx
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -20,7 +21,9 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_K
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
+from daimon.core.stores.domain import Role
 from daimon.core.stores.github_linked_pending import PendingGrant, save, take
+from daimon.core.stores.github_personal_links import mint_link
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -91,6 +94,62 @@ async def _deliver_result(runtime: McpRuntime, pending: PendingGrant, message: s
             thread_ts=pending.thread_id,
             text=message,
         )
+
+
+async def _deliver_recovery(runtime: McpRuntime, pending: PendingGrant, *, status: str) -> None:
+    # Import here because the direct connect path imports save_pending from this module.
+    from daimon.adapters.mcp.tools.github_connect import (
+        _post_personal_link,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    recipient = AuthIdentity(
+        account_id=pending.account_id,
+        tenant_id=pending.tenant_id,
+        role=Role.USER,
+        platform=pending.platform,
+        external_id=pending.workspace_id,
+        platform_user_id=pending.platform_user_id,
+    )
+    if status == "needs_install":
+        url = f"https://github.com/apps/{runtime.settings.github_app.app_slug}/installations/new"
+        label = "Open GitHub setup"
+    else:
+        root = runtime.settings.mcp.app_root_url
+        if root is None:
+            raise ValueError("GitHub linking is unavailable on this server.")
+        async with runtime.session_factory.begin() as session:
+            url = await mint_link(
+                session,
+                tenant_id=pending.tenant_id,
+                account_id=pending.account_id,
+                platform=pending.platform,
+                platform_user_id=pending.platform_user_id,
+                root_url=str(root),
+            )
+            await save_pending(
+                session,
+                tenant_id=pending.tenant_id,
+                account_id=pending.account_id,
+                agent_id=pending.agent_id,
+                ma_agent_id=pending.ma_agent_id,
+                agent_name=pending.agent_name,
+                repo_name=pending.repo_name,
+                requested_access=pending.requested_access,
+                platform=pending.platform,
+                platform_user_id=pending.platform_user_id,
+                workspace_id=pending.workspace_id,
+                parent_channel_id=pending.parent_channel_id,
+                thread_id=pending.thread_id,
+            )
+        label = "Link GitHub"
+    await _post_personal_link(
+        runtime,
+        recipient,
+        url=url,
+        channel_id=pending.parent_channel_id,
+        thread_id=pending.thread_id,
+        label=label,
+    )
 
 
 async def resume_pending(
@@ -178,6 +237,8 @@ async def resume_pending(
                         requested_access=row.requested_access,
                     )
                     message = outcome.message
+                    if outcome.status in ("needs_install", "needs_link", "relink"):
+                        await _deliver_recovery(runtime, row, status=outcome.status)
                 except DBAPIError as exc:
                     if getattr(exc.orig, "sqlstate", None) not in ("40001", "23505"):
                         raise

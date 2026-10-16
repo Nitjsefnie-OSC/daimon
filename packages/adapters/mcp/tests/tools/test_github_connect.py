@@ -63,10 +63,10 @@ async def test_connected_repo_is_granted_immediately_in_chat(
                 "(tenant_id, repo_id, scope_agent_id, owner_id, installation_id, "
                 "repo_full_name, max_access, authorized_by_github_user_id, "
                 "authorized_by_account_id) "
-                "VALUES (:tenant, 12345, :agent, 12, 98765, 'owner/repo', "
+                "VALUES (:tenant, 12345, NULL, 12, 98765, 'owner/repo', "
                 "'write', 17, :account)"
             ),
-            {"tenant": tenant.id, "agent": agent_id, "account": account.id},
+            {"tenant": tenant.id, "account": account.id},
         )
     runtime = McpRuntime(
         session_factory=committing_sessionmaker,
@@ -145,6 +145,22 @@ async def test_connected_repo_is_granted_immediately_in_chat(
             session, tenant_id=tenant.id, agent_id=agent_id
         )
         assert grant.ceiling_access == "write"
+    async with committing_sessionmaker.begin() as session:
+        await session.execute(
+            text("UPDATE tenant_github_repos SET max_access = 'read' WHERE repo_id = 12345")
+        )
+    read = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/repo", access="write"
+    )
+    assert read.status == "granted_read_only"
+    assert read.message == (
+        "Agent can now read owner/repo from the next message. To undo, ask me to remove it."
+    )
+    async with committing_sessionmaker() as session:
+        [grant] = await github_access.list_agent_grants(
+            session, tenant_id=tenant.id, agent_id=agent_id
+        )
+        assert (grant.baseline_access, grant.ceiling_access) == ("read", "read")
     missing = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime,
         auth,
@@ -203,7 +219,7 @@ async def test_connected_repo_is_granted_immediately_in_chat(
     foreign = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, channel_auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/foreign"
     )
-    assert foreign.status == "sent"
+    assert foreign.status == "client_agent"
     async with committing_sessionmaker() as session:
         assert all(
             grant.repo_id != 12346
@@ -212,6 +228,7 @@ async def test_connected_repo_is_granted_immediately_in_chat(
             )
         )
     async with committing_sessionmaker.begin() as session:
+        await set_access_policy(session, tenant_id=tenant.id, policy=TenantAccessPolicy())
         await session.execute(
             text("""
             UPDATE github_app_installations SET github_repo_full_names = ARRAY[]::text[]

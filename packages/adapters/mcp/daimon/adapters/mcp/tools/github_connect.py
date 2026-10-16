@@ -368,7 +368,8 @@ async def _github_connect_impl(
                 grantable = (
                     installation is not None
                     and installation_covers_repo(installation, repo.repo_full_name)
-                    and (is_admin or repo.scope_agent_id == agent_id)
+                    and repo.scope_agent_id is None
+                    and is_admin
                 )
                 if grantable:
                     existing = next(
@@ -387,8 +388,8 @@ async def _github_connect_impl(
                             tenant_id=auth.tenant_id,
                             agent_id=agent_id,
                             repo_id=repo.repo_id,
-                            baseline_access="write",
-                            ceiling_access="write",
+                            baseline_access=repo.max_access,
+                            ceiling_access=repo.max_access,
                             granted_by_account_id=auth.account_id,
                             mount_path=existing.mount_path if existing else None,
                             is_working_repo=existing.is_working_repo if existing else False,
@@ -403,9 +404,11 @@ async def _github_connect_impl(
                     except ValueError as error:
                         raise ToolError(str(error)) from error
                     return ConnectResult(
-                        status="granted",
+                        status="granted" if repo.max_access == "write" else "granted_read_only",
                         message=(
-                            f"{agent.name} can now read and change {repo.repo_full_name} "
+                            f"{agent.name} can now "
+                            f"{'read and change' if repo.max_access == 'write' else 'read'} "
+                            f"{repo.repo_full_name} "
                             "from the next message. To undo, ask me to remove it."
                         ),
                     )
