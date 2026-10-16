@@ -432,17 +432,6 @@ class TeamsInstallationRow(BaseModel):
     name: str | None = None
 
 
-class TeamsChannelSiteRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    channel_id: str
-    group_id: str
-    site_id: str
-    drive_id: str
-    folder_id: str
-
-
 class TeamsChannelSubscriptionRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
