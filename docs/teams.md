@@ -67,7 +67,7 @@ is supported; government and China clouds use other Bot Framework hosts.
   adding `;messageid=<root post id>`. Where readers are limited, the agent's
   memory is read-only. See [permissions.md](permissions.md).
 
-A turn shows one status card, edited in place, with a Cancel button only the
+A turn shows one status card, edited in place, with a Stop button only the
 author can use. The answer replaces the card, split across messages when long,
 then a card follows with the summary line (agent, time, cost, money left; see
 [billing.md](billing.md)) and the controls below. Messages sent while a turn
@@ -77,7 +77,7 @@ follow-up per author. Work an agent hands off
 refuses that work, it is dropped without a notice, as on Slack. A retried
 delivery runs once, across restarts too (see Restart behaviour).
 
-### Feedback and Ask a human
+### Feedback and Ask a person
 
 The card below an answer carries 👍 and 👎 buttons: Teams refuses an edit
 with both text and a card, so they cannot sit on the answer itself. 👍 records
@@ -239,7 +239,7 @@ A burst of replies is judged once, after the thread has been quiet for
 `QUIET_SECONDS`, over the thread read through Graph, and capped per thread
 per hour. The turn runs as the burst's newest author and passes the same
 admission and billing gates as a mention, but posts only its answer: no
-status card or Cancel button, and every refusal, notice and error is only
+status card or Stop button, and every refusal, notice and error is only
 logged. No turn posts a status message of its own under its answer, as on
 Slack and Discord: what the person must hear rides on the answer, and only
 cards (forms, file offers) are sent besides it. Root posts are never judged, the bot's own and other bots' messages
@@ -331,6 +331,10 @@ setting off the routes answer 404 and nothing is subscribed.
   workspace. The turn context tells the agent which case applies
   (`files="available"` or `"unavailable"`), learned per channel from the last
   folder lookup or upload and rechecked every 10 minutes while unavailable.
+  Where they are unavailable, `files_hint` tells the agent, asked for a file or
+  to turn files on, to call `enable_channel_files` first rather than offer an
+  artifact, report or notebook; the bot posts the Enable files card (below)
+  after that answer, for a Daimon admin who asked.
 - **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as
   Teams renders a base64 image attachment: downscaled to fit 1024x1024 and
   re-encoded under 512 KiB (PNG, else JPEG). In a 1:1 chat each image comes
@@ -346,10 +350,6 @@ setting off the routes answer 404 and nothing is subscribed.
   Graph renders it (ten seconds at most in all), fetched without a token and
   re-encoded like an image. One that does not come is logged
   (`teams.output_thumbnail.skipped`, no name) and left out.
-  Where they are unavailable, `files_hint` tells the agent, asked for a file or
-  to turn files on, to call `enable_channel_files` first rather than offer an
-  artifact, report or notebook; the bot posts the Enable files card (below)
-  after that answer, for a Daimon admin who asked.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts (a

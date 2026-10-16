@@ -405,8 +405,10 @@ This registration is the identity Daimon signs in as.
 
 You don't need to add any API permissions here. The bot reads channels
 through a team-level permission that a team owner grants when they add the
-app (more on that in step 7). Only the optional channel files need a Graph
-permission.
+app (more on that in step 7). Only two optional features need a Graph
+application permission: channel files (`Sites.Selected`) and private and
+shared channel messages (`ChannelMessage.Read.All`, which is tenant-wide; see
+[below](#private-and-shared-channels-optional)).
 
 ### 2. Create the Azure Bot and connect it to Teams
 
