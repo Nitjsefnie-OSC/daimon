@@ -3854,3 +3854,19 @@ class FleetWorker(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class GeminiRuntimeState(Base):
+    """Driver records and conservative attempt holds on the host state database."""
+
+    __tablename__ = "gemini_runtime_state"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "account_id", "project", "kind"),
+        CheckConstraint("kind IN ('records', 'holds')", name="ck_gemini_runtime_state_kind"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    project: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
