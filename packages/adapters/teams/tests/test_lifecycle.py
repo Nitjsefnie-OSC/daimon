@@ -619,6 +619,24 @@ async def test_previews_stay_out_of_an_answer_with_math() -> None:
     assert sender.activities[-1].text_format == "extendedmarkdown", "the math still renders"
 
 
+async def test_a_pinged_answer_keeps_its_mention_beside_its_previews() -> None:
+    """A ping is plain markdown already, so math does not hold previews back; the edit keeps it."""
+    sender = FakeSender()
+    asker = Account(id="aad-1", name="Ada")
+    lifecycle = await _posted(sender, completion_ping=True, requester=asker)
+    await lifecycle.on_terminal_success(_answer("The mean is $\\mu = 3$."))
+
+    assert await lifecycle.append_to_answer(attachments=[_image("a.png")])
+    edited = sender.activities[-1]
+    assert edited.id == "m-2" and edited.text_format == "markdown", "an edit of the answer"
+    assert edited.text == (
+        "<at>Ada</at>\n\nThe mean is $\\mu = 3$.\n\n![a.png](data:image/png;base64,AA==)"
+    ), "the image follows the mention and the answer"
+    assert [e.mentioned.id for e in edited.entities or [] if isinstance(e, MentionEntity)] == [
+        "aad-1"
+    ], "the ping survives the edit"
+
+
 def test_preview_alt_text_cannot_break_out_of_its_image() -> None:
     """A file name with brackets or markup stays the image's alt text."""
     image = card.inline_image(_image("a]![x](https://example.com/y) *b*\n.png"))
