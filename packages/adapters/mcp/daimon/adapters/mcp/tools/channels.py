@@ -13,6 +13,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import (
     OPEN_READ_POLICY,
     ChannelReadPolicy,
+    list_running_origins,
     load_read_policy,
 )
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
@@ -106,7 +107,18 @@ async def _read_policy(
         origin_context_id=origin_context_id,
         resolve_without_seals=auth.platform == "teams",
     )
-    if auth.platform == "teams" and read.origin and is_group_chat(read.origin.parent_channel_id):
+    if auth.platform != "teams":
+        return read
+    if read.origin is not None:
+        in_group_chat = is_group_chat(read.origin.parent_channel_id)
+    else:
+        # A chat token names no turn: any of its turns running in a group chat refuses
+        # a call that names no origin, as `_held_origin` holds one.
+        in_group_chat = read.origin_place is None and any(
+            is_group_chat(origin.parent_channel_id)
+            for origin in await list_running_origins(runtime, auth)
+        )
+    if in_group_chat:
         raise ToolError(GROUP_CHAT_REFUSED)
     return read
 

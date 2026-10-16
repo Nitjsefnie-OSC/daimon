@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -23,10 +24,12 @@ from daimon.adapters.mcp.tools.teams._read import (
 )
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import AgentRef
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.teams_installations import record_teams_installation
-from daimon.testing.factories import make_tenant
+from daimon.core.stores.turn_origins import create_origin
+from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -572,3 +575,48 @@ async def test_channel_reads_are_refused_from_a_group_chat_turn(
     )
     with pytest.raises(ToolError, match="group chats"):
         await channels._read_policy(MagicMock(), auth, "origin")  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(("place", "refused"), [("19:group@thread.v2", True), (_CHANNEL, False)])
+async def test_reads_naming_no_origin_are_refused_while_a_group_chat_turn_runs(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    place: str,
+    refused: bool,
+) -> None:
+    """A chat token names no turn, so leaving the origin out cannot read from a group chat."""
+    from daimon.adapters.mcp.tools import channels
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    now = datetime.now(UTC)
+    await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="teams",
+        parent_channel_id=place,
+        thread_id=place,
+        responder_ma_agent_id="ag_chat",
+        responder_name="chat",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        expires_at=now + timedelta(minutes=10),
+        now=now,
+    )
+    await db_session.commit()
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="teams",
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_chat"),
+    )
+    runtime = _runtime(_Fake(), sessionmaker)
+    read = channels._read_policy(runtime, auth, None)  # pyright: ignore[reportPrivateUsage]
+    if refused:
+        with pytest.raises(ToolError, match="group chats"):
+            await read
+    else:
+        assert (await read).origin is None, "a channel turn's call reads as from outside"
