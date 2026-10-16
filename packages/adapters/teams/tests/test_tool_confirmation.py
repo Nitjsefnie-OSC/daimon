@@ -754,6 +754,37 @@ async def test_runtime_hook_rechecks_current_configured_admins(
     assert await check(AAD_OBJECT_ID) is False
 
 
+async def test_clicks_check_the_cached_owners_and_read_again_only_for_a_yes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clicking a card repeatedly must not cost a Graph owner read each time."""
+    from daimon.core import confirmation
+
+    team = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
+    owners = AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
+    runtime = MagicMock(team_owners=owners, group_members=GroupMembersCache())
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.teams.admin_user_ids = ()
+    runtime.settings.teams.admin_team_id = team
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    TeamsConfirmationCards(FakeSender()).hook(
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        runtime=runtime,
+        tenant_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+    )
+    check = factory.call_args.kwargs["current_admin"]
+    for _ in range(25):
+        assert await check(OTHER_AAD_OBJECT_ID) is False, "a non-owner is no admin"
+    assert owners.await_count == 1, "a cached no needs no further read"
+    assert await check(AAD_OBJECT_ID) is True, "an owner's yes is confirmed"
+    assert owners.await_count == 2, "only a yes is read again"
+    owners.return_value = frozenset()
+    assert await check(AAD_OBJECT_ID) is False, "a revoked owner counts at once, cache or not"
+
+
 @pytest.mark.parametrize("state", ["pending", "approved", "denied", "expired", "stopped"])
 def test_complete_backend_loss_list_survives_native_card_rendering(state):
     losses = "Won't be available on openai: files, mcp, memory, model_controls, repository, sandbox, skills, tools"

@@ -101,12 +101,19 @@ EDIT_TIMEOUT_S = 2.0
 
 
 async def _is_admin_now(runtime: TeamsRuntime, clicker: str) -> bool:
-    """A live admin check at a click: a revoked team ownership counts at once."""
+    """A live admin check at a click: a revoked team ownership counts at once.
+
+    The cached owners answer first and only a yes is read again, so a click
+    by anyone else costs no Graph read and can't spend the shared rate limit.
+    """
     settings = runtime.settings.teams
     if settings is None:
         return False
-    owners = admin_team_owners(runtime, fresh=True)
-    return await is_deployment_admin(settings, owners, user_id=clicker, is_external=False)
+    for fresh in (False, True):
+        owners = admin_team_owners(runtime, fresh=fresh)
+        if not await is_deployment_admin(settings, owners, user_id=clicker, is_external=False):
+            return False
+    return True
 
 
 def _footer(
@@ -272,8 +279,12 @@ class TeamsConfirmationCards:
                 return Subject()
             admin = await _is_admin_now(runtime, clicker)
             caller = await channel_admin_caller(
-                runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
+                runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin
             )
+            if caller.role_ids:  # like the admin check: only owned teams are read again
+                caller = await channel_admin_caller(
+                    runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
+                )
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(
                     session, tenant_id=tenant_id, platform="teams", caller=caller
