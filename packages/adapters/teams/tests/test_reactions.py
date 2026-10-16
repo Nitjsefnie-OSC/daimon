@@ -224,6 +224,26 @@ async def test_close_cancels_waiting_reactions_and_sends_no_more() -> None:
     assert reactions._running == set(), "nothing new starts after close"
 
 
+async def test_a_refused_hourglass_is_never_added_nor_removed_though_its_turn_starts_first() -> (
+    None
+):
+    """The gate answers late: the removal queued meanwhile still waits for it."""
+    calls = Calls()
+    harness = Harness(calls)
+    answer = asyncio.Event()
+
+    async def refused() -> bool:
+        await answer.wait()
+        return False
+
+    queued = make_inbound()
+    harness.reactions.mark_queued(queued, allowed=refused)
+    harness.reactions.clear_queued([queued])
+    answer.set()
+    await harness.settle()
+    assert calls.made == [], "no ⌛ for a message admission would refuse, so none to remove"
+
+
 async def test_nothing_reacts_to_a_form_a_reply_nobody_addressed_or_without_a_client() -> None:
     form = dataclasses.replace(make_inbound(), from_form=True)
     unprompted = dataclasses.replace(make_inbound(), unprompted=True)

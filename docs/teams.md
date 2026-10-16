@@ -71,8 +71,10 @@ A turn shows one status card, edited in place, with a Stop button only the
 author can use. The answer replaces the card, split across messages when long,
 then a card follows with the summary line (agent, time, cost, money left; see
 [billing.md](billing.md)) and the controls below. Messages sent while a turn
-runs are queued, each marked ⌛ until its turn starts, and run as one
-follow-up per author. Work an agent hands off
+runs are queued, each marked ⌛ until its turn starts (only where the sender
+may start a turn: not in a protected place, not for someone off the invoker
+allowlist or from another organisation outside an isolated channel), and run
+as one follow-up per author. Work an agent hands off
 (`hand_off_task`) runs right after the turn that queued it; if admission
 refuses that work, it is dropped without a notice, as on Slack. A retried
 delivery runs once, across restarts too (see Restart behaviour).

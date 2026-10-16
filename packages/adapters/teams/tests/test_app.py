@@ -169,6 +169,66 @@ async def test_a_queued_message_shows_an_hourglass_until_its_turn_starts(
     )
 
 
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize(
+    ("policy", "external", "marked"),
+    [
+        (TenantAccessPolicy(), False, True),
+        (TenantAccessPolicy(invoker_user_ids=(OTHER_AAD_OBJECT_ID,)), False, False),
+        (TenantAccessPolicy(protected_channel_ids=(CONVERSATION_ID,)), False, False),
+        (TenantAccessPolicy(), True, False),
+    ],
+    ids=["allowed", "off-the-invoker-allowlist", "protected", "external-not-isolated"],
+)
+async def test_an_hourglass_only_for_a_message_admission_would_let_start(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    policy: TenantAccessPolicy,
+    external: bool,
+    marked: bool,
+) -> None:
+    """⌛ promises an answer, so it waits on the gates the turn itself would meet."""
+    monkeypatch.setattr(reactions, "MIN_INTERVAL_S", 0.0)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(session, tenant_id=TENANT, policy=policy)
+    made: list[tuple[str, str, bool]] = []
+
+    async def react(target: reactions.ReactionTarget, reaction: str, *, add: bool) -> None:
+        made.append((target.activity_id, reaction, add))
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+        react=react,
+    )
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        if not started.is_set():
+            started.set()
+            await release.wait()
+
+    queued = dataclasses.replace(make_inbound("two", kind="channel"), is_external=external)
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        running = asyncio.create_task(
+            teams._orchestrate(make_inbound("one", kind="channel"), TENANT)
+        )
+        await started.wait()
+        await teams._orchestrate(queued, TENANT)
+        async with asyncio.timeout(5):
+            while teams._reactions._running:
+                await asyncio.sleep(0.01)
+        added = [(queued.activity_id, reactions.HOURGLASS, True)] if marked else []
+        assert made == added, "⌛ only where admission would let the message start a turn"
+        release.set()
+        await running
+    await teams.drain(timeout=5)
+    removed = [(queued.activity_id, reactions.HOURGLASS, False)] if marked else []
+    assert made[len(added) :] == removed, "a removal only for a ⌛ that was added"
+
+
 async def test_a_replayed_message_loses_a_predecessors_hourglass(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:

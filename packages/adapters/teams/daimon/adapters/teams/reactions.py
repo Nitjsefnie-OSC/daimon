@@ -128,12 +128,18 @@ class TeamsReactions:
         self._queue(target, CHECK, add=True)
         self._queue(target, EYES, add=False)
 
-    def mark_queued(self, inbound: TeamsInbound) -> None:
-        """⌛ on a message waiting behind the turn running in its chat."""
+    def mark_queued(
+        self, inbound: TeamsInbound, *, allowed: Callable[[], Awaitable[bool]] | None = None
+    ) -> None:
+        """⌛ on a message waiting behind the turn running in its chat, once `allowed` says yes.
+
+        `allowed` runs in the background, ahead of the add on the message's
+        chain, so a removal queued meanwhile still waits for its answer.
+        """
         if self._react is None or (target := reaction_target(inbound)) is None:
             return
         self._queued[target.key] = target
-        self._queue(target, HOURGLASS, add=True)
+        self._queue(target, HOURGLASS, add=True, allowed=allowed)
 
     def clear_queued(self, items: Iterable[TeamsInbound]) -> None:
         """Remove the ⌛ from these messages, if they show one: their work started or settled."""
@@ -163,14 +169,21 @@ class TeamsReactions:
         await asyncio.gather(*running, return_exceptions=True)
 
     def _queue(
-        self, target: ReactionTarget, reaction: str, *, add: bool, known: bool = True
+        self,
+        target: ReactionTarget,
+        reaction: str,
+        *,
+        add: bool,
+        known: bool = True,
+        allowed: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         react = self._react
         if react is None or self._closed:
             return
         key = target.key
         previous = self._chains.get(key)
-        task = self._spawn(self._run(react, previous, target, reaction, add=add, known=known))
+        run = self._run(react, previous, target, reaction, add=add, known=known, allowed=allowed)
+        task = self._spawn(run)
         self._chains[key] = task
         self._running.add(task)
 
@@ -190,10 +203,15 @@ class TeamsReactions:
         *,
         add: bool,
         known: bool,
+        allowed: Callable[[], Awaitable[bool]] | None,
     ) -> None:
         if previous is not None:
             await asyncio.wait([previous])  # never raises: its outcome is its own
         mark = (target.key, reaction)
+        if allowed is not None and not await allowed():
+            self._remember_absent(mark)
+            log.debug("teams.reaction.skipped", reaction=reaction, add=add, reason="not_allowed")
+            return
         if not add and mark in self._absent:
             del self._absent[mark]
             if known:  # this process's own add never landed: nothing to take off

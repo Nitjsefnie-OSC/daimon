@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could not react, so a message queued behind a running turn showed nothing
   until its turn began, and a completion ping was an @mention alone. A message
   waiting behind the turn running in its chat or thread now gets ⌛, removed
-  once its turn starts. With completion pings on, the asker's message gets 👀
+  once its turn starts, if its sender may start a turn there. With completion pings on, the asker's message gets 👀
   once the turn is accepted and ✅ in its place once it is answered. Reactions
   go through Bot Framework in the background, spaced to its limit of two a
   second per bot, so a reaction never holds up or fails a turn. An add that

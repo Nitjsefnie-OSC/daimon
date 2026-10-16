@@ -98,6 +98,7 @@ from daimon.adapters.teams.thread_handoff import hand_over_button
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
+from daimon.core.authz import Action, authorize, build_subject, build_turn_place
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
@@ -115,7 +116,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.participation_gates import ParticipationGates
-from daimon.core.permissions import home_of
+from daimon.core.permissions import channel_permissions, home_of
 from daimon.core.routine_delivery import RoutinePoster, run_delivery_poller
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import (
@@ -1165,7 +1166,8 @@ class TeamsApp:
         if key in self._processing:
             self._last_message_at[key] = datetime.now(UTC)
             self._thread_queue.enqueue(key, inbound)
-            self._reactions.mark_queued(inbound)
+            allowed = functools.partial(self._may_start_turn, inbound, tenant_id)
+            self._reactions.mark_queued(inbound, allowed=allowed)
             self._supersede_batch(inbound)
             return
         # Over the cap the turn queues: it posts the ordinary card and waits
@@ -1193,6 +1195,30 @@ class TeamsApp:
         self._supersede_batch(inbound)
         async with self._holding(key, ticket):
             await self._run_turns(key, tenant_id, [inbound])
+
+    async def _may_start_turn(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> bool:
+        """Whether admission's people-and-place gates let `inbound` start a turn there.
+
+        ⌛ says an answer is coming, so a protected place, someone off the
+        invoker allowlist or from another organisation outside an isolated
+        channel gets none; nor does anyone while the policy cannot be read.
+        """
+        try:
+            async with self.runtime.sessionmaker() as session:
+                policy = await load_access_policy(session, tenant_id=tenant_id)
+        except (AccessPolicyUnreadable, *_DB_ERRORS):
+            return False
+        if inbound.is_external:
+            here = channel_permissions(
+                policy, channel_id=inbound.thread_id, parent_channel_id=inbound.channel_id
+            )
+            if inbound.kind == "dm" or not here.answers_external:
+                return False
+        subject = build_subject(
+            is_admin=self._role(inbound) is Role.ADMIN, platform_user_id=inbound.user_id
+        )
+        place = build_turn_place(channel_id=inbound.channel_id, thread_id=inbound.thread_id)
+        return bool(authorize(policy, subject=subject, action=Action.START_TURN, place=place))
 
     def _supersede_batch(self, inbound: TeamsInbound) -> None:
         """A mention's turn owns the thread now: drop its waiting batch, whose replies it replays.
