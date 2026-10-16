@@ -906,3 +906,112 @@ async def _record_personal_sign_in(
     )
     await flows_store.consume_flow(session, state=flow.state, now=now)
     await flows_store.mark_flow_completed(session, state=flow.state, now=now)
+
+
+async def test_shared_app_repo_session_reuse_never_refreshes_a_caller_identity(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryptography.fernet import Fernet, MultiFernet
+    from daimon.core._models import TenantGitHubRepo
+    from daimon.core.config import GithubAppSettings
+    from daimon.core.github_app_session import declared_app_repositories
+    from daimon.core.stores import github_access, github_app_installations
+    from daimon.core.stores.accounts import get_account
+    from pydantic import SecretStr
+
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    bob = await make_account(db_session, tenant=tenant)
+    agent, env = await _app_agent(db_session, tenant)
+    identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    revision = await set_channel_backend(
+        db_session, channel_ref(tenant.id, "discord", "chan-1"), _SHARED
+    )
+    await github_app_installations.upsert(
+        db_session, installation_id=77, account_login="example", repo_full_names=["example/widgets"]
+    )
+    db_session.add(
+        TenantGitHubRepo(
+            tenant_id=tenant.id,
+            repo_id=101,
+            owner_id=1,
+            installation_id=77,
+            repo_full_name="example/widgets",
+            max_access="read",
+            authorized_by_github_user_id=2,
+            status="active",
+            version=1,
+        )
+    )
+    await db_session.flush()
+    await github_access.stage_grant(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=identity,
+        repo_id=101,
+        baseline_access="none",
+        ceiling_access="read",
+        granted_by_account_id=None,
+    )
+    await db_session.commit()
+    assert await declared_app_repositories(
+        db_session_factory, tenant_id=tenant.id, agent_id=identity
+    )
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    pem = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    fake = _Fake()
+    # The real admission/preparation path creates the App workspace offline.
+    fake.router.add(
+        "POST",
+        r"/v1/vaults/[^/]+/credentials",
+        lambda request, _m: httpx.Response(
+            200,
+            json={
+                "id": "cred_github",
+                "type": "credential",
+                **json.loads(request.content),
+                "created_at": "2026-10-10T00:00:00Z",
+            },
+        ),
+    )
+    deps = replace(
+        _deps(db_session_factory, fake),
+        fernet=MultiFernet([Fernet(Fernet.generate_key())]),
+        agent_github_app=GithubAppSettings(app_id="1", private_key=SecretStr(pem)),
+        mcp=McpSettings(public_url="https://mcp.example.com/mcp", jwt_secret=SecretStr("s" * 32)),
+    )
+    original_client = httpx.AsyncClient
+
+    def github(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.github.com"
+        assert request.url.path == "/app/installations/77/access_tokens"
+        return httpx.Response(
+            201, json={"token": "ghs_offline", "expires_at": "2099-01-01T00:00:00Z"}
+        )
+
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: original_client(**kw, transport=httpx.MockTransport(github)),
+    )
+    first = await _bind(deps, tenant, _admission(alice.id, agent, env, revision), user="alice")
+    assert len(fake.created[first.ma_session_id]["vault_ids"]) == 1
+    async with db_session_factory() as db:
+        assert await get_account(db, shared_owner(_slot(tenant))) is None
+    previous = len(fake.requests)
+    second = await _bind(deps, tenant, _admission(bob.id, agent, env, revision), user="bob")
+    assert second.reused and second.ma_session_id == first.ma_session_id
+    assert not any("/vaults/" in request.url.path for request in fake.requests[previous:])
+    assert not any("/credentials" in request.url.path for request in fake.requests[previous:])

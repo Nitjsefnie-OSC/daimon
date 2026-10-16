@@ -43,7 +43,7 @@ from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
 
-from ..harness import make_jwt
+from ..harness import registered_account_token
 
 SECRET = "a" * 32
 
@@ -403,7 +403,7 @@ async def test_operator_token_discovers_publish_and_delete_report_tools(
     async with sessionmaker() as s, s.begin():
         tenant = await make_tenant(s, platform="discord", workspace_id="publish-reachability")
         account = await make_account(s, tenant=tenant)
-    token = make_jwt(account_id=account.id)
+    token = await registered_account_token(sessionmaker, account_id=account.id)
     app = _make_app(sessionmaker)
 
     result = await mcp_session(

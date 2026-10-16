@@ -209,11 +209,6 @@ jobs:
             --image "${{ steps.images.outputs.daimon }}"
           gcloud run jobs execute ${{ vars.GCP_AR_REPO }}-migrate --region "$REGION" --wait
 
-      - name: Deploy mcp revision
-        run: |
-          gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
-            --image "${{ steps.images.outputs.daimon }}"
-
       - name: Resolve seam URL for report-host
         id: seam
         run: |
@@ -495,6 +490,34 @@ jobs:
             exit 1
           fi
           exit "$(cat "$RUNNER_TEMP/notebook-refresh.rc")"
+
+      # Registered minters must be running before the verifier refuses legacy
+      # vault bearers. The initial cutover also lets already-running turns finish.
+      - name: Drain legacy MCP turns before first verifier cutover
+        id: mcp_cutover
+        run: |
+          CUTOFF=$(gcloud run services describe ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
+            --format=json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((e.get("value", "") for e in d["spec"]["template"]["spec"]["containers"][0].get("env", []) if e["name"] == "DAIMON_MCP__LEGACY_TOKEN_CUTOFF"), ""))')
+          if [ -z "$CUTOFF" ]; then
+            test -f "$RUNNER_TEMP/workers-refreshed-at" || {
+              echo "Cannot verify registered minters were refreshed; verifier cutover refused" >&2
+              exit 1
+            }
+            # Existing turn ceiling is 45 minutes. The extra minute covers
+            # timestamp truncation and the last request during worker handover.
+            DRAIN_UNTIL=$(( $(cat "$RUNNER_TEMP/workers-refreshed-at") + 2760 ))
+            while [ "$(date +%s)" -lt "$DRAIN_UNTIL" ]; do sleep 30; done
+            CUTOFF=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          fi
+          echo "cutoff=$CUTOFF" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy mcp revision
+        env:
+          LEGACY_CUTOFF: ${{ steps.mcp_cutover.outputs.cutoff }}
+        run: |
+          gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
+            --image "${{ steps.images.outputs.daimon }}" \
+            --update-env-vars "DAIMON_MCP__LEGACY_TOKEN_CUTOFF=$LEGACY_CUTOFF"
 
       - name: Health gate
         run: |

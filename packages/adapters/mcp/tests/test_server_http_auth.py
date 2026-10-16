@@ -154,7 +154,11 @@ async def test_verified_token_carries_platform_and_external_id_claims(
             account=account,
         )
 
-    token = pyjwt.encode({"sub": str(account_id), "iat": 0}, SECRET, algorithm="HS256")
+    from .harness import registered_account_token
+
+    token = await registered_account_token(
+        sessionmaker, account_id=account_id, secret=SECRET.encode()
+    )
 
     # Verify the minted token carries no platform or guild_id wire claims (REQ-1)
     decoded = pyjwt.decode(token, SECRET, algorithms=["HS256"])
@@ -174,3 +178,20 @@ async def test_verified_token_carries_platform_and_external_id_claims(
         f"verifier should accept token for discord account with PlatformPrincipal, "
         f"injecting platform/external_id claims; got {r.status_code}: {r.text}"
     )
+
+
+async def test_default_verifier_refuses_pre_cutover_unregistered_account_bearer(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sessionmaker.begin() as session:
+        _, account_id = await seed_tenant_and_account(session)
+    app = create_mcp_app(
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+            anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+            mcp=McpSettings(jwt_secret=SecretStr(SECRET), public_url=HttpUrl("https://x/mcp")),
+        ),
+        sessionmaker=sessionmaker,
+    )
+    token = pyjwt.encode({"sub": str(account_id), "iat": 0}, SECRET, algorithm="HS256")
+    assert (await _post(app, token=token)).status_code == 401

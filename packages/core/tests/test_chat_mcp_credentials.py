@@ -41,6 +41,13 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(
     admitted_at_publication = []
 
     async def handler(req):
+        if req.method == "GET" and req.url.path == "/v1/sessions/sess_renew":
+            from daimon.testing import ma_session
+
+            return httpx.Response(
+                200,
+                json=ma_session(id="sess_renew", vault_ids=["vlt_chat"]).model_dump(mode="json"),
+            )
         if req.method == "GET" and req.url.path == "/v1/vaults":
             return httpx.Response(
                 200,
@@ -181,5 +188,121 @@ async def test_registered_vault_rotates_before_expiry_and_after_revoke(
         assert admitted_at_publication == [True, True], (
             "a running session can use the replacement before its vault-write response returns"
         )
+    finally:
+        await client.close()
+
+
+async def test_reuse_refreshes_both_app_vaults_but_never_injects_an_external_slot(
+    db_engine, db_clean
+):
+    from daimon.core._models import McpToken
+    from daimon.core.config import McpSettings
+    from daimon.core.mcp_vault import chat_mcp_credential
+    from daimon.core.session_snapshot import snapshot_from_created_session
+    from daimon.core.session_update_ops import apply_update_ops
+    from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+    from daimon.testing import ma_agent, ma_session
+    from pydantic import SecretStr
+    from sqlalchemy import func, select
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    now = dt.datetime.now(dt.UTC)
+    secret = b"s" * 32
+    agent_id = uuid.uuid4()
+    async with factory() as db, db.begin():
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+        payloads = {
+            name: await chat_mcp_credential(
+                db,
+                account_id=account.id,
+                agent_id=agent_id,
+                jwt_secret=secret,
+                public_url="https://mcp.example.com/mcp",
+                now=now - dt.timedelta(minutes=70),
+            )
+            for name in ("caller", "github")
+        }
+    slots = {
+        name: [
+            {
+                "id": f"cred_{name}",
+                "type": "credential",
+                "vault_id": name,
+                "auth": {"type": "static_bearer", "mcp_server_url": "https://mcp.example.com/mcp"},
+                "metadata": payload["metadata"],
+            }
+        ]
+        for name, payload in payloads.items()
+    }
+    slots["external"] = [
+        {
+            "id": "cred_external",
+            "type": "credential",
+            "vault_id": "external",
+            "auth": {"type": "static_bearer", "mcp_server_url": "https://external.example/mcp"},
+            "metadata": {},
+        }
+    ]
+    live = ma_session(id="sess_dual", vault_ids=list(slots))
+    writes = []
+
+    async def handler(req):
+        if req.method == "GET" and req.url.path == "/v1/sessions/sess_dual":
+            return httpx.Response(200, json=live.model_dump(mode="json"))
+        name = req.url.path.split("/")[3]
+        if req.method == "GET":
+            return httpx.Response(200, json={"data": slots[name], "has_more": False})
+        assert req.method == "POST" and name in ("caller", "github")
+        payload = json.loads(req.content)
+        verifier = DaimonJWTVerifier(secret=secret, sessionmaker=factory)
+        assert await verifier.verify_token(payload["auth"]["token"]) is not None
+        writes.append(name)
+        payloads[name] = payload
+        slots[name][0]["metadata"] = payload["metadata"]
+        return httpx.Response(200, json=slots[name][0])
+
+    recorded = snapshot_from_created_session(
+        live,
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id="github",
+        sent_skills=live.agent.skills,
+        github_mode="app",
+    )
+    client = AsyncAnthropic(
+        api_key="offline", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    kwargs = dict(
+        ops=(),
+        session_id=live.id,
+        recorded=recorded,
+        agent=ma_agent(),
+        tenant_id=tenant.id,
+        agent_uuid=agent_id,
+        account_id=account.id,
+        mcp=McpSettings(
+            public_url="https://mcp.example.com/mcp", jwt_secret=SecretStr(secret.decode())
+        ),
+        tool_safety=OPEN_TOOL_SAFETY,
+        fernet=None,
+        github_fallback_pat=None,
+        github_app_id=None,
+        github_app_private_key=None,
+    )
+    try:
+        await apply_update_ops(client, factory, now=now, **kwargs)
+        assert writes == ["caller", "github"]
+        # Whichever mounted-vault precedence the provider uses, both authenticate.
+        verifier = DaimonJWTVerifier(secret=secret, sessionmaker=factory)
+        for name in ("caller", "github"):
+            assert await verifier.verify_token(payloads[name]["auth"]["token"]) is not None
+        async with factory() as db:
+            before = await db.scalar(select(func.count()).select_from(McpToken))
+        await apply_update_ops(client, factory, now=now + dt.timedelta(minutes=1), **kwargs)
+        async with factory() as db:
+            after = await db.scalar(select(func.count()).select_from(McpToken))
+        assert before == after == 4 and writes == ["caller", "github"]
     finally:
         await client.close()

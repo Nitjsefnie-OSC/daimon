@@ -13,7 +13,7 @@ of whether or when this sweep runs. The gate alone is sufficient.
 
 This one-time backfill replaces stale credentials with the same registered,
 expiring ordinary-chat credential the per-turn vault owner mints. Retired
-per-account names without an executing agent are left alone and reported;
+per-account names without an executing agent are archived and reported;
 creating another unbounded account bearer would undo the vault invariant.
 
 **Scope:** matches ONLY ``static_bearer`` credentials whose
@@ -32,8 +32,8 @@ user-added external MCP credentials.
   ``static_bearer`` at ``public_url`` → in non-dry-run delete then recreate
   with a registered expiring ordinary-chat credential (no ``is_admin``).
 
-No global state; ``client`` / ``jwt_secret`` / ``now`` are injected per
-``guideline:architecture``. Let ``anthropic.APIError`` propagate.
+No global state; dependencies are injected. Individual vault failures are
+reported without blocking other vaults. Failure to list vaults propagates.
 """
 
 from __future__ import annotations
@@ -43,16 +43,18 @@ import uuid
 from dataclasses import dataclass, field
 
 import structlog
-from anthropic import AsyncAnthropic
+from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
 from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, chat_mcp_credential, same_server_url
 from daimon.core.mux_backend import platform_scope
 from daimon.core.mux_compat import (
+    archive_vault,
     create_credential,
     delete_credential,
     list_credentials,
     list_vaults,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -70,11 +72,15 @@ class SweepReport:
     dry-run).
     ``unparseable_vault_ids``: daimon-mcp:* vaults without valid account/agent
     binding or private namespace — left alone for operator inspection.
+    ``archived_vault_ids``: retired per-account namespaces archived (planned
+    in dry-run). ``failures``: per-vault error types, with other vaults continued.
     """
 
     swept_pairs: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     recreated_cred_ids: list[str] = field(default_factory=list[str])
     unparseable_vault_ids: list[str] = field(default_factory=list[str])
+    archived_vault_ids: list[str] = field(default_factory=list[str])
+    failures: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
 
 
 def partition_daimon_mcp_vault_ids(
@@ -110,7 +116,7 @@ async def sweep_stale_admin_credentials(
     For each daimon-mcp vault:
     1. Parse account, executing agent and optional isolated Slack context from
        ``daimon-mcp:<account>:<agent>[:slack-turn:<context>]``. Unsupported or
-       malformed names, including retired per-account vaults, are reported
+       malformed names are reported. Retired per-account vaults are archived
        without creating another unbounded account credential.
     2. List credentials for the vault.
     3. Find the ``static_bearer`` credential whose
@@ -125,8 +131,8 @@ async def sweep_stale_admin_credentials(
     The explicit operator sweep retains its delete+recreate behavior. Normal
     turns use the vault owner's in-place refresh instead.
 
-    ``anthropic.APIError`` propagates — callers at the CLI boundary decide how
-    to surface failures.
+    Each vault isolates provider, database and identity failures in the report.
+    A failure listing the inventory still propagates to the CLI boundary.
     """
     scope = platform_scope("mcp_credential_sweep.sweep_stale_admin_credentials")
     all_vaults = [v async for v in list_vaults(client, scope=scope)]
@@ -139,12 +145,25 @@ async def sweep_stale_admin_credentials(
     recreated_cred_ids: list[str] = []
     unparseable_vault_ids: list[str] = []
 
+    archived_vault_ids: list[str] = []
+    failures: list[tuple[str, str]] = []
+
     for vault_id in daimon_mcp_ids:
         vault = vault_by_id[vault_id]
+        if vault.archived_at is not None:
+            continue
         suffix = vault.display_name[len(_DISPLAY_PREFIX) :]
         parts = suffix.split(":")
         try:
             account_id = uuid.UUID(parts[0])
+            if len(parts) == 1:
+                try:
+                    if not dry_run:
+                        await archive_vault(client, vault_id, scope=scope)
+                    archived_vault_ids.append(vault_id)
+                except (APIError, SQLAlchemyError, ValueError) as exc:
+                    failures.append((vault_id, type(exc).__name__))
+                continue
             agent_id = uuid.UUID(parts[1])
             context_id = None
             if len(parts) != 2:
@@ -160,63 +179,104 @@ async def sweep_stale_admin_credentials(
             unparseable_vault_ids.append(vault_id)
             continue
 
-        # Find the static_bearer credential at public_url (skip all others).
-        target_cred_id: str | None = None
-        async for cred in list_credentials(client, vault_id, scope=scope):
-            if cred.auth.type != "static_bearer":
-                continue
-            if same_server_url(cred.auth.mcp_server_url, GITHUB_COPILOT_MCP_URL):
-                continue  # Never touch Copilot credentials.
-            if same_server_url(cred.auth.mcp_server_url, public_url):
-                target_cred_id = cred.id
-                break  # First match is sufficient; URLs are effectively unique.
-
-        if target_cred_id is None:
-            # No static_bearer at public_url — nothing to sweep for this vault.
-            continue
-
-        swept_pairs.append((vault_id, target_cred_id))
-
-        if dry_run:
-            _log.info(
-                "mcp_credential_sweep.planned",
-                vault_id=vault_id,
-                cred_id=target_cred_id,
-                account_id=str(account_id),
-            )
-            continue
-
-        # Commit the registry row before publishing the replacement bearer.
-        async with session_factory() as session, session.begin():
-            payload = await chat_mcp_credential(
-                session,
-                account_id=account_id,
-                agent_id=agent_id,
+        try:
+            await _sweep_vault(
+                client,
+                session_factory=session_factory,
                 jwt_secret=jwt_secret,
                 public_url=public_url,
                 now=now,
-                slack_turn_context_id=context_id,
+                dry_run=dry_run,
+                vault_id=vault_id,
+                account_id=account_id,
+                agent_id=agent_id,
+                context_id=context_id,
+                swept_pairs=swept_pairs,
+                recreated_cred_ids=recreated_cred_ids,
             )
-
-        _log.info(
-            "mcp_credential_sweep.delete",
-            vault_id=vault_id,
-            cred_id=target_cred_id,
-            account_id=str(account_id),
-        )
-        await delete_credential(client, vault_id, target_cred_id, scope=scope)
-
-        new_cred = await create_credential(client, vault_id, payload, scope=scope)
-        _log.info(
-            "mcp_credential_sweep.recreated",
-            vault_id=vault_id,
-            new_cred_id=new_cred.id,
-            account_id=str(account_id),
-        )
-        recreated_cred_ids.append(new_cred.id)
+        except (APIError, SQLAlchemyError, ValueError) as exc:
+            # Never include credential payloads, JWTs or arbitrary provider error text.
+            failures.append((vault_id, type(exc).__name__))
+            _log.warning(
+                "mcp_credential_sweep.failed", vault_id=vault_id, error_type=type(exc).__name__
+            )
 
     return SweepReport(
         swept_pairs=swept_pairs,
         recreated_cred_ids=recreated_cred_ids,
         unparseable_vault_ids=unparseable_vault_ids,
+        archived_vault_ids=archived_vault_ids,
+        failures=failures,
     )
+
+
+async def _sweep_vault(
+    client: AsyncAnthropic,
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    jwt_secret: bytes,
+    public_url: str,
+    now: dt.datetime,
+    dry_run: bool,
+    vault_id: str,
+    account_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    context_id: uuid.UUID | None,
+    swept_pairs: list[tuple[str, str]],
+    recreated_cred_ids: list[str],
+) -> None:
+    scope = platform_scope("mcp_credential_sweep.sweep_stale_admin_credentials")
+    # Find the static_bearer credential at public_url (skip all others).
+    target_cred_id: str | None = None
+    async for cred in list_credentials(client, vault_id, scope=scope):
+        if cred.auth.type != "static_bearer":
+            continue
+        if same_server_url(cred.auth.mcp_server_url, GITHUB_COPILOT_MCP_URL):
+            continue  # Never touch Copilot credentials.
+        if same_server_url(cred.auth.mcp_server_url, public_url):
+            target_cred_id = cred.id
+            break  # First match is sufficient; URLs are effectively unique.
+
+    if target_cred_id is None:
+        # No static_bearer at public_url — nothing to sweep for this vault.
+        return
+
+    if dry_run:
+        swept_pairs.append((vault_id, target_cred_id))
+        _log.info(
+            "mcp_credential_sweep.planned",
+            vault_id=vault_id,
+            cred_id=target_cred_id,
+            account_id=str(account_id),
+        )
+        return
+
+    # Commit the registry row before publishing the replacement bearer.
+    async with session_factory() as session, session.begin():
+        payload = await chat_mcp_credential(
+            session,
+            account_id=account_id,
+            agent_id=agent_id,
+            jwt_secret=jwt_secret,
+            public_url=public_url,
+            now=now,
+            slack_turn_context_id=context_id,
+        )
+
+    _log.info(
+        "mcp_credential_sweep.delete",
+        vault_id=vault_id,
+        cred_id=target_cred_id,
+        account_id=str(account_id),
+    )
+    await delete_credential(client, vault_id, target_cred_id, scope=scope)
+
+    new_cred = await create_credential(client, vault_id, payload, scope=scope)
+    _log.info(
+        "mcp_credential_sweep.recreated",
+        vault_id=vault_id,
+        new_cred_id=new_cred.id,
+        account_id=str(account_id),
+    )
+    swept_pairs.append((vault_id, target_cred_id))
+    recreated_cred_ids.append(new_cred.id)

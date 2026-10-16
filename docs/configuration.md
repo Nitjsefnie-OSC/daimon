@@ -272,6 +272,14 @@ Both fields are optional so deployments that don't run the MCP adapter keep work
 
 Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter.
 
+### `DAIMON_MCP__LEGACY_TOKEN_CUTOFF`
+
+`AwareDatetime | None` · optional · default unset
+
+Reject unregistered non-internal MCP tokens issued before this UTC instant. Unset uses
+verifier startup time. Deploy registered minters, refresh vaults and drain legacy turns
+before deploying the verifier.
+
 ### `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION`
 
 `bool` · optional · default `False`

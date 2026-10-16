@@ -235,6 +235,7 @@ async def handle_topup_select(
             url = await create_checkout(
                 http_client,
                 settings=runtime.settings.mcp,
+                session_factory=runtime.sessionmaker,
                 account_id=principal.account_id,
                 amount=amount,
             )

@@ -25,7 +25,7 @@ from daimon.core.channel_budget import (
 )
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
-from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_auth import mint_panel_mcp_token
 from daimon.core.promo_credit import ActiveTimedCredit, PromoRedeemed, get_active_timed_credit
 from daimon.core.stores import tenant_user_caps
 from daimon.core.stores.platform_names import get_user_names
@@ -40,7 +40,7 @@ from daimon.core.stores.usage_events import (
     turns_by_user_in_tenant_since,
 )
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
@@ -432,7 +432,12 @@ def estimate_turns(amount_usd: float, *, guild_spend: float, guild_turns: int) -
 
 
 async def create_checkout(
-    http_client: httpx.AsyncClient, *, settings: McpSettings, account_id: uuid.UUID, amount: int
+    http_client: httpx.AsyncClient,
+    *,
+    settings: McpSettings,
+    account_id: uuid.UUID,
+    amount: int,
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> str:
     """POST `/billing/checkout` and return the Stripe Checkout URL.
 
@@ -447,11 +452,15 @@ async def create_checkout(
     jwt_secret = settings.jwt_secret
     if app_root_url is None or jwt_secret is None:
         raise DaimonError("Top-ups need DAIMON_MCP__PUBLIC_URL and DAIMON_MCP__JWT_SECRET.")
-    token = mint_jwt(
-        account_id=account_id,
-        secret=jwt_secret.get_secret_value().encode(),
-        now=datetime.now(UTC),
-    )
+    # Publish the registry row before the independently connected MCP verifier
+    # can receive this request.
+    async with session_factory.begin() as session:
+        token = await mint_panel_mcp_token(
+            session,
+            account_id=account_id,
+            secret=jwt_secret.get_secret_value().encode(),
+            now=datetime.now(UTC),
+        )
     response = await http_client.post(
         f"{app_root_url.rstrip('/')}/billing/checkout",
         json={"amount": amount},

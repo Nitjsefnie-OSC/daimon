@@ -190,6 +190,7 @@ async def _refresh_chat_credential_locked(
     slack_turn_context_id: uuid.UUID | None = None,
     preserve_context: bool = False,
     registered_payload: dict[str, Any] | None = None,
+    create_missing: bool = True,
 ) -> None:
     target = None
     metadata: dict[str, str] = {}
@@ -229,6 +230,8 @@ async def _refresh_chat_credential_locked(
         target = cred
         break
 
+    if target is None and not create_missing:
+        return
     if registered_payload is None:
         payload = await chat_mcp_credential(
             session,
@@ -256,6 +259,7 @@ async def _refresh_chat_credential_locked(
             scope=scope,
             slack_turn_context_id=slack_turn_context_id,
             registered_payload=payload,
+            create_missing=create_missing,
         )
         return
 
@@ -297,6 +301,7 @@ async def refresh_agent_mcp_vault(
             now=now,
             scope=scope,
             preserve_context=True,
+            create_missing=False,
         )
 
         await session.commit()

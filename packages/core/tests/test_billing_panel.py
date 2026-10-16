@@ -40,10 +40,15 @@ from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import KnownName, upsert_user_names
 from daimon.testing import ma_model_usage
-from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_channel_budget,
+    make_ledger_entry,
+    make_tenant,
+)
 from pydantic import SecretStr
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _CALLER_ID = "U_CALLER"
 _OTHER_ID = "U_OTHER"
@@ -328,7 +333,11 @@ def _mcp_settings() -> MagicMock:
     return settings
 
 
-async def test_create_checkout_posts_only_the_amount_with_a_bearer_token() -> None:
+async def test_create_checkout_posts_only_the_amount_with_a_bearer_token(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    account = await make_account(db_session)
+    await db_session.commit()
     captured: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -337,7 +346,11 @@ async def test_create_checkout_posts_only_the_amount_with_a_bearer_token() -> No
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         url = await create_checkout(
-            client, settings=_mcp_settings(), account_id=uuid.uuid4(), amount=25
+            client,
+            session_factory=db_session_factory,
+            settings=_mcp_settings(),
+            account_id=account.id,
+            amount=25,
         )
 
     assert url == _CHECKOUT_URL, "the Checkout URL from the MCP answer"
@@ -347,44 +360,77 @@ async def test_create_checkout_posts_only_the_amount_with_a_bearer_token() -> No
     assert request.headers["authorization"].startswith("Bearer "), "the hop is authenticated"
 
 
-async def test_create_checkout_sends_a_plain_account_token() -> None:
+async def test_create_checkout_sends_a_plain_account_token(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
     """The checkout route never checks admin, so the hop carries no admin or internal claim."""
+    account = await make_account(db_session)
+    await db_session.commit()
     captured: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
         return httpx.Response(200, json={"url": _CHECKOUT_URL})
 
-    account_id = uuid.uuid4()
+    account_id = account.id
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await create_checkout(client, settings=_mcp_settings(), account_id=account_id, amount=10)
+        await create_checkout(
+            client,
+            session_factory=db_session_factory,
+            settings=_mcp_settings(),
+            account_id=account_id,
+            amount=10,
+        )
 
     token = captured[0].headers["authorization"].removeprefix("Bearer ")
     claims = pyjwt.decode(token, options={"verify_signature": False})
     assert claims["sub"] == str(account_id), "the verifier derives the tenant from the account"
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+
+    async with db_session_factory() as session:
+        row = await get_mcp_token(session, jti=uuid.UUID(claims["jti"]))
+    assert row is not None and row.kind == "cli" and row.label == "billing-panel"
+    assert claims["exp"] - claims["iat"] == 600
     assert "internal" not in claims and "is_admin" not in claims, (
         "a checkout hop must not mint an internal admin bearer"
     )
 
 
-async def test_create_checkout_raises_on_non_2xx() -> None:
+async def test_create_checkout_raises_on_non_2xx(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    account = await make_account(db_session)
+    await db_session.commit()
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(422, json={"error": "invalid amount"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(httpx.HTTPStatusError):
             await create_checkout(
-                client, settings=_mcp_settings(), account_id=uuid.uuid4(), amount=999
+                client,
+                session_factory=db_session_factory,
+                settings=_mcp_settings(),
+                account_id=account.id,
+                amount=999,
             )
 
 
-async def test_create_checkout_refuses_without_mcp_settings() -> None:
+async def test_create_checkout_refuses_without_mcp_settings(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
     settings = MagicMock()
     settings.app_root_url = None
     settings.jwt_secret = None
     async with httpx.AsyncClient() as client:
         with pytest.raises(DaimonError, match="DAIMON_MCP__PUBLIC_URL"):
-            await create_checkout(client, settings=settings, account_id=uuid.uuid4(), amount=10)
+            await create_checkout(
+                client,
+                session_factory=db_session_factory,
+                settings=settings,
+                account_id=uuid.uuid4(),
+                amount=10,
+            )
 
 
 async def test_load_billing_snapshot_flags_the_codes_each_viewer_may_redeem(
@@ -519,3 +565,34 @@ def test_redeemed_text_names_what_each_redemption_did() -> None:
     assert text(kind="timed", credit_starts_at=end, credit_ends_at=end, granted=False) == (
         "🎟️ Credit scheduled: *$10.00* from 20 May until 20 May."
     )
+
+
+async def test_checkout_registration_is_committed_before_the_http_hop(db_engine, db_clean):
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+    from daimon.core.stores.mcp_tokens import revoke_mcp_token
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory.begin() as session:
+        account = await make_account(session)
+    secret = _mcp_settings().jwt_secret.get_secret_value().encode()
+    verifier = DaimonJWTVerifier(secret=secret, sessionmaker=factory)
+    observed = []
+
+    async def checkout(request: httpx.Request) -> httpx.Response:
+        token = request.headers["authorization"].removeprefix("Bearer ")
+        assert await verifier.verify_token(token) is not None
+        observed.append(token)
+        return httpx.Response(200, json={"url": _CHECKOUT_URL})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(checkout)) as client:
+        await create_checkout(
+            client,
+            settings=_mcp_settings(),
+            session_factory=factory,
+            account_id=account.id,
+            amount=10,
+        )
+    claims = pyjwt.decode(observed[0], options={"verify_signature": False})
+    async with factory.begin() as session:
+        await revoke_mcp_token(session, jti=uuid.UUID(claims["jti"]), now=datetime.now(UTC))
+    assert await verifier.verify_token(observed[0]) is None

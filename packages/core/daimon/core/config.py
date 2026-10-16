@@ -19,6 +19,7 @@ from uuid import UUID
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -163,6 +164,14 @@ class McpSettings(BaseModel):
         default=None,
         description=(
             "Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter."
+        ),
+    )
+    legacy_token_cutoff: AwareDatetime | None = Field(
+        default=None,
+        description=(
+            "Reject unregistered non-internal MCP tokens issued before this UTC instant. "
+            "Unset uses verifier startup time. Deploy registered minters, refresh vaults "
+            "and drain legacy turns before deploying the verifier."
         ),
     )
     require_routine_destination: bool = Field(

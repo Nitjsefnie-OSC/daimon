@@ -129,11 +129,13 @@ class DaimonJWTVerifier(JWTVerifier):
         secret: bytes,
         sessionmaker: async_sessionmaker[AsyncSession],
         group_members: GroupMembersFor | None = None,
+        legacy_token_cutoff: datetime | None = None,
     ) -> None:
         super().__init__(
             public_key=secret.decode(),
             algorithm="HS256",
         )
+        self._legacy_token_cutoff = int((legacy_token_cutoff or datetime.now(UTC)).timestamp())
         self._sessionmaker = sessionmaker
         self._group_members_for = group_members
 
@@ -174,8 +176,12 @@ class DaimonJWTVerifier(JWTVerifier):
                 row = await get_mcp_token(session, jti=jti_uuid)
                 if row is None:
                     return None
-            elif access.claims.get("kind") is not None:
-                return None  # only registered tokens carry a kind
+            elif jti is not None or access.claims.get("kind") is not None:
+                return None  # malformed registry ids never fall back to legacy auth
+            elif access.claims.get("internal") is not True:
+                issued = access.claims.get("iat")
+                if type(issued) is not int or issued < self._legacy_token_cutoff:
+                    return None
             # A turn may hold its sender as external without storing it (no
             # evidence either way): while it runs, every tool call is held too.
             external = identity_row.is_external or (

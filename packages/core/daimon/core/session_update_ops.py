@@ -62,6 +62,7 @@ from daimon.core.session_compat import (
 from daimon.core.session_ports_compat import (
     add_session_file_record,
     remove_session_resource_record,
+    retrieve_session_record,
     session_scope,
     update_session_record,
     walk_session_resource_records,
@@ -241,6 +242,7 @@ async def apply_update_ops(
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     mcp_vault_ids: McpVaultIds | None = None,
+    shared_owner: uuid.UUID | None = None,
 ) -> AppliedOps | SessionBusy:
     """Run `ops` against the live session and return what it runs afterwards.
 
@@ -256,20 +258,31 @@ async def apply_update_ops(
     snapshot = recorded
     applied: list[ChangeReason] = []
 
-    # This is the mounted session vault, including shared and GitHub-App vaults.
-    # Refresh independently of external credential mirroring or .env encryption.
-    if snapshot.vault_id is not None and mcp.public_url is not None and mcp.jwt_secret is not None:
-        await refresh_agent_mcp_vault(
-            anthropic,
-            vault_id=snapshot.vault_id,
-            account_id=account_id,
-            agent_id=agent_uuid,
-            jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
-            public_url=str(mcp.public_url),
-            now=now,
-            session_factory=sessionmaker,
-            scope=scope,
-        )
+    # Shared workspaces must never acquire a caller's MCP identity. App mode
+    # can mount both a caller and a repository vault; refresh every actual slot
+    # rather than relying on undocumented provider credential precedence.
+    if (
+        shared_owner is None
+        and snapshot.vault_id is not None
+        and mcp.public_url is not None
+        and mcp.jwt_secret is not None
+    ):
+        mounted_vaults = (snapshot.vault_id,)
+        if snapshot.github_mode == "app":
+            live = await retrieve_session_record(anthropic, session_id, scope=scope)
+            mounted_vaults = tuple(dict.fromkeys(live.vault_ids))
+        for vault_id in mounted_vaults:
+            await refresh_agent_mcp_vault(
+                anthropic,
+                vault_id=vault_id,
+                account_id=account_id,
+                agent_id=agent_uuid,
+                jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
+                public_url=str(mcp.public_url),
+                now=now,
+                session_factory=sessionmaker,
+                scope=scope,
+            )
 
     for op in ops:
         match op:

@@ -534,6 +534,11 @@ async def test_sweep_never_recreates_an_unbound_or_malformed_vault(db_session_fa
 
     def handler(req):
         requests.append((req.method, req.url.path))
+        if req.method == "POST" and req.url.path == "/v1/vaults/vlt_retired/archive":
+            return httpx.Response(
+                200,
+                json={**_vault_wire("vlt_retired", display), "archived_at": "2026-06-29T00:00:00Z"},
+            )
         assert (req.method, req.url.path) == ("GET", "/v1/vaults")
         return httpx.Response(
             200, json={"data": [_vault_wire("vlt_retired", display)], "has_more": False}
@@ -549,8 +554,74 @@ async def test_sweep_never_recreates_an_unbound_or_malformed_vault(db_session_fa
             now=_NOW,
             dry_run=False,
         )
-        assert report.unparseable_vault_ids == ["vlt_retired"]
+        assert report.failures == []
+        assert report.unparseable_vault_ids == (["vlt_retired"] if suffix != "legacy" else [])
+        assert report.archived_vault_ids == (["vlt_retired"] if suffix == "legacy" else [])
         assert report.swept_pairs == [] and report.recreated_cred_ids == []
-        assert requests == [("GET", "/v1/vaults")]
+        assert requests == [("GET", "/v1/vaults")] + (
+            [("POST", "/v1/vaults/vlt_retired/archive")] if suffix == "legacy" else []
+        )
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("failure", ["deleted-account", "provider"])
+async def test_sweep_isolates_one_vault_failure_and_continues(
+    db_session,
+    db_session_factory,
+    failure,
+):
+    live = await make_account(db_session)
+    await db_session.commit()
+    accounts = {"vlt_bad": uuid.uuid4(), "vlt_good": live.id}
+    names = {key: f"daimon-mcp:{account}:{uuid.uuid4()}" for key, account in accounts.items()}
+    writes = []
+
+    def handler(req):
+        path = req.url.path
+        if req.method == "GET" and path == "/v1/vaults":
+            return httpx.Response(
+                200, json={"data": [_vault_wire(k, v) for k, v in names.items()], "has_more": False}
+            )
+        vault_id = path.split("/")[3]
+        if req.method == "GET":
+            if vault_id == "vlt_bad" and failure == "provider":
+                return httpx.Response(
+                    404, json={"error": {"type": "not_found_error", "message": "gone"}}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        _cred_wire(
+                            cred_id="cred_old", vault_id=vault_id, mcp_server_url=_PUBLIC_URL
+                        )
+                    ],
+                    "has_more": False,
+                },
+            )
+        writes.append(vault_id)
+        if req.method == "DELETE":
+            return httpx.Response(
+                200, json={"id": "cred_old", "type": "vault_credential_deleted", "deleted": True}
+            )
+        return httpx.Response(
+            200, json=_cred_wire(cred_id="cred_new", vault_id=vault_id, mcp_server_url=_PUBLIC_URL)
+        )
+
+    client = _make_client(httpx.MockTransport(handler))
+    try:
+        report = await sweep_stale_admin_credentials(
+            client,
+            session_factory=db_session_factory,
+            jwt_secret=_SECRET,
+            public_url=_PUBLIC_URL,
+            now=_NOW,
+            dry_run=False,
+        )
+        assert len(report.failures) == 1 and report.failures[0][0] == "vlt_bad"
+        assert report.recreated_cred_ids == ["cred_new"]
+        assert report.swept_pairs == [("vlt_good", "cred_old")]
+        assert writes == ["vlt_good", "vlt_good"]
     finally:
         await client.close()

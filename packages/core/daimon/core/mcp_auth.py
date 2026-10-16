@@ -10,9 +10,8 @@ The injected `now` keeps lifetimes deterministic in tests.
 Server-side verification lives in `daimon.adapters.mcp.auth.verifier`
 (FastMCP's `JWTVerifier`, which is authlib-backed). We don't verify here.
 
-`mint_internal_mcp_token` is a v1.1 seam used by the headless routine runner
-and the `/mcp-token mint` command. A future variant may
-supersede it with a tenant-aware variant — keep the signature stable.
+`mint_internal_mcp_token` is a retained internal compatibility seam. Current
+chat workers and CLI commands use registered mint functions instead.
 """
 
 from __future__ import annotations
@@ -54,8 +53,9 @@ def mint_jwt(
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
-    This is the Discord/CLI mint path. It intentionally NEVER emits the ``internal``
-    claim, so a Discord vault token cannot be treated as a trusted internal token
+    This low-level compatibility signer never emits the ``internal`` claim.
+    Registered chat minting supplies both a jti and expiry, so a vault token
+    cannot be treated as a trusted internal token
     by the MCP admin gate. Admin elevation for Discord tokens
     comes exclusively from the live DB ``role`` re-read by the verifier each turn.
 
@@ -101,11 +101,14 @@ def mint_jwt(
 # One hour covers the existing 45-minute turn ceiling plus vault propagation.
 CHAT_TOKEN_TTL = dt.timedelta(hours=1)
 CHAT_TOKEN_REFRESH_MARGIN = dt.timedelta(minutes=50)
+CHAT_TOKEN_LABEL_PREFIX = "vault-chat:"
+PANEL_TOKEN_LABEL = "billing-panel"
+EPHEMERAL_TOKEN_RETENTION = dt.timedelta(days=1)
 
 
 def chat_token_label(jti: uuid.UUID) -> str:
     """Bind the registry discriminator to a generated id, leaving user labels free."""
-    return f"vault-chat:{jti}"
+    return f"{CHAT_TOKEN_LABEL_PREFIX}{jti}"
 
 
 async def mint_chat_mcp_token(
@@ -160,7 +163,7 @@ def mint_internal_mcp_token(
     secret: bytes,
     now: dt.datetime,
 ) -> str:
-    """Sign a token for headless (routine-driven) MCP calls.
+    """Retained signer for legacy trusted internal callers.
 
     Claims: ``{sub: <account_uuid>, iat, is_admin: True, internal: True}``.
     Signed HS256 with ``secret``. ``sub`` is the stringified account UUID (stable
@@ -173,12 +176,13 @@ def mint_internal_mcp_token(
     gate keys on ``is_admin AND internal`` together: a Discord vault token minted by
     ``mint_jwt`` never carries ``internal``, so a stale pre-sweep Discord vault cred
     with ``is_admin=True`` and ``role=user`` is DENIED admin elevation at the gate.
-    Only tokens minted here (CLI/scheduler/headless) carry both claims and can gain
+    Only tokens minted here carry both claims and can gain
     admin via the claim path.
 
-    A future variant may supersede this with a tenant-aware
-    variant — the signature is the seam, keep it stable. The
-    ``/mcp-token mint`` reuses this helper directly.
+    There are no current in-repository production callers. Chat/headless
+    workers use registered ordinary-chat tokens; CLI mint-token uses the
+    registered account-token owner. Retiring this compatibility seam requires
+    inventorying external callers before removing the internal cutoff exception.
     """
     return pyjwt.encode(
         {
@@ -315,10 +319,54 @@ async def mint_cli_mcp_token(
     Unlike the jti-less tokens `mint_jwt` signs, this one expires and
     `daimon mcp revoke-token` can revoke it.
     """
+    return await _mint_account_mcp_token(
+        session,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        secret=secret,
+        now=now,
+        expires_at=now + dt.timedelta(days=ttl_days),
+        label=None,
+    )
+
+
+async def mint_panel_mcp_token(
+    session: AsyncSession,
+    *,
+    account_id: uuid.UUID,
+    secret: bytes,
+    now: dt.datetime,
+) -> str:
+    """Register a ten-minute non-admin account token for the checkout HTTP hop."""
+    from daimon.core.stores.accounts import get_account_with_tenant
+
+    identity = await get_account_with_tenant(session, account_id=account_id)
+    if identity is None:
+        raise ValueError("checkout requires a live account")
+    return await _mint_account_mcp_token(
+        session,
+        account_id=account_id,
+        tenant_id=identity.tenant_id,
+        secret=secret,
+        now=now,
+        expires_at=now + dt.timedelta(minutes=10),
+        label=PANEL_TOKEN_LABEL,
+    )
+
+
+async def _mint_account_mcp_token(
+    session: AsyncSession,
+    *,
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    secret: bytes,
+    now: dt.datetime,
+    expires_at: dt.datetime,
+    label: str | None,
+) -> str:
     from daimon.core.stores.mcp_tokens import create_mcp_token_row
 
     jti = uuid.uuid4()
-    expires_at = now + dt.timedelta(days=ttl_days)
     await create_mcp_token_row(
         session,
         jti=jti,
@@ -326,7 +374,7 @@ async def mint_cli_mcp_token(
         tenant_id=tenant_id,
         agent_id=None,
         kind="cli",
-        label=None,
+        label=label,
         created_at=now,
         expires_at=expires_at,
     )

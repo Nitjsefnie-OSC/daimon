@@ -23,7 +23,7 @@ from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.errors import ConfigError
+from daimon.core.errors import ConfigError, StoreError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token, mint_cli_mcp_token
 from daimon.core.mcp_credential_sweep import sweep_stale_admin_credentials
@@ -75,8 +75,7 @@ async def mint_token(*, rt: CliRuntime, os_user: str | None, ttl_days: int = 90)
     """Mint the CLI principal's token with a jti, an exp and a registry row.
 
     `daimon mcp revoke-token` revokes it. Tokens minted before rows existed
-    carry no jti; they cannot be told apart from vault tokens, so they keep
-    verifying as before.
+    carry no jti; the verifier applies its configured legacy issuance cutoff.
     """
     if not 1 <= ttl_days <= 365:
         raise typer.BadParameter("--ttl-days must be 1 to 365")
@@ -308,12 +307,21 @@ async def mcp_sweep_credentials(*, rt: CliRuntime, console: Console, apply: bool
         table.add_row(vault_id, old_cred_id, status)
     for vid in report.unparseable_vault_ids:
         table.add_row(vid, "—", "unparseable display_name (left alone)")
+    for vid in report.archived_vault_ids:
+        table.add_row(vid, "—", "archived retired account vault" if apply else "archive planned")
+    for vid, error_type in report.failures:
+        table.add_row(vid, "—", f"failed: {error_type} (other vaults continued)")
     console.print(table)
 
     swept = len(report.swept_pairs)
     unparseable = len(report.unparseable_vault_ids)
-    summary = f"{swept} swept, {unparseable} unparseable"
+    summary = (
+        f"{swept} swept, {unparseable} unparseable, "
+        f"{len(report.archived_vault_ids)} retired, {len(report.failures)} failed"
+    )
     if not apply and report.swept_pairs:
         console.print(f"[yellow]{summary} — re-run with --apply to delete+recreate[/yellow]")
     else:
         console.print(summary)
+    if report.failures:
+        raise StoreError(f"{len(report.failures)} vaults failed; see per-vault report and retry.")

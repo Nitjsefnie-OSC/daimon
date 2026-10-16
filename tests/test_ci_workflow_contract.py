@@ -205,3 +205,70 @@ def test_image_selection_shell_validation(
             assert f"daimon=example.test/test-project/images/daimon@{digests[0]}" in lines
         else:
             assert "daimon=example/daimon:abc1234" in lines
+
+
+@pytest.mark.parametrize("state", ["first", "repeat", "missing-minters"])
+def test_mcp_cutover_shell_drains_legacy_turns_before_verifier(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    """Execute the actual cutover Bash against an offline clock and Cloud Run receipt."""
+    import json
+
+    from daimon.core.turn.ceiling import TURN_CEILING_S
+
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    names = [step.get("name") for step in steps]
+    cutover_name = "Drain legacy MCP turns before first verifier cutover"
+    assert names.index("Refresh worker VM containers (recreate in place)") < names.index(
+        cutover_name
+    )
+    assert names.index("Wait for notebook-host VM refresh") < names.index(cutover_name)
+    assert names.index(cutover_name) < names.index("Deploy mcp revision")
+    script = next(step["run"] for step in steps if step.get("id") == "mcp_cutover")
+    script = script.replace("${{ vars.GCP_AR_REPO }}", "offline")
+    clock = tmp_path / "clock"
+    clock.write_text("1000")
+    if state != "missing-minters":
+        (tmp_path / "workers-refreshed-at").write_text("1000")
+    env_rows = [{"name": "UNRELATED_SECRET", "value": "do-not-print"}]
+    cutoff = "2026-10-16T00:00:00Z"
+    if state == "repeat":
+        env_rows.append({"name": "DAIMON_MCP__LEGACY_TOKEN_CUTOFF", "value": cutoff})
+    receipt = {"spec": {"template": {"spec": {"containers": [{"env": env_rows}]}}}}
+    (tmp_path / "service.json").write_text(json.dumps(receipt))
+    commands = {
+        "gcloud": '#!/bin/sh\ncat "$RUNNER_TEMP/service.json"\n',
+        "date": '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$RUNNER_TEMP/clock"; else echo 2026-10-16T01:00:00Z; fi\n',
+        "sleep": '#!/bin/sh\necho "$(( $(cat "$RUNNER_TEMP/clock") + $1 ))" > "$RUNNER_TEMP/clock"\n',
+    }
+    for command, body in commands.items():
+        executable = tmp_path / command
+        executable.write_text(body)
+        executable.chmod(0o700)
+    output = tmp_path / "outputs"
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", script],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(output),
+            "REGION": "offline",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert "do-not-print" not in result.stdout + result.stderr
+    if state == "missing-minters":
+        assert result.returncode != 0
+        assert not output.exists()
+    elif state == "first":
+        assert result.returncode == 0, result.stderr
+        assert int(clock.read_text()) >= 1000 + TURN_CEILING_S + 60
+        assert output.read_text() == "cutoff=2026-10-16T01:00:00Z\n"
+    else:
+        assert result.returncode == 0, result.stderr
+        assert clock.read_text() == "1000", "a completed cutover does not drain again"
+        assert output.read_text() == f"cutoff={cutoff}\n"

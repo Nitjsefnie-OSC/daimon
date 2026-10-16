@@ -1,6 +1,6 @@
 """Claim-less end-to-end keystone acceptance test (REQ-6 gate).
 
-Proves that a JWT minted with only `sub` (no platform / guild_id wire claims)
+Proves that a registered JWT with only `sub` as its identity (no platform / guild_id wire claims)
 drives both a routines tool and a discord tool through the full real chain:
 
   real DaimonJWTVerifier → DB JOIN → claim injection
@@ -38,7 +38,7 @@ async def test_claimless_token_drives_routines_and_discord_tools(
     db_session: AsyncSession,
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Sub-only JWT drives routines + discord tool through real DaimonJWTVerifier.
+    """Registered account JWT drives routines + discord tool through real DaimonJWTVerifier.
 
     The token carries no platform/guild_id wire claims. The verifier performs a
     three-table JOIN (accounts → tenants, platform_principals) and injects
@@ -63,11 +63,9 @@ async def test_claimless_token_drives_routines_and_discord_tools(
     await db_session.commit()
 
     # --- Mint claim-less token (sub only, no platform/guild_id wire claims) ---
-    token = pyjwt.encode(
-        {"sub": str(account.id), "iat": 0},
-        SECRET,
-        algorithm="HS256",
-    )
+    from .harness import registered_account_token
+
+    token = await registered_account_token(sessionmaker, account_id=account.id)
 
     # Verify the minted token carries no platform or guild_id wire claims (REQ-1)
     decoded = pyjwt.decode(token, SECRET, algorithms=["HS256"])

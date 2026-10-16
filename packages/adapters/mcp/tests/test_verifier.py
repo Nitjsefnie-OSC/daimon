@@ -6,7 +6,7 @@ to None → HTTP 401 via RequireAuthMiddleware.
 jti-revocation tests:
 - Revoked jti → verify_token returns None (401).
 - Un-revoked agent token → still verifies.
-- No jti claim → verifies unchanged (existing non-agent flow unaffected).
+- No jti claim → obeys the explicitly configured legacy cutoff.
 - Malformed jti string → verify_token returns None (fail-closed).
 """
 
@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .harness import seed_server_admin, seed_tenant_and_account
 
 SECRET = b"a" * 32
+LEGACY_CUTOFF = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
 
 
 async def test_verifier_accepts_known_account(
@@ -44,7 +45,11 @@ async def test_verifier_accepts_known_account(
 ) -> None:
     async with sessionmaker() as s, s.begin():
         _tenant_id, account_id = await seed_tenant_and_account(s)
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     token = pyjwt.encode({"sub": str(account_id), "iat": 0}, SECRET, algorithm="HS256")
 
     result = await verifier.verify_token(token)
@@ -58,7 +63,11 @@ async def test_verifier_stashes_tenant_id_in_claims(
 ) -> None:
     async with sessionmaker() as s, s.begin():
         tenant_id, account_id = await seed_tenant_and_account(s)
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     token = pyjwt.encode({"sub": str(account_id), "iat": 0}, SECRET, algorithm="HS256")
 
     result = await verifier.verify_token(token)
@@ -72,7 +81,11 @@ async def test_verifier_stashes_tenant_id_in_claims(
 async def test_verifier_rejects_bad_signature(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     token = pyjwt.encode({"sub": str(uuid.uuid4()), "iat": 0}, b"b" * 32, algorithm="HS256")
     assert await verifier.verify_token(token) is None
 
@@ -80,7 +93,11 @@ async def test_verifier_rejects_bad_signature(
 async def test_verifier_rejects_missing_sub(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     token = pyjwt.encode({"iat": 0}, SECRET, algorithm="HS256")
     assert await verifier.verify_token(token) is None
 
@@ -88,7 +105,11 @@ async def test_verifier_rejects_missing_sub(
 async def test_verifier_rejects_malformed_uuid_sub(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     token = pyjwt.encode({"sub": "not-a-uuid", "iat": 0}, SECRET, algorithm="HS256")
     assert await verifier.verify_token(token) is None
 
@@ -96,7 +117,11 @@ async def test_verifier_rejects_malformed_uuid_sub(
 async def test_verifier_rejects_unknown_account(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     token = pyjwt.encode({"sub": str(uuid.uuid4()), "iat": 0}, SECRET, algorithm="HS256")
     assert await verifier.verify_token(token) is None
 
@@ -134,7 +159,11 @@ async def test_verifier_rejects_revoked_jti_with_none(
         jti = uuid.UUID(claims["jti"])
         await revoke_mcp_token(s, jti=jti, now=now)
 
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     result = await verifier.verify_token(token)
     assert result is None, (
         "verify_token must return None (→ HTTP 401) for a token whose jti is revoked"
@@ -161,7 +190,11 @@ async def test_verifier_accepts_unrevoked_agent_token(
             ttl_days=90,
         )
 
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     result = await verifier.verify_token(token)
     assert result is not None, (
         "verify_token must return a valid AccessToken for an un-revoked agent token"
@@ -171,24 +204,26 @@ async def test_verifier_accepts_unrevoked_agent_token(
     )
 
 
-async def test_verifier_accepts_no_jti_token_unchanged(
+async def test_verifier_accepts_no_jti_token_at_explicit_legacy_cutoff(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A token with no jti claim (e.g. mint_jwt output) verifies unchanged.
+    """A token at the explicitly configured cutoff remains compatible.
 
     The jti check branch only fires when a jti claim is present — existing
-    mint_jwt and mint_internal_mcp_token flows must be unaffected.
+    The default cutoff and old-bearer rejection have dedicated tests below.
     """
     async with sessionmaker() as s, s.begin():
         _tenant_id, account_id = await seed_tenant_and_account(s)
     # mint_jwt produces {sub, iat} — no jti, no exp
     token = pyjwt.encode({"sub": str(account_id), "iat": 0}, SECRET, algorithm="HS256")
 
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
-    result = await verifier.verify_token(token)
-    assert result is not None, (
-        "verify_token must accept a token with no jti (existing mint_jwt flow unaffected)"
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
     )
+    result = await verifier.verify_token(token)
+    assert result is not None, "a legacy token at the configured cutoff remains admitted"
 
 
 async def test_verifier_rejects_malformed_jti_string(
@@ -207,7 +242,11 @@ async def test_verifier_rejects_malformed_jti_string(
         algorithm="HS256",
     )
 
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     result = await verifier.verify_token(token)
     assert result is None, (
         "verify_token must return None (fail-closed) when jti is present but not a valid UUID"
@@ -230,7 +269,11 @@ async def test_verifier_rejects_a_hub_login_token_signed_with_the_same_secret(
         algorithm="HS256",
     )
 
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     result = await verifier.verify_token(token)
     assert result is None, "a token without an account sub must be rejected by the /mcp verifier"
 
@@ -267,7 +310,11 @@ async def test_verifier_accepts_operator_token_and_stashes_its_row(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     _account_id, token = await _mint_operator(sessionmaker)
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
 
     result = await verifier.verify_token(token)
 
@@ -286,7 +333,11 @@ async def test_verifier_reads_operator_scopes_live_from_the_row(
     )
     async with sessionmaker() as s, s.begin():
         await s.execute(_SET_SCOPES, {"scopes": ["tenant:read"], "jti": _jti(token)})
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
 
     result = await verifier.verify_token(token)
 
@@ -301,7 +352,11 @@ async def test_verifier_refuses_operator_token_once_its_admin_is_demoted(
     account_id, token = await _mint_operator(sessionmaker)
     async with sessionmaker() as s, s.begin():
         await set_role(s, account_id, Role.USER)
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
 
     assert await verifier.verify_token(token) is None, "a demoted admin's token gets a 401"
 
@@ -312,7 +367,11 @@ async def test_verifier_refuses_revoked_operator_token(
     _account_id, token = await _mint_operator(sessionmaker)
     async with sessionmaker() as s, s.begin():
         await revoke_mcp_token(s, jti=_jti(token), now=dt.datetime.now(dt.UTC))
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
 
     assert await verifier.verify_token(token) is None, "a revoked token gets a 401"
 
@@ -326,7 +385,11 @@ async def test_verifier_refuses_operator_token_whose_row_expired(
             text("UPDATE mcp_tokens SET expires_at = :at WHERE jti = :jti"),
             {"at": dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1), "jti": _jti(token)},
         )
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
 
     assert await verifier.verify_token(token) is None, "the row's expiry is enforced"
 
@@ -346,7 +409,11 @@ async def test_verifier_refuses_operator_token_past_its_exp_claim(
             now=dt.datetime.now(dt.UTC) - dt.timedelta(days=31),
             ttl_days=30,
         )
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
 
     assert await verifier.verify_token(token) is None, "an expired token gets a 401"
 
@@ -355,7 +422,11 @@ async def test_verifier_refuses_operator_token_without_a_platform_user(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     _account_id, token = await _mint_operator(sessionmaker, platform_user_id=None)
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
 
     assert await verifier.verify_token(token) is None, (
         "without a platform user the token would read as the unbilled operator path"
@@ -368,7 +439,11 @@ async def test_verifier_refuses_operator_token_with_no_scopes_left(
     _account_id, token = await _mint_operator(sessionmaker)
     async with sessionmaker() as s, s.begin():
         await s.execute(_SET_SCOPES, {"scopes": [], "jti": _jti(token)})
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
 
     assert await verifier.verify_token(token) is None, "an emptied token grants nothing"
 
@@ -379,7 +454,11 @@ async def test_verifier_refuses_kind_claim_without_a_registered_jti(
 ) -> None:
     async with sessionmaker() as s, s.begin():
         _tenant_id, account_id = await seed_server_admin(s)
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     token = pyjwt.encode(
         {"sub": str(account_id), "iat": 0, "kind": kind, SCOPES_CLAIM: ["promo:create"]},
         SECRET,
@@ -402,7 +481,11 @@ async def test_verifier_accepts_registered_cli_token(
             now=dt.datetime.now(dt.UTC),
             ttl_days=90,
         )
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
 
     result = await verifier.verify_token(token)
 
@@ -432,7 +515,11 @@ async def test_verifier_audits_each_refusal_of_a_registered_token(
     if reason == "kind_mismatch":
         claims = pyjwt.decode(token, options={"verify_signature": False})
         token = pyjwt.encode({**claims, "kind": "cli"}, SECRET, algorithm="HS256")
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
 
     assert await verifier.verify_token(token) is None, f"a {reason} token gets a 401"
 
@@ -462,7 +549,11 @@ async def test_verifier_computes_the_administered_channels_from_stored_roles(
         await make_platform_principal(
             s, platform="discord", external_id="u1", tenant=tenant, account=account
         )
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     token = pyjwt.encode(
         {"sub": str(account.id), "iat": 0, "administered_channel_ids": ["c9"]},
         SECRET,
@@ -534,7 +625,12 @@ async def test_verifier_rechecks_a_stored_slack_group_live(
         assert access is not None, "the token verifies either way"
         return access.claims["administered_channel_ids"], access.claims["platform_role_ids"]
 
-    live = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker, group_members=lookup)
+    live = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+        group_members=lookup,
+    )
     assert await claims(live) == (["C1"], ["S1"]), "still in the group: still C1's admin"
     assert asked == [("slack", "T0VERIFY", "S1")], (
         "the person's own workspace is asked, and only about a group some grant names"
@@ -543,7 +639,11 @@ async def test_verifier_rechecks_a_stored_slack_group_live(
     assert await claims(live) == ([], []), "removed from the group: no rights before a new turn"
     del group["S1"]
     assert await claims(live) == ([], []), "a failed lookup grants nothing"
-    blind = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    blind = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     assert await claims(blind) == ([], []), "no lookup at all grants nothing"
 
 
@@ -599,7 +699,10 @@ async def test_verifier_rechecks_a_stored_discord_role_against_the_members_roles
         cache=GroupMembersCache(ttl_s=0, failure_ttl_s=0),
     )
     verifier = DaimonJWTVerifier(
-        secret=SECRET, sessionmaker=sessionmaker, group_members=lookups.members
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+        group_members=lookups.members,
     )
     token = pyjwt.encode({"sub": str(account.id), "iat": 0}, SECRET, algorithm="HS256")
 
@@ -640,7 +743,11 @@ async def test_verifier_reads_the_bound_channel_from_the_token_row(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     token = await _agent_token(sessionmaker, platform="discord", channel_id="c-1")
-    result = await DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker).verify_token(token)
+    result = await DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    ).verify_token(token)
     assert result is not None
     assert result.claims["bound_channel_id"] == "c-1"
 
@@ -657,7 +764,11 @@ async def test_verifier_drops_a_bound_channel_claimed_in_the_jwt(
     no_jti = pyjwt.encode(
         {"sub": str(account_id), "iat": 0, "bound_channel_id": "c-1"}, SECRET, algorithm="HS256"
     )
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     for token in (forged, no_jti):
         result = await verifier.verify_token(token)
         assert result is not None
@@ -668,7 +779,11 @@ async def test_verifier_rejects_a_binding_on_another_platform(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     token = await _agent_token(sessionmaker, platform="slack", channel_id="C1")
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     assert await verifier.verify_token(token) is None, (
         "a Discord account's key binds no Slack channel"
     )
@@ -705,7 +820,11 @@ async def test_verifier_reads_the_external_mark_live_and_drops_admin_rights(
             user_ids=["u1"],
             actor_account_id=None,
         )
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     claims = {"sub": str(account.id), "iat": 0, EXTERNAL_CLAIM: False}
     token = pyjwt.encode(claims, SECRET, algorithm="HS256")
 
@@ -734,7 +853,11 @@ async def test_a_turn_held_as_external_holds_its_tool_calls_while_it_runs(
         await make_platform_principal(
             s, platform="teams", external_id="u1", tenant=tenant, account=account
         )
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     token = pyjwt.encode({"sub": str(account.id), "iat": 0}, SECRET, algorithm="HS256")
     before = await verifier.verify_token(token)
     assert before is not None and before.claims[EXTERNAL_CLAIM] is False, "internal: unchanged"
@@ -810,7 +933,11 @@ async def test_vault_chat_jwt_requires_its_live_bound_registry_row(sessionmaker,
     if corruption == "external_agent_claim":
         claims["agent_id"] = claims.pop("chat_agent_id")
     candidate = pyjwt.encode(claims, SECRET, algorithm="HS256")
-    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
     result = await verifier.verify_token(candidate)
     assert (result is not None) == (corruption is None)
     if result is not None:
@@ -834,6 +961,54 @@ async def test_external_agent_key_label_does_not_select_chat_authentication(sess
             secret=SECRET,
             now=now,
         )
-    result = await DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker).verify_token(token)
+    result = await DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    ).verify_token(token)
     assert result is not None and result.claims["agent_id"] == str(agent_id)
     assert "chat_agent_id" not in result.claims
+
+
+@pytest.mark.parametrize("issued", [0, None, "0", True])
+async def test_verifier_default_cutoff_rejects_old_or_missing_legacy_iat(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    issued: object,
+) -> None:
+    async with sessionmaker.begin() as session:
+        _, account_id = await seed_tenant_and_account(session)
+    claims: dict[str, object] = {"sub": str(account_id)}
+    if issued is not None:
+        claims["iat"] = issued
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker)
+    token = pyjwt.encode(claims, SECRET, algorithm="HS256")
+    assert await verifier.verify_token(token) is None
+
+
+async def test_verifier_cutoff_boundary_registered_tokens_and_internal_compatibility(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    async with sessionmaker.begin() as session:
+        tenant_id, account_id = await seed_tenant_and_account(session)
+        registered = await mint_cli_mcp_token(
+            session,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            secret=SECRET,
+            now=now - dt.timedelta(minutes=1),
+            ttl_days=1,
+        )
+    verifier = DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker, legacy_token_cutoff=now)
+
+    def legacy(issued: int, **extra: object) -> str:
+        return pyjwt.encode(
+            {"sub": str(account_id), "iat": issued, **extra}, SECRET, algorithm="HS256"
+        )
+
+    assert await verifier.verify_token(legacy(int(now.timestamp()) - 1)) is None
+    assert await verifier.verify_token(legacy(int(now.timestamp()))) is not None
+    assert await verifier.verify_token(legacy(0, internal=True, is_admin=True)) is not None
+    assert await verifier.verify_token(legacy(0, internal="true")) is None
+    assert await verifier.verify_token(legacy(int(now.timestamp()), jti=12)) is None
+    assert await verifier.verify_token(registered) is not None
