@@ -24,13 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`role_ids`) either.
 
 - **Teams output previews show inside the answer.** Image previews and
-  document first pages are added to the answer's last message, beside its
-  text and file links, instead of following it as separate messages; in a
-  1:1 chat they sit above the consent cards. When the answer cannot take
-  them, such as a closing notice card or an edit Teams refuses, they still
-  come in a message of their own. Channels without file access and group
-  chats no longer show image previews: nothing is saved there, so the agent
-  is no longer told an image will still show.
+  document first pages go into the answer's last message as markdown images
+  after its text and file links, instead of following it as separate
+  messages; in a 1:1 chat they sit above the consent cards. Teams refuses an
+  edit with text and an image attachment, so they ride in the text, and the
+  message is sent as plain markdown, whose images Graph reads back. An
+  answer with math, a closing notice card or an edit Teams refuses still
+  gets them in a message of their own. Channels without file access and
+  group chats no longer show image previews: nothing is saved there.
 
 - **Teams channel files need one permission and no card.** Grant the Graph
   application permission `Files.ReadWrite.All` with admin consent and files
@@ -48,6 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owner loses the stored admin role at the next owner read or restart.
 
 ### Fixed
+
+- **Teams agents can reopen the files they delivered.** History replay and
+  the MCP Teams read tools resolve the SharePoint links in daimon's own
+  saved-files list to download URLs, inside the channel's folder only, as
+  for shared files, and replay its previews as images. The list itself is
+  left out of replayed text, and the agent guidance says daimon adds it:
+  an agent had copied it from history into its reply and hedged about
+  whether the file was saved.
+
+- **A Teams restart no longer drops a turn's files.** Shutdown gave running
+  work 15 seconds, while an output sweep polls the listing for up to 14
+  seconds before it uploads, and it ignored a sweep that a turn ending
+  during the drain started. It now waits 60 seconds for all of it, within
+  the 90-second stop grace the self-hosting guide asks for.
 
 - Require fleet reviewers to use a different backend from the primary, including retained reviews checked before summary delivery.
 

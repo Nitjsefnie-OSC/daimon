@@ -269,7 +269,12 @@ replies. One page is read per turn, marked `truncated` when there is more.
 Each message carries its sender and time, and the turn names its channel. System events, deleted
 posts and the bot's own cards are left out; mentions read as `@name`. The
 newest 4 images in the replay are passed to the agent, and up to 10 shared
-files get a download link where channel files work (below). When Graph cannot
+files get a download link where channel files work (below). daimon's own
+answers read back with their previews as images and the files they saved
+as attachments with download links, so the agent can open what it delivered
+earlier; the "Saved to this channel's files" list itself is left out of the
+replayed text, so the agent does not copy it into its own reply. The MCP
+Teams read tools resolve those saved-file links too. When Graph cannot
 be read, the agent is told history is unavailable and why, rather than
 guessing from nothing.
 
@@ -400,15 +405,23 @@ setting off the routes answer 404 and nothing is subscribed.
   Where they are unavailable, `files_hint` tells the agent that an admin must
   grant `Files.ReadWrite.All`, rather than offer an artifact, report or
   notebook.
-- **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as
-  Teams renders a base64 image attachment: downscaled to fit 1024x1024 and
-  re-encoded under 512 KiB (PNG, else JPEG). Up to four, in delivery order,
-  are added to the answer's last message, beside its text: in a channel in the
-  same edit as the file links (not after an unprompted answer), in a 1:1 chat
-  above the consent cards. When the answer cannot take them (a closing notice
-  card, or Teams refuses the edit, as it may when the message gets too large),
-  they come in a message of their own after it; in a 1:1 chat, one message
-  each below the consent cards, as do any beyond four. A channel without file
+- **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as a
+  base64 data URI downscaled to fit 1024x1024 and re-encoded under 512 KiB
+  (PNG, else JPEG). Up to four, in delivery order, are added to the answer's
+  last message as markdown images after its text, `![name](data:…)`: in a
+  channel in the same edit as the file links (not after an unprompted
+  answer), in a 1:1 chat above the consent cards. Teams refuses an edit that
+  carries text and an image attachment (400 `BadSyntax`, "Activity resulted
+  into multiple skype activities") and splits such a new post into two
+  messages, so no activity carries both. The message is then sent as plain
+  markdown, which Teams stores with each image as hosted content that Graph
+  reads back; an Extended Markdown message keeps a link no app token can
+  fetch. Plain markdown shows no math, so an answer whose last message has
+  math, a closing notice card, or an edit Teams refuses (as it may when the
+  message gets too large) gets them in an image-only message of its own after
+  it; in a 1:1 chat, one message each below the consent cards, as do any
+  beyond four. Every later edit of the answer, such as a notice above it,
+  sends its images again; the 4,000-character limit counts its text alone. A channel without file
   access shows no previews. Animated GIFs get no preview, and a preview Teams
   refuses is only logged (`teams.output_preview.send_failed`).
 - **Document previews.** Up to four Word, PowerPoint, Excel or PDF outputs
@@ -576,8 +589,11 @@ landed.
 
 ### Restart behaviour
 
-On shutdown the adapter stops admitting, gives running turns 15 seconds, then
-cancels them. The next boot edits every card a restart cut off to an
+On shutdown the adapter stops admitting, gives running turns and output
+sweeps 60 seconds, including a sweep that a turn ending meanwhile starts,
+then cancels them; give the container a longer stop grace (90 seconds, see
+the self-hosting guide). A cancelled sweep leaves its files listed, and the
+session's next sweep delivers them. The next boot edits every card a restart cut off to an
 interrupted notice before admitting new turns. A channel card whose send never
 returned an id is found by reading its thread through Graph; one in a 1:1 chat,
 which cannot be read back, is left as is.
@@ -585,7 +601,7 @@ which cannot be read back, is left as is.
 Every incoming message is admitted once, by Teams activity id, in a database
 receipt shared by every adapter process, so a redelivery, a second process or
 a restart never runs it twice. A message whose turn had not started when the
-restart began (queued behind a running turn, or arriving during the 15
+restart began (queued behind a running turn, or arriving during the 60
 seconds) is kept: its chat gets one "I'm restarting for an update. I'll pick
 this up as soon as I'm back." note, and the next process runs it once, in
 order, through the usual admission checks. One more than 10 minutes old by
