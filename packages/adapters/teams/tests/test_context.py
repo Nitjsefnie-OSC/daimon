@@ -223,6 +223,26 @@ def test_render_user_message_without_history_has_no_envelope() -> None:
     assert 'is_admin="true">hi &lt;b&gt;</user_query>' in message
 
 
+def test_the_files_hint_mentions_image_previews_only_where_they_are_sent() -> None:
+    """An unprompted answer posts no preview, so its agent is not told an image still shows."""
+    inbound = make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel")
+    asked, unprompted = (
+        render_user_message(
+            "<controls/>",
+            item,
+            is_admin=False,
+            keys="",
+            prefix="",
+            history=None,
+            channel_files=False,
+        )
+        for item in (inbound, dataclasses.replace(inbound, unprompted=True))
+    )
+    assert "still shows inline" in asked, "a mention's images preview, so the agent hears so"
+    assert "files_hint=" in unprompted, "the unprompted turn still learns files cannot be saved"
+    assert "still shows inline" not in unprompted, "but is promised no preview"
+
+
 def test_a_channel_turn_names_its_thread_and_channel() -> None:
     """The ids `set_thread_participation` keys on, as Discord's `<thread>` and `<channel>`."""
     inbound = make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel")
