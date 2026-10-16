@@ -3142,7 +3142,10 @@ configuration pins; channel plans and workers cannot activate it. Unconfigured
 turns remain cold and the explicit Gemini worker token envelope is unchanged.
 
 A representation row applies only to its exact agent-origin platform, channel,
-account, source version and backend profile. DMs, routines without that binding,
+account, source version and backend profile. Verified public backend previews
+explicitly use their existing channel context before a backend revision exists;
+the preview owner considers the evidence only for the requested target. Ordinary
+headless captures do not select this preview context. DMs, routines without that binding,
 workers and other profiles keep their original source capture. Invalid or stale
 representation evidence is discarded; the full deployment independently refuses
 without it. Capture never substitutes a reduced target after that refusal.
