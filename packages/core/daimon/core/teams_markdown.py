@@ -5,7 +5,8 @@ quoting prices ("$5 and $10") could turn into a formula. Every `$` that does
 not open or close a math span by pandoc's `tex_math_dollars` rules is escaped
 as `\\$`: an opening `$` is followed by a non-space, a closing one follows a
 non-space and is not followed by a digit, no `$` inside follows a space, and
-the span ends at a blank line. Code spans and fences are left as they are.
+the span ends at a blank line. Code spans, fences and `<scheme:…>` autolinks
+are left as they are: CommonMark reads no backslash escape in any of them.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ __all__ = ["escape_dollars"]
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _TICKS = re.compile(r"`+")
+# CommonMark's URI autolink: a 2-32 character scheme, then no space, `<` or `>`.
+_AUTOLINK = re.compile(r"<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\x00-\x20<>]*>")
 
 
 def _inline_end(text: str, start: int) -> int | None:
@@ -49,6 +52,9 @@ def _escape_prose(text: str) -> str:
         if char == "\\":
             out.append(text[index : index + 2])
             index += 2
+        elif char == "<" and (link := _AUTOLINK.match(text, index)) is not None:
+            out.append(link.group())
+            index = link.end()
         elif char != "$":
             out.append(char)
             index += 1
@@ -99,10 +105,12 @@ def escape_dollars(text: str) -> str:
             out.append(line)
         elif fence is not None:
             out.append(line)
+            # A closing fence carries no info string: "```python" inside stays code.
             if (
                 match is not None
                 and match.group(1)[0] == fence[0]
                 and len(match.group(1)) >= len(fence)
+                and not line[match.end() :].strip()
             ):
                 fence = None
         else:

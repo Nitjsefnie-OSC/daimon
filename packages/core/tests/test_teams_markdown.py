@@ -93,3 +93,25 @@ def test_escape_dollars_unclosed_fence_runs_to_the_end() -> None:
 def test_escape_dollars_unmatched_backtick_is_literal() -> None:
     """A lone backtick opens no code span, so dollars after it are still prose."""
     assert escape_dollars("it's ` $5") == r"it's ` \$5", "a lone backtick is plain text"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("<https://ex.com/$5> costs $5", r"<https://ex.com/$5> costs \$5"),
+        ("<mailto:a$b@ex.com>", "<mailto:a$b@ex.com>"),
+        ("<not a link $5>", r"<not a link \$5>"),
+        ("<at>Bob</at> owes $5", r"<at>Bob</at> owes \$5"),
+    ],
+)
+def test_escape_dollars_copies_autolinks_through(text: str, expected: str) -> None:
+    """CommonMark reads no escapes in an autolink: a `\\` there would join the URL."""
+    assert escape_dollars(text) == expected, f"the autolink in {text!r} should stay as is"
+
+
+def test_escape_dollars_a_fence_with_an_info_string_does_not_close() -> None:
+    """Only a bare fence closes one: code after "```python" inside stays code."""
+    text = "```\ncode $a\n```python\n$5 still code\n```\nafter $5\n"
+    expected = "```\ncode $a\n```python\n$5 still code\n```\nafter \\$5\n"
+    assert escape_dollars(text) == expected, "the fence closes at the bare line only"
+    assert escape_dollars("~~~\n$x\n~~~  \n$5") == "~~~\n$x\n~~~  \n\\$5", "trailing spaces close"
