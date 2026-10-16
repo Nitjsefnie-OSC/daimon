@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 119 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 118 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -183,14 +183,6 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | `request_agent_key` | Discord callers, Slack callers, Teams callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
 | `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion, Slack or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear through an MCP endpoint with a bearer token, not browser OAuth. |
-
-## `enable_files`
-
-`enable_channel_files`: the agent asks for the Teams Enable files card.
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `enable_channel_files` | Teams callers | Post the Enable files card in this Teams channel, right after your reply. |
 
 ## `environments`
 

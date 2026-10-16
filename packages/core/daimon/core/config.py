@@ -749,10 +749,8 @@ class TeamsSettings(BaseModel):
         default=None,
         description=(
             "Externally reachable base URL of the Teams service (the Bot "
-            "Framework messaging endpoint without /api/messages). Enables the "
-            "admin sign-in that grants Daimon a team's SharePoint site; its "
-            "callback is <public_url>/oauth/teams/files/callback, which must be "
-            "a Web redirect URI on the app registration."
+            "Framework messaging endpoint without /api/messages). Graph's change "
+            "notifications for private and shared channels post to it."
         ),
     )
     admin_team_id: str | None = Field(

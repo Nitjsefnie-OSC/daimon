@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chats no longer show image previews: nothing is saved there, so the agent
   is no longer told an image will still show.
 
+- **Teams channel files need one permission and no card.** Grant the Graph
+  application permission `Files.ReadWrite.All` with admin consent and files
+  work in every channel, private and shared ones included, within 10
+  minutes; the Enable files card, the `enable_channel_files` tool and the
+  sign-in callback are gone. When upgrading, `Sites.Selected` and the app's
+  redirect URI can be removed, and a migration drops `teams_channel_sites`.
+  The permission is tenant-wide, so Daimon opens a shared file and saves its
+  own only inside the channel's Files folder. Uploads take one request.
+
 ### Removed
 
 - **`DAIMON_TEAMS__ADMIN_USER_IDS` is no longer read.** Make those admins

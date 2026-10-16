@@ -448,7 +448,7 @@ You need:
 | Register the app in Entra | Anyone, if your organisation lets users register apps; otherwise the Application Developer role |
 | Create the Azure Bot | Contributor (or Owner) on the subscription or a resource group |
 | Upload the app to Teams | A Teams administrator, or anyone if custom app uploads are allowed |
-| Turn on channel files (optional) | A global administrator (or Privileged Role Administrator) to consent once, then a SharePoint or global admin who is a member of the channel |
+| Turn on channel files (optional) | A global administrator (or Privileged Role Administrator) to consent once |
 
 ### 1. Register the app in Entra
 
@@ -471,7 +471,7 @@ You don't need to add any API permissions here. The bot reads channels
 through a team-level permission that a team owner grants when they add the
 app (more on that in step 7), and group chats through a chat-level one
 (`ChatMessage.Read.Chat`) granted when the app is added to the chat. Only two optional features need a Graph
-application permission: channel files (`Sites.Selected`) and private and
+application permission: channel files (`Files.ReadWrite.All`) and private and
 shared channel messages (`ChannelMessage.Read.All`, which is tenant-wide; see
 [below](#private-and-shared-channels-optional)).
 The same team-level consent covers activity feed notices
@@ -554,7 +554,7 @@ over HTTPS. Any reverse proxy or tunnel works. With
 
 ```text
 teams.example.com {
-	@teams path /api/messages /healthz /readyz /oauth/teams/files/callback
+	@teams path /api/messages /healthz /readyz
 	handle @teams {
 		reverse_proxy 127.0.0.1:3978
 	}
@@ -719,26 +719,14 @@ those files and save its own outputs to the channel's Files tab:
 
 1. Entra → **App registrations** → your app → **API permissions** → **Add a
    permission** → **Microsoft Graph** → **Application permissions** →
-   `Sites.Selected` → **Grant admin consent**. This permission reaches only
-   the sites you grant one by one, not every site in the organisation.
-2. Same app → **Authentication** → **Add a platform** → **Web**, with the
-   redirect URI `https://teams.example.com/oauth/teams/files/callback`.
-3. Set `DAIMON_TEAMS__PUBLIC_URL=https://teams.example.com` in `.env` (your
-   hostname, without `/api/messages`) and run
-   `docker compose --profile teams up -d` so the service picks it up.
-4. In the channel, a Daimon admin asks the bot to turn files on ("enable
-   files in this channel"), or shares a file it can't open, and the bot posts
-   an **Enable files** card. Click it and sign in as a SharePoint or global
-   admin who is a member of that channel. The first sign-in in your
-   organisation must be a global admin, who approves this for everyone.
-   Daimon then grants itself access to that channel's site, and the next
-   message can read the file.
+   `Files.ReadWrite.All` → **Grant admin consent**. No restart is needed:
+   each channel's files turn on within 10 minutes.
 
-One sign-in covers a team's standard channels, which share its site; each
-private or shared channel is turned on from inside it. Open a new channel's
-Files tab once first. A shared channel hosted by another organisation keeps
-its files there, out of reach. [`teams.md`](teams.md#channel-files-optional)
-also shows how to grant a team's site by hand.
+This one permission covers every channel, private and shared ones included.
+It reaches every file in your organisation, so Daimon only opens a shared
+file inside the channel's own Files folder and only saves there. Open a new
+channel's Files tab once first. A shared channel hosted by another
+organisation keeps its files there, out of reach.
 
 ### Private and shared channels (optional)
 
