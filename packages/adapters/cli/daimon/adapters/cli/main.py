@@ -22,6 +22,7 @@ from daimon.adapters.cli.commands.help import help_app
 from daimon.adapters.cli.commands.mcp import mcp_app
 from daimon.adapters.cli.commands.memory import memory_app
 from daimon.adapters.cli.commands.notebook import notebook_app
+from daimon.adapters.cli.commands.openai import openai_app
 from daimon.adapters.cli.commands.promo import promo_app
 from daimon.adapters.cli.commands.routines import routines_app
 from daimon.adapters.cli.commands.sessions import sessions_app
@@ -52,6 +53,7 @@ app.add_typer(help_app, name="help")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(memory_app, name="memory")
 app.add_typer(notebook_app, name="notebook")
+app.add_typer(openai_app, name="openai")
 app.add_typer(promo_app, name="promo")
 app.add_typer(github_app, name="github")
 app.add_typer(routines_app, name="routines")

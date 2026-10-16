@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import stat
 import struct
@@ -9,12 +10,25 @@ import zipfile
 import zlib
 from pathlib import PurePosixPath
 
+from mux.contracts.errors import ProviderError
 from mux.contracts.ids import Page, PageRequest, Scope, SkillRef
 from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import Skill, SkillUpload, SkillUploadFile, SkillVersion
 from mux.drivers.openai._common import Context, owned, page_of, query, text, timestamp
 from mux.drivers.openai.transport import Object, segment
 from mux.state.operations import request_digest
+
+_VERIFY_CONTENT_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
+"""Bounded ~15.5s backoff for the post-publish content read only.
+
+Root-caused live against the QA OpenAI key (neutral-core F2-O probe): a
+freshly published version's content GET 404s immediately after `POST
+.../versions` returns 200, then reads 200 from ~2s on — provider-side
+read-after-write lag, not a wrong or deleted skill, and not a path bug.
+Retrying any other 404 here would hide a real error, so this bounded retry
+applies only to this one download, never to `retrieve`/`list`/`delete` or
+any other skill call. A 404 that survives the whole backoff is final.
+"""
 
 
 def bundle_digest(bundle: SkillUpload) -> str:
@@ -25,8 +39,7 @@ def bundle_digest(bundle: SkillUpload) -> str:
     return request_digest(canonical.model_dump(mode="json"))
 
 
-async def verify_content(context: Context, skill_id: str, version: str, digest: str) -> None:
-    """Read the selected native version's complete bounded archive, never latest."""
+async def _download_content(context: Context, skill_id: str, version: str) -> bytearray:
     data = bytearray()
     source = await context.transport.download(
         f"/skills/{segment(skill_id)}/versions/{segment(version)}/content"
@@ -40,6 +53,23 @@ async def verify_content(context: Context, skill_id: str, version: str, digest: 
         closer = getattr(source, "aclose", None)
         if closer is not None:
             await closer()
+    return data
+
+
+async def _download_content_with_retry(context: Context, skill_id: str, version: str) -> bytearray:
+    for delay in _VERIFY_CONTENT_RETRY_DELAYS_S:
+        try:
+            return await _download_content(context, skill_id, version)
+        except ProviderError as error:
+            if error.category != "not_found":
+                raise
+            await asyncio.sleep(delay)
+    return await _download_content(context, skill_id, version)
+
+
+async def verify_content(context: Context, skill_id: str, version: str, digest: str) -> None:
+    """Read the selected native version's complete bounded archive, never latest."""
+    data = await _download_content_with_retry(context, skill_id, version)
     try:
         bundle = _downloaded_bundle(data)
     except (zipfile.BadZipFile, NotImplementedError, zlib.error, EOFError) as error:
