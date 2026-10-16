@@ -2,12 +2,14 @@
 
 The status card says what Discord's and Slack's say, in the words of
 `daimon.core.turn.status_lines`: a Thinking or Working headline with the
-elapsed time, the turn's tool lines, the latest draft, and a Cancel button.
+elapsed time, the turn's tool lines, the latest draft, and a Stop button.
 The answer replaces the card as Extended Markdown messages: a card TextBlock
 renders no code blocks or math, a message does. A card follows it with the
 summary line, 👍/👎 buttons (`vote_actions`, answered by `feedback`) and
-Ask a human's when support is on: Teams refuses an edit carrying both text
-and a card. A tool-only or failed turn's notice card carries them itself.
+Ask a person when support is on: Teams refuses an edit carrying both text
+and a card. The votes sit beside Ask a person, as on Slack and Discord,
+not in Teams' feedback loop. A tool-only or failed turn's notice card
+carries them itself.
 """
 
 from __future__ import annotations
