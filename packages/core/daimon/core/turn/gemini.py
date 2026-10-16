@@ -58,7 +58,7 @@ from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
 from mux.drivers.gemini.core import compile_agent, compile_environment
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAccounting, FlashTransport
-from mux.drivers.gemini.mcp_auth import MCPSecretResolver
+from mux.drivers.gemini.mcp_auth import GCSSecretResolver, MCPSecretResolver
 from mux.drivers.gemini.skill_deployment import SkillBundlePublisher
 from mux.drivers.gemini.storage import Storage
 from mux.drivers.gemini.transport import Transport
@@ -106,6 +106,7 @@ class GeminiTransportRuntime:
     catalog_transport: AgentCatalogTransport | None = None
     mcp_secrets: MCPSecretResolver | None = None
     skill_bundle_publisher: SkillBundlePublisher | None = None
+    gcs_secrets: GCSSecretResolver | None = None
 
 
 def _runtime_model(runtime: TurnRuntime | None) -> str:
@@ -215,6 +216,7 @@ def gemini_backend(
         max_output_tokens=deployment.max_output_tokens,
         max_input_tokens=deployment.max_input_tokens,
         mcp_secrets=supplied.mcp_secrets,
+        gcs_secrets=supplied.gcs_secrets,
         skill_bundle_publisher=supplied.skill_bundle_publisher,
     )
 

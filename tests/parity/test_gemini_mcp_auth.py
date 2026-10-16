@@ -1062,3 +1062,151 @@ async def test_both_gemini_mcp_test_clients_refuse_names_before_http_allocation(
         with pytest.raises(ValueError, match="refuses ambient"):
             async with mcp_sdk(httpx.MockTransport(Wire().handle)):
                 raise AssertionError("Gemini MCP test admitted ambient options")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("followup", [False, True])
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_private_gcs_mount_auth_is_fresh_exact_and_memory_only(
+    sdk_wire: tuple[SDKTransport, Wire],
+    caplog: pytest.LogCaptureFixture,
+    followup: bool,
+    fallback: bool,
+) -> None:
+    from mux.drivers.gemini.core import compile_agent
+
+    sdk, wire = sdk_wire
+    resolver = Resolver()
+    expected = compile_agent(
+        AgentSpec(
+            name="owned",
+            model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+            tools=TOOLS,
+            mcp_servers=(CONNECTION,),
+        ),
+        authenticated_mcp=True,
+    )
+    source = "gs://private-skills/immutable/version/"
+    expected["environment"] = {
+        "type": "remote",
+        "sources": [{"type": "gcs", "source": source, "target": ".agents/skills/owned"}],
+    }
+    calls = []
+
+    async def storage(scope: Scope, sources: tuple[str, ...]) -> str:
+        assert (scope, sources) == (SCOPE, (source,))
+        calls.append(sources)
+        return f"offline-private-storage-{len(calls)}"
+
+    overrides: Object = {
+        "input": [{"type": "text", "text": "Use the full skill bundle."}],
+        "background": True,
+        "store": True,
+    }
+    if followup:
+        overrides.update({"environment": "owned-environment", "previous_interaction_id": "prior"})
+    caplog.set_level(logging.DEBUG)
+    request = await authenticated_template(
+        SCOPE,
+        expected,
+        expected,
+        (CONNECTION,),
+        resolver.resolve,
+        overrides=overrides,
+        gcs_secrets=storage,
+    )
+    assert "offline-private-storage" not in repr(request)
+    assert "offline-private-storage" not in json.dumps(expected)
+    if fallback:
+        wire.statuses = [503, 200]
+    dispatch = FlashTransport(sdk, Accounting()) if fallback else sdk
+    await dispatch.create(request)
+    body = json.loads(wire.requests[-1].content)
+    assert body["environment"]["network"] == {
+        "allowlist": [
+            {
+                "domain": "storage.googleapis.com",
+                "transform": {"Authorization": f"Bearer offline-private-storage-{len(calls)}"},
+            }
+        ]
+    }
+    if followup:
+        assert body["environment"] == {
+            "type": "remote",
+            "environment_id": "owned-environment",
+            "network": body["environment"]["network"],
+        }
+    else:
+        assert body["environment"]["sources"] == expected["environment"]["sources"]
+    assert len(calls) == 1 + len(wire.requests) == (3 if fallback else 2)
+    for index, post in enumerate(wire.requests, start=2):
+        assert f"Bearer offline-private-storage-{index}" in post.content.decode()
+    assert "offline-private-storage" not in caplog.text
+    assert "offline-private-storage" not in repr(wire.saved)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ["domain", "extra_rule", "unbound", "changed_source", "expired"])
+async def test_private_gcs_changed_or_unavailable_auth_never_dispatches(
+    sdk_wire: tuple[SDKTransport, Wire], defect: str
+) -> None:
+    from mux.drivers.gemini.core import compile_agent
+
+    sdk, wire = sdk_wire
+    resolver = Resolver()
+    expected = compile_agent(
+        AgentSpec(
+            name="owned",
+            model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+            tools=TOOLS,
+            mcp_servers=(CONNECTION,),
+        ),
+        authenticated_mcp=True,
+    )
+    expected["environment"] = {
+        "type": "remote",
+        "sources": [
+            {
+                "type": "gcs",
+                "source": "gs://private-skills/immutable/version/",
+                "target": ".agents/skills/owned",
+            }
+        ],
+    }
+    revoked = False
+
+    async def storage(scope: Scope, sources: tuple[str, ...]) -> str:
+        if revoked:
+            raise ValueError("private expired credential")
+        return "offline-private-storage"
+
+    request = await authenticated_template(
+        SCOPE,
+        expected,
+        expected,
+        (CONNECTION,),
+        resolver.resolve,
+        overrides={"input": []},
+        gcs_secrets=storage,
+    )
+    assert isinstance(request["environment"], dict)
+    environment = request["environment"]
+    network = environment["network"]
+    assert isinstance(network, dict) and isinstance(network["allowlist"], list)
+    rule = network["allowlist"][0]
+    assert isinstance(rule, dict)
+    if defect == "domain":
+        rule["domain"] = "foreign.invalid"
+    elif defect == "extra_rule":
+        network["allowlist"].append({"domain": "*"})
+    elif defect == "unbound":
+        rule["transform"] = {"Authorization": "Bearer offline-private-storage"}
+    elif defect == "changed_source":
+        environment["sources"] = [
+            {"type": "gcs", "source": "gs://foreign/version/", "target": ".agents/skills/owned"}
+        ]
+    else:
+        revoked = True
+    with pytest.raises((UnsupportedCapability, ProviderError)):
+        await sdk.create(request)
+    assert wire.requests == []

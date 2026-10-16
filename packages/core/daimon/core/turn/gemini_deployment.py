@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
@@ -70,6 +70,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     field_validator,
     model_validator,
 )
@@ -77,7 +78,9 @@ from pydantic import (
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
 
 
-def _private_credential(path: Path) -> str:
+def _private_credential(
+    path: Path, *, storage_until: datetime | None = None, current: datetime | None = None
+) -> str:
     """Read one explicitly owned, bounded bearer file without following links."""
     from mux.drivers.gemini.mcp_auth import credential
 
@@ -95,6 +98,23 @@ def _private_credential(path: Path) -> str:
             raw = stream.read(16_385)
         if len(raw) > 16_384:
             raise ValueError("invalid credential")
+        if storage_until is not None:
+            value = cast(JsonValue, json.loads(raw))
+            if not isinstance(value, dict) or set(value) != {"access_token", "expires_at"}:
+                raise ValueError("storage credential requires exact token/expiry fields")
+            expiry = value["expires_at"]
+            if not isinstance(expiry, str):
+                raise ValueError("storage credential expiry must be a timestamp")
+            expires = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+            if (
+                current is None
+                or expires.tzinfo is None
+                or not storage_until + timedelta(seconds=30)
+                < expires
+                <= current + timedelta(hours=1)
+            ):
+                raise ValueError("storage credential expiry does not cover the bounded turn")
+            return credential(value["access_token"])
         return credential(raw.decode().strip())
     finally:
         if descriptor is not None:
@@ -449,13 +469,15 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     namespace = json.dumps([scope.tenant_id, scope.account_id, plan.project], separators=(",", ":"))
     counterpart_verified = False
 
-    async def verify_storage() -> None:
+    async def verify_storage() -> str | None:
         if plan.source_capabilities is None:
             return
         if plan.gcs_credential_file is None:
             raise AdmissionDenied(reason="backend_unsupported")
         try:
-            token = _private_credential(plan.gcs_credential_file)
+            token = _private_credential(
+                plan.gcs_credential_file, storage_until=request.deadline, current=request.now()
+            )
         except (OSError, ValueError):
             raise ScopeViolation(
                 "skill-deployment", "invalid explicit storage credential"
@@ -465,6 +487,21 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             token=token,
             retained_until=request.deadline + timedelta(days=7),
         )
+        return token
+
+    async def resolve_storage(authorized: Scope, sources: tuple[str, ...]) -> str:
+        if (
+            not counterpart_verified
+            or authorized != scope
+            or sources != tuple(item.source for item in plan.skill_deployments)
+        ):
+            raise ScopeViolation(
+                "skill-deployment", "storage credential has no verified source binding"
+            )
+        token = await verify_storage()
+        if token is None:
+            raise ScopeViolation("skill-deployment", "storage credential unavailable")
+        return token
 
     async def resolve_mcp(authorized: Scope, reference: str, destination: str) -> str:
         from daimon.core.mcp_auth import validate_agent_mcp_token
@@ -517,6 +554,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             if request.admission.backend_revision_origin == "agent"
             else None,
             mcp_secrets=resolve_mcp if plan.source_capabilities is not None else None,
+            gcs_secrets=resolve_storage if plan.source_capabilities is not None else None,
             skill_bundle_publisher=RetainedSkillDeployments(plan.skill_deployments)
             if plan.source_capabilities is not None
             else None,

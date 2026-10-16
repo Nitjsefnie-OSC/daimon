@@ -3180,7 +3180,12 @@ therefore cannot count as preserved capabilities.
 
 Full plans additionally require an absolute `gcs_credential_file`, read using the
 same owned regular 0600/no-follow credential reader as MCP. It supplies an explicit
-read-only OAuth access token; there is no ambient credential discovery. On each
+read-only OAuth access token in an exact JSON object with `access_token` and
+timezone-aware RFC3339 `expires_at`. Its expiry must cover the admitted turn plus
+30 seconds and be no more than one hour from the current check; a raw token,
+unknown field, missing file or expired/insufficient lifetime refuses. The owner
+rotates the protected file explicitly; there is no ambient credential discovery
+or token minting. On each
 native counterpart read and each provider credential exposure, the runtime lists
 every configured GCS prefix, rejects missing/extra/duplicate objects, requires
 locked object retention through the admitted deadline plus the seven-day inline
@@ -3192,8 +3197,25 @@ permissions under published prefixes before final inventory verification. Retain
 read-back bucket/project/inherited IAM evidence that the provisioner and runtime
 principals cannot append objects through cleanup. Locked retention prevents
 replacement/deletion, not new objects. A readback is a point-in-time observation,
-not a transactional directory mount. Private-bucket mount authentication must be verified separately against the
-provider's documented network credentials before live provisioning.
+not a transactional directory mount.
+
+Private mounts use the same explicitly supplied reader credential in Gemini's
+managed environment egress proxy, scoped to the exact `storage.googleapis.com`
+domain through `environment.network.allowlist[].transform.Authorization`. The
+existing bound session credential seam refreshes and revalidates both MCP and
+GCS credentials at each SDK dispatch, including fallback attempts. It binds the
+exact admitted GCS sources and caller scope; unsupported or modified network
+rules refuse. Credentials exist only in transient, repr-redacted dispatch memory,
+never in retained native definitions or host session requests. Follow-up turns
+refresh the same environment using `type=remote`, its actual `environment_id`,
+and the fresh network rule, without remounting or resetting files. Ordinary
+turns without the full-source resolver retain their existing request shape.
+The credential's actual identity needs only bucket-scoped read authority; a
+Gemini-project service agent is not required for this explicit OAuth mechanism.
+Storage-owner IAM evidence must establish the principal and read-only scope;
+local token expiry metadata is not an IAM attestation. Verify the real mount on
+the exact deployed image before any paid send. See Google's
+[private-source and credential refresh documentation](https://ai.google.dev/gemini-api/docs/agent-environment#private-sources).
 
 Capture currently re-downloads the attached source versions and verifies the
 retained archives on every matching capture, including preview and follow-up.
