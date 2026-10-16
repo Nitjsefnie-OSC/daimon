@@ -189,12 +189,21 @@ A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's
 usual session resumes when `new` or **End** closes it. Opening one runs no turn.
 
-Teams has no workspace-admin flag a bot can read, so admins are listed by
-Entra object ID in `DAIMON_TEAMS__ADMIN_USER_IDS`. Their turns run with the
-admin role, and the panels unlock the admin actions for them. Every card click
-and dialog re-checks the organisation, the clicker and their role. The list
-is read at boot, which also takes the stored admin role, used by routines and
-MCP clients, from anyone no longer on it. A refusal in a channel is a private
+Daimon's admins are the owners of one team, named by its Entra group ID in
+`DAIMON_TEAMS__ADMIN_TEAM_ID` (the team's ⋯ → **Get link to team** → the
+`groupId` parameter). The app must be installed in that team: its
+`TeamMember.Read.Group` consent is what lets Daimon read the owners. Making
+someone an owner makes them an admin, with no redeploy; the owner list is
+cached for a minute, so a removed owner loses admin within it, and a failed
+read grants nothing. Guests, people from another organisation and anyone in a
+group chat with outsiders are never admins. The deprecated
+`DAIMON_TEAMS__ADMIN_USER_IDS` still adds admins by Entra object ID, and logs a
+warning at startup while set. Admins' turns run with the admin role, and the
+panels unlock the admin actions for them. Every card click and dialog
+re-checks the organisation, the clicker and their role. Boot takes the stored
+admin role, used by routines and MCP clients, from anyone no longer an admin;
+support requests and budget notices for "the admins" reach the team's owners
+and the deprecated list. A refusal in a channel is a private
 message, toast, dialog message or card edit only its sender or clicker sees.
 Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
 group ID in `role_ids` to admit that team's owners), channel budgets
@@ -264,9 +273,9 @@ be read, the agent is told history is unavailable and why, rather than
 guessing from nothing.
 
 Graph access is the resource-specific consent `ChannelMessage.Read.Group` in
-the manifest, plus `TeamMember.Read.Group` for the owner list a team grant of
-channel admins reads (cached for a minute; without it the team's owners are
-not channel admins). A team owner grants them when adding the app to a team, for that
+the manifest, plus `TeamMember.Read.Group` for the owner list the admin team
+and a team grant of channel admins read (cached for a minute; without it the
+team's owners are not admins). A team owner grants them when adding the app to a team, for that
 team only; no tenant-wide permission or admin consent is needed. It also makes
 Teams deliver every channel post to the bot, which ignores those without a
 mention unless their thread is followed. An existing install needs the updated app package uploaded again

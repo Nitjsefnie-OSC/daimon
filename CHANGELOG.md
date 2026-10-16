@@ -11,6 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - GitHub repository access now uses the GitHub App for every agent. Migration deletes staged grants, keeps live App grants, carries a matching working repo, and retires saved GitHub keys. `daimon github retirement-preview` reports staged rows and saved-key coverage before migration. Private skill imports use an active App grant; missing access posts Connect GitHub. Operators can preview and delete retired Managed Agents vault credentials with `daimon github cleanup-legacy-vault` (`--apply` deletes them).
 
+- **Teams admins are the owners of one team.** Set
+  `DAIMON_TEAMS__ADMIN_TEAM_ID` to the team's Entra group ID and add the app
+  to that team; its owners, read live and cached for a minute, are Daimon's
+  admins, so adding one needs no redeploy. Guests and people from another
+  organisation never are, and a failed owner read grants nothing. Support
+  requests and channel budget notices for the admins reach these owners.
+
+### Deprecated
+
+- **`DAIMON_TEAMS__ADMIN_USER_IDS`.** Still honoured, on top of the admin
+  team's owners, with a warning at startup. Make those people owners of the
+  admin team, then remove it.
+
 ### Fixed
 
 - Require fleet reviewers to use a different backend from the primary, including retained reviews checked before summary delivery.

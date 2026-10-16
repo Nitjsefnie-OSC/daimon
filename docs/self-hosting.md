@@ -444,11 +444,12 @@ az bot msteams create -g <resource-group> -n <bot-name>
 
 ### 3. Run the Teams service
 
-**Find your admins.** Teams doesn't tell bots who its admins are, so you list
-Daimon's admins yourself, by their Entra object ID: Entra → **Users** → pick
-the person → copy **Object ID**. Admins can create routines, mint
-coding-tool tokens, replace shared keys, top up and see everyone's usage.
-Anyone can create an agent. You can change the list later.
+**Pick your admin team.** The owners of one team are Daimon's admins: they
+can create routines, mint coding-tool tokens, replace shared keys, top up and
+see everyone's usage. Anyone can create an agent. In Teams, open the team's
+⋯ → **Get link to team** and copy the `groupId` parameter from the link. Once
+the service runs, add the app to that team (step 7). To add or remove an
+admin later, change the team's owners; no redeploy.
 
 **Add the values to `.env`:**
 
@@ -456,7 +457,7 @@ Anyone can create an agent. You can change the list later.
 DAIMON_TEAMS__CLIENT_ID=<application (client) ID>
 DAIMON_TEAMS__TENANT_ID=<directory (tenant) ID>
 DAIMON_TEAMS__CLIENT_SECRET=<client secret value>
-DAIMON_TEAMS__ADMIN_USER_IDS=["<object ID>","<another object ID>"]
+DAIMON_TEAMS__ADMIN_TEAM_ID=<groupId of the admin team>
 ```
 
 A few things to know:
@@ -464,7 +465,10 @@ A few things to know:
 - **Set the three credentials together.** Once any `DAIMON_TEAMS__` value is
   set, every Daimon process expects the full set. A half-filled block stops
   them all from starting, not just Teams.
-- **The admin list is a JSON array**, not a comma-separated list.
+- **`DAIMON_TEAMS__ADMIN_USER_IDS` is deprecated.** It still adds admins by
+  Entra object ID (a JSON array) on top of the team's owners, and logs a
+  warning at startup. Make those people owners of the admin team, then remove
+  it.
 - **`DAIMON_CRYPTO__KEYS` must be set** (see step 1 of this guide).
 - **The `mcp` service reads these same values**, because the agent's Teams
   tools (posting, reading channels, sending files) run there. With Compose,
@@ -588,7 +592,8 @@ your apps** → **Upload an app**.
   bot reads the thread it is asked about. The bot then posts a welcome in
   the team. To ask it something, @mention it in a post or a reply. Pick the
   name from the autocomplete list so it turns into a highlighted mention:
-  typed text alone doesn't count.
+  typed text alone doesn't count. Add it to the admin team too, or nobody
+  is an admin.
 - **A private or shared channel:** adding the app to the team doesn't add it
   there. The channel's owner adds it from the channel itself, in the
   channel's apps settings. A package built from an
@@ -697,8 +702,11 @@ Details are in [`teams.md`](teams.md#private-and-shared-channels-optional).
 - **A Reply on a bot message gets no answer in a private channel:** Teams
   sends the bot only the private channel posts that @mention it. Mention it.
 - **Every Daimon process fails at startup after adding Teams:** a
-  `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_USER_IDS` isn't
-  a JSON array of object IDs.
+  `DAIMON_TEAMS__` value is missing, `DAIMON_TEAMS__ADMIN_TEAM_ID` isn't a
+  group ID, or `DAIMON_TEAMS__ADMIN_USER_IDS` isn't a JSON array of object IDs.
+- **Nobody is an admin:** `DAIMON_TEAMS__ADMIN_TEAM_ID` is unset, or the app
+  isn't installed in that team (`teams.admin_team.lookup_failed` in the logs
+  gives the reason and status).
 - **`teams.tenant_reconcile_failed` in the logs:** Daimon couldn't finish
   setting up your organisation, and it refuses turns until it does. The log
   line says why.

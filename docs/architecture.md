@@ -1537,7 +1537,10 @@ possible follow-up.
 
 Who counts as an admin:
 
-- In admission (DMs), the live role the adapter passes for this turn.
+- In admission (DMs), the live role the adapter passes for this turn. Teams
+  reads it from the owners of `DAIMON_TEAMS__ADMIN_TEAM_ID`'s team (Graph,
+  cached for a minute, failing closed) plus the deprecated
+  `DAIMON_TEAMS__ADMIN_USER_IDS`.
 - For credential and configuration tools, a chat turn's credential, whose
   `is_admin` reads the account's stored role -- recorded from the platform by
   that turn's admission, and as current as the person's last platform turn
