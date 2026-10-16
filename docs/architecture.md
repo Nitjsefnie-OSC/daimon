@@ -1197,7 +1197,10 @@ that deadline. If the repository is still desired when the exclusion expires,
 the next turn replaces the session and retries minting once. A refusal in the
 replacement starts a new 60-minute period.
 Reconciliation can change coverage sooner, triggering normal session change
-handling. Issued installation tokens remain valid for up to one hour, so
+handling. The scheduler leaves a session with a recorded refusal or an
+unannounced notice to that turn-boundary replacement, which carries the notice
+history, instead of retiring it; until then the removed repository's mount gets
+no new token. Issued installation tokens remain valid for up to one hour, so
 reconciliation does not immediately revoke access already delivered to a
 session. GitHub does not document a unique status code for an uncovered or
 suspended repository; HTTP 422 can also mean spam detection.

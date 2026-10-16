@@ -343,6 +343,7 @@ def _mapped_app_session(
                 repo_urls=(url,),
                 repo_resource_ids={url: "res-1"},
                 unavailable_repos=(),
+                unavailable_notice_pending=(),
             ),
         ),
         agent_id=uuid.UUID(int=4),
@@ -446,25 +447,43 @@ async def test_mapped_excluded_working_repo_is_not_archived_before_retry(
     rotate.assert_awaited_once()
 
 
-async def test_mapped_excluded_working_repo_retries_after_one_hour(
+async def test_mapped_expired_exclusion_is_left_to_the_turn_boundary(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     fresh_refresh_state: dict[str, tuple[int, datetime]],
 ) -> None:
+    # Retiring here would drop the refusal and notice history; the next turn
+    # replaces the session through the path that carries it.
     item = _mapped_app_session(active_turn=False)
     url = "https://github.com/acme/repo"
     item.mapping.effective_config.repo_urls = ()
     item.mapping.effective_config.unavailable_repos = (
         (url, datetime.now(UTC) - timedelta(minutes=61)),
     )
-    _, rotate, archive = await _refresh_mapped(
+    _, _, archive = await _refresh_mapped(
         db_session_factory,
         monkeypatch,
         [[item], [item]],
         desired=((url,), {11: {"contents": "read"}}),
     )
-    archive.assert_awaited_once()
-    rotate.assert_not_awaited()
+    archive.assert_not_awaited()
+
+
+async def test_mapped_pending_notice_is_left_to_the_turn_boundary(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    item = _mapped_app_session(active_turn=False)
+    item.mapping.effective_config.repo_urls = ()
+    item.mapping.effective_config.unavailable_notice_pending = ("https://github.com/acme/old",)
+    _, _, archive = await _refresh_mapped(
+        db_session_factory,
+        monkeypatch,
+        [[item], [item]],
+        desired=(("https://github.com/acme/repo",), {11: {"contents": "read"}}),
+    )
+    archive.assert_not_awaited()
 
 
 async def test_mapped_session_with_only_revoked_token_is_refreshed(

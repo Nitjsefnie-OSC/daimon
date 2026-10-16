@@ -808,7 +808,16 @@ async def _refresh_github_app_sessions(
                 )
                 valid_exclusions = valid_unavailable_repo_urls(snapshot, now=now)
                 comparable_urls = tuple(url for url in desired_urls if url not in valid_exclusions)
-                if comparable_urls != snapshot.repo_urls and not active_turn:
+                # A session that ever had a refused repo, or still owes a notice, is
+                # replaced at the turn boundary instead, which carries notice history.
+                refusal_history = bool(
+                    snapshot.unavailable_repos or snapshot.unavailable_notice_pending
+                )
+                if (
+                    comparable_urls != snapshot.repo_urls
+                    and not active_turn
+                    and not refusal_history
+                ):
                     scope = session_scope(
                         tenant_id=item.mapping.tenant_id,
                         account_id=item.mapping.account_id,
