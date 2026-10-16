@@ -228,12 +228,13 @@ with `--add-member-guest` (or every guest with
 unlisted guest, an anonymous member, or a roster that cannot be read closes
 the chat: the sender gets a private notice and no turn starts. The roster is
 read through Bot Framework and cached for a minute, or until someone joins.
-A running turn checks it again before its card shows any of its work, and
-reads it afresh before the answer. If the chat has closed meanwhile, the turn
-stops, its card says only that someone from outside is in the chat, and the
-asker gets the private notice. A group chat has no team,
-so team owners are not its channel admins: those settings need a workspace
-admin there.
+A running turn checks it again before its card shows any of its work or it
+posts an approval or question card, and reads it afresh before the answer. If
+the chat has closed meanwhile, the turn stops, no such card is posted (the
+approval or question goes unanswered), its card says only that someone from
+outside is in the chat, and the asker gets the private notice once. A group
+chat has no team, so team owners are not its channel admins: those settings
+need a workspace admin there.
 
 A turn replays the chat like a channel thread (Channel history, below): the
 first turn the newest 25 messages, a later one only newer messages, the
@@ -409,9 +410,10 @@ setting off the routes answer 404 and nothing is subscribed.
   `report.pdf.preview.png`, is the agent's own picture of that file. It shows
   inline like an image, under the file's name, and is never offered or
   uploaded; delivery deletes it. In a channel it stands in for Graph's
-  thumbnail of that file. In a 1:1 chat `files_hint` tells the agent it may
-  make one when it can render the first page cheaply (PyMuPDF from a PDF);
-  no office renderer is installed by default.
+  thumbnail of that file. In a 1:1 chat it shows just before its file's
+  consent card, and `files_hint` tells the agent it may make one when it can
+  render the first page cheaply (PyMuPDF from a PDF); no office renderer is
+  installed by default.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts (a
