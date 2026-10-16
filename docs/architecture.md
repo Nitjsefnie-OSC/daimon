@@ -1192,8 +1192,8 @@ visibility. The notice is sent once for a continuous refusal; if access returns
 and a later mint refuses it again, a new notice is sent. Authentication failures,
 rate limits, timeouts, and server failures stop preparation so it can be retried.
 Each exclusion remains valid for 60 minutes from its first refusal. Token
-rotation skips groups whose repositories are all validly excluded, preserving
-that deadline. If the repository is still desired when the exclusion expires,
+rotation never retries a refused repository, even after its 60 minutes, so
+the deadline holds and retries stay at one per turn. If the repository is still desired when the exclusion expires,
 the next turn replaces the session and retries minting once. A refusal in the
 replacement starts a new 60-minute period.
 Reconciliation can change coverage sooner, triggering normal session change

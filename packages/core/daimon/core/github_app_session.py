@@ -957,16 +957,9 @@ async def _rotate_live_app_tokens_unlocked(
             # running turn alone; the next turn boundary replaces the session.
             _log.warning("No App rollback snapshot for active session %s", session_id)
     async with httpx.AsyncClient() as client:
-        from daimon.core.session_compat import UNAVAILABLE_RETRY_AFTER
-
-        now = datetime.now(UTC)
-        valid_exclusions = tuple(
-            url
-            for url, first_refused in unavailable_repos
-            if first_refused.tzinfo is not None
-            and first_refused.tzinfo.utcoffset(first_refused) is not None
-            and now - first_refused < UNAVAILABLE_RETRY_AFTER
-        )
+        # Rotation never retries a refused repo, even after its 60 minutes: only
+        # the turn-boundary replacement does, so retries stay one per turn.
+        refused = tuple(url for url, _ in unavailable_repos)
         access = await prepare_app_access(
             sessionmaker,
             client,
@@ -978,7 +971,7 @@ async def _rotate_live_app_tokens_unlocked(
             config=config,
             fernet=fernet,
             cache=REQUESTER_CACHE,
-            excluded_repo_urls=valid_exclusions,
+            excluded_repo_urls=refused,
         )
         try:
             for resource in access.resources:

@@ -301,6 +301,26 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
         assert current.effective_config.unavailable_repos == ((read_url, first_refused),)
         assert current.effective_config.unavailable_notice_pending == (read_url,)
 
+    # Even after its 60 minutes, rotation leaves the refused repo to the
+    # turn-boundary replacement and keeps the original refusal time.
+    expired = first_refused - timedelta(minutes=61)
+    minted_ids.clear()
+    await rotate_live_app_tokens(
+        None,  # type: ignore[arg-type]
+        db_session_factory,
+        session_id="live-session",
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=None,
+        is_external=False,
+        vault_id="vault",
+        resource_ids={write_url: "resource"},
+        config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
+        fernet=fernet,
+        unavailable_repos=((read_url, expired),),
+    )
+    assert minted_ids == [[102]]
+
 
 def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:
     from daimon.core.session_compat import identity_change_reasons
