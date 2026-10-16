@@ -29,7 +29,7 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, ResourceRef, Scope, SkillRef
 from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProviderBinding, ResourceBinding
-from mux.errors import UnsupportedCapability
+from mux.errors import InvalidConfig, UnsupportedCapability
 from mux.profiles import backend_selection, get_profile, native_agent_tools
 from mux.state.operations import OperationRecord, request_digest
 from mux.state.store import binding_slot
@@ -1339,6 +1339,8 @@ async def _capture_source_capabilities(
     Native target ownership/readback remains a separate mandatory preparation gate.
     """
     from daimon.core.defaults.ma_index import download_skill_version
+    from daimon.core.mcp_auth import mint_jwt
+    from daimon.core.mcp_oauth.discovery import list_mcp_tools
     from daimon.core.mux_backend import managed_agents
     from daimon.core.mux_compat import legacy_call
     from daimon.core.skills.ingest import retained_archive_files
@@ -1347,6 +1349,7 @@ async def _capture_source_capabilities(
     from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
     from mux.profiles import represented_execution_tools
 
+    source = source.model_copy(update={"representations": ()})
     path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
     if path is None:
         return source
@@ -1361,11 +1364,24 @@ async def _capture_source_capabilities(
         # capture. A full deployment still refuses without the representation,
         # and its closed runtime-manifest loader independently rejects bad input.
         return source
+    revision = request.admission.backend_revision
+    if (
+        request.worker is not None
+        or request.admission.private_dm_id is not None
+        or request.admission.slack_turn_context_id is not None
+        or revision is None
+        or request.admission.backend_revision_origin != "agent"
+    ):
+        return source
     try:
         selected = [
             row
             for row in rows
             if row.get("source_capabilities") is not None
+            and row.get("platform") == request.platform
+            and row.get("channel_id") == revision.channel.channel_id
+            and row.get("profile") == revision.profile
+            and request.admission.origin_channel_id == revision.channel.channel_id
             and row.get("tenant_id") == str(source.tenant_id)
             and row.get("account_id") == request.scope.account_id
             and row.get("source_agent_id") == str(source.agent_id)
@@ -1399,10 +1415,39 @@ async def _capture_source_capabilities(
                 )
             ):
                 raise ValueError("representation differs from captured source")
+            if request.deps.mcp.public_url is None or request.deps.mcp.jwt_secret is None:
+                raise ValueError("MCP catalogue requires the captured caller")
+            catalogue_token = mint_jwt(
+                account_id=request.admission.account_id,
+                chat_agent_id=source.agent_id,
+                secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
+                now=request.now(),
+            )
+            catalogue = await list_mcp_tools(str(request.deps.mcp.public_url), catalogue_token)
+            allowed = next(
+                (
+                    server.tool_policy.get("allowed_tools")
+                    for server in spec.mcp_servers or ()
+                    if server.name == DAIMON_SERVER_NAME
+                ),
+                None,
+            )
+            if allowed is not None:
+                if not isinstance(allowed, list) or any(
+                    not isinstance(name, str) for name in allowed
+                ):
+                    raise ValueError("invalid source MCP allowlist")
+                if not set(allowed).issubset(catalogue):
+                    raise ValueError("source MCP names absent from server")
+                catalogue = frozenset(cast(list[str], allowed))
+            if frozenset(inputs.mcp_tools) != catalogue:
+                raise ValueError("MCP representation must preserve the exact source catalogue")
             tools = tuple(spec.tools or ())
             for extension in spec.extensions or ():
                 if extension.namespace == AGENT_TOOLS_NAMESPACE:
-                    tools = agent_tools(extension).intent(exact=True)
+                    tools = agent_tools(extension).intent(
+                        exact=True, mcp_catalogues={DAIMON_SERVER_NAME: catalogue}
+                    )
             mapped_tools = represented_execution_tools(
                 profile, tuple(tool for tool in tools if tool.kind != "mcp_toolset")
             )
@@ -1414,7 +1459,7 @@ async def _capture_source_capabilities(
                 raise ValueError("unrepresented MCP toolset")
             reference = f"caller-mcp:{source.tenant_id}:{scope.account_id}:{source.agent_id}"
             servers = tuple(spec.mcp_servers or ())
-            if not servers and request.deps.mcp.public_url is not None:
+            if not servers:
                 # The composer supplies this caller-bound capability even when
                 # it is absent from the persistent source agent definition.
                 servers = (
@@ -1424,7 +1469,6 @@ async def _capture_source_capabilities(
                 len(servers) != 1
                 or servers[0].name != DAIMON_SERVER_NAME
                 or servers[0].transport != "streamable_http"
-                or request.deps.mcp.public_url is None
                 or servers[0].url.rstrip("/") != str(request.deps.mcp.public_url).rstrip("/")
                 or not any(
                     binding.credential_ref == reference
@@ -1434,9 +1478,13 @@ async def _capture_source_capabilities(
                 or servers[0].credential_ref not in (None, reference)
             ):
                 raise ValueError("MCP representation requires its original caller authority")
+            if set(servers[0].tool_policy) - {"allowed_tools"}:
+                raise ValueError("unrepresented MCP tool policy")
             allowed = servers[0].tool_policy.get("allowed_tools")
             if allowed is not None and (
-                not isinstance(allowed, list) or not set(inputs.mcp_tools).issubset(allowed)
+                not isinstance(allowed, list)
+                or len(allowed) != len(inputs.mcp_tools)
+                or set(inputs.mcp_tools) != set(allowed)
             ):
                 raise ValueError("MCP representation expands the source allowlist")
             connection = servers[0].model_copy(
@@ -1528,8 +1576,11 @@ async def _capture_source_capabilities(
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
             raise ValueError("ambiguous source representation")
         return source.model_copy(update={"representations": tuple(represented)})
-    except (OSError, ValueError):
-        raise UnsupportedCapability(("source_representation",), "source") from None
+    except (OSError, ValueError, InvalidConfig):
+        # Representations are optional capture evidence, never a new failure
+        # mode for native callers or worker ceilings. Full deployments require
+        # this evidence independently and refuse before any provider exposure.
+        return source
 
 
 def source_instructions_preserved(required: str | None, system: str | None) -> bool:
@@ -1768,7 +1819,7 @@ def classify_source_obligations(
                         # The native compiler preserves this exact tool payload,
                         # overriding the target's neutral tools.
                         source_tools = tuple(target.tools or ())
-                    elif native.has_unrepresented_toolset():
+                    elif not represented and native.has_unrepresented_toolset():
                         missing.add("tools")
         else:
             foreign_target = target is not None and target.model.provider != spec.model.provider

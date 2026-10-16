@@ -196,6 +196,7 @@ async def validate_agent_mcp_token(
     scope: Scope,
     agent_id: uuid.UUID,
     now: dt.datetime,
+    max_ttl_s: int = 900,
 ) -> None:
     """Check a minted caller-bound token before exposing it to a remote provider.
 
@@ -220,13 +221,14 @@ async def validate_agent_mcp_token(
         )
         expiry = claims.get("exp")
         if (
-            scope.is_platform
+            not 0 < max_ttl_s <= 900
+            or scope.is_platform
             or scope.is_legacy_host_authorized
             or set(claims) != {"sub", "agent_id", "jti", "exp"}
             or claims["sub"] != scope.account_id
             or claims["agent_id"] != str(agent_id)
             or type(expiry) is not int
-            or not now.timestamp() < expiry <= now.timestamp() + 900
+            or not now.timestamp() < expiry <= now.timestamp() + max_ttl_s
         ):
             raise ValueError("invalid scoped agent token")
         jti = uuid.UUID(claims["jti"])

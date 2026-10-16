@@ -284,3 +284,57 @@ def test_conversation_worker_is_explicit_without_changing_openai_selection():
         is CONVERSATION_ONLY
     )
     assert neutral_catalog_profile_for("gemini", profile_id=CONVERSATION_ONLY.profile_id) is None
+
+
+@pytest.mark.parametrize(
+    "names", [("read",), ("read", "grep", "glob"), ("read", "edit", "grep", "glob", "write")]
+)
+def test_execution_mapping_refuses_restricted_filesystem_authority(names):
+    from mux.profiles import represented_execution_tools
+
+    with pytest.raises(InvalidConfig):
+        represented_execution_tools(
+            INLINE_REUSE, tuple(ToolSpec(name=n, kind="builtin") for n in names)
+        )
+
+
+def test_execution_mapping_requires_complete_automatic_authority():
+    from mux.profiles import represented_execution_tools
+
+    tools = tuple(
+        ToolSpec(name=n, kind="builtin") for n in ("bash", "read", "edit", "grep", "glob", "write")
+    )
+    assert represented_execution_tools(INLINE_REUSE, tools) == (
+        ToolSpec(name="code_execution", kind="builtin"),
+    )
+    for permission in ("ask",):
+        with pytest.raises(InvalidConfig):
+            represented_execution_tools(
+                INLINE_REUSE, (tools[0].model_copy(update={"permission": permission}), *tools[1:])
+            )
+
+
+@pytest.mark.parametrize("disabled", ["bash", "write", "edit"])
+def test_native_disabled_capability_cannot_acquire_general_execution(disabled):
+    from mux.drivers.anthropic.schemas import AgentToolsConfig
+    from mux.profiles import represented_execution_tools
+
+    source = AgentToolsConfig.model_validate(
+        {
+            "tools": [
+                {
+                    "type": "agent_toolset_20260401",
+                    "default_config": {
+                        "enabled": False,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": [
+                        {"name": name, "enabled": name != disabled}
+                        for name in ("bash", "read", "edit", "grep", "glob", "write")
+                    ],
+                }
+            ]
+        }
+    )
+    with pytest.raises(InvalidConfig):
+        represented_execution_tools(INLINE_REUSE, source.intent(exact=True))

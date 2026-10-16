@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 import pytest
 import yaml
+from daimon.core.channel_backend import AgentBackendRefused
 from daimon.core.mcp_auth import token_jti
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores import mux_state
@@ -71,7 +72,13 @@ PARAMS = {
                 {"name": t["name"], "enabled": True, "permission_policy": {"type": "always_allow"}}
                 for t in DEFAULT["tools"][0]["configs"]
             ],
-        }
+        },
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "daimon-mcp",
+            "configs": [],
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        },
     ],
     "skills": [
         {"type": "custom", "skill_id": f"source-{s['skill_id']}", "version": "1"}
@@ -100,6 +107,10 @@ async def full(consent_request, monkeypatch, tmp_path):
     request = replace(
         request,
         scope=scope,
+        admission=replace(
+            request.admission,
+            origin_channel_id=request.admission.backend_revision.channel.channel_id,
+        ),
         now=lambda: datetime.now(UTC),
         deadline=datetime.now(UTC) + timedelta(seconds=30),
         deps=replace(
@@ -188,7 +199,71 @@ async def full(consent_request, monkeypatch, tmp_path):
             return httpx.Response(200, json=interaction(f"turn-{len(posts)}"))
         return httpx.Response(200, json=interaction(call.url.path.rsplit("/", 1)[-1]))
 
+    # Exercise actual MCP initialize/tools-list and generation-pinned GCS GETs.
+    # Only the HTTP edge is replaced; all validation stays production code.
+    class ReadbackClient(httpx.AsyncClient):
+        pass
+
+    readback_calls = []
+    catalogue_state = {"names": ["describe_agent", "list_my_sessions"]}
+    storage = {}
+    for deployment, bundle in zip(deployments, bundles, strict=True):
+        prefix = deployment.source.split("owned-offline/", 1)[1]
+        for file in bundle.files:
+            storage[prefix + file.path] = file.content
+
+    def readback(call):
+        readback_calls.append(call)
+        if call.url.host == "mcp.invalid":
+            body = json.loads(call.content)
+            if body["method"] == "notifications/initialized":
+                return httpx.Response(202)
+            result = {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "serverInfo": {"name": "offline", "version": "1"},
+            }
+            if body["method"] == "tools/list":
+                result = {
+                    "tools": [
+                        {"name": name, "inputSchema": {"type": "object"}}
+                        for name in catalogue_state["names"]
+                    ]
+                }
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+        assert call.url.host == "storage.googleapis.com" and call.method == "GET"
+        if call.url.params.get("alt") == "media":
+            assert call.url.params["generation"] == "123"
+            return httpx.Response(200, content=storage[call.url.path.split("/o/", 1)[1]])
+        prefix = call.url.params["prefix"]
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "name": name,
+                        "bucket": "owned-offline",
+                        "generation": "123",
+                        "retention": {"mode": "Locked", "retainUntilTime": "2027-01-01T00:00:00Z"},
+                    }
+                    for name in storage
+                    if name.startswith(prefix)
+                ]
+            },
+        )
+
     clients = clients_for(monkeypatch, handle)
+    sdk_client = httpx.AsyncClient
+
+    class RouteClient(sdk_client):
+        def __init__(self, **kwargs):
+            if "verify" in kwargs:
+                # Preserve the real SDK's explicit network-policy assertion.
+                super().__init__(**kwargs)
+            else:
+                ReadbackClient.__init__(self, transport=httpx.MockTransport(readback), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", RouteClient)
 
     async def never_resolve(*_):
         pytest.fail("Catalog persistence must never resolve a bearer")
@@ -226,7 +301,7 @@ async def full(consent_request, monkeypatch, tmp_path):
         "source_pin": source_preservation_pin(source),
         "model": ModelRef(provider="gemini", id=FLASH_PRIMARY).model_dump(mode="json"),
         "skills": mappings,
-        "mcp_tools": ["get_agent", "list_agents"],
+        "mcp_tools": ["describe_agent", "list_my_sessions"],
     }
     manifest.write_text(
         json.dumps(
@@ -245,6 +320,12 @@ async def full(consent_request, monkeypatch, tmp_path):
         )
     )
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
+    from daimon.core.channel_backend import AgentBackendService
+
+    async def capture_bound_source(_):
+        return await capture_preparation_source(request, fresh=True)
+
+    service = AgentBackendService(sessions, enabled=True, capture_source=capture_bound_source)
     # This is the same fresh owner capture used by both preview and preparation.
     represented = await capture_preparation_source(request, fresh=True)
     assert source_preservation_pin(represented) == source_preservation_pin(source)
@@ -318,6 +399,9 @@ async def full(consent_request, monkeypatch, tmp_path):
     credential = tmp_path / "caller.token"
     credential.write_text(token)
     credential.chmod(0o600)
+    gcs_credential = tmp_path / "gcs.token"
+    gcs_credential.write_text("offline-storage-token")
+    gcs_credential.chmod(0o600)
     plan = GeminiPlan(
         profile=revision.profile,
         tenant_id=scope.tenant_id,
@@ -342,13 +426,27 @@ async def full(consent_request, monkeypatch, tmp_path):
         counterpart_catalog_revision=counterpart.local_revision,
         source_capabilities=capabilities,
         mcp_credential_file=credential,
+        gcs_credential_file=gcs_credential,
         skill_deployments=tuple(deployments),
     )
     manifest.write_text(json.dumps([plan.model_dump(mode="json")]))
     monkeypatch.setenv(plan.api_key_env, "offline-full-source")
     calls.clear()
     try:
-        yield request, plan, canonical, native, calls, posts, token, archives, source_reads, router
+        yield (
+            request,
+            plan,
+            canonical,
+            native,
+            calls,
+            posts,
+            token,
+            archives,
+            source_reads,
+            router,
+            storage,
+            catalogue_state,
+        )
     finally:
         await binding.close()
     assert all(client.is_closed for client in clients)
@@ -407,6 +505,8 @@ async def test_full_default_preparation_and_fresh_followup_turns(full):
         assert body["agent"] == native["id"]
         assert body["system_instruction"] == canonical.target_spec.system
         assert token in json.dumps(body["tools"])
+        remote = next(tool for tool in body["tools"] if tool["type"] == "mcp_server")
+        assert set(remote["allowed_tools"][0]["tools"]) == {"describe_agent", "list_my_sessions"}
     assert token not in json.dumps(native) and token not in plan.model_dump_json()
 
 
@@ -494,3 +594,122 @@ async def test_unrelated_manifest_failure_preserves_ordinary_source_capture(
     captured = await capture_preparation_source(request, fresh=True)
     assert captured == source
     assert source_preservation_pin(captured) == source_preservation_pin(source)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("surface", ["other_channel", "dm", "routine", "anthropic", "worker"])
+async def test_full_mode_row_does_not_affect_unrelated_source_capture(full, monkeypatch, surface):
+    request, _, _, _, _, posts, _, archives, *_ = full
+    from mux.profiles import backend_selection
+
+    # Even retained skill drift must not trigger representation I/O elsewhere.
+    archives[0].write_bytes(b"not an archive")
+    admission = request.admission
+    if surface == "other_channel":
+        old = admission.backend_revision
+        other = old.channel.model_copy(update={"channel_id": "another-channel"})
+        admission = replace(admission, backend_revision=ConfigRevision.create(other, 1, old))
+    elif surface == "dm":
+        admission = replace(admission, private_dm_id="private-dm")
+    elif surface == "routine":
+        admission = replace(admission, backend_revision=None, backend_revision_origin=None)
+    elif surface == "anthropic":
+        old = admission.backend_revision
+        admission = replace(
+            admission,
+            backend_revision=ConfigRevision.create(old.channel, 3, backend_selection("anthropic")),
+        )
+    else:
+        request = replace(request, worker=object())
+    request = replace(request, admission=admission)
+    captured = await capture_preparation_source(request, fresh=True)
+    assert not captured.representations
+    assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("defect", ["subset", "nonexistent", "extra"])
+async def test_full_mode_mcp_catalogue_must_equal_actual_source_tools(full, defect):
+    request, *_ = full
+    path = Path(os.environ["DAIMON_TURN__PROVIDER_RUNTIME_FILE"])
+    rows = json.loads(path.read_text())
+    tools = rows[0]["source_capabilities"]["mcp_tools"]
+    if defect == "subset":
+        tools.pop()
+    elif defect == "nonexistent":
+        tools[0] = "get_agent"
+    else:
+        tools.append("unknown_tool")
+    path.write_text(json.dumps(rows))
+    captured = await capture_preparation_source(request, fresh=True)
+    assert not captured.representations
+    with pytest.raises((AdmissionDenied, UnsupportedCapability, AgentBackendRefused)):
+        await prepare_source(request)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("phase", ["counterpart_read", "provider_exposure"])
+@pytest.mark.parametrize("defect", ["bytes", "extra", "missing"])
+async def test_live_gcs_drift_refuses_before_provider_send(full, defect, phase):
+    from mux.errors import ProviderError
+
+    request, _, canonical, _, _, posts, *_ = full
+    runtime = build_gemini_runtime(canonical)
+    if phase == "provider_exposure":
+        await runtime.read_agent_counterpart(canonical)
+    storage = full[10]
+    path = next(iter(storage))
+    if defect == "bytes":
+        storage[path] = b"overwritten"
+    elif defect == "missing":
+        del storage[path]
+    else:
+        storage[path.rsplit("/", 1)[0] + "/extra.txt"] = b"unexpected"
+    expected = AdmissionDenied if phase == "counterpart_read" else ProviderError
+    with pytest.raises(expected):
+        if phase == "counterpart_read":
+            await read_preparation_counterpart(scope_channel_runtimes(request)[0])
+        else:
+            transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+            connection = canonical.target_spec.mcp_servers[0]
+            await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_target_credential_must_see_the_complete_captured_mcp_catalogue(full):
+    request, _, canonical, _, _, posts, *_ = full
+    runtime = build_gemini_runtime(canonical)
+    await runtime.read_agent_counterpart(canonical)
+    full[11]["names"] = ["describe_agent"]
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    connection = canonical.target_spec.mcp_servers[0]
+    with pytest.raises(ScopeViolation):
+        await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_scoped_mcp_validator_retains_the_shorter_provisioning_deadline(full):
+    from daimon.core.mcp_auth import validate_agent_mcp_token
+
+    request, plan, _, _, _, _, token, *_ = full
+    with pytest.raises(ValueError, match="invalid scoped agent token"):
+        await validate_agent_mcp_token(
+            request.deps.sessionmaker,
+            token=token,
+            secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
+            scope=request.scope,
+            agent_id=plan.source_agent_id,
+            now=request.now(),
+            max_ttl_s=30,
+        )
+    await validate_agent_mcp_token(
+        request.deps.sessionmaker,
+        token=token,
+        secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
+        scope=request.scope,
+        agent_id=plan.source_agent_id,
+        now=request.now(),
+        max_ttl_s=600,
+    )

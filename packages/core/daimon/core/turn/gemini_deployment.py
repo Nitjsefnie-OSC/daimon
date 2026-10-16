@@ -54,7 +54,11 @@ from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.core import compile_agent, compile_environment
 from mux.drivers.gemini.flash import FLASH_PRIMARY
-from mux.drivers.gemini.skill_deployment import GCSBundleDeployment, RetainedSkillDeployments
+from mux.drivers.gemini.skill_deployment import (
+    GCSBundleDeployment,
+    RetainedSkillDeployments,
+    verify_retained_deployments,
+)
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import (
     INLINE_REUSE,
@@ -71,6 +75,30 @@ from pydantic import (
 )
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
+
+
+def _private_credential(path: Path) -> str:
+    """Read one explicitly owned, bounded bearer file without following links."""
+    from mux.drivers.gemini.mcp_auth import credential
+
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.getuid()
+        ):
+            raise ValueError("credential file must be private and owned")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(16_385)
+        if len(raw) > 16_384:
+            raise ValueError("invalid credential")
+        return credential(raw.decode().strip())
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 class GeminiPlan(BaseModel):
@@ -110,6 +138,7 @@ class GeminiPlan(BaseModel):
         default=None, exclude_if=lambda value: value is None
     )
     mcp_credential_file: Path | None = Field(default=None, exclude_if=lambda value: value is None)
+    gcs_credential_file: Path | None = Field(default=None, exclude_if=lambda value: value is None)
     skill_deployments: tuple[GCSBundleDeployment, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
@@ -140,13 +169,19 @@ class GeminiPlan(BaseModel):
                 != ModelRef(provider=INLINE_REUSE.provider, id=FLASH_PRIMARY)
                 or tuple(item.target.id for item in self.source_capabilities.skills)
                 != self.skill_ids
+                or self.gcs_credential_file is None
+                or not self.gcs_credential_file.is_absolute()
                 or not self.skill_deployments
             ):
                 raise ValueError(
                     "full source capabilities require scoped deployment and credential inputs"
                 )
             RetainedSkillDeployments(self.skill_deployments)
-        elif self.mcp_credential_file is not None or self.skill_deployments:
+        elif (
+            self.mcp_credential_file is not None
+            or self.gcs_credential_file is not None
+            or self.skill_deployments
+        ):
             raise ValueError("capability dependencies require a verified source capability plan")
         if (
             not self.records_path.is_absolute()
@@ -408,9 +443,26 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     namespace = json.dumps([scope.tenant_id, scope.account_id, plan.project], separators=(",", ":"))
     counterpart_verified = False
 
+    async def verify_storage() -> None:
+        if plan.source_capabilities is None:
+            return
+        if plan.gcs_credential_file is None:
+            raise AdmissionDenied(reason="backend_unsupported")
+        try:
+            token = _private_credential(plan.gcs_credential_file)
+        except (OSError, ValueError):
+            raise ScopeViolation(
+                "skill-deployment", "invalid explicit storage credential"
+            ) from None
+        await verify_retained_deployments(
+            plan.skill_deployments,
+            token=token,
+            retained_until=request.deadline + timedelta(days=7),
+        )
+
     async def resolve_mcp(authorized: Scope, reference: str, destination: str) -> str:
         from daimon.core.mcp_auth import validate_agent_mcp_token
-        from mux.drivers.gemini.mcp_auth import credential
+        from daimon.core.mcp_oauth.discovery import list_mcp_tools
 
         expected = f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{plan.source_agent_id}"
         public_url = request.deps.mcp.public_url
@@ -425,23 +477,8 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             or plan.source_agent_id is None
         ):
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
-        descriptor: int | None = None
         try:
-            descriptor = os.open(plan.mcp_credential_file, os.O_RDONLY | os.O_NOFOLLOW)
-            info = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or stat.S_IMODE(info.st_mode) != 0o600
-                or info.st_uid != os.getuid()
-            ):
-                raise ScopeViolation(
-                    "mcp-credential", "MCP credential file must be private and owned"
-                )
-            with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                raw = stream.read(16_385)
-            if len(raw) > 16_384:
-                raise ValueError("invalid credential")
-            token = credential(raw.decode().strip())
+            token = _private_credential(plan.mcp_credential_file)
             await validate_agent_mcp_token(
                 request.deps.sessionmaker,
                 token=token,
@@ -450,12 +487,14 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 agent_id=plan.source_agent_id,
                 now=request.now(),
             )
+            catalogue = await list_mcp_tools(destination, token)
+            assert plan.source_capabilities is not None
+            if catalogue != frozenset(plan.source_capabilities.mcp_tools):
+                raise ValueError("target MCP catalogue differs from captured source")
+            await verify_storage()
             return token
         except (OSError, ValueError):
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
 
     def transport(config: ConfigRevision, authorized: Scope) -> GeminiTransportRuntime:
         if config != revision or authorized != scope:
@@ -502,6 +541,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         checked = await plan.read_counterpart(
             preparation, source=source, resources=resources(preparation)
         )
+        await verify_storage()
         counterpart_verified = True
         return checked
 

@@ -178,6 +178,7 @@ class AgentMCPBinding:
                 scope=binding.scope,
                 agent_id=self.agent,
                 now=now,
+                max_ttl_s=ttl,
             )
         except ValueError:
             raise LiveRefused(
