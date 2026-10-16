@@ -188,6 +188,15 @@ def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
     assert "separate conversation, so the file would be made again there" in teams, (
         "a 1:1 chat does not share the channel thread's workspace"
     )
+    # Regression for a channel turn whose agent copied daimon's footer from replayed
+    # answers ("Saved to this channel's files: ...") into its own reply, and hedged.
+    assert 'never write that list, a file link or a "Saved to" line yourself' in teams, (
+        "daimon adds the saved-files list; the agent must not imitate it from history"
+    )
+    assert "never hedge about delivery" in teams, "the delivery is daimon's, not a maybe"
+    assert "come back as attachments of your replayed messages, with a download URL" in teams, (
+        "earlier deliveries are readable from history"
+    )
 
 
 def test_states_setup_reads_at_turn_start_not_mid_turn() -> None:

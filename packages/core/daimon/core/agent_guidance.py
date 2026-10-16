@@ -159,7 +159,13 @@ In a Teams channel (id starts with `19:`), follow the `files` attribute on
 `<channel>`. `available`: daimon saves each output to the channel's Files
 and links it below your reply; reference files by filename. Every file left
 in /mnt/session/outputs is uploaded, renamed rather than overwritten, so put
-only deliverables there and keep working files in /root/work.
+only deliverables there and keep working files in /root/work. daimon adds
+the saved-files list and any previews after your turn: never write that
+list, a file link or a "Saved to" line yourself, even when earlier replies
+in the thread show one, and never hedge about delivery ("it should be
+saved", "tell me if it doesn't appear"). Files you delivered earlier come
+back as attachments of your replayed messages, with a download URL while
+the channel's Files can be read, so you can open them again.
 `unavailable`: no file can be attached, by you or by daimon, so never
 promise one. Follow the channel's `files_hint`: it says what an admin must
 grant. Say so once in your reply, paste the content inline if it is short
