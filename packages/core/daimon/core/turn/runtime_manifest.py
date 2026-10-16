@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from daimon.core.turn.deps import TurnDeps
     from daimon.core.turn.persistence import TurnPersistence
     from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
+    from mux.contracts.ports import ManagedAgents
     from mux.state.lease import Lease
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1279,7 +1280,8 @@ async def _capture_source_capabilities(
     Native target ownership/readback remains a separate mandatory preparation gate.
     """
     from daimon.core.defaults.ma_index import download_skill_version
-    from daimon.core.mux_compat import collect_skills
+    from daimon.core.mux_backend import managed_agents
+    from daimon.core.mux_compat import legacy_call
     from daimon.core.skills.ingest import retained_archive_files
     from daimon.core.stores.domain import SourceRepresentation
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
@@ -1386,17 +1388,37 @@ async def _capture_source_capabilities(
             )
             if {item.source.id for item in inputs.skills} != {s.id for s in spec.skills or ()}:
                 raise ValueError("skill representation is incomplete")
-            latest: dict[str, str | None] = {}
-            if any(s.version in (None, "latest") for s in spec.skills or ()):
-                catalogue, truncated = await collect_skills(
-                    request.deps.anthropic, limit=1000, scope=scope
+            unresolved = tuple(s for s in spec.skills or () if s.version in (None, "latest"))
+            latest: dict[str, str] = {}
+            if unresolved:
+                # Grant reads only for ids captured from this actual source.
+                # A scoped catalogue walk deliberately hides custom skills.
+                backend = managed_agents(
+                    request.deps.anthropic,
+                    scope=scope,
+                    resources=frozenset(("skill", s.id) for s in unresolved),
                 )
-                if truncated:
-                    raise ValueError("source skill catalogue is incomplete")
-                latest = {item.id: item.latest_version for item in catalogue}
+
+                async def resolve_latest(
+                    attached: SkillRef, selected: ManagedAgents = backend
+                ) -> tuple[str, str]:
+                    record = await legacy_call(selected.skills.retrieve(scope, attached.id))
+                    pin = record.latest_version
+                    if (
+                        record.id != attached.id
+                        or record.source != attached.source
+                        or pin is None
+                        or pin.id != attached.id
+                        or pin.version in (None, "latest")
+                    ):
+                        raise ValueError("source skill has no concrete current version")
+                    assert pin.version is not None
+                    return attached.id, pin.version
+
+                latest = dict(await asyncio.gather(*(resolve_latest(s) for s in unresolved)))
 
             async def verify_skill(
-                item: SourceSkillMapping, versions: Mapping[str, str | None] = latest
+                item: SourceSkillMapping, versions: Mapping[str, str] = latest
             ) -> None:
                 attached = next(s for s in spec.skills or () if s.id == item.source.id)
                 version = (

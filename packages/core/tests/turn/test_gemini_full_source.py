@@ -79,6 +79,8 @@ PARAMS = {
     ],
 }
 
+LATEST_PARAMS = {**PARAMS, "skills": [{**skill, "version": "latest"} for skill in PARAMS["skills"]]}
+
 
 def archive(files):
     stream = io.BytesIO()
@@ -147,6 +149,29 @@ async def full(consent_request, monkeypatch, tmp_path):
                 f"gs://owned-offline/{scope.tenant_id}/{scope.account_id}/{version}/",
                 file_manifest(bundle),
             )
+        )
+
+    def no_catalogue(*_):
+        pytest.fail("Source attachment resolution must not enumerate other custom skills")
+
+    router.add("GET", r"/v1/skills", no_catalogue)
+    for item in DEFAULT["skills"]:
+        skill_id = f"source-{item['skill_id']}"
+        router.add(
+            "GET",
+            rf"/v1/skills/{skill_id}",
+            lambda *_, sid=skill_id: httpx.Response(
+                200,
+                json={
+                    "id": sid,
+                    "type": "skill",
+                    "source": "custom",
+                    "latest_version": "1",
+                    "display_title": sid,
+                    "created_at": "2026-10-14T00:00:00Z",
+                    "updated_at": None,
+                },
+            ),
         )
     native, calls, posts = {}, [], []
 
@@ -329,7 +354,9 @@ async def full(consent_request, monkeypatch, tmp_path):
     assert all(client.is_closed for client in clients)
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize(
+    "consent_request", [PARAMS, LATEST_PARAMS], indirect=True, ids=["concrete", "latest"]
+)
 async def test_full_default_preparation_and_fresh_followup_turns(full):
     request, plan, canonical, native, calls, posts, token, *_ = full
     assert len(canonical.target_spec.skills) == 11
