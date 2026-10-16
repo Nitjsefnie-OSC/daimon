@@ -410,8 +410,8 @@ setting off the routes answer 404 and nothing is subscribed.
   inline like an image, under the file's name, and is never offered or
   uploaded; delivery deletes it. In a channel it stands in for Graph's
   thumbnail of that file. In a 1:1 chat `files_hint` tells the agent it may
-  make one when it can render cheaply (typst for a document it built with
-  typst, PyMuPDF for a PDF); no office renderer is installed by default.
+  make one when it can render the first page cheaply (PyMuPDF from a PDF);
+  no office renderer is installed by default.
 
 The bot token is only sent to Bot Framework hosts, the Graph token only to
 `graph.microsoft.com`, downloads and uploads only go to SharePoint hosts (a

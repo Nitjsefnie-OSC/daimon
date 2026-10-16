@@ -58,14 +58,15 @@ _GROUP_FILES_HINT = (
     "here; they can ask you for it in their 1:1 chat with you."
 )
 # A 1:1 chat has no Graph thumbnails: the agent may picture a document itself
-# (`output_delivery.is_preview_output`). The default environment has typst, no office suite.
+# (`output_delivery.is_preview_output`). Page one only: typst's PNG export of a multi-page
+# document needs a page template. The default environment has no office suite.
 _DIRECT_FILES_HINT = (
     "When you deliver a .docx, .pptx, .xlsx or .pdf here, you may also save a PNG of its "
-    "first page or slide, at most 1024 px, to your outputs as <file name>.preview.png "
+    "first page or slide to your outputs as <file name>.preview.png "
     "(report.pdf.preview.png for report.pdf): it shows inline as a picture and is never "
-    "offered as a file. Only when you can render one cheaply, such as "
-    'typst.compile(..., format="png") for a document built with typst or PyMuPDF '
-    "(pip install pymupdf) for a PDF; no office renderer is installed by default."
+    "offered as a file. Only when you can render one cheaply, such as from a PDF with "
+    "PyMuPDF (pip install pymupdf): pymupdf.open(pdf)[0].get_pixmap(dpi=96).save(png). "
+    "No office renderer is installed by default."
 )
 # Only where previews are sent: an unprompted answer posts none.
 _PREVIEW_NOTE = (

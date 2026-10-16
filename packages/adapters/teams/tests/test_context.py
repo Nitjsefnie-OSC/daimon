@@ -259,6 +259,7 @@ def test_only_a_direct_chat_turn_hears_about_preview_outputs() -> None:
         channel_files=True,
     )
     assert ".preview.png" in direct, "a 1:1 turn learns the preview output convention"
+    assert "[0].get_pixmap(" in direct, "the recipe renders page one of any document"
     assert ".preview.png" not in channel, "a channel already gets Graph's thumbnails"
 
 

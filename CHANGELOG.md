@@ -50,8 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the file's name, and is never offered or uploaded; delivery deletes
   it afterwards. In a channel it takes the place of Graph's thumbnail of that
   file. In a 1:1 chat the turn context tells the agent it may make one when it
-  can render cheaply, with typst or PyMuPDF; no office renderer is installed
-  by default.
+  can render its first page cheaply, from a PDF with PyMuPDF; no office
+  renderer is installed by default.
 - **Teams activity feed notices.** A routine result posted in a channel now
   notifies its creator in their Teams activity feed, linking to the post, with
   one feed entry per routine that each run replaces. An approval or question
