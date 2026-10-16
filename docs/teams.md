@@ -494,10 +494,12 @@ natively, so `DAIMON_TABLE_RENDERING` has nothing to do here.
 Each tenant runs three turns at once by default
 (`DAIMON_TEAMS__MAX_CONCURRENT_TURNS_PER_TENANT`). A new thread over the limit
 gets a retry-later reply without starting a turn, and due timers and handoffs
-from the wake poller wait until a turn finishes. A post or edit Teams throttles
-(HTTP 429) is retried once after the wait Teams asks for, up to 10 seconds.
-Reactions (👀, ✅, ⌛) are spaced to Bot Framework's limit of two a second per
-bot and sent in the background, so they never hold up a turn. An add that
+from the wake poller wait until a turn finishes. A post, edit or reaction Teams
+throttles (HTTP 429) is retried once after the wait Teams asks for, up to 10
+seconds (five for a reaction, its whole call). Reactions (👀, ✅, ⌛) are spaced
+to Bot Framework's
+[limit](https://learn.microsoft.com/en-us/microsoftteams/platform/agents-in-teams/agent-reactions)
+of two a second per bot and sent in the background, so they never hold up a turn. An add that
 would wait over five seconds, or fails, is dropped; a removal always waits its
 turn, so ⌛ and 👀 never stay behind, and is skipped only when its add never
 landed.

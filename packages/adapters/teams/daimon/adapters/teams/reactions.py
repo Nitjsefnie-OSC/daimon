@@ -1,15 +1,18 @@
 """Reactions on the asker's message: 👀 once a turn is accepted, ✅ once answered, ⌛ while queued.
 
 Bot Framework rate-limits a bot's reactions to two a second across every
-conversation, answering 429 past that. A reaction is a nicety, so none may fail
-or delay a turn or intake: each call runs in the background, spaced to that
-limit in this process. An add that would wait longer than `MAX_WAIT_S` for its
-slot is dropped rather than queued behind a burst. A removal is never dropped,
-since a lost one would leave ⌛ or 👀 on the message for good; it only waits
-its turn, and is skipped when its add was dropped or refused, as there is
-nothing to remove. Calls on one message run in order, so a removal never
-overtakes the add it undoes. A failure, a 429 included, is logged and dropped;
-nothing retries it.
+conversation, answering 429 past that
+(https://learn.microsoft.com/microsoftteams/platform/agents-in-teams/agent-reactions).
+A reaction is a nicety, so none may fail or delay a turn or intake: each call
+runs in the background, spaced to that limit in this process. An add that
+would wait longer than `MAX_WAIT_S` for its slot is dropped rather than queued
+behind a burst. A removal is never dropped, since a lost one would leave ⌛ or
+👀 on the message for good; it only waits its turn, and is skipped when its add
+was dropped or refused, as there is nothing to remove. Calls on one message run
+in order, so a removal never overtakes the add it undoes. The bot client
+retries a 429 once, after the wait Teams asks for and within the call's
+timeout, as for every Bot Framework call; a call that still fails is logged and
+dropped, never retried here.
 """
 
 from __future__ import annotations
@@ -30,7 +33,8 @@ from daimon.core.turn.lifecycle import Acknowledgment
 
 log = structlog.get_logger(__name__)
 
-# Teams' reaction ids: the code point, then the emoji's name.
+# Teams' reaction ids: the code point, then the emoji's name, as listed at
+# https://learn.microsoft.com/microsoftteams/platform/agents-in-teams/teams-reactions-reference
 EYES: Final = "1f440_eyes"
 CHECK: Final = "2705_whiteheavycheckmark"
 HOURGLASS: Final = "231b_hourglassdone"

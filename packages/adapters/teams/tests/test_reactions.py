@@ -120,7 +120,8 @@ async def test_the_same_activity_id_in_two_chats_keeps_two_hourglasses() -> None
     assert removed == ["chat-a", "chat-b"], "neither chat's mark overwrote the other's"
 
 
-async def test_a_throttled_reaction_is_dropped_and_the_next_still_runs() -> None:
+async def test_a_reaction_still_throttled_after_the_client_retry_is_dropped() -> None:
+    """The bot client retries a 429 once below `react`; one that still fails reaches here."""
     calls = Calls(fail=frozenset({CHECK}))
     harness = Harness(calls)
     target = reaction_target(make_inbound())
@@ -129,7 +130,7 @@ async def test_a_throttled_reaction_is_dropped_and_the_next_still_runs() -> None
     harness.reactions.acknowledge(target, "done")
     await harness.settle()
     assert [reaction for _, reaction, _ in calls.made] == [EYES, CHECK, EYES], (
-        "a 429 is not retried, and the calls after it still run"
+        "no second retry here, and the calls after it still run"
     )
     assert all(task.exception() is None for task in harness.tasks), "no failure escapes"
 
