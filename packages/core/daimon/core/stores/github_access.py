@@ -14,6 +14,7 @@ from daimon.core._models import (
     TenantGitHubRepo,
 )
 from daimon.core.stores.github_installation_coverage import installation_covers_repo
+from daimon.core.stores.github_owner_grants import list_owner_grants
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import ColumnElement, or_, select, text
@@ -431,6 +432,62 @@ async def require_may_grant(
         raise ValueError(SERVER_WIDE_GRANT_MESSAGE)
 
 
+def _second_installation(
+    agent_name: str | None, agent_id: uuid.UUID, org: str
+) -> SecondInstallationError:
+    return SecondInstallationError(
+        f"{agent_name or agent_id} already uses repos from {org}. "
+        "One agent can use one GitHub org. Use another agent for repos from a "
+        "different org.",
+        org=org,
+    )
+
+
+async def _refuse_other_owner_installation(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    installation_ids: set[int],
+    agent_name: str | None,
+) -> None:
+    """Refuse when an owner grant of the agent sits on an installation outside the set."""
+    for owner_grant in await list_owner_grants(session, tenant_id=tenant_id, agent_id=agent_id):
+        if owner_grant.installation_id not in installation_ids:
+            raise _second_installation(agent_name, agent_id, owner_grant.owner_login)
+
+
+async def require_owner_grant_installations(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    installation_ids: set[int],
+    agent_name: str | None = None,
+) -> None:
+    """An owner grant keeps the one-installation rule `stage_grant` keeps for repos.
+
+    Takes the agent's grant lock, so owner and explicit grants serialize per
+    agent, then refuses when the agent has an explicit grant or an owner grant
+    on an installation outside `installation_ids`. Re-adding an owner grant for the installation
+    the agent already uses passes. The caller owns the transaction.
+    """
+    await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
+    for grant in await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id):
+        other = await repo_for_agent(
+            session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
+        )
+        if other is not None and other.installation_id not in installation_ids:
+            raise _second_installation(agent_name, agent_id, other.repo_full_name.split("/", 1)[0])
+    await _refuse_other_owner_installation(
+        session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        installation_ids=installation_ids,
+        agent_name=agent_name,
+    )
+
+
 async def stage_grant(
     session: AsyncSession,
     *,
@@ -468,13 +525,14 @@ async def stage_grant(
             session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
         )
         if other is not None and other.installation_id != authorized.installation_id:
-            org = other.repo_full_name.split("/", 1)[0]
-            raise SecondInstallationError(
-                f"{agent_name or agent_id} already uses repos from {org}. "
-                "One agent can use one GitHub org. Use another agent for repos from a "
-                "different org.",
-                org=org,
-            )
+            raise _second_installation(agent_name, agent_id, other.repo_full_name.split("/", 1)[0])
+    await _refuse_other_owner_installation(
+        session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        installation_ids={authorized.installation_id},
+        agent_name=agent_name,
+    )
     if is_working_repo:
         working = await session.scalars(
             select(AgentGitHubGrant)

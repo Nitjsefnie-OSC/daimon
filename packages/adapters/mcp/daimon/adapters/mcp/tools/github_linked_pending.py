@@ -23,7 +23,14 @@ from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
-from daimon.core.stores.github_linked_pending import PendingGrant, resolve, save, take
+from daimon.core.stores.github_linked_pending import (
+    ClaimLostError,
+    PendingGrant,
+    renew,
+    resolve,
+    save,
+    take,
+)
 from daimon.core.stores.github_personal_links import mint_link
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +39,7 @@ _log = structlog.get_logger(__name__)
 
 AGENT_CHANGED_MESSAGE = "Agent access changed while you were linking.\nAsk again in chat."
 GITHUB_DOWN_MESSAGE = "GitHub didn't answer.\nAsk again in chat."
-FAILED_MESSAGE = "Something went wrong.\nAsk again in chat."
+FAILED_MESSAGE = "Something went wrong.\nAsk again."
 # The browser page shows "Ask again in chat" when every resumed request ended this way.
 REQUEST_CHANGED_MESSAGES = frozenset({AGENT_CHANGED_MESSAGE, CHANGED_MESSAGE})
 
@@ -89,9 +96,14 @@ async def _take_pending(
         return rows
 
 
-async def _resolve_pending(runtime: McpRuntime, request_id: uuid.UUID) -> None:
+async def _renew_pending(runtime: McpRuntime, row: PendingGrant) -> bool:
     async with runtime.session_factory.begin() as session:
-        await resolve(session, request_id)
+        return await renew(session, row.id, row.claim_token)
+
+
+async def _resolve_pending(runtime: McpRuntime, row: PendingGrant) -> bool:
+    async with runtime.session_factory.begin() as session:
+        return await resolve(session, row.id, row.claim_token)
 
 
 async def _deliver_result(runtime: McpRuntime, pending: PendingGrant, message: str) -> None:
@@ -155,6 +167,11 @@ async def _deliver_recovery(runtime: McpRuntime, pending: PendingGrant, *, statu
                 parent_channel_id=pending.parent_channel_id,
                 thread_id=pending.thread_id,
             )
+            # The fresh request and the original's resolution commit together:
+            # a failure keeps the original and adds nothing, and a claim another
+            # callback took over rolls back the new link as well.
+            if not await resolve(session, pending.id, pending.claim_token):
+                raise ClaimLostError
         label = "Link GitHub"
     await _post_personal_link(
         runtime,
@@ -243,6 +260,8 @@ async def _outcome_message(
         if outcome.status in ("needs_install", "needs_link", "relink"):
             try:
                 await _deliver_recovery(runtime, row, status=outcome.status)
+            except ClaimLostError:
+                raise
             except Exception:
                 # Private delivery can fail per person; the rest of the
                 # batch still runs and the thread says what to do.
@@ -272,7 +291,8 @@ async def resume_pending(
     A request leaves the table only after it has an outcome and its result
     delivery was attempted. Any failure of one request, including after its grant
     committed, ends that request with `FAILED_MESSAGE` and leaves the rest to run.
-    A crash leaves unresolved requests claimed until their lease passes.
+    A crash leaves unresolved requests claimed until their lease passes (see
+    `take`). A request whose claim another callback took over is skipped.
     """
     pending = await _take_pending(
         runtime,
@@ -283,6 +303,16 @@ async def resume_pending(
     )
     results: list[str] = []
     for row in pending:
+        # Renew just before running: a slow earlier request must not let this
+        # lease lapse, and a callback that took the row over owns it now.
+        try:
+            renewed = await _renew_pending(runtime, row)
+        except Exception:
+            _log.warning("github.linked_resume.renew_failed", request_id=str(row.id))
+            continue
+        if not renewed:
+            _log.warning("github.linked_resume.claim_lost", request_id=str(row.id))
+            continue
         try:
             message = await _outcome_message(
                 runtime,
@@ -292,6 +322,10 @@ async def resume_pending(
                 platform=platform,
                 platform_user_id=platform_user_id,
             )
+        except ClaimLostError:
+            # Another callback took the request while this one ran; it answers.
+            _log.warning("github.linked_resume.claim_lost", request_id=str(row.id))
+            continue
         except Exception:
             _log.exception("github.linked_resume.request_failed", request_id=str(row.id))
             message = FAILED_MESSAGE
@@ -300,7 +334,8 @@ async def resume_pending(
         except Exception:
             _log.warning("github.linked_resume.result_delivery_failed", request_id=str(row.id))
         try:
-            await _resolve_pending(runtime, row.id)
+            if not await _resolve_pending(runtime, row):
+                _log.info("github.linked_resume.already_resolved", request_id=str(row.id))
         except Exception:
             # The lease expires and the request runs again, which is idempotent.
             _log.warning("github.linked_resume.resolve_failed", request_id=str(row.id))

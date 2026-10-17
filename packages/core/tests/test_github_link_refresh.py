@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -14,6 +14,7 @@ from daimon.core.github_credentials import build_multifernet, decrypt_token, enc
 from daimon.core.github_link_refresh import LinkRefreshCounts, refresh_expiring_links
 from daimon.core.github_requester_access import linked_access_token_with_generation
 from daimon.core.stores import github_links
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 pytestmark = pytest.mark.asyncio
@@ -81,6 +82,7 @@ async def _sweep(
     client: httpx.AsyncClient,
     fernet: MultiFernet,
     limit: int = 50,
+    **kwargs: Any,
 ) -> LinkRefreshCounts:
     return await refresh_expiring_links(
         sessionmaker,
@@ -90,6 +92,7 @@ async def _sweep(
         client_secret="secret",
         now=datetime.now(UTC),
         limit=limit,
+        **kwargs,
     )
 
 
@@ -244,7 +247,131 @@ async def test_sweep_does_not_respend_a_token_connect_just_rotated(
             _sweep(sessionmaker, client, fernet), _sweep(sessionmaker, client, fernet)
         )
     assert seen == ["refresh-1"]
-    assert first.refreshed + second.refreshed == 2  # both end with a usable token
+    # The second sweep either reuses the rotated token or selects nothing because
+    # the first already moved the refresh expiry out of the window.
+    assert first.refreshed + second.refreshed in (1, 2)
+    assert first.failed + second.failed + first.broken + second.broken == 0
     async with sessionmaker() as session:
         row = await github_links.get_user(session, github_user_id=1)
     assert row is not None and row.token_generation == 2
+
+
+async def test_failing_users_are_backed_off_so_later_healthy_rows_are_refreshed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+) -> None:
+    for user_id, days in ((7001, 1), (7002, 2), (7003, 3), (7004, 4)):
+        await _add_user(db_session_factory, fernet, user_id, refresh_in=timedelta(days=days))
+    fail = {f"refresh-{n}": httpx.Response(500, text="boom") for n in (7001, 7002, 7003)}
+    seen: list[str] = []
+    backoff: dict[int, datetime] = {}
+    async with _github(seen, fail_for=fail) as client:
+        first = await _sweep(db_session_factory, client, fernet, limit=2, backoff=backoff)
+        assert first == LinkRefreshCounts(failed=2)
+        assert set(backoff) == {7001, 7002}
+        second = await _sweep(db_session_factory, client, fernet, limit=2, backoff=backoff)
+    # Users 1 and 2 are left out, so the slots go to 3 (fails) and 4 (healthy).
+    assert seen == ["refresh-7001", "refresh-7002", "refresh-7003", "refresh-7004"]
+    assert second == LinkRefreshCounts(refreshed=1, failed=1)
+    assert set(backoff) == {7001, 7002, 7003}
+
+
+async def test_without_a_backoff_persistent_failures_hold_every_slot(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+) -> None:
+    """Control: no memory between sweeps, so the healthy row never gets a slot."""
+    for user_id, days in ((7001, 1), (7002, 2), (7003, 3)):
+        await _add_user(db_session_factory, fernet, user_id, refresh_in=timedelta(days=days))
+    fail = {f"refresh-{n}": httpx.Response(500, text="boom") for n in (7001, 7002)}
+    seen: list[str] = []
+    async with _github(seen, fail_for=fail) as client:
+        for _ in range(2):
+            await _sweep(db_session_factory, client, fernet, limit=2)
+    assert seen == ["refresh-7001", "refresh-7002", "refresh-7001", "refresh-7002"]
+
+
+async def test_a_backoff_that_has_passed_lets_the_user_be_tried_again(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+) -> None:
+    await _add_user(db_session_factory, fernet, 7001)
+    backoff = {
+        7001: datetime.now(UTC) - timedelta(seconds=1),
+        7002: datetime.now(UTC) + timedelta(hours=1),
+    }
+    seen: list[str] = []
+    async with _github(seen) as client:
+        counts = await _sweep(db_session_factory, client, fernet, backoff=backoff)
+    assert counts.refreshed == 1 and seen == ["refresh-7001"]
+    assert set(backoff) == {7002}
+
+
+async def test_a_slow_user_hits_the_per_user_deadline_and_keeps_the_old_tokens(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+) -> None:
+    await _add_user(db_session_factory, fernet, 7001, refresh_in=timedelta(days=1))
+    await _add_user(db_session_factory, fernet, 7002, refresh_in=timedelta(days=2))
+    seen: list[str] = []
+    cancelled: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = dict(pair.split("=") for pair in request.content.decode().split("&"))
+        spent = body["refresh_token"]
+        seen.append(spent)
+        if spent == "refresh-7001":
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(spent)
+                raise
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "a",
+                "refresh_token": f"{spent}-new",
+                "expires_in": 28800,
+                "refresh_token_expires_in": 15897600,
+            },
+        )
+
+    backoff: dict[int, datetime] = {}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        counts = await _sweep(
+            db_session_factory, client, fernet, backoff=backoff, per_user_deadline_s=0.2
+        )
+    assert counts == LinkRefreshCounts(refreshed=1, failed=1)
+    assert cancelled == ["refresh-7001"] and set(backoff) == {7001}
+    async with db_session_factory() as session:
+        slow = await github_links.get_user(session, github_user_id=7001)
+        fast = await github_links.get_user(session, github_user_id=7002)
+    # The cancelled transaction rolled back: nothing of a rotation was saved.
+    assert slow is not None and slow.token_generation == 1 and slow.status == "active"
+    assert slow.encrypted_refresh_token is not None
+    assert decrypt_token(fernet, slow.encrypted_refresh_token) == "refresh-7001"
+    assert fast is not None and fast.token_generation == 2
+
+
+async def test_the_per_user_deadline_also_bounds_the_refresh_lock_wait(
+    db_engine: AsyncEngine, db_clean: None, fernet: MultiFernet
+) -> None:
+    sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
+    await _add_user(sessionmaker, fernet, 7005, refresh_in=timedelta(days=1))
+    await _add_user(sessionmaker, fernet, 7006, refresh_in=timedelta(days=2))
+    seen: list[str] = []
+    started = asyncio.get_running_loop().time()
+    async with sessionmaker.begin() as holder:
+        # Another worker is mid-refresh for user 1 and keeps the lock.
+        await holder.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended('github-refresh:' || CAST(:user_id AS text), 0))"
+            ),
+            {"user_id": "7005"},
+        )
+        async with _github(seen) as client:
+            counts = await _sweep(sessionmaker, client, fernet, per_user_deadline_s=0.3)
+    assert asyncio.get_running_loop().time() - started < 5
+    assert counts == LinkRefreshCounts(refreshed=1, failed=1)
+    assert seen == ["refresh-7006"]

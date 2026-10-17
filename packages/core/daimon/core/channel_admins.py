@@ -490,16 +490,26 @@ async def load_member_group_ids(
 
 
 async def load_administered_channel_ids(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: ChannelAdminCaller
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    caller: ChannelAdminCaller,
+    for_share: bool = False,
 ) -> frozenset[str]:
-    """Shell half of `administered_channel_ids`: read this tenant's grants."""
+    """Shell half of `administered_channel_ids`: read this tenant's grants.
+
+    `for_share` locks the grant rows (`list_channel_admins`).
+    """
     if (
         not channel_admins_enabled()
         or platform not in CHANNEL_ADMIN_PLATFORMS
         or (caller.platform_user_id is None and not caller.role_ids)
     ):
         return frozenset()
-    grants = await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
+    grants = await list_channel_admins(
+        session, tenant_id=tenant_id, platform=platform, for_share=for_share
+    )
     return administered_channel_ids(caller, grants)
 
 

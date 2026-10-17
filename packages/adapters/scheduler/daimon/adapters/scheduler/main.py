@@ -27,7 +27,7 @@ import signal
 import sys
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -737,6 +737,8 @@ _last_app_access_checks: dict[str, datetime] = {}
 # mints fresh tokens each attempt, so retries back off from 1 to 30 minutes.
 _app_refresh_failures: dict[str, tuple[int, datetime]] = {}
 _GITHUB_LINK_REFRESH_INTERVAL_S = 3600.0
+# Everything the hourly sweep may spend, whoever is slow; each person has a shorter one.
+_GITHUB_LINK_REFRESH_DEADLINE_S = 120.0
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
 # A turn running continuously for longer than this is treated as abandoned and
@@ -1248,6 +1250,8 @@ async def run(
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     push_resync_fernet = build_multifernet(crypto_keys) if crypto_keys else None
     link_refresh_throttle = _IntervalThrottle(_GITHUB_LINK_REFRESH_INTERVAL_S)
+    link_refresh_flight = _SingleFlight()
+    link_refresh_backoff: dict[int, datetime] = {}
 
     lock_conn = await _acquire_advisory_lock(engine, scheduler_settings.advisory_lock_key)
     if lock_conn is None:
@@ -1326,7 +1330,11 @@ async def run(
             )
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
             await _refresh_expiring_github_links(
-                sm=sm, settings=settings, fernet=push_resync_fernet, throttle=link_refresh_throttle
+                sm=sm,
+                settings=settings,
+                fernet=push_resync_fernet,
+                throttle=link_refresh_throttle,
+                backoff=link_refresh_backoff,
             )
             return 0
 
@@ -1363,7 +1371,12 @@ async def run(
             )
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
             await _refresh_expiring_github_links(
-                sm=sm, settings=settings, fernet=push_resync_fernet, throttle=link_refresh_throttle
+                sm=sm,
+                settings=settings,
+                fernet=push_resync_fernet,
+                throttle=link_refresh_throttle,
+                flight=link_refresh_flight,
+                backoff=link_refresh_backoff,
             )
 
         async def usage_sweep() -> None:
@@ -1387,6 +1400,7 @@ async def run(
 
         return 0
     finally:
+        await link_refresh_flight.aclose()
         await dispatcher.close()
         health_server.close()
         await health_server.wait_closed()
@@ -1456,28 +1470,56 @@ class _IntervalThrottle:
         return True
 
 
-async def _refresh_expiring_github_links(
+class _SingleFlight:
+    """Run one background job at a time, so a slow sweep never delays a tick.
+
+    `start` skips while the previous job is still running. `aclose` cancels it at
+    shutdown, before the engine goes away.
+    """
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task[None] | None = None
+
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def start(self, job: Callable[[], Coroutine[object, object, None]]) -> bool:
+        if self.running():
+            return False
+        self._task = asyncio.create_task(job())
+        return True
+
+    async def aclose(self) -> None:
+        task, self._task = self._task, None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def _run_github_link_refresh(
     *,
     sm: async_sessionmaker[AsyncSession],
-    settings: Settings,
-    fernet: MultiFernet | None,
-    throttle: _IntervalThrottle,
+    fernet: MultiFernet,
+    client_id: str,
+    client_secret: str,
+    backoff: dict[int, datetime],
 ) -> None:
-    """Keep linked GitHub tokens from reaching refresh-token expiry; hourly, best effort."""
-    app = settings.github_app
-    if fernet is None or app.client_id is None or app.client_secret is None:
-        return
-    if not throttle.due():
-        return
+    """One bounded sweep: an overall deadline here, a per-person one inside."""
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http_client:
+        async with (
+            asyncio.timeout(_GITHUB_LINK_REFRESH_DEADLINE_S),
+            httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http_client,
+        ):
             counts = await refresh_expiring_links(
                 sm,
                 http_client,
                 fernet=fernet,
-                client_id=app.client_id,
-                client_secret=app.client_secret.get_secret_value(),
+                client_id=client_id,
+                client_secret=client_secret,
                 now=datetime.now(UTC),
+                backoff=backoff,
             )
         if counts.refreshed or counts.broken or counts.failed:
             log.info(
@@ -1486,8 +1528,52 @@ async def _refresh_expiring_github_links(
                 broken=counts.broken,
                 failed=counts.failed,
             )
+    except TimeoutError:
+        log.warning(
+            "scheduler.github_link_refresh.deadline", deadline_s=_GITHUB_LINK_REFRESH_DEADLINE_S
+        )
     except Exception:
         log.exception("scheduler.github_link_refresh.failed")
+
+
+async def _refresh_expiring_github_links(
+    *,
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    fernet: MultiFernet | None,
+    throttle: _IntervalThrottle,
+    flight: _SingleFlight | None = None,
+    backoff: dict[int, datetime] | None = None,
+) -> None:
+    """Keep linked GitHub tokens from reaching refresh-token expiry; hourly, best effort.
+
+    With a `flight` the sweep runs in the background, one at a time, so a slow
+    GitHub never delays routine dispatch; without one (`--once`) it is awaited,
+    still under its deadline. `backoff` is the caller's per-person failure memory.
+    """
+    app = settings.github_app
+    if fernet is None or app.client_id is None or app.client_secret is None:
+        return
+    if flight is not None and flight.running():
+        # Asked before the throttle, so a skipped hour is not consumed.
+        return
+    if not throttle.due():
+        return
+
+    async def sweep() -> None:
+        assert app.client_id is not None and app.client_secret is not None
+        await _run_github_link_refresh(
+            sm=sm,
+            fernet=fernet,
+            client_id=app.client_id,
+            client_secret=app.client_secret.get_secret_value(),
+            backoff=backoff if backoff is not None else {},
+        )
+
+    if flight is None:
+        await sweep()
+    else:
+        flight.start(sweep)
 
 
 def run_sync() -> None:

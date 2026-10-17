@@ -23,6 +23,7 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.github_access import (
     SecondInstallationError,
     list_agent_grants,
+    require_owner_grant_installations,
     stage_grant,
     upsert_linked_agent_authorization,
 )
@@ -80,21 +81,34 @@ def owner_no_access_message(owner: str) -> str:
     )
 
 
-def needs_install_message(target: str) -> str:
+def needs_install_message(repo_name: str) -> str:
     # A repo missing from the person's installation listing may be private and
     # invisible to them, outside the app's repos, or waiting on an install, and
     # the listing cannot tell these apart, so the text claims none of them.
     return (
-        f"Daimon can't reach {target} with your GitHub account.\n"
-        "The Daimon app may not be set up for it, or your account may not have access."
+        f"Daimon can't reach {repo_name} with your GitHub account.\n"
+        "If you can open it on GitHub, ask an owner or repo admin to add it to the Daimon app."
+    )
+
+
+def owner_needs_install_message(owner: str) -> str:
+    return (
+        f"Daimon can't reach {owner} repos with your GitHub account.\n"
+        "If you can open them on GitHub, ask an owner to add them to the Daimon app."
     )
 
 
 def other_installation_message(agent_name: str, org: str | None) -> str:
-    source = org or "another GitHub account or org"
+    if org is None:
+        return (
+            f"{agent_name} already uses repos from another GitHub account or org.\n"
+            "An agent uses one GitHub account or org at a time. "
+            "To switch, remove those repos first."
+        )
     return (
-        f"{agent_name} already uses repos from {source}.\n"
-        "An agent can use one GitHub account or org at a time."
+        f"{agent_name} already uses repos from {org}.\n"
+        "An agent uses one GitHub account or org at a time. "
+        f"To switch, remove the {org} repos first."
     )
 
 
@@ -447,7 +461,7 @@ async def linked_owner_grant(
             candidates = [i for i in installations if i.owner_login.casefold() == owner.casefold()]
             if not candidates:
                 return LinkedOutcome(
-                    status="needs_install", message=needs_install_message(f"{owner} repos")
+                    status="needs_install", message=owner_needs_install_message(owner)
                 )
             checked: list[tuple[int, str, frozenset[str], list[tuple[int, str, str]]]] = []
             async with sessionmaker() as session:
@@ -527,7 +541,7 @@ async def linked_owner_grant(
             if not checked:
                 return LinkedOutcome(
                     status="needs_install",
-                    message=needs_install_message(f"{owner} repos"),
+                    message=owner_needs_install_message(owner),
                 )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 401:
@@ -543,96 +557,112 @@ async def linked_owner_grant(
         raise
     await _before_commit()
     removed: list[str] = []
-    async with sessionmaker.begin() as session:
-        await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-        current_link = await get_account_link_for_update(session, account_id=account_id)
-        current_user = await get_user_for_update(session, github_user_id=link.github_user_id)
-        if (
-            current_link is None
-            or current_link.github_user_id != link.github_user_id
-            or current_user is None
-            or current_user.status != "active"
-            or current_user.link_generation != checked_generation
-            or not await manages_now(session)
-        ):
-            return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
-        for installation_id, _owner_login, names, new_rows in checked:
-            current = await get_for_update(session, installation_id=installation_id)
-            if current is not None and (
-                current.suspended_at is not None
-                or current.github_removed_at is not None
-                or current.account_login.casefold() != owner.casefold()
-                or frozenset(
-                    current.github_repo_full_names
-                    if current.github_repo_full_names is not None
-                    else current.repo_full_names
-                )
-                != names
+    try:
+        async with sessionmaker.begin() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
+            current_link = await get_account_link_for_update(session, account_id=account_id)
+            current_user = await get_user_for_update(session, github_user_id=link.github_user_id)
+            if (
+                current_link is None
+                or current_link.github_user_id != link.github_user_id
+                or current_user is None
+                or current_user.status != "active"
+                or current_user.link_generation != checked_generation
+                or not await manages_now(session)
             ):
                 return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
-            if not new_rows and not await installation_associated(
-                session, tenant_id=tenant_id, installation_id=installation_id
-            ):
-                return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
-        for installation_id, owner_login, _names, new_rows in checked:
-            if new_rows:
-                for repo_id, repo_full_name, permission in new_rows:
-                    await upsert_linked_agent_authorization(
-                        session,
-                        tenant_id=tenant_id,
-                        agent_id=agent_id,
-                        repo_id=repo_id,
-                        owner_id=next(i.owner_id for i in candidates if i.id == installation_id),
-                        installation_id=installation_id,
-                        repo_full_name=repo_full_name,
-                        access=access,
-                        github_user_id=link.github_user_id,
-                        account_id=account_id,
-                        permission=permission,
-                    )
-                candidate = next(i for i in candidates if i.id == installation_id)
-                await upsert_github_app(
-                    session,
-                    installation_id=installation_id,
-                    account_id=candidate.owner_id,
-                    account_login=candidate.owner_login,
-                    account_type=candidate.owner_type,
-                    repository_selection=cast(
-                        Literal["all", "selected"], candidate.repository_selection
-                    ),
-                    suspended_at=None,
-                )
-                await enqueue_reconciliation(
-                    session,
-                    installation_id=installation_id,
-                    delivery_id=f"connect:{uuid.uuid4()}",
-                    event="connect",
-                    deleted=False,
-                    now=datetime.now(UTC),
-                )
-            if not await installation_associated(
-                session, tenant_id=tenant_id, installation_id=installation_id
-            ):
-                raise ValueError("Owner installation association was not saved")
-            await upsert_owner_grant(
+            await require_owner_grant_installations(
                 session,
                 tenant_id=tenant_id,
                 agent_id=agent_id,
-                installation_id=installation_id,
-                owner_login=owner_login,
-                access=access,
-                account_id=account_id,
+                installation_ids={installation_id for installation_id, *_ in checked},
+                agent_name=agent_name,
             )
-        prefix = f"{owner.casefold()}/"
-        removed = sorted(
-            name[len(prefix) :]
-            for name in await session.scalars(
-                text(
-                    "SELECT lower(repo_full_name) FROM agent_github_owner_exclusions "
-                    "WHERE tenant_id = :tenant AND agent_id = :agent"
-                ).bindparams(tenant=tenant_id, agent=agent_id)
+            for installation_id, _owner_login, names, new_rows in checked:
+                current = await get_for_update(session, installation_id=installation_id)
+                if current is not None and (
+                    current.suspended_at is not None
+                    or current.github_removed_at is not None
+                    or current.account_login.casefold() != owner.casefold()
+                    or frozenset(
+                        current.github_repo_full_names
+                        if current.github_repo_full_names is not None
+                        else current.repo_full_names
+                    )
+                    != names
+                ):
+                    return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
+                if not new_rows and not await installation_associated(
+                    session, tenant_id=tenant_id, installation_id=installation_id
+                ):
+                    return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
+            for installation_id, owner_login, _names, new_rows in checked:
+                if new_rows:
+                    for repo_id, repo_full_name, permission in new_rows:
+                        await upsert_linked_agent_authorization(
+                            session,
+                            tenant_id=tenant_id,
+                            agent_id=agent_id,
+                            repo_id=repo_id,
+                            owner_id=next(
+                                i.owner_id for i in candidates if i.id == installation_id
+                            ),
+                            installation_id=installation_id,
+                            repo_full_name=repo_full_name,
+                            access=access,
+                            github_user_id=link.github_user_id,
+                            account_id=account_id,
+                            permission=permission,
+                        )
+                    candidate = next(i for i in candidates if i.id == installation_id)
+                    await upsert_github_app(
+                        session,
+                        installation_id=installation_id,
+                        account_id=candidate.owner_id,
+                        account_login=candidate.owner_login,
+                        account_type=candidate.owner_type,
+                        repository_selection=cast(
+                            Literal["all", "selected"], candidate.repository_selection
+                        ),
+                        suspended_at=None,
+                    )
+                    await enqueue_reconciliation(
+                        session,
+                        installation_id=installation_id,
+                        delivery_id=f"connect:{uuid.uuid4()}",
+                        event="connect",
+                        deleted=False,
+                        now=datetime.now(UTC),
+                    )
+                if not await installation_associated(
+                    session, tenant_id=tenant_id, installation_id=installation_id
+                ):
+                    raise ValueError("Owner installation association was not saved")
+                await upsert_owner_grant(
+                    session,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    installation_id=installation_id,
+                    owner_login=owner_login,
+                    access=access,
+                    account_id=account_id,
+                )
+            prefix = f"{owner.casefold()}/"
+            removed = sorted(
+                name[len(prefix) :]
+                for name in await session.scalars(
+                    text(
+                        "SELECT lower(repo_full_name) FROM agent_github_owner_exclusions "
+                        "WHERE tenant_id = :tenant AND agent_id = :agent"
+                    ).bindparams(tenant=tenant_id, agent=agent_id)
+                )
+                if name.startswith(prefix)
             )
-            if name.startswith(prefix)
+    except SecondInstallationError as exc:
+        # The transaction rolled back, so no authorization or grant row was saved.
+        return LinkedOutcome(
+            status="other_installation",
+            message=other_installation_message(agent_name, exc.org),
         )
     return LinkedOutcome(
         status="granted" if access == "write" else "granted_read_only",

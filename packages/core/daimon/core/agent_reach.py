@@ -362,10 +362,15 @@ async def _caller_locality(
     caller: ChannelAdminCaller,
     caller_account_id: uuid.UUID | None,
     caller_platform_user_id: str | None,
+    lock_authority: bool = False,
 ) -> _Locality:
-    """All False without a grant, reading no reach."""
+    """All False without a grant, reading no reach.
+
+    `lock_authority` takes `FOR SHARE` locks on the rows that confer holding:
+    the channel admin grants and the agent's rule in the access policy.
+    """
     administered = await load_administered_channel_ids(
-        session, tenant_id=tenant_id, platform=platform, caller=caller
+        session, tenant_id=tenant_id, platform=platform, caller=caller, for_share=lock_authority
     )
     if not administered:
         return _Locality(is_local=False)
@@ -386,6 +391,7 @@ async def _caller_locality(
             agent_names=agent_names,
             caller=caller,
             administered=administered,
+            lock_authority=lock_authority,
         )
         return _Locality(
             is_local=held
@@ -408,14 +414,17 @@ async def _caller_holds(
     agent_names: tuple[str, ...],
     caller: ChannelAdminCaller,
     administered: frozenset[str],
+    lock_authority: bool = False,
 ) -> bool:
     """Mutation ownership requires a rule limited to administered channels.
 
     Creation records and admin-set defaults can authorize binding an agent,
     but do not authorize changing its spec. An unreadable policy counts no rule.
+    `lock_authority` reads the policy row `FOR SHARE`: this rule is what makes
+    the agent the caller's to change.
     """
     try:
-        policy = await load_access_policy(session, tenant_id=tenant_id)
+        policy = await load_access_policy(session, tenant_id=tenant_id, for_share=lock_authority)
     except AccessPolicyUnreadable:
         policy = TenantAccessPolicy()
     return channel_admin_holds(
@@ -674,6 +683,7 @@ async def load_target_facts(
     is_daimon_managed: bool,
     caller_account_id: uuid.UUID | None = None,
     caller_platform_user_id: str | None = None,
+    lock_authority: bool = False,
 ) -> TargetFacts:
     """The policy facts for one target, reading only what the decision depends on.
 
@@ -685,6 +695,11 @@ async def load_target_facts(
     them all. Locality counts everything the sharing read does, so it can only
     narrow it: a wide read on an agent with no stable id is shared and local
     to nobody.
+
+    `lock_authority` is for a commit-time recheck in a SERIALIZABLE transaction:
+    the rows that confer holding (channel admin grants, the agent's access policy
+    rule) are read `FOR SHARE`, so a change committed after the snapshot fails
+    the transaction (40001). The reach facts only narrow and are read unlocked.
     """
     if not needs_reachability_read(
         operation, is_admin=caller.is_server_admin, is_daimon_managed=is_daimon_managed
@@ -713,6 +728,7 @@ async def load_target_facts(
             caller=caller,
             caller_account_id=caller_account_id,
             caller_platform_user_id=caller_platform_user_id,
+            lock_authority=lock_authority,
         )
         if not unplaceable
         else _Locality(is_local=False)

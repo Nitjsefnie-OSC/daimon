@@ -3,27 +3,33 @@ EXTENDS Naturals, FiniteSets, TLC
 
 \* IdentityCheck:      the platform callback verifies the chat identity.
 \* CommitRecheck:      the grant transaction rechecks link, generation, coverage
-\*                     and the manager role under its locks (off = the pre-fix
-\*                     commit that trusted the earlier lookup).
+\*                     and the requester's authority under its locks (off = the
+\*                     pre-fix commit that trusted the earlier lookup).
 \* LateCoverageCheck:  the late snapshot rejects when the installation row exists
 \*                     and no longer covers the repo. An early exit; the check
 \*                     under the installation lock also decides.
 \* LockRepoCheck:      the check under the installation lock also requires the
 \*                     repo to be covered (off = the spike, which compared the
 \*                     snapshot's name set with the current one and nothing else).
-\* RoleRead:           how the transaction reads the requester's DB role.
-\*   "locked"       SELECT ... FOR SHARE. A role row changed after the snapshot
+\* Authority at commit comes from two kinds of stored rows, each revoked by its
+\* own write: the requester's role (the Account row and the channel-admin rows,
+\* read first by read_stored_admin) and the agent's access-policy ownership
+\* rule (read by _caller_holds when the role does not already grant). The
+\* requester has authority while either one holds.
+\* RoleRead, RuleRead: how the transaction reads each source.
+\*   "locked"       SELECT ... FOR SHARE. A row changed after the snapshot
 \*                  aborts the transaction (serialization failure); a change
 \*                  after the lock waits for the transaction to finish.
-\*   "snapshot"     plain read: the snapshot's role, no lock.
-\*   "lockedStale"  lock held, but the read returns the snapshot's role instead
-\*                  of aborting. Only here to show the clean result leans on
-\*                  PostgreSQL's abort rule.
+\*   "snapshot"     plain read: the snapshot's value, no lock.
+\*   "lockedStale"  lock held, but the read returns the snapshot's value
+\*                  instead of aborting. Only here to show the clean result
+\*                  leans on PostgreSQL's abort rule.
 CONSTANTS IdentityCheck, CommitRecheck, LateCoverageCheck, LockRepoCheck,
-          RoleRead
+          RoleRead, RuleRead
 ASSUME /\ IdentityCheck \in BOOLEAN /\ CommitRecheck \in BOOLEAN
        /\ LateCoverageCheck \in BOOLEAN /\ LockRepoCheck \in BOOLEAN
        /\ RoleRead \in {"locked", "snapshot", "lockedStale"}
+       /\ RuleRead \in {"locked", "snapshot", "lockedStale"}
 
 Users == {"manager", "member"}
 GitHubUsers == {"gh1", "gh2"}
@@ -34,25 +40,30 @@ None == "none"
 \* Link and callback state.
 VARIABLES phase, owner, opener, githubIdentity, proven, link, generation,
           saves, replayed, foreignEver
-\* Stored authority: manager pairs, the installation row's repo_full_names
+\* Stored authority: role pairs and policy-rule pairs (person, agent), the
+\* installation row's repo_full_names
 \* (covered), whether the row exists, GitHub's per-user permission, and the
 \* active authorization rows that upsert_github_app rebuilds covered from.
-VARIABLES managers, covered, instPresent, auth, permitted
+VARIABLES roles, rules, covered, instPresent, auth, permitted
 \* One request: its stage, inputs, what the lookup saw, the late snapshot of
-\* the installation row, and the role the transaction's snapshot holds.
+\* the installation row, and the role and rule the transaction's snapshot holds
+\* (roleChanged, ruleChanged: that row was written after the snapshot;
+\* ruleLocked: the rule row is held FOR SHARE).
 VARIABLES req, requester, agent, repo, checkedIdentity, checkedGeneration,
-          checkedPermission, snapPresent, snapNames, snapRole, roleChanged
+          checkedPermission, snapPresent, snapNames, snapRole, roleChanged,
+          snapRule, ruleChanged, ruleLocked
 \* Ghosts: written by actions, never read by them.
 VARIABLES grant, unsafeEver, stalePermissionEver, removedEver, restoredEver,
-          staleRoleEver
+          staleAuthEver
 
 idVars == <<phase, owner, opener, githubIdentity, proven, link, generation,
             saves, replayed, foreignEver>>
-authVars == <<managers, covered, instPresent, auth, permitted>>
+authVars == <<roles, rules, covered, instPresent, auth, permitted>>
 reqVars == <<req, requester, agent, repo, checkedIdentity, checkedGeneration,
-             checkedPermission, snapPresent, snapNames, snapRole, roleChanged>>
+             checkedPermission, snapPresent, snapNames, snapRole, roleChanged,
+          snapRule, ruleChanged, ruleLocked>>
 ghostVars == <<grant, unsafeEver, stalePermissionEver, removedEver,
-               restoredEver, staleRoleEver>>
+               restoredEver, staleAuthEver>>
 vars == <<idVars, authVars, reqVars, ghostVars>>
 
 Init ==
@@ -61,8 +72,8 @@ Init ==
   /\ link = [u \in Users |-> None]
   /\ generation = [u \in Users |-> 0]
   /\ saves = 0 /\ replayed = FALSE /\ foreignEver = FALSE
-  /\ managers = {<<"manager", "shared">>, <<"manager", "own">>,
-                  <<"member", "own">>}
+  /\ roles = {<<"manager", "shared">>, <<"manager", "own">>}
+  /\ rules = {<<"manager", "own">>, <<"member", "own">>}
   /\ instPresent \in BOOLEAN
   /\ covered = IF instPresent THEN Repos ELSE {}
   /\ auth = covered
@@ -71,9 +82,10 @@ Init ==
   /\ checkedIdentity = None /\ checkedGeneration = 0
   /\ checkedPermission = FALSE
   /\ snapPresent = FALSE /\ snapNames = {} /\ snapRole = FALSE
+  /\ snapRule = FALSE /\ ruleChanged = FALSE /\ ruleLocked = FALSE
   /\ roleChanged = FALSE
   /\ grant = FALSE /\ unsafeEver = FALSE /\ stalePermissionEver = FALSE
-  /\ removedEver = FALSE /\ restoredEver = FALSE /\ staleRoleEver = FALSE
+  /\ removedEver = FALSE /\ restoredEver = FALSE /\ staleAuthEver = FALSE
 
 -------------------------------------------------------------------------------
 \* Link and callback.
@@ -122,14 +134,16 @@ ReplayCallback ==
 
 -------------------------------------------------------------------------------
 \* The grant request. Stages: checking -> discovered -> looked -> checked ->
-\* begun -> roleRead -> done, or denied from any stage after the first.
+\* begun -> (roleRead ->) authRead -> done, or denied from any stage after the
+\* first. roleRead: the role did not grant, the policy rule is read next.
+\* authRead: authority decided.
 
 Request(u, a, r) ==
   /\ req = "idle" /\ u \in Users /\ a \in Agents /\ r \in Repos
   /\ req' = "checking" /\ requester' = u /\ agent' = a /\ repo' = r
   /\ UNCHANGED <<idVars, authVars, checkedIdentity, checkedGeneration,
                   checkedPermission, snapPresent, snapNames, snapRole,
-                  roleChanged, ghostVars>>
+                  roleChanged, snapRule, ruleChanged, ruleLocked, ghostVars>>
 
 \* linked_grant: read the link generation and token, list the user's
 \* installations; GitHub says the repo is covered. The repo GET is now
@@ -140,7 +154,8 @@ Discover ==
   /\ checkedIdentity' = link[requester]
   /\ checkedGeneration' = generation[requester]
   /\ UNCHANGED <<idVars, authVars, requester, agent, repo, checkedPermission,
-                  snapPresent, snapNames, snapRole, roleChanged, ghostVars>>
+                  snapPresent, snapNames, snapRole, roleChanged, snapRule,
+                  ruleChanged, ruleLocked, ghostVars>>
 
 \* The repo GET answers with the user's permission.
 CheckPermission ==
@@ -149,7 +164,7 @@ CheckPermission ==
   /\ checkedPermission' = (<<requester, repo>> \in permitted)
   /\ UNCHANGED <<idVars, authVars, requester, agent, repo, checkedIdentity,
                   checkedGeneration, snapPresent, snapNames, snapRole,
-                  roleChanged, ghostVars>>
+                  roleChanged, snapRule, ruleChanged, ruleLocked, ghostVars>>
 
 LateRejects == LateCoverageCheck /\ instPresent /\ repo \notin covered
 
@@ -159,7 +174,8 @@ LateSnapshot ==
   /\ req' = "checked"
   /\ snapPresent' = instPresent /\ snapNames' = covered
   /\ UNCHANGED <<idVars, authVars, requester, agent, repo, checkedIdentity,
-                  checkedGeneration, checkedPermission, snapRole, roleChanged,
+                  checkedGeneration, checkedPermission, snapRole, roleChanged, snapRule,
+                  ruleChanged, ruleLocked,
                   ghostVars>>
 
 LateReject ==
@@ -167,7 +183,8 @@ LateReject ==
   /\ req' = "denied"
   /\ UNCHANGED <<idVars, authVars, requester, agent, repo, checkedIdentity,
                   checkedGeneration, checkedPermission, snapPresent, snapNames,
-                  snapRole, roleChanged, ghostVars>>
+                  snapRole, roleChanged, snapRule,
+                  ruleChanged, ruleLocked, ghostVars>>
 
 \* Under the installation lock: an existing row must be the snapshot's row
 \* with the same names (and, unless the spike's bug is on, must cover the
@@ -187,13 +204,17 @@ BeginOk ==
        /\ generation[requester] = checkedGeneration
        /\ LockCoverageOk
 
+\* Authority is "has a role or a policy rule" for the (person, agent) pair.
+Authority(u, a) == <<u, a>> \in roles \/ <<u, a>> \in rules
+
 \* The transaction's snapshot is taken at its first SELECT (the link lock) and
-\* holds the requester's role as of now.
+\* holds the requester's role and the agent's policy rule as of now.
 Begin ==
   /\ req = "checked" /\ BeginOk
   /\ req' = "begun"
-  /\ snapRole' = (<<requester, agent>> \in managers)
-  /\ roleChanged' = FALSE
+  /\ snapRole' = (<<requester, agent>> \in roles)
+  /\ snapRule' = (<<requester, agent>> \in rules)
+  /\ roleChanged' = FALSE /\ ruleChanged' = FALSE /\ ruleLocked' = FALSE
   /\ UNCHANGED <<idVars, authVars, requester, agent, repo, checkedIdentity,
                   checkedGeneration, checkedPermission, snapPresent, snapNames,
                   ghostVars>>
@@ -203,51 +224,80 @@ BeginReject ==
   /\ req' = "denied"
   /\ UNCHANGED <<idVars, authVars, requester, agent, repo, checkedIdentity,
                   checkedGeneration, checkedPermission, snapPresent, snapNames,
-                  snapRole, roleChanged, ghostVars>>
+                  snapRole, roleChanged, snapRule,
+                  ruleChanged, ruleLocked, ghostVars>>
 
-RoleOk ==
-  IF ~CommitRecheck THEN TRUE
-  ELSE IF RoleRead = "locked" THEN snapRole /\ ~roleChanged
-  ELSE snapRole
+\* manages_now, first source: get_account(..., for_share=True) and the stored
+\* channel-admin rows (read_stored_admin). A role that grants ends the check
+\* (stored.is_admin returns True); otherwise the policy rule is read next. A
+\* locked read of a row written after the snapshot aborts (RoleDeny).
+RoleAborts ==
+  CommitRecheck /\ RoleRead = "locked" /\ snapRole /\ roleChanged
 
-\* manages_now: the role read, last statement before the writes.
 ReadRole ==
-  /\ req = "begun" /\ RoleOk
-  /\ req' = "roleRead"
-  /\ staleRoleEver' = (staleRoleEver \/
-       (CommitRecheck /\ <<requester, agent>> \notin managers))
+  /\ req = "begun" /\ ~RoleAborts
+  /\ IF ~CommitRecheck \/ snapRole THEN req' = "authRead" ELSE req' = "roleRead"
+  /\ staleAuthEver' = (staleAuthEver \/
+       (CommitRecheck /\ snapRole /\ ~Authority(requester, agent)))
   /\ UNCHANGED <<idVars, authVars, requester, agent, repo, checkedIdentity,
                   checkedGeneration, checkedPermission, snapPresent, snapNames,
-                  snapRole, roleChanged, grant, unsafeEver,
-                  stalePermissionEver, removedEver, restoredEver>>
+                  snapRole, roleChanged, snapRule, ruleChanged, ruleLocked,
+                  grant, unsafeEver, stalePermissionEver, removedEver,
+                  restoredEver>>
 
 RoleDeny ==
-  /\ req = "begun" /\ ~RoleOk
+  /\ req = "begun" /\ RoleAborts
   /\ req' = "denied"
   /\ UNCHANGED <<idVars, authVars, requester, agent, repo, checkedIdentity,
                   checkedGeneration, checkedPermission, snapPresent, snapNames,
-                  snapRole, roleChanged, ghostVars>>
+                  snapRole, roleChanged, snapRule, ruleChanged, ruleLocked,
+                  ghostVars>>
+
+\* manages_now, second source: _caller_holds loads the access policy and looks
+\* for the agent's ownership rule. Locked: a rule written after the snapshot
+\* aborts. A missing rule denies.
+RuleAborts == RuleRead = "locked" /\ snapRule /\ ruleChanged
+RuleGrants == snapRule /\ ~RuleAborts
+
+ReadRule ==
+  /\ req = "roleRead" /\ RuleGrants
+  /\ req' = "authRead"
+  /\ ruleLocked' = (RuleRead # "snapshot")
+  /\ staleAuthEver' = (staleAuthEver \/ ~Authority(requester, agent))
+  /\ UNCHANGED <<idVars, authVars, requester, agent, repo, checkedIdentity,
+                  checkedGeneration, checkedPermission, snapPresent, snapNames,
+                  snapRole, roleChanged, snapRule, ruleChanged, grant,
+                  unsafeEver, stalePermissionEver, removedEver, restoredEver>>
+
+RuleDeny ==
+  /\ req = "roleRead" /\ ~RuleGrants
+  /\ req' = "denied"
+  /\ UNCHANGED <<idVars, authVars, requester, agent, repo, checkedIdentity,
+                  checkedGeneration, checkedPermission, snapPresent, snapNames,
+                  snapRole, roleChanged, snapRule, ruleChanged, ruleLocked,
+                  ghostVars>>
 
 \* The authorization upsert, upsert_github_app (which rebuilds
 \* repo_full_names from the active authorization rows) and the commit.
 Commit ==
-  /\ req = "roleRead"
+  /\ req = "authRead"
   /\ req' = "done" /\ grant' = TRUE
   /\ auth' = auth \cup {repo}
   /\ covered' = auth \cup {repo}
   /\ instPresent' = TRUE
   /\ unsafeEver' = (unsafeEver \/
-       ~(<<requester, agent>> \in managers
+       ~(Authority(requester, agent)
          /\ link[requester] = checkedIdentity
          /\ generation[requester] = checkedGeneration
          /\ (instPresent => repo \in covered)))
   /\ stalePermissionEver' = (stalePermissionEver \/
        (<<requester, repo>> \notin permitted))
   /\ restoredEver' = (restoredEver \/ (instPresent /\ repo \notin covered))
-  /\ UNCHANGED <<idVars, managers, permitted, requester, agent, repo,
+  /\ UNCHANGED <<idVars, roles, rules, permitted, requester, agent, repo,
                   checkedIdentity, checkedGeneration, checkedPermission,
-                  snapPresent, snapNames, snapRole, roleChanged, removedEver,
-                  staleRoleEver>>
+                  snapPresent, snapNames, snapRole, roleChanged, snapRule,
+                  ruleChanged, ruleLocked, removedEver,
+                  staleAuthEver>>
 
 -------------------------------------------------------------------------------
 \* The world changes. Link, user and installation rows are locked from Begin
@@ -256,16 +306,34 @@ Commit ==
 
 Lookup == req \in {"discovered", "looked", "checked"}
 
-RevokeManager(u, a) ==
-  /\ req \in {"checked", "begun", "roleRead"}
-  /\ (req = "roleRead" => RoleRead = "snapshot")
-  /\ u = requester /\ a = agent /\ <<u, a>> \in managers
-  /\ managers' = managers \ {<<u, a>>}
+\* A role write (demotion; the Account row or a channel-admin row). The role
+\* rows are locked from ReadRole on when the role read takes the lock, so the
+\* writer waits there; before it, a commit after the snapshot is what the
+\* locked read detects.
+RevokeRole(u, a) ==
+  /\ req \in {"checked", "begun", "roleRead", "authRead"}
+  /\ (req \in {"roleRead", "authRead"} => RoleRead = "snapshot")
+  /\ u = requester /\ a = agent /\ <<u, a>> \in roles
+  /\ roles' = roles \ {<<u, a>>}
   /\ roleChanged' = (roleChanged \/ req = "begun")
-  /\ UNCHANGED <<idVars, covered, instPresent, auth, permitted, req,
+  /\ UNCHANGED <<idVars, rules, covered, instPresent, auth, permitted, req,
                   requester, agent, repo, checkedIdentity, checkedGeneration,
                   checkedPermission, snapPresent, snapNames, snapRole,
-                  ghostVars>>
+                  snapRule, ruleChanged, ruleLocked, ghostVars>>
+
+\* An operator removes the agent's ownership rule from the access policy. The
+\* policy row is locked only once ReadRule has read it with a lock; a role that
+\* granted ends the check before the rule is read, so the rule stays unlocked.
+RevokeRule(u, a) ==
+  /\ req \in {"checked", "begun", "roleRead", "authRead"}
+  /\ (req = "authRead" => ~ruleLocked)
+  /\ u = requester /\ a = agent /\ <<u, a>> \in rules
+  /\ rules' = rules \ {<<u, a>>}
+  /\ ruleChanged' = (ruleChanged \/ req \in {"begun", "roleRead"})
+  /\ UNCHANGED <<idVars, roles, covered, instPresent, auth, permitted, req,
+                  requester, agent, repo, checkedIdentity, checkedGeneration,
+                  checkedPermission, snapPresent, snapNames, snapRole,
+                  snapRule, roleChanged, ruleLocked, ghostVars>>
 
 Unlink(u) ==
   /\ Lookup /\ u = requester /\ link[u] # None
@@ -287,21 +355,21 @@ RemoveCoverage(r) ==
   /\ Lookup /\ r = repo /\ r \in covered
   /\ covered' = covered \ {r}
   /\ removedEver' = TRUE
-  /\ UNCHANGED <<idVars, managers, instPresent, auth, permitted, reqVars,
+  /\ UNCHANGED <<idVars, roles, rules, instPresent, auth, permitted, reqVars,
                   grant, unsafeEver, stalePermissionEver, restoredEver,
-                  staleRoleEver>>
+                  staleAuthEver>>
 
 \* Reconciliation creates an installation row this agent's lookup had not seen.
 ReconcileInsert ==
   /\ Lookup /\ ~instPresent
   /\ instPresent' = TRUE /\ covered' = Repos
-  /\ UNCHANGED <<idVars, managers, auth, permitted, reqVars, ghostVars>>
+  /\ UNCHANGED <<idVars, roles, rules, auth, permitted, reqVars, ghostVars>>
 
 RevokePermission(u, r) ==
-  /\ req \in {"looked", "checked", "begun", "roleRead"}
+  /\ req \in {"looked", "checked", "begun", "roleRead", "authRead"}
   /\ u = requester /\ r = repo /\ <<u, r>> \in permitted
   /\ permitted' = permitted \ {<<u, r>>}
-  /\ UNCHANGED <<idVars, managers, covered, instPresent, auth, reqVars,
+  /\ UNCHANGED <<idVars, roles, rules, covered, instPresent, auth, reqVars,
                   ghostVars>>
 
 Quiescent ==
@@ -315,8 +383,9 @@ Next ==
   \/ ReplayCallback
   \/ \E u \in Users, a \in Agents, r \in Repos: Request(u, a, r)
   \/ Discover \/ CheckPermission \/ LateSnapshot \/ LateReject
-  \/ Begin \/ BeginReject \/ ReadRole \/ RoleDeny \/ Commit
-  \/ \E u \in Users, a \in Agents: RevokeManager(u, a)
+  \/ Begin \/ BeginReject \/ ReadRole \/ RoleDeny \/ ReadRule \/ RuleDeny
+  \/ Commit
+  \/ \E u \in Users, a \in Agents: RevokeRole(u, a) \/ RevokeRule(u, a)
   \/ \E r \in Repos: RemoveCoverage(r)
   \/ ReconcileInsert
   \/ \E u \in Users, r \in Repos: RevokePermission(u, r)
@@ -325,7 +394,8 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 NoForeignLink == ~foreignEver
-\* The grant commits only while the requester is still a manager, the link is
+\* The grant commits only while the requester still has authority (a role or a
+\* policy rule), the link is
 \* the one the lookup used, and the repo is still covered. Stricter than
 \* serializability: a demotion that committed before the grant counts, even
 \* though "grant, then demotion" is a valid serial order.
@@ -336,13 +406,21 @@ NoStalePermission == ~stalePermissionEver
 \* never puts a removed repo back into repo_full_names.
 NoGrantAfterCoverageRemoval == ~(grant /\ removedEver)
 CoverageNotRestoredByGrant == ~restoredEver
-\* The role the transaction reads is the requester's current role: no
-\* demotion committed between the snapshot and the read.
-NoStaleRoleRead == ~staleRoleEver
+\* When the authority check passes, the requester has authority now: no role
+\* or rule revocation committed after the snapshot and before the read that
+\* decided is missed.
+NoStaleAuthority == ~staleAuthEver
+
+\* Witnesses, violated on purpose: the locked reads can abort, for each source.
+\* A denial after the role was written means the role read aborted (a locked
+\* role that changed always has snapRole). A denial after the rule was written
+\* while the role did not grant means the rule read aborted.
+RoleAbortNeverHappens == ~(req = "denied" /\ roleChanged)
+RuleAbortNeverHappens == ~(req = "denied" /\ ruleChanged /\ ~snapRole)
 
 ProgressStep ==
   Discover \/ CheckPermission \/ LateSnapshot \/ LateReject \/ Begin
-  \/ BeginReject \/ ReadRole \/ RoleDeny \/ Commit
+  \/ BeginReject \/ ReadRole \/ RoleDeny \/ ReadRule \/ RuleDeny \/ Commit
 EveryRequestResolves ==
   (req \notin {"idle", "done", "denied"}) ~> (req \in {"done", "denied"})
 LiveSpec == Spec /\ WF_vars(ProgressStep)

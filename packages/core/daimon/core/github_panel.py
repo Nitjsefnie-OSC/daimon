@@ -71,11 +71,13 @@ async def can_manage_agent_github(
     ma_agent_id: str,
     is_daimon_managed: bool,
     default: DeploymentDefault,
+    lock_authority: bool = False,
 ) -> bool:
     """Whether the caller may connect, grant and remove repos for one agent.
 
     A server admin, or a channel admin for a non-managed agent that is local to
     and held by their channels (`github_connect`, the `github_grant` terms).
+    `lock_authority` is `requester_manages_agent`'s.
     """
     facts = await load_target_facts(
         session,
@@ -88,6 +90,7 @@ async def can_manage_agent_github(
         caller=caller,
         is_daimon_managed=is_daimon_managed,
         caller_platform_user_id=caller.platform_user_id,
+        lock_authority=lock_authority,
     )
     return (
         decide_operation("github_connect", is_admin=caller.is_server_admin, target=facts) == "allow"
@@ -123,12 +126,14 @@ async def requester_manages_agent(
     a platform user ID or a failed group lookup is no.
 
     `lock_authority` is for a commit-time recheck inside a SERIALIZABLE
-    transaction. It takes `FOR SHARE` locks on the requester's account and the
-    tenant's channel admin grants, the rows that confer authority, so a demotion
-    that committed after the transaction's snapshot fails the transaction (40001)
-    instead of reading the old role. Reach facts (propagations, bindings, runs,
-    the access policy) are read unlocked, and live group membership comes from
-    the platform.
+    transaction. It takes `FOR SHARE` locks on the rows that confer authority:
+    the requester's account, the tenant's channel admin grants and the access
+    policy row holding the agent's ownership rule (`channel_admin_holds`). A
+    demotion, a removed grant or an edited rule that committed after the
+    transaction's snapshot fails the transaction (40001) instead of being read
+    as it was. Reach facts (propagations, bindings, runs, DM origins) only
+    narrow the decision and are read unlocked, since a new binding or run is an
+    insert no row lock covers; live group membership comes from the platform.
     """
     if not agent_name or not ma_agent_id or platform is None or is_daimon_managed is None:
         return False
@@ -170,6 +175,7 @@ async def requester_manages_agent(
         ma_agent_id=ma_agent_id,
         is_daimon_managed=is_daimon_managed,
         default=default,
+        lock_authority=lock_authority,
     )
 
 

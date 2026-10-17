@@ -350,25 +350,36 @@ tool_rules	ToolRules	ToolRulesAnyClicker	violates:RunAuthorized	61	-	unsafe: a n
 tool_rules	ToolRules	ToolRulesBlindUpsert	violates:NoResurrection	553	-	unsafe: a save from before a clear restores the rule
 tool_rules	ToolRules	ToolRulesSaveIfLost	violates:SaveFollowsSettlement	534	-	unsafe: a click that lost to expiry or Deny still saves a rule
 # ---- linked GitHub chat grants ----
-github_linked_grant	GitHubChatGrant	clean	clean	25926	-seed 1 -fp 0	link identity, single use, coverage at lookup and commit, role read under lock, permission gap
+github_linked_grant	GitHubChatGrant	clean	clean	32294	-seed 1 -fp 0	link identity, single use, coverage at lookup and commit, role and policy rule read under lock, permission gap
 github_linked_grant	GitHubChatGrant	no_platform_identity	violates:NoForeignLink	233	-seed 1 -fp 0	unsafe: a forwarded link attaches another person's GitHub account
-github_linked_grant	GitHubChatGrant	no_commit_recheck	violates:GrantRestsOnCurrentAuthority	14208	-seed 1 -fp 0	unsafe: commit trusts the earlier lookup
-github_linked_grant	GitHubChatGrant	permission_gap	violates:NoStalePermission	17220	-seed 1 -fp 0	witness: GitHub permission revoked after its response is not re-read in the transaction
-github_linked_grant	GitHubChatGrant	late_snapshot_sets_only	violates:NoGrantAfterCoverageRemoval	22380	-seed 1 -fp 0	unsafe: coverage removed during the repo GET; late snapshot and lock compare name sets only, grant restores coverage
-github_linked_grant	GitHubChatGrant	lock_check_only	clean	30438	-seed 1 -fp 0	witness: the check under the installation lock alone also stops a removal during the repo GET
-github_linked_grant	GitHubChatGrant	late_check_only	clean	25926	-seed 1 -fp 0	witness: the late snapshot check plus the name-set comparison also stops it
-github_linked_grant	GitHubChatGrant	role_read_unlocked	violates:NoStaleRoleRead	12519	-seed 1 -fp 0	unsafe: plain role read after a demotion committed since the snapshot sees the old role
-github_linked_grant	GitHubChatGrant	role_lock_no_abort	violates:NoStaleRoleRead	12518	-seed 1 -fp 0	unsafe: FOR SHARE that returns the snapshot value instead of aborting (PostgreSQL abort assumption removed)
+github_linked_grant	GitHubChatGrant	no_commit_recheck	violates:GrantRestsOnCurrentAuthority	15736	-seed 1 -fp 0	unsafe: commit trusts the earlier lookup
+github_linked_grant	GitHubChatGrant	permission_gap	violates:NoStalePermission	19184	-seed 1 -fp 0	witness: GitHub permission revoked after its response is not re-read in the transaction
+github_linked_grant	GitHubChatGrant	late_snapshot_sets_only	violates:NoGrantAfterCoverageRemoval	25653	-seed 1 -fp 0	unsafe: coverage removed during the repo GET; late snapshot and lock compare name sets only, grant restores coverage
+github_linked_grant	GitHubChatGrant	lock_check_only	clean	38310	-seed 1 -fp 0	witness: the check under the installation lock alone also stops a removal during the repo GET
+github_linked_grant	GitHubChatGrant	late_check_only	clean	32294	-seed 1 -fp 0	witness: the late snapshot check plus the name-set comparison also stops it
+github_linked_grant	GitHubChatGrant	role_read_unlocked	violates:NoStaleAuthority	13643	-seed 1 -fp 0	unsafe: plain role read after a demotion committed since the snapshot sees the old role
+github_linked_grant	GitHubChatGrant	role_lock_no_abort	violates:NoStaleAuthority	13642	-seed 1 -fp 0	unsafe: role FOR SHARE that returns the snapshot value instead of aborting (PostgreSQL abort assumption removed)
+github_linked_grant	GitHubChatGrant	rule_read_unlocked	violates:NoStaleAuthority	21587	-seed 1 -fp 0	unsafe: role locked but the access-policy rule read unlocked (9441d430d): a rule revoked after the snapshot is still honoured
+github_linked_grant	GitHubChatGrant	rule_lock_no_abort	violates:NoStaleAuthority	21586	-seed 1 -fp 0	unsafe: rule FOR SHARE that returns the snapshot value instead of aborting (PostgreSQL abort assumption removed)
+github_linked_grant	GitHubChatGrant	role_abort_witness	violates:RoleAbortNeverHappens	13642	-seed 1 -fp 0	witness: the locked role read aborts the grant after a demotion committed since the snapshot
+github_linked_grant	GitHubChatGrant	rule_abort_witness	violates:RuleAbortNeverHappens	21586	-seed 1 -fp 0	witness: the locked rule read aborts the grant after the rule was revoked since the snapshot
 # ---- linked GitHub pending requests ----
-github_linked_pending	LinkedPending	safe	clean	173161	-seed 1 -fp 0 -lncheck final	claim lease, per-request outcome, delete after delivery attempt; crash, lease lapse, expiry, second take
-github_linked_pending	LinkedPending	live	clean	75697	-seed 1 -fp 0 -lncheck final	a held request reaches an outcome while another in its batch fails (no crash, weak fairness on worker steps)
-github_linked_pending	LinkedPending	delete_on_claim	violates:NoSilentLoss	8	-seed 1 -fp 0 -lncheck final	unsafe: take deletes the rows it returns
-github_linked_pending	LinkedPending	resolve_before_delivery	violates:NoSilentLoss	102	-seed 1 -fp 0 -lncheck final	unsafe: row deleted before the result is posted
-github_linked_pending	LinkedPending	take_ignores_lease	violates:NoDoubleProcessing	424	-seed 1 -fp 0 -lncheck final	unsafe: a second take returns rows whose lease is live
-github_linked_pending	LinkedPending	abort_batch_on_exception	violates:HeldReachesOutcome	63969	-seed 1 -fp 0 -lncheck final	unsafe: one exception ends the batch, later requests get no outcome
-github_linked_pending	LinkedPending	retake_after_crash_witness	violates:RetakeAfterCrashNeverFinishes	6760	-seed 1 -fp 0 -lncheck final	witness: a request claimed by a crashed worker is retaken after the lease and finished
-github_linked_pending	LinkedPending	failure_does_not_block_witness	violates:FailureNeverUnblocksOthers	5023	-seed 1 -fp 0 -lncheck final	witness: after one request fails the next in the batch finishes
-github_linked_pending	LinkedPending	delivery_failure_witness	violates:DeliveryFailureAlwaysVisible	303	-seed 1 -fp 0 -lncheck final	witness (accepted gap): a failed post is logged, not retried, and the row is deleted
+github_linked_pending	LinkedPending	safe	clean	789113	-seed 1 -fp 0 -lncheck final	fixed design with cleanup of never-claimed expired rows only: token claim and renewal, token resolve, atomic recovery; crash, lease lapse, expiry, second take
+github_linked_pending	LinkedPending	live	clean	262137	-seed 1 -fp 0 -lncheck final	fixed design, no crash: a held request reaches an outcome and an outcome reaches a post attempt while another in its batch fails (weak fairness on worker steps)
+github_linked_pending	LinkedPending	lapsed_cleanup	violates:NoSilentLoss	245	-seed 1 -fp 0 -lncheck final	unsafe: cleanup of expired rows whose lease lapsed deletes a request a live slow worker still holds unstarted
+github_linked_pending	LinkedPending	expiry_deletes_claimed	violates:NoSilentLoss	84	-seed 1 -fp 0 -lncheck final	unsafe: cleanup deletes expired rows even under a live claim
+github_linked_pending	LinkedPending	delete_on_claim	violates:CrashLeavesRetakeable	26	-seed 1 -fp 0 -lncheck final	unsafe: the old take deletes the rows it returns, so a crash destroys the requests
+github_linked_pending	LinkedPending	abort_batch_on_exception	violates:HeldReachesOutcome	529	-seed 1 -fp 0 -lncheck final	unsafe: the old loop (delete on claim, exception leaves the loop): later requests get no outcome
+github_linked_pending	LinkedPending	resolve_before_delivery	violates:CrashLeavesRetakeable	777	-seed 1 -fp 0 -lncheck final	unsafe: row deleted before the result is posted
+github_linked_pending	LinkedPending	take_ignores_lease	violates:NoDuplicateDelivery	16877	-seed 1 -fp 0 -lncheck final	unsafe: a second take returns rows whose lease is live
+github_linked_pending	LinkedPending	renew_ignores_token	violates:NoDuplicateDelivery	23137	-seed 1 -fp 0 -lncheck final	unsafe: renewal by id lets a worker that lost its claim process and post the request again
+github_linked_pending	LinkedPending	resolve_ignores_token	clean	898425	-seed 1 -fp 0 -lncheck final	witness: resolve by id alone is not what prevents a duplicate post; the renewal token check is (see README)
+github_linked_pending	LinkedPending	nonatomic_recovery	violates:RecoveryAtomic	289	-seed 1 -fp 0 -lncheck final	unsafe: the replacement row commits before the original is resolved (9441d430d): both exist
+github_linked_pending	LinkedPending	retake_after_crash_witness	violates:RetakeAfterCrashNeverFinishes	4538	-seed 1 -fp 0 -lncheck final	witness: the request a crashed worker held is answered by a second take
+github_linked_pending	LinkedPending	failure_does_not_block_witness	violates:FailureNeverUnblocksOthers	12730	-seed 1 -fp 0 -lncheck final	witness: after one request fails the next in the batch finishes
+github_linked_pending	LinkedPending	delivery_failure_witness	violates:DeliveryFailureAlwaysVisible	617	-seed 1 -fp 0 -lncheck final	witness (accepted gap): a failed post is logged, not retried, and the row is deleted
+github_linked_pending	LinkedPending	recovery_commit_witness	violates:RecoveryNeverCommits	242	-seed 1 -fp 0 -lncheck final	witness: the recovery transaction commits and the original is gone with a replacement present
+github_linked_pending	LinkedPending	renew_skip_witness	violates:SkipNeverHappens	223	-seed 1 -fp 0 -lncheck final	witness: a worker whose claim was lost skips the request
 # ---- GitHub owner grants ----
 github_owner_grant	OwnerGrant	clean	clean	66096	-seed 1 -fp 0	owner coverage, exclusions and future repositories
 github_owner_grant	OwnerGrant	no_exclusion	violates:ExcludedNeverMinted	114	-seed 1 -fp 0	owner coverage, exclusions and future repositories

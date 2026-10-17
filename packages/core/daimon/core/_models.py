@@ -3068,6 +3068,8 @@ class GitHubLinkedConnectPending(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # Set while a resume holds the request; cleared by deleting the row once resolved.
     claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Identifies the claim that holds the request: only it may renew or resolve the row.
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
 
 class AgentGitHubOwnerGrant(Base):

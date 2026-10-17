@@ -3127,3 +3127,186 @@ async def test_link_refresh_swallows_a_failing_sweep(
             throttle=_IntervalThrottle(3600.0),
         )
     sweep.assert_awaited_once()
+
+
+async def test_link_refresh_in_the_background_does_not_block_the_tick(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.scheduler.main import (
+        _IntervalThrottle,  # pyright: ignore[reportPrivateUsage]
+        _refresh_expiring_github_links,  # pyright: ignore[reportPrivateUsage]
+        _SingleFlight,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.github_link_refresh import LinkRefreshCounts
+
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def slow_sweep(*_args: object, **_kwargs: object) -> LinkRefreshCounts:
+        started.set()
+        await release.wait()
+        return LinkRefreshCounts(refreshed=1)
+
+    flight = _SingleFlight()
+    sweep = unittest.mock.AsyncMock(side_effect=slow_sweep)
+    with unittest.mock.patch("daimon.adapters.scheduler.main.refresh_expiring_links", sweep):
+        await asyncio.wait_for(
+            _refresh_expiring_github_links(
+                sm=db_session_factory,
+                settings=_link_refresh_settings(with_oauth=True),
+                fernet=build_multifernet((Fernet.generate_key().decode(),)),
+                throttle=_IntervalThrottle(3600.0),
+                flight=flight,
+            ),
+            timeout=1.0,
+        )
+        # The tick came back while the sweep is still running.
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert flight.running()
+        release.set()
+        await flight.aclose()
+    sweep.assert_awaited_once()
+    assert not flight.running()
+
+
+async def test_link_refresh_runs_one_sweep_at_a_time_and_keeps_the_hour_when_skipped(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.scheduler.main import (
+        _IntervalThrottle,  # pyright: ignore[reportPrivateUsage]
+        _refresh_expiring_github_links,  # pyright: ignore[reportPrivateUsage]
+        _SingleFlight,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.github_link_refresh import LinkRefreshCounts
+
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def slow_sweep(*_args: object, **_kwargs: object) -> LinkRefreshCounts:
+        started.set()
+        await release.wait()
+        return LinkRefreshCounts()
+
+    flight = _SingleFlight()
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    sweep = unittest.mock.AsyncMock(side_effect=slow_sweep)
+    second_throttle = _IntervalThrottle(3600.0)
+    with unittest.mock.patch("daimon.adapters.scheduler.main.refresh_expiring_links", sweep):
+        await _refresh_expiring_github_links(
+            sm=db_session_factory,
+            settings=_link_refresh_settings(with_oauth=True),
+            fernet=fernet,
+            throttle=_IntervalThrottle(3600.0),
+            flight=flight,
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        # A due throttle, but the previous sweep still runs: skipped, hour not spent.
+        await _refresh_expiring_github_links(
+            sm=db_session_factory,
+            settings=_link_refresh_settings(with_oauth=True),
+            fernet=fernet,
+            throttle=second_throttle,
+            flight=flight,
+        )
+        assert sweep.await_count == 1
+        assert second_throttle.due()
+        release.set()
+        await flight.aclose()
+
+
+async def test_link_refresh_deadline_cancels_a_stuck_sweep_cleanly(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.scheduler import main as scheduler_main
+
+    monkeypatch.setattr(scheduler_main, "_GITHUB_LINK_REFRESH_DEADLINE_S", 0.1)
+    cancelled = asyncio.Event()
+
+    async def stuck_sweep(*_args: object, **_kwargs: object) -> object:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    flight = scheduler_main._SingleFlight()  # pyright: ignore[reportPrivateUsage]
+    with unittest.mock.patch.object(scheduler_main, "refresh_expiring_links", stuck_sweep):
+        # Awaited inline, as `--once` does: it returns at the deadline, not after 30 s.
+        await asyncio.wait_for(
+            scheduler_main._refresh_expiring_github_links(  # pyright: ignore[reportPrivateUsage]
+                sm=db_session_factory,
+                settings=_link_refresh_settings(with_oauth=True),
+                fernet=build_multifernet((Fernet.generate_key().decode(),)),
+                throttle=scheduler_main._IntervalThrottle(3600.0),  # pyright: ignore[reportPrivateUsage]
+            ),
+            timeout=5.0,
+        )
+        assert cancelled.is_set()
+        # In the background the task ends at its deadline too, freeing the next hour's sweep.
+        cancelled.clear()
+        await scheduler_main._refresh_expiring_github_links(  # pyright: ignore[reportPrivateUsage]
+            sm=db_session_factory,
+            settings=_link_refresh_settings(with_oauth=True),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            throttle=scheduler_main._IntervalThrottle(3600.0),  # pyright: ignore[reportPrivateUsage]
+            flight=flight,
+        )
+        assert flight.running()
+        await asyncio.wait_for(cancelled.wait(), timeout=5.0)
+        await asyncio.sleep(0)
+        await flight.aclose()
+    assert not flight.running()
+
+
+async def test_shutdown_cancels_a_running_link_refresh(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.scheduler import main as scheduler_main
+
+    cancelled = asyncio.Event()
+
+    async def stuck_sweep(*_args: object, **_kwargs: object) -> object:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    flight = scheduler_main._SingleFlight()  # pyright: ignore[reportPrivateUsage]
+    with unittest.mock.patch.object(scheduler_main, "refresh_expiring_links", stuck_sweep):
+        await scheduler_main._refresh_expiring_github_links(  # pyright: ignore[reportPrivateUsage]
+            sm=db_session_factory,
+            settings=_link_refresh_settings(with_oauth=True),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            throttle=scheduler_main._IntervalThrottle(3600.0),  # pyright: ignore[reportPrivateUsage]
+            flight=flight,
+        )
+        await asyncio.sleep(0.05)
+        assert flight.running()
+        await asyncio.wait_for(flight.aclose(), timeout=2.0)
+    assert cancelled.is_set()
+    assert not flight.running()
+
+
+async def test_link_refresh_passes_its_failure_memory_to_every_sweep(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.scheduler.main import (
+        _IntervalThrottle,  # pyright: ignore[reportPrivateUsage]
+        _refresh_expiring_github_links,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.github_link_refresh import LinkRefreshCounts
+
+    memory: dict[int, datetime] = {7: datetime.now(UTC) + timedelta(hours=1)}
+    sweep = unittest.mock.AsyncMock(return_value=LinkRefreshCounts())
+    with unittest.mock.patch("daimon.adapters.scheduler.main.refresh_expiring_links", sweep):
+        await _refresh_expiring_github_links(
+            sm=db_session_factory,
+            settings=_link_refresh_settings(with_oauth=True),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            throttle=_IntervalThrottle(3600.0),
+            backoff=memory,
+        )
+    assert sweep.await_args is not None
+    assert sweep.await_args.kwargs["backoff"] is memory
