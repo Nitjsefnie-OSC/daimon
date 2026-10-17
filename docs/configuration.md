@@ -26,6 +26,7 @@ typo is silent — check the spelling here.
 - [MCP Server](#mcp-server)
 - [Hub](#hub)
 - [Agent Identity](#agent-identity)
+- [Environment](#environment)
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
 - [Slack](#slack)
@@ -429,6 +430,16 @@ Slack workspace team IDs where agent identity stays off when enabled globally. S
 DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS to a JSON array of IDs. Default: [] (no
 workspaces excluded).
 
+## Environment
+
+Read from `daimon.core.config.EnvironmentSettings`. Prefix `DAIMON_ENVIRONMENT__`.
+
+### `DAIMON_ENVIRONMENT__NAME`
+
+`str` · optional · default unset
+
+Deployment name. Empty selects production Discord command behavior.
+
 ## Discord
 
 Read from `daimon.core.config.DiscordSettings`. Prefix `DAIMON_DISCORD__`.
@@ -446,6 +457,13 @@ and the features that read it are inactive while it is.
 `SecretStr` · **required** · secret
 
 Discord bot token. Required to run the Discord adapter.
+
+### `DAIMON_DISCORD__COMMAND_GUILD_IDS`
+
+`list[int]` · optional · default unset
+
+Guilds allowed to receive commands and events when the environment name is set. An empty
+list disables all Discord ingress, including DMs, in non-production.
 
 ### `DAIMON_DISCORD__STARTUP_REPLAY_MINUTES`
 
