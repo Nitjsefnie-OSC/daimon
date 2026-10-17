@@ -448,6 +448,11 @@ def _run_grant_command(
                                                 resource_ids=snapshot.repo_resource_ids,
                                                 config=settings.github_app,
                                                 fernet=fernet,
+                                                unavailable_repos=(
+                                                    current.effective_config.unavailable_repos
+                                                    if current.effective_config is not None
+                                                    else ()
+                                                ),
                                                 active_turn=current.active_turn_message_id
                                                 is not None,
                                             )

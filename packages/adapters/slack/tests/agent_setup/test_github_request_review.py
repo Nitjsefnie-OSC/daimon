@@ -60,7 +60,14 @@ async def test_review_requires_card_ts_and_live_admin(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         module,
         "get_app_installation",
-        AsyncMock(return_value=SimpleNamespace(repo_full_names=["private/connected"])),
+        AsyncMock(
+            return_value=SimpleNamespace(
+                repo_full_names=["private/connected"],
+                github_repo_full_names=None,
+                github_removed_at=None,
+                suspended_at=None,
+            )
+        ),
     )
     monkeypatch.setattr(module, "resolve_is_admin", admin)
     monkeypatch.setattr(module, "post_ephemeral", ephemeral)

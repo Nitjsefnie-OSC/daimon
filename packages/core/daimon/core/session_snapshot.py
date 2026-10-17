@@ -29,7 +29,8 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Collection, Sequence
-from typing import Literal, cast
+from datetime import datetime
+from typing import Any, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -59,7 +60,15 @@ from daimon.core.tool_safety import (
     session_tools_for_policy,
     trusted_servers_for,
 )
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    model_serializer,
+)
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type MaSkill = BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill
@@ -96,6 +105,18 @@ class SessionSnapshot(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    @model_serializer(mode="wrap")
+    def _omit_empty_refusal_state(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> dict[str, Any]:
+        # Refusal fields are absent from every snapshot written before them; keep
+        # stored and compared JSON unchanged while they are empty.
+        data: dict[str, Any] = handler(self)
+        for name in ("unavailable_repos", "unavailable_notice_pending", "unavailable_notice_sent"):
+            if not data.get(name):
+                data.pop(name, None)
+        return data
+
     schema_version: Literal[1] = 1
 
     # Identity axis — a difference here can only be applied by replacing the session.
@@ -109,6 +130,9 @@ class SessionSnapshot(BaseModel):
     # Every repo the session's App tokens cover, mounted or not. A new grant
     # changes this set, and the session must be replaced to receive the token.
     token_repo_urls: tuple[str, ...] = ()
+    unavailable_repos: tuple[tuple[str, datetime], ...] = ()
+    unavailable_notice_pending: tuple[str, ...] = ()
+    unavailable_notice_sent: tuple[str, ...] = ()
     repo_url: str | None
     repo_branch: str | None
     memory_store_id: str | None
@@ -137,6 +161,31 @@ class SessionSnapshot(BaseModel):
     # is not a configuration change to the session that already froze it.
     agent_version: int
     agent_name: str
+
+
+def refreshed_unavailable_state(
+    previous: SessionSnapshot,
+    refused_urls: tuple[str, ...],
+    *,
+    now: datetime,
+) -> dict[str, tuple[tuple[str, datetime], ...] | tuple[str, ...]]:
+    """Keep first refusal times and deliver each continuous refusal once."""
+    previous_times = dict(previous.unavailable_repos)
+    refused = set(refused_urls)
+    sent = tuple(url for url in previous.unavailable_notice_sent if url in refused)
+    pending = tuple(
+        dict.fromkeys(
+            (
+                *previous.unavailable_notice_pending,
+                *(url for url in refused_urls if url not in sent),
+            )
+        )
+    )
+    return {
+        "unavailable_repos": tuple((url, previous_times.get(url, now)) for url in refused_urls),
+        "unavailable_notice_pending": pending,
+        "unavailable_notice_sent": sent,
+    }
 
 
 def canonical_json(obj: JsonValue) -> str:

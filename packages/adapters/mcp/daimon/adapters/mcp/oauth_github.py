@@ -10,8 +10,10 @@ import json
 import logging
 import secrets
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal, cast
 from urllib.parse import parse_qs, urlencode
 
@@ -44,6 +46,7 @@ from daimon.core.stores import github_access, github_app_installations, github_c
 from daimon.core.stores.accounts import get_account_with_tenant, has_external_accounts
 from daimon.core.stores.domain import AccountIdentityRow, Role
 from daimon.core.stores.github_access import list_agent_repos
+from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
 from daimon.core.stores.github_request_actions import finish_confirmed_requests
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, Field
@@ -1928,6 +1931,14 @@ def build_oauth_github_routes(
                                 repository_selection=detail.repository_selection,
                                 suspended_at=detail.suspended_at,
                             )
+                            await enqueue_reconciliation(
+                                session,
+                                installation_id=detail.installation_id,
+                                delivery_id=f"connect:{uuid.uuid4()}",
+                                event="connect",
+                                deleted=False,
+                                now=datetime.now(UTC),
+                            )
                         for repo_id in removed_ids:
                             await github_access.remove_agent_repo(
                                 session,
@@ -2137,6 +2148,14 @@ def build_oauth_github_routes(
                                 account_type=detail.account_type,
                                 repository_selection=detail.repository_selection,
                                 suspended_at=detail.suspended_at,
+                            )
+                            await enqueue_reconciliation(
+                                session,
+                                installation_id=detail.installation_id,
+                                delivery_id=f"connect:{uuid.uuid4()}",
+                                event="connect",
+                                deleted=False,
+                                now=datetime.now(UTC),
                             )
                         await github_connect.activate_confirmed_agent(
                             session, invitation=invitation, repos=repos

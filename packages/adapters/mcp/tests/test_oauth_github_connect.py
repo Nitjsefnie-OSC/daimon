@@ -29,6 +29,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import set_external, set_role
 from daimon.core.stores.domain import Role
+from daimon.core.stores.github_installation_reconciliation import get as get_reconciliation
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -823,10 +824,12 @@ async def test_connection_happy_path_and_rechecks(
             assert installation.account_type == "Organization"
             assert installation.repository_selection == "selected"
             assert set(installation.repo_full_names) == {"example/one", "example/two"}
+            refresh = await get_reconciliation(session, installation_id=77)
+            assert refresh is not None and refresh.generation == 1
             assert (
                 await github_app_installations.get_for_repo(session, repo_full_name="example/one")
-                is None
-            )
+                is not None
+            ), "the confirmed set applies until the first GitHub refresh"
             events = await list_events(session, tenant_id=tenant_id)
             assert len(events) == 1
             assert events[0].operation == "github_connect"

@@ -1178,7 +1178,39 @@ against the fingerprints stored on the mapping row; the outcome rides back on
 GitHub App mode uses the agent's live grants when assembling a turn. External
 askers get no App token. Each session gets one write token scoped to the agent's
 live repositories in one installation. The token is recorded before minting
-and checked again after delivery. The session mounts only the selected working
+and checked again after delivery. A repository is live when it remains in both
+the tenant-confirmed Connect set and the
+latest complete GitHub installation snapshot. Until the first refresh, the
+confirmed set applies. A GitHub-confirmed uninstall or suspension disables
+coverage; later refreshes can restore it when the repo is still confirmed.
+The refresh never adds repos to the tenant-confirmed set.
+If token minting returns 403, 404, or 422 for a repository group, that group's
+pending token is closed, its installation is queued for reconciliation, and
+only successfully minted groups enter the session. The refused group's repos
+are recorded with a per-URL first-refusal time in the session snapshot. A pending
+notice is announced on the next turn, including after reconciliation removes the
+repository or the exclusion expires, subject to the requester's repository-name
+visibility. The notice is sent once for a continuous refusal; if access returns
+and a later mint refuses it again, a new notice is sent. Authentication failures,
+rate limits, timeouts, and server failures stop preparation so it can be retried.
+Each exclusion remains valid for 60 minutes from its first refusal. Token
+rotation never retries a refused repository, even after its 60 minutes, so
+the deadline holds and retries stay at one per turn. If the repository is still desired when the exclusion expires,
+the next turn replaces the session and retries minting once. A refusal in the
+replacement starts a new 60-minute period.
+Reconciliation can change coverage sooner, triggering normal session change
+handling. The scheduler leaves a session with a recorded refusal or an
+unannounced notice to that turn-boundary replacement, which carries the notice
+history, instead of retiring it; until then the removed repository's mount gets
+no new token. Issued installation tokens remain valid for up to one hour, so
+reconciliation does not immediately revoke access already delivered to a
+session. GitHub does not document a unique status code for an uncovered or
+suspended repository; HTTP 422 can also mean spam detection.
+MCP and headless sessions do not store refusal history. When their token
+rotation reports a refused repository, the scheduler backs off later mint
+attempts using the same delay as transient refresh failures, including while a
+turn is active.
+The session mounts only the selected working
 repository, if there is one, and uses its own vault for `GH_TOKEN` and Copilot.
 Other granted repos are available through that token
 for cloning by name. A change to the working mount or the token repository

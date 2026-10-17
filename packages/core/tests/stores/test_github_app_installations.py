@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
+from daimon.core._models import GitHubAppInstallation
 from daimon.core.stores import github_app_installations as store
 from daimon.core.stores.domain import GitHubAppInstallationRow
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,3 +135,52 @@ async def test_get_for_repo_returns_none_on_miss(db_session: AsyncSession) -> No
     row = await store.get_for_repo(db_session, repo_full_name="org/not-installed")
 
     assert row is None, "get_for_repo should return None for a repo not in any installation"
+
+
+@pytest.mark.asyncio
+async def test_get_for_repo_requires_github_snapshot_for_new_app(db_session: AsyncSession) -> None:
+    await store.upsert_github_app(
+        db_session,
+        installation_id=6003,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+    )
+    installation = await db_session.get(GitHubAppInstallation, 6003)
+    assert installation is not None
+    installation.repo_full_names = ["org/repo"]
+    await db_session.flush()
+    assert await store.get_for_repo(db_session, repo_full_name="org/repo") is not None
+    installation.github_repo_full_names = []
+    await db_session.flush()
+    assert await store.get_for_repo(db_session, repo_full_name="org/repo") is None
+
+
+@pytest.mark.asyncio
+async def test_connect_upsert_preserves_reconciled_suspension(db_session: AsyncSession) -> None:
+    await store.upsert_github_app(
+        db_session,
+        installation_id=6004,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+    )
+    installation = await db_session.get(GitHubAppInstallation, 6004)
+    assert installation is not None
+    suspended_at = datetime(2026, 10, 16, tzinfo=UTC)
+    installation.suspended_at = suspended_at
+    await db_session.flush()
+    updated = await store.upsert_github_app(
+        db_session,
+        installation_id=6004,
+        account_id=17,
+        account_login="org",
+        account_type="Organization",
+        repository_selection="selected",
+        suspended_at=None,
+    )
+    assert updated.suspended_at == suspended_at

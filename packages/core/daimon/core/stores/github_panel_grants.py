@@ -15,6 +15,7 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.github_connect import (
     require_app_eligible_agent,
 )
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -160,7 +161,7 @@ async def stage_panel_grant(
         raise ValueError("Repository is not connected to this workspace.")
     await github_access.require_may_grant(session, repo=authorized, account_id=account_id)
     installation = await session.get(GitHubAppInstallation, authorized.installation_id)
-    if installation is None or installation.suspended_at is not None:
+    if not installation_covers_repo(installation, authorized.repo_full_name):
         raise ValueError("GitHub installation is unavailable.")
     rank = {"none": 0, "read": 1, "write": 2}
     if (

@@ -73,6 +73,7 @@ from daimon.core.session_snapshot import (
     hash_env_bytes,
     hash_mcp_servers,
     hash_tools,
+    refreshed_unavailable_state,
     session_mcp_servers,
     session_tools,
 )
@@ -345,9 +346,9 @@ async def apply_update_ops(
                 )
                 applied.extend(("tools", "mcp_servers"))
             case RotateAppTokens():
-                if snapshot.vault_id is None or fernet is None:
+                if snapshot.vault_id is None or not isinstance(fernet, MultiFernet):
                     raise ValueError("App session has no vault or encryption")
-                await rotate_live_app_tokens(
+                access = await rotate_live_app_tokens(
                     anthropic,
                     sessionmaker,
                     session_id=session_id,
@@ -357,11 +358,23 @@ async def apply_update_ops(
                     is_external=is_external,
                     vault_id=snapshot.vault_id,
                     resource_ids=op.resource_ids,
+                    unavailable_repos=snapshot.unavailable_repos,
                     config=agent_github_app or GithubAppSettings(),
                     fernet=fernet,
                 )
                 snapshot = snapshot.model_copy(
-                    update={"repo_token_issued_at": int(now.timestamp())}
+                    update={
+                        "repo_urls": tuple(
+                            url
+                            for url in snapshot.repo_urls
+                            if url not in access.excluded_repo_urls
+                        ),
+                        "token_repo_urls": access.token_repo_urls,
+                        **refreshed_unavailable_state(
+                            snapshot, access.excluded_repo_urls, now=dt.datetime.now(dt.UTC)
+                        ),
+                        "repo_token_issued_at": int(now.timestamp()),
+                    }
                 )
                 applied.append("repo_token_age")
             case RemirrorVaultCredentials():

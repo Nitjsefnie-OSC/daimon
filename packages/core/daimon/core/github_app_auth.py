@@ -357,13 +357,19 @@ async def mint_installation_listing_token(
     return token
 
 
+@dataclass(frozen=True)
+class InstallationAccountState:
+    account_login: str
+    suspended_at: datetime | None
+
+
 async def get_app_installation_account(
     http_client: httpx.AsyncClient,
     *,
     jwt: str,
     installation_id: int,
-) -> str | None:
-    """Return the account login, or None when GitHub confirms uninstall."""
+) -> InstallationAccountState | None:
+    """Return GitHub's installation account and suspension, or None on uninstall."""
     url = f"https://api.github.com/app/installations/{installation_id}"
     response = await http_client.get(
         url,
@@ -391,7 +397,16 @@ async def get_app_installation_account(
         raise ValueError(
             f"GitHub installation response is missing account.login ({installation_id})"
         )
-    return login
+    suspended_raw = body_object.get("suspended_at")
+    if suspended_raw is None:
+        suspended_at = None
+    elif isinstance(suspended_raw, str):
+        suspended_at = datetime.fromisoformat(suspended_raw.replace("Z", "+00:00"))
+        if suspended_at.utcoffset() is None:
+            raise ValueError("GitHub installation suspended_at must include a timezone")
+    else:
+        raise ValueError("GitHub installation suspended_at must be a timestamp or null")
+    return InstallationAccountState(account_login=login, suspended_at=suspended_at)
 
 
 async def list_installation_repositories(

@@ -49,6 +49,7 @@ from daimon.core.stores.github_connect import (
     revoke_invitation,
     set_invitation_encrypted_token,
 )
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.security_audit import append_event
 from daimon.core.teams_threads import conversation_of
 from fastmcp import Context, FastMCP
@@ -289,8 +290,7 @@ async def _github_connect_impl(
                 )
                 grantable = (
                     installation is not None
-                    and installation.suspended_at is None
-                    and repo.repo_full_name in installation.repo_full_names
+                    and installation_covers_repo(installation, repo.repo_full_name)
                     and (is_admin or repo.scope_agent_id == agent_id)
                 )
                 if grantable:

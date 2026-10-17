@@ -211,6 +211,17 @@ async def test_connected_repo_is_granted_immediately_in_chat(
                 session, tenant_id=tenant.id, agent_id=agent_id
             )
         )
+    async with committing_sessionmaker.begin() as session:
+        await session.execute(
+            text("""
+            UPDATE github_app_installations SET github_repo_full_names = ARRAY[]::text[]
+            WHERE installation_id = 98765
+        """)
+        )
+    removed = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/repo"
+    )
+    assert removed.status == "sent", "GitHub removal must block a newly requested grant"
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ keep a caller on a stale session forever.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import pytest
@@ -43,7 +43,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_memory_store_resource imp
     BetaManagedAgentsMemoryStoreResource,
 )
 from daimon.core.credential_env import assemble_env_bytes
-from daimon.core.session_compat import identity_change_reasons
+from daimon.core.session_compat import identity_change_reasons, valid_unavailable_repo_urls
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     desired_snapshot,
@@ -54,6 +54,7 @@ from daimon.core.session_snapshot import (
     hash_skills,
     hash_system,
     hash_tools,
+    refreshed_unavailable_state,
     session_skills,
     snapshot_from_created_session,
     snapshot_from_retrieved_session,
@@ -745,3 +746,69 @@ def test_a_snapshot_without_a_personal_store_keeps_its_recorded_fingerprint() ->
 
     assert fingerprint_identity(legacy) == fingerprint_identity(snapshot)
     assert fingerprint_identity(with_personal) != fingerprint_identity(snapshot)
+
+
+def test_old_snapshot_unavailability_fields_are_ignored() -> None:
+    snapshot = desired_snapshot(
+        _agent(),
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_science",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+    )
+    legacy = SessionSnapshot.model_validate(
+        {
+            **snapshot.model_dump(exclude={"unavailable_repos"}),
+            "unavailable_repo_urls": ("https://github.com/acme/refused",),
+            "unavailable_since": _NOW,
+            "unavailable_notice_announced": False,
+        }
+    )
+    assert legacy.unavailable_repos == ()
+    assert legacy.unavailable_notice_pending == ()
+    assert valid_unavailable_repo_urls(legacy, now=_NOW) == ()
+
+
+def test_refusal_keeps_first_time_and_announces_once_until_access_returns() -> None:
+    url = "https://github.com/acme/refused"
+    snapshot = desired_snapshot(
+        _agent(),
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_science",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+    )
+    first = snapshot.model_copy(update=refreshed_unavailable_state(snapshot, (url,), now=_NOW))
+    assert first.unavailable_repos == ((url, _NOW),)
+    assert first.unavailable_notice_pending == (url,)
+    dropped_before_notice = first.model_copy(
+        update=refreshed_unavailable_state(first, (), now=_NOW + timedelta(minutes=61))
+    )
+    assert dropped_before_notice.unavailable_repos == ()
+    assert dropped_before_notice.unavailable_notice_pending == (url,)
+    announced = first.model_copy(
+        update={
+            "unavailable_notice_pending": (),
+            "unavailable_notice_sent": (url,),
+        }
+    )
+    later = _NOW + timedelta(minutes=40)
+    refused_again = announced.model_copy(
+        update=refreshed_unavailable_state(announced, (url,), now=later)
+    )
+    assert refused_again.unavailable_repos == ((url, _NOW),)
+    assert refused_again.unavailable_notice_pending == ()
+    dropped = refused_again.model_copy(
+        update=refreshed_unavailable_state(refused_again, (), now=later)
+    )
+    assert dropped.unavailable_repos == ()
+    assert dropped.unavailable_notice_sent == ()
+    anew = dropped.model_copy(update=refreshed_unavailable_state(dropped, (url,), now=later))
+    assert anew.unavailable_repos == ((url, later),)
+    assert anew.unavailable_notice_pending == (url,)

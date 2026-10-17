@@ -1531,7 +1531,11 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
     )
     monkeypatch.setattr(
         "daimon.core.sessions.prepare_app_access",
-        AsyncMock(return_value=AppSessionAccess((), (token,), "ghs_x")),
+        AsyncMock(
+            return_value=AppSessionAccess(
+                (), (token,), "ghs_x", ("https://github.com/example/unavailable",)
+            )
+        ),
     )
     monkeypatch.setattr("daimon.core.sessions.add_app_credentials", AsyncMock())
     monkeypatch.setattr("daimon.core.sessions.finish_app_delivery", AsyncMock())
@@ -1556,6 +1560,7 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
             ),
         )
 
+    observed_access: list[AppSessionAccess] = []
     await create_session(
         build_fake_anthropic_http(handler),
         agent=_make_agent(anthropic_id="ag_identity"),
@@ -1564,9 +1569,12 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         agent_github_app=GithubAppSettings(app_slug="daimon"),
+        on_app_access=observed_access.append,
     )
 
     resolve.assert_awaited_once()
+    assert observed_access[0].excluded_repo_urls == ("https://github.com/example/unavailable",)
+    assert "github_unavailable_repo_urls" not in bodies[0]["metadata"]
     assert resolve.await_args is not None and resolve.await_args.kwargs["slug"] == "daimon"
     mounted = [r for r in bodies[0].get("resources", []) if r["type"] == "file"]
     if identity_resolves:

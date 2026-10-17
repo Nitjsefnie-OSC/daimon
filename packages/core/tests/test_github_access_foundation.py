@@ -18,6 +18,7 @@ from cryptography.fernet import Fernet
 from daimon.core._models import (
     Account,
     AgentGitHubGrant,
+    GitHubAppInstallation,
     GitHubIssuedToken,
     GitHubNewRepoNotice,
     GitHubRemovalNotice,
@@ -143,6 +144,24 @@ async def test_grants_are_live_immediately(
         is_working_repo=True,
     )
     assert updated.version == 2 and updated.baseline_access == "read"
+    installation = await db_session.get(GitHubAppInstallation, 77)
+    assert installation is not None
+    assert (
+        len(
+            await github_access.list_live_grant_repositories(
+                db_session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        )
+        == 1
+    )
+    installation.github_repo_full_names = []
+    await db_session.flush()
+    assert (
+        await github_access.list_live_grant_repositories(
+            db_session, tenant_id=tenant_id, agent_id=agent_id
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio
@@ -815,6 +834,15 @@ async def test_inventory_sweeper_keeps_write_token_for_read_authorizer_until_ver
     )
     assert github_issued_tokens.decrypt_issued_token(stored, fernet=fernet) == "secret"
     assert await github_issued_tokens.select_stale_tokens(db_session) == []
+    installation = await db_session.get(GitHubAppInstallation, 909)
+    assert installation is not None
+    installation.github_repo_full_names = []
+    await db_session.flush()
+    assert [
+        item.token_id for item in await github_issued_tokens.select_stale_tokens(db_session)
+    ] == [row.token_id]
+    installation.github_repo_full_names = None
+    await db_session.flush()
     grant = await db_session.get(AgentGitHubGrant, (tenant_id, agent_id, 101))
     assert grant is not None
     grant.version = 2

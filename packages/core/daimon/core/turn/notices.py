@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 import anthropic
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.errors import TurnError
+from daimon.core.github_app_session import GitHubTokenMintUnavailable
 from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -274,7 +275,14 @@ def render_termination_notice(
     if reason is TerminationReason.COMPLETED:
         return None
     copy = _COPY.get(reason, _FALLBACK)
-    if spend_limit_error(error or (state.error if state is not None else None)) is not None:
+    failure = error or (state.error if state is not None else None)
+    if any(isinstance(cause, GitHubTokenMintUnavailable) for cause in _error_chain(failure)):
+        copy = _Copy(
+            "GitHub access is temporarily unavailable.",
+            "@mention Daimon to try again.",
+            "Send your message again.",
+        )
+    elif spend_limit_error(failure) is not None:
         copy = _Copy(
             "Daimon has reached its usage limit.",
             "Ask the team running it to check the limit.",
@@ -316,6 +324,15 @@ def render_termination_notice(
         finished_tools=finished,
         request_id=request_id,
     )
+
+
+def _error_chain(error: BaseException | None) -> list[BaseException]:
+    chain: list[BaseException] = []
+    while error is not None and error not in chain:
+        chain.append(error)
+        next_error = error.cause if isinstance(error, TurnError) else error.__cause__
+        error = next_error if isinstance(next_error, BaseException) else None
+    return chain
 
 
 def _clock(at: datetime) -> str:

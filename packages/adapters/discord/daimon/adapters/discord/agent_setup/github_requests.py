@@ -24,6 +24,7 @@ from daimon.core.stores.github_access_requests import (
     set_status,
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.github_personal_links import mint_link
 from daimon.core.stores.github_request_actions import (
     approve_connected_request,
@@ -232,7 +233,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                     installation = await get_app_installation(
                         session, installation_id=repo.installation_id
                     )
-                    if installation and repo.repo_full_name in installation.repo_full_names:
+                    if installation_covers_repo(installation, repo.repo_full_name):
                         connected[repo.repo_full_name.casefold()] = repo.repo_full_name
             connected_names = [
                 connected[name.casefold()]
