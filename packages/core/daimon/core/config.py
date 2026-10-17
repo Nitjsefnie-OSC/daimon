@@ -420,6 +420,13 @@ class ThreadParticipationSettings(BaseModel):
     )
 
 
+class EnvironmentSettings(BaseModel):
+    name: str = Field(
+        default="",
+        description="Deployment name. Empty selects production Discord command behavior.",
+    )
+
+
 class DiscordSettings(BaseModel):
     """Discord adapter config.
 
@@ -429,6 +436,13 @@ class DiscordSettings(BaseModel):
 
     bot_token: SecretStr = Field(
         description="Discord bot token. Required to run the Discord adapter.",
+    )
+    command_guild_ids: list[int] = Field(
+        default_factory=list[int],
+        description=(
+            "Guilds allowed to receive commands and events when the environment name is set. "
+            "An empty list disables all Discord ingress, including DMs, in non-production."
+        ),
     )
     startup_replay_minutes: int = Field(
         default=0,
@@ -1583,6 +1597,7 @@ class Settings(BaseSettings):
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
+    environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
     discord: DiscordSettings | None = None
     thread_participation: ThreadParticipationSettings = Field(
         default_factory=ThreadParticipationSettings,

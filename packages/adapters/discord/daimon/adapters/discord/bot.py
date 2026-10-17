@@ -702,6 +702,17 @@ class DaimonBot(commands.Bot):
         self.runtime = with_budget_notifier(
             runtime, self.open_member_dm, self.is_closed, client=self
         )
+        # The SDK routes slash commands, buttons, and modals before dispatching
+        # on_interaction, so filter their gateway payload before those callbacks.
+        parse_interaction = self._connection.parsers["INTERACTION_CREATE"]
+
+        def parse_allowed_interaction(data: dict[str, Any]) -> None:
+            guild_id = data.get("guild_id")
+            if self._allows_guild(int(guild_id) if guild_id is not None else None):
+                parse_interaction(data)
+
+        self._connection.parsers["INTERACTION_CREATE"] = parse_allowed_interaction
+        self.tree.interaction_check = self._interaction_allowed  # type: ignore[method-assign]
         # Per-thread concurrency state. _processing: thread IDs with an active turn.
         # _pending: mentions queued behind an in-flight turn for that thread.
         # Drained after the current turn finishes into a single composite follow-up
@@ -2014,10 +2025,52 @@ class DaimonBot(commands.Bot):
             allow_missing_member=True,
         )
 
+    def _allows_guild(self, guild_id: int | None) -> bool:
+        """Non-production accepts only configured guilds; DMs have no guild to allow."""
+        name = self.runtime.settings.environment.name
+        if type(name) is not str or not name:
+            return True
+        settings = self.runtime.settings.discord
+        return (
+            guild_id is not None and settings is not None and guild_id in settings.command_guild_ids
+        )
+
+    async def _interaction_allowed(self, interaction: discord.Interaction) -> bool:
+        return self._allows_guild(interaction.guild_id)
+
+    def dispatch(self, event: str, /, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        """Stop guild events before any registered cog listener sees them."""
+        if args and event not in {"ready", "connect", "disconnect"}:
+            subject = args[0]
+            guild = getattr(subject, "guild", None)
+            guild_id = getattr(subject, "guild_id", None)
+            if guild_id is None and isinstance(subject, discord.Guild):
+                guild_id = subject.id
+            if guild_id is None and guild is not None:
+                guild_id = getattr(guild, "id", None)
+            guild_event = event in {"message", "interaction"} or guild_id is not None
+            if guild_event and not self._allows_guild(guild_id):
+                return
+        super().dispatch(event, *args, **kwargs)
+
     async def on_ready(self) -> None:
         """Forward-only reconcile sweep: provision-if-missing, re-seed pending/failed,
         sync the command tree. NO archive-on-absence."""
         log.info("bot_ready", user=str(self.user))
+        environment_name = self.runtime.settings.environment.name
+        command_guild_ids = (
+            set(self.runtime.settings.discord.command_guild_ids)
+            if self.runtime.settings.discord is not None
+            else set[int]()
+        )
+        non_production = type(environment_name) is str and bool(environment_name)
+        log.info(
+            "discord_command_environment",
+            environment=environment_name if non_production else "production",
+            allowlist_size=len(command_guild_ids),
+        )
+        if non_production and not command_guild_ids:
+            log.warning("discord_command_allowlist_empty", environment=environment_name)
         await self._retire_orphaned_turns()
         if not self._startup_replay_started:
             self._startup_replay_started = True
@@ -2029,6 +2082,8 @@ class DaimonBot(commands.Bot):
         # means the bot left and rejoined while this process was stopped: revive
         # it and reseed without sending a second welcome or signup credit.
         for guild in self.guilds:
+            if not self._allows_guild(guild.id):
+                continue
             ws_id = str(guild.id)
             known_tenant = known_tenants.get(ws_id)
             if known_tenant is not None and known_tenant.archived_at is None:
@@ -2058,6 +2113,8 @@ class DaimonBot(commands.Bot):
         # gate turns a hash match into a skip -- bounded by the sweep's concurrency
         # cap above. Per-guild permission check + tree sync for joined guilds.
         for tr in tenants:
+            if non_production and int(tr.external_id) not in command_guild_ids:
+                continue
             guild = self.get_guild(int(tr.external_id))
             # Tracked per path: the joined path adds the roster check and the
             # ready flip, so a guild back since the last ready still gets them.
@@ -2093,7 +2150,7 @@ class DaimonBot(commands.Bot):
                 )
             else:
                 log.info("permissions_ok", guild_id=tr.external_id, guild_name=guild.name)
-            if guild.id in self._ready_synced_guild_ids:
+            if non_production or guild.id in self._ready_synced_guild_ids:
                 continue
             try:
                 guild_obj = discord.Object(id=int(tr.external_id))
@@ -2107,6 +2164,34 @@ class DaimonBot(commands.Bot):
                 log.info("tree_synced", guild_id=tr.external_id)
             except discord.HTTPException as exc:
                 log.warning("tree_sync_failed", guild_id=tr.external_id, error=str(exc))
+        if non_production:
+            # Remove commands left by a production deployment without registering
+            # any global commands in this environment. Guild copies stay local.
+            if not self._global_tree_synced:
+                if self.application_id is None:
+                    log.warning("tree_sync_global_clear_failed", reason="missing_application_id")
+                    return
+                try:
+                    await self.http.bulk_upsert_global_commands(self.application_id, payload=[])
+                    self._global_tree_synced = True
+                    log.info("tree_cleared_global")
+                except discord.HTTPException as exc:
+                    log.warning("tree_sync_global_clear_failed", error=str(exc))
+                    return
+            for guild in self.guilds:
+                if guild.id in self._ready_synced_guild_ids:
+                    continue
+                guild_obj = discord.Object(id=guild.id)
+                try:
+                    self.tree.clear_commands(guild=guild_obj)
+                    if guild.id in command_guild_ids:
+                        self.tree.copy_global_to(guild=guild_obj)
+                    await self.tree.sync(guild=guild_obj)
+                    self._ready_synced_guild_ids.add(guild.id)
+                    log.info("tree_synced", guild_id=str(guild.id))
+                except discord.HTTPException as exc:
+                    log.warning("tree_sync_failed", guild_id=str(guild.id), error=str(exc))
+            return
         # Global sync so dm_permission=True commands (e.g. /privacy) appear in DMs.
         # DM-capable commands must be registered at the global scope. Note: global
         # sync has propagation latency (up to ~1h); operators triggering UAT in
@@ -2127,6 +2212,8 @@ class DaimonBot(commands.Bot):
             return
         cutoff = datetime.now(UTC) - timedelta(minutes=settings.startup_replay_minutes)
         for guild in self.guilds:
+            if not self._allows_guild(guild.id):
+                continue
             tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
             async with self.runtime.sessionmaker() as session:
                 candidates = await replay_channels(
@@ -2187,6 +2274,8 @@ class DaimonBot(commands.Bot):
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Async two-phase provisioning: provision (pending) → immediate welcome →
         per-guild tree sync → background seed that flips ready/failed + posts the follow-up."""
+        if not self._allows_guild(guild.id):
+            return
         guild_id = str(guild.id)
         try:
             tenant_id = await self._provision_joined_guild(guild)
@@ -2202,10 +2291,10 @@ class DaimonBot(commands.Bot):
             )
             try:
                 guild_obj = discord.Object(id=guild.id)
-                # Keep the guild command scope empty — global commands already
-                # apply to a newly-joined guild immediately. Copying globals into
-                # the guild scope would render every command twice.
                 self.tree.clear_commands(guild=guild_obj)
+                environment_name = self.runtime.settings.environment.name
+                if type(environment_name) is str and environment_name:
+                    self.tree.copy_global_to(guild=guild_obj)
                 await self.tree.sync(guild=guild_obj)
                 log.info("synced_commands_on_join", guild_id=guild_id, guild_name=guild.name)
             except discord.HTTPException as exc:
@@ -2218,6 +2307,8 @@ class DaimonBot(commands.Bot):
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Soft-archive: stamp archived_at=now(). NO row delete."""
+        if not self._allows_guild(guild.id):
+            return
         guild_id = str(guild.id)
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
         async with self._guild_lifecycle_lock_for(guild.id):
@@ -2625,6 +2716,8 @@ class DaimonBot(commands.Bot):
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Remember the clicker's name for /billing; the command tree handles the rest."""
+        if not self._allows_guild(interaction.guild_id):
+            return
         remember_guild_user(
             self.runtime.sessionmaker, guild_id=interaction.guild_id, user=interaction.user
         )
@@ -2709,6 +2802,8 @@ class DaimonBot(commands.Bot):
     ) -> None:
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
         then orchestrate a turn in a thread."""
+        if not self._allows_guild(message.guild.id if message.guild else None):
+            return
         if startup_replay:
             # Its admission may run later (queued); it must stay as quiet as here.
             self._replayed_message_ids.add(message.id)
@@ -4124,20 +4219,28 @@ class DaimonBot(commands.Bot):
             await self._archive_after_outputs(outcome, thread)
 
     async def on_guild_role_update(self, before: discord.Role, after: discord.Role) -> None:
+        if not self._allows_guild(after.guild.id):
+            return
         if before.permissions != after.permissions:
             clear_webhook_backoff(after.guild)
 
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        if not self._allows_guild(after.guild.id):
+            return
         if self.user is not None and after.id == self.user.id and before.roles != after.roles:
             clear_webhook_backoff(after.guild)
 
     async def on_guild_channel_update(
         self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
     ) -> None:
+        if not self._allows_guild(after.guild.id):
+            return
         if before.overwrites != after.overwrites:
             clear_webhook_backoff(after.guild)
 
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
+        if not self._allows_guild(payload.guild_id):
+            return
         metadata = payload.data["thread_metadata"]
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
         async with self.runtime.sessionmaker() as session:
@@ -4153,6 +4256,8 @@ class DaimonBot(commands.Bot):
             await session.commit()
 
     async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent) -> None:
+        if not self._allows_guild(payload.guild_id):
+            return
         had_running_turn = payload.thread_id in self._processing
         # Every time, so a deployment can show whether this event beats the first 10003.
         log.info(
