@@ -360,8 +360,10 @@ github_owner_grant	OwnerGrant	no_exclusion	violates:ExcludedNeverMinted	114	-see
 github_owner_grant	OwnerGrant	mint_from_cache	violates:MintedSubsetCovered	133	-seed 1 -fp 0	owner coverage, exclusions and future repositories
 github_owner_grant	OwnerGrant	future_repo_witness	violates:FutureRepoNeverMinted	139	-seed 1 -fp 0	owner coverage, exclusions and future repositories
 # ---- GitHub installation reconciliation ----
-github_installation_reconcile	Reconcile	Safe	clean	40493	-deadlock	installation queue generation, lease, and convergence witness
-github_installation_reconcile	Reconcile	NoGenerationCheck	violates:NoStaleOverwrite	1577	-deadlock	installation queue generation, lease, and convergence witness
-github_installation_reconcile	Reconcile	LegacyOnlyWrite	violates:EventuallyConsistent	24851	-deadlock	installation queue generation, lease, and convergence witness
-github_installation_reconcile	Reconcile	NoLeaseOwnerCheck	violates:NoStaleOverwrite	1606	-deadlock	installation queue generation, lease, and convergence witness
-github_installation_reconcile	Reconcile	ReorderDuplicateWitness	violates:NoReorderDuplicateWitness	4358	-deadlock	installation queue generation, lease, and convergence witness
+github_installation_reconcile	Reconcile	Safe	clean	607089	-deadlock -lncheck final	installation queue generation, lease, convergence, and deploy-order refresh backfill
+github_installation_reconcile	Reconcile	NoGenerationCheck	violates:NoStaleOverwrite	1434	-deadlock -lncheck final	installation queue generation, lease, convergence, and deploy-order refresh backfill
+github_installation_reconcile	Reconcile	LegacyOnlyWrite	violates:EventuallyConsistent	126481	-deadlock -lncheck final	installation queue generation, lease, convergence, and deploy-order refresh backfill
+github_installation_reconcile	Reconcile	NoLeaseOwnerCheck	violates:NoStaleOverwrite	1469	-deadlock -lncheck final	installation queue generation, lease, convergence, and deploy-order refresh backfill
+github_installation_reconcile	Reconcile	ReorderDuplicateWitness	violates:NoReorderDuplicateWitness	21883	-deadlock -lncheck final	installation queue generation, lease, convergence, and deploy-order refresh backfill
+github_installation_reconcile	Reconcile	NoSweep	violates:EventuallyRefreshed	303669	-deadlock -lncheck final	installation queue generation, lease, convergence, and deploy-order refresh backfill
+github_installation_reconcile	Reconcile	NoSweepNoOldDrainer	clean	303611	-deadlock -lncheck final	installation queue generation, lease, convergence, and deploy-order refresh backfill
