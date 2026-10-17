@@ -1007,6 +1007,46 @@ class CryptoSettings(BaseModel):
     )
 
 
+class MicrosoftAccountsSettings(BaseModel):
+    """Per-person Microsoft 365 access on Teams: the Entra app people sign in to.
+
+    Inert until `client_id`, `client_secret` and `tenant_id` are all set.
+    """
+
+    client_id: str | None = Field(
+        default=None,
+        description=(
+            "Application (client) ID of the Entra app registration people sign in to "
+            "with Connect Microsoft. Its Web redirect URI is "
+            "`<public root>/oauth/microsoft/callback`."
+        ),
+    )
+    client_secret: SecretStr | None = Field(
+        default=None,
+        description="Client secret of that app registration, sent as client_secret_post.",
+    )
+    tenant_id: str | None = Field(
+        default=None,
+        description=(
+            "Entra tenant ID (a GUID) people sign in to. Only accounts of this tenant whose "
+            "object ID matches the Teams user asking can connect."
+        ),
+    )
+    authority: HttpUrl = Field(
+        default=HttpUrl("https://login.microsoftonline.com"),
+        description="Microsoft identity platform host; change it only for a sovereign cloud.",
+    )
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _canonical_tenant(cls, value: str | None) -> str | None:
+        return None if value is None else str(uuid.UUID(value))
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.client_id and self.client_secret and self.tenant_id)
+
+
 class CredentialsSettings(BaseModel):
     """Tenant-level credentials for the token broker.
 
@@ -1632,6 +1672,7 @@ class Settings(BaseSettings):
     teams: TeamsSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
     github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
+    microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
