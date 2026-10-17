@@ -519,8 +519,6 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW
 
     if req.action is Action.BIND_CHANNEL_DEFAULT:
-        if not subject.is_admin or subject.via_agent_key:
-            return _deny("admin_required")
         if _outside_rule(agent, place):
             return _deny("runs_elsewhere")
         if agent.present and crosses_home(agent.permissions, place.permissions):

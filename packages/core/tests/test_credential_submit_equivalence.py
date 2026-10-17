@@ -68,6 +68,15 @@ def _modules(platform):
         "from daimon.core.stores.agent_skill_repo_credentials import set_skill_repo_credential",
         "set_skill_repo_credential = None",
     )
+    # The frozen adapters used the retired grant caller type. Keep their live
+    # admin/member signal while evaluating against the permanent native policy.
+    source = source.replace(
+        "from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin",
+        "from daimon.adapters.discord.checks import admin_caller as channel_admin_caller, is_guild_admin",
+    ).replace(
+        "from daimon.core.channel_admins import ChannelAdminCaller",
+        "from daimon.core.native_admins import AdminCaller as ChannelAdminCaller",
+    )
     old = types.ModuleType(f"{module_name}_base")
     old.__package__ = current.__package__
     sys.modules[old.__name__] = old
