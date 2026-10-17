@@ -80,7 +80,6 @@ async def remove_repo_impl(
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = account.role == Role.ADMIN and auth.is_admin
-        lookups = runtime.group_lookups
         manages = is_admin or await requester_manages_agent(
             session,
             tenant_id=auth.tenant_id,
@@ -92,14 +91,9 @@ async def remove_repo_impl(
             ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            members=(
-                lookups.live_members(auth.platform, auth.external_id)
-                if lookups is not None and auth.external_id is not None
-                else None
-            ),
         )
         if not manages:
-            raise ToolError("Ask a server admin or an admin for this agent's channels.")
+            raise ToolError("Ask a server admin.")
         if requested.endswith("/*"):
             if not await remove_owner_grants(
                 session, tenant_id=auth.tenant_id, agent_id=agent_id, owner_login=requested[:-2]

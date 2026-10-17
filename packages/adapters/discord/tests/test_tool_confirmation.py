@@ -17,8 +17,7 @@ from daimon.adapters.discord.tool_confirmation import (
     build_confirmation_view,
     discord_confirmation_hook,
 )
-from daimon.core.authz import Subject, build_subject
-from daimon.core.config import reset_channel_admins_enabled
+from daimon.core.authz import Subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
@@ -32,11 +31,7 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_card,
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
-from daimon.core.stores import agent_tool_rules
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.tool_safety import ToolCall
-from daimon.testing.factories import make_tenant
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def _prompt(*, expires_in: timedelta = timedelta(minutes=10)) -> ConfirmationPrompt:
@@ -264,121 +259,6 @@ async def test_always_button_refuses_requester_without_admin_rights(
     assert click.response.defer.await_count == 1
     assert not answer.done()
     save.assert_not_awaited()
-
-
-async def test_disabled_former_holder_cannot_save_always_but_approve_once_works(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    reset_channel_admins_enabled()
-    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
-    tenant = await make_tenant(db_session)
-    await set_channel_admins(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        channel_id="home",
-        role_ids=[],
-        user_ids=["111"],
-        actor_account_id=None,
-    )
-    await db_session.commit()
-    prompt = _prompt().model_copy(
-        update={
-            "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=tenant.id,
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-                channel_id="home",
-            ),
-        }
-    )
-    try:
-        reset_channel_admins_enabled()
-        monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
-        answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
-        view = confirmation_module._ConfirmationView(
-            build_confirmation_card(
-                prompt, state="pending", token="tok_abcdefgh", allow_always=True
-            ),
-            prompt,
-            answer,
-            rule_factory=db_session_factory,
-            rule_subject=AsyncMock(
-                return_value=build_subject(
-                    is_admin=False,
-                    platform_user_id="111",
-                    administered_channel_ids={"home"},
-                )
-            ),
-        )
-        click = _interaction(111)
-        await view._on_always(click)
-        assert "Only an admin" in click.followup.send.await_args.args[0]
-        assert not answer.done()
-        async with db_session_factory() as session:
-            assert await agent_tool_rules.list_rules(session, tenant_id=tenant.id) == []
-        await view._on_approve(_interaction(111))
-        assert answer.result() == "approved"
-    finally:
-        reset_channel_admins_enabled()
-
-
-async def test_disabled_server_admin_always_saves_an_agent_wide_rule(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    reset_channel_admins_enabled()
-    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    prompt = _prompt().model_copy(
-        update={
-            "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=tenant.id,
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-                channel_id="home",
-            ),
-        }
-    )
-    try:
-        answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
-        view = confirmation_module._ConfirmationView(
-            build_confirmation_card(
-                prompt, state="pending", token="tok_abcdefgh", allow_always=True
-            ),
-            prompt,
-            answer,
-            rule_factory=db_session_factory,
-            rule_subject=AsyncMock(return_value=Subject(is_admin=True, platform_user_id="222")),
-        )
-        await view._on_always(_interaction(222))
-        assert answer.result() == "approved"
-        assert await drain_card_edits(1) == 0
-        async with db_session_factory() as session:
-            row = await agent_tool_rules.get_rule(
-                session, tenant_id=tenant.id, agent_id="ma-1", tool_key="linear/create_issue"
-            )
-            channel_row = await agent_tool_rules.get_rule(
-                session,
-                tenant_id=tenant.id,
-                agent_id="ma-1",
-                tool_key="linear/create_issue",
-                channel_id="home",
-            )
-        assert row is not None and row.rule == "allow" and row.set_by == "222"
-        assert channel_row is None
-    finally:
-        reset_channel_admins_enabled()
 
 
 async def test_always_defers_before_live_admin_check(monkeypatch: pytest.MonkeyPatch) -> None:

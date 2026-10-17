@@ -29,11 +29,6 @@ from daimon.adapters.mcp.tools._ctx import (
 from daimon.adapters.mcp.tools._pin_guard import (
     _trusted_credential,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.channel_admins import (
-    _clear_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
-    _list_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
-    _set_channel_admins_impl,  # pyright: ignore[reportPrivateUsage]
-)
 from daimon.adapters.mcp.tools.channel_rules import (
     _set_channel_rule_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -61,13 +56,11 @@ from daimon.core.promo_credit import PromoRedeemed, redeem_promo_code
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import promo_codes
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.direct_messages import DirectMessageRow, start_conversation
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token, revoke_mcp_token
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
-from daimon.core.tenant_summary import ChannelAdmins
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import (
     make_account,
@@ -139,66 +132,6 @@ def _identity(
         token_jti=jti,
         scopes=scopes,
     )
-
-
-async def test_tenant_summary_lists_configured_and_budgeted_channels(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
-    async with committing_sessionmaker.begin() as session:
-        await make_ledger_entry(session, tenant=tenant, delta_usd=Decimal("12.5"))
-        await make_tenant_config(session, tenant=tenant, agent_name="helper")
-        await set_fields(
-            session,
-            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"),
-            tenant_id=tenant.id,
-            environment_name="data-env",
-        )
-        await make_channel_budget(session, tenant=tenant, channel_id="c2", limit_usd=Decimal(5))
-
-    summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
-
-    assert (summary.balance_usd, summary.funding_mode, summary.default_agent) == (
-        "12.50",
-        tenant.funding_mode,
-        "helper",
-    ), "the tenant's balance, funding mode and default agent"
-    assert [
-        (c.channel_id, c.agent_name, c.environment_name, c.own_agents_only)
-        for c in summary.channels
-    ] == [("c1", "helper", "data-env", False), ("c2", "helper", "default-env", False)], (
-        "every configured or budgeted channel, with what resolves there"
-    )
-    assert summary.channels[0].budget is None, "c1 has no budget"
-    budget = summary.channels[1].budget
-    assert budget is not None and (budget.limit_usd, budget.window) == ("5.00", "monthly")
-    assert summary.channels[0].admins == ChannelAdmins(role_ids=[], user_ids=[])
-
-
-async def test_tenant_summary_lists_each_channels_admins(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """A channel with admins and nothing else is listed too."""
-    tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
-    async with committing_sessionmaker.begin() as session:
-        await make_channel_budget(session, tenant=tenant, channel_id="c1", limit_usd=Decimal(5))
-        await set_channel_admins(
-            session,
-            tenant_id=tenant.id,
-            platform=tenant.platform,
-            channel_id="c2",
-            role_ids=["r1"],
-            user_ids=["u2", "u1"],
-            actor_account_id=auth.account_id,
-        )
-
-    summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
-
-    assert [(c.channel_id, c.admins) for c in summary.channels] == [
-        ("c1", ChannelAdmins(role_ids=[], user_ids=[])),
-        ("c2", ChannelAdmins(role_ids=["r1"], user_ids=["u1", "u2"])),
-    ], "each channel carries its stored admins, none where nobody was named"
-    assert summary.channels[1].budget is None, "c2 is listed for its admins alone"
 
 
 async def test_tenant_summary_leaves_out_dm_channels(
@@ -314,7 +247,6 @@ async def test_tenant_summary_omits_readers_and_writers_and_lists_timed_credit(
         "agent_name",
         "environment_name",
         "own_agents_only",
-        "admins",
         "budget",
     }, "readers and writers are omitted, not sent as null, for a caller that can't read them"
     assert [(c.remaining_usd, c.ends_at) for c in summary.timed_credit] == [
@@ -371,22 +303,6 @@ async def test_agent_default_tools_refuse_the_workspace_default_for_operators(
         await _set_agent_default_impl(runtime, auth, "helper", None)
     with pytest.raises(ToolError, match="changes only a channel's default"):
         await _clear_agent_default_impl(runtime, auth, None)
-
-
-async def test_channel_admin_tools_require_their_scopes(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    runtime = _runtime(committing_sessionmaker)
-    _tenant, reader = await _operator(committing_sessionmaker, "tenant:read")
-    _tenant, writer = await _operator(committing_sessionmaker, "channels:write")
-    with pytest.raises(ToolError, match="does not have the channels:write scope"):
-        await _set_channel_admins_impl(
-            runtime, reader, channel_id="111111111111111111", role_ids=[], user_ids=[]
-        )
-    with pytest.raises(ToolError, match="does not have the channels:write scope"):
-        await _clear_channel_admins_impl(runtime, reader, channel_id="111111111111111111")
-    with pytest.raises(ToolError, match="does not have the tenant:read scope"):
-        await _list_channel_admins_impl(runtime, writer)
 
 
 async def test_server_admin_cannot_create_promo_codes(
@@ -539,3 +455,33 @@ async def test_admit_bills_an_operator_token(
     operator = await _verified_operator_identity(sessionmaker)
     with pytest.raises(ToolError, match="credit is depleted"):
         await _admit(operator, sessionmaker=sessionmaker, billing_config=None, tool_name="ask")
+
+
+async def test_tenant_summary_lists_configured_and_budgeted_channels(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, auth = await _operator(committing_sessionmaker, "tenant:read")
+    async with committing_sessionmaker.begin() as session:
+        await make_ledger_entry(session, tenant=tenant, delta_usd=Decimal("12.5"))
+        await make_tenant_config(session, tenant=tenant, agent_name="helper")
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"),
+            tenant_id=tenant.id,
+            environment_name="data-env",
+        )
+        await make_channel_budget(session, tenant=tenant, channel_id="c2", limit_usd=Decimal(5))
+
+    summary = await _get_tenant_summary_impl(_runtime(committing_sessionmaker), auth)
+    assert (summary.balance_usd, summary.funding_mode, summary.default_agent) == (
+        "12.50",
+        tenant.funding_mode,
+        "helper",
+    )
+    assert [
+        (c.channel_id, c.agent_name, c.environment_name, c.own_agents_only)
+        for c in summary.channels
+    ] == [("c1", "helper", "data-env", False), ("c2", "helper", "default-env", False)]
+    assert summary.channels[0].budget is None
+    budget = summary.channels[1].budget
+    assert budget is not None and (budget.limit_usd, budget.window) == ("5.00", "monthly")

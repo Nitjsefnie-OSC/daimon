@@ -67,6 +67,10 @@ from daimon.core.github_installation_reconcile import (
     drain_github_installation_reconciliations,
 )
 from daimon.core.github_link_refresh import refresh_expiring_links
+from daimon.core.github_requester_access import (
+    drain_detached_refreshes,
+    settle_detached_refreshes,
+)
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
@@ -743,7 +747,12 @@ _GITHUB_LINK_REFRESH_INTERVAL_S = 3600.0
 _GITHUB_LINK_REFRESH_DEADLINE_S = 120.0
 # How long shutdown waits for a sweep to finish its current person before it
 # cancels the sweep as a last resort. The refresh's own persistence survives that.
-_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S = 60.0
+# Grace plus drain stays inside the worker's 90 s stop_grace_period.
+_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S = 30.0
+# After the sweep is cancelled, how long shutdown waits for refreshes still
+# running detached from it to store their rotated tokens, before the HTTP
+# clients close and the engine is disposed.
+_GITHUB_LINK_REFRESH_DRAIN_S = 30.0
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
 # A turn running continuously for longer than this is treated as abandoned and
@@ -1244,7 +1253,7 @@ async def run(
         await _anthropic_factory(settings)
         if _anthropic_factory is not None
         else AsyncAnthropic(
-            api_key=settings.anthropic.api_key.get_secret_value(),
+            api_key=settings.anthropic.resolved_api_key(),
             base_url=str(settings.anthropic.base_url),
             max_retries=MA_MAX_RETRIES,
             http_client=DefaultAsyncHttpxClient(
@@ -1406,6 +1415,10 @@ async def run(
         return 0
     finally:
         await link_refresh_flight.aclose()
+        # A refresh detached from the cancelled sweep must store its rotated
+        # tokens before the clients close and the engine is disposed.
+        if await drain_detached_refreshes(_GITHUB_LINK_REFRESH_DRAIN_S):
+            log.warning("scheduler.github_link_refresh.drain_timed_out")
         await dispatcher.close()
         health_server.close()
         await health_server.wait_closed()
@@ -1523,7 +1536,12 @@ async def _run_github_link_refresh(
 ) -> None:
     """One sweep: it stops starting new people at its budget or on `should_stop`."""
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http_client:
+        async with (
+            httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http_client,
+            # A cancel mid-refresh leaves the refresh running detached; it needs
+            # this client until it stores GitHub's answer.
+            settle_detached_refreshes(_GITHUB_LINK_REFRESH_DRAIN_S),
+        ):
             counts = await refresh_expiring_links(
                 sm,
                 http_client,

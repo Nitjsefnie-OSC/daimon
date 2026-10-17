@@ -3169,6 +3169,84 @@ async def test_link_refresh_in_the_background_does_not_block_the_tick(
     assert not flight.running()
 
 
+async def test_shutdown_cancels_the_sweep_then_drains_before_the_client_and_engine_go(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Production order: cancel the sweep mid-call, drain, then close; the rotation is stored."""
+    from daimon.adapters.scheduler import main as scheduler_main
+    from daimon.core._models import GitHubUserLink
+    from daimon.core.github_credentials import decrypt_token, encrypt_token
+    from daimon.core.github_requester_access import drain_detached_refreshes
+    from daimon.core.stores import github_links
+
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as session:
+        session.add(
+            GitHubUserLink(
+                github_user_id=8801,
+                login="user8801",
+                encrypted_access_token=encrypt_token(fernet, "access-8801"),
+                encrypted_refresh_token=encrypt_token(fernet, "refresh-8801"),
+                access_expires_at=now + timedelta(hours=5),
+                refresh_expires_at=now + timedelta(days=1),
+                status="active",
+            )
+        )
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+    closed: list[bool] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        in_flight.set()
+        await release.wait()
+        if closed:
+            raise httpx.ConnectError("the client was closed under the refresh")
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "rotated-access",
+                "refresh_token": "rotated-refresh",
+                "expires_in": 28800,
+                "refresh_token_expires_in": 15897600,
+            },
+        )
+
+    real_client = httpx.AsyncClient
+
+    class RecordingClient(real_client):  # type: ignore[valid-type, misc]
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(transport=httpx.MockTransport(handler))
+
+        async def __aexit__(self, *args: object) -> None:
+            closed.append(True)
+            await super().__aexit__(*args)  # type: ignore[arg-type]
+
+    flight = scheduler_main._SingleFlight()  # pyright: ignore[reportPrivateUsage]
+    with unittest.mock.patch.object(scheduler_main.httpx, "AsyncClient", RecordingClient):
+        assert flight.start(
+            lambda: scheduler_main._run_github_link_refresh(  # pyright: ignore[reportPrivateUsage]
+                sm=db_session_factory,
+                fernet=fernet,
+                client_id="client",
+                client_secret="secret",
+                backoff={},
+            )
+        )
+        await asyncio.wait_for(in_flight.wait(), timeout=5)
+        # GitHub answers a moment after shutdown cancels the sweep.
+        asyncio.get_running_loop().call_later(0.2, release.set)
+        await flight.aclose(grace_s=0.05)
+        assert await drain_detached_refreshes(5) == 0
+    assert closed == [True]
+    async with db_session_factory() as session:
+        row = await github_links.get_user(session, github_user_id=8801)
+    assert row is not None and row.encrypted_refresh_token is not None
+    assert row.token_generation == 2
+    assert decrypt_token(fernet, row.encrypted_access_token) == "rotated-access"
+    assert decrypt_token(fernet, row.encrypted_refresh_token) == "rotated-refresh"
+
+
 async def test_link_refresh_runs_one_sweep_at_a_time_and_keeps_the_hour_when_skipped(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

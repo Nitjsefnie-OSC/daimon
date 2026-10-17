@@ -11,7 +11,6 @@ who answers everywhere else is untouched. But the thread then runs as the
 destination, with its repo, keys, connectors and memory, so a member may only
 hand a thread to an agent of this channel: the one it answers with, one pinned
 to it, or one of an isolated channel's own agents. Bringing in any other agent
-is a server or channel admin's call, and an agent an operator pinned to other
 channels can't be brought in at all. `daimon.core.thread_handoff` decides and
 writes the switch under the tenant policy lock.
 """
@@ -29,7 +28,6 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.authz import Action, build_agent_ref
-from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.continuity.continuation import (
     MAX_REQUESTED_WORK,
     ContinuationRequest,
@@ -44,6 +42,7 @@ from daimon.core.continuity.tool_messages import (
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.native_admins import AdminCaller
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ChatPlatform
@@ -194,20 +193,8 @@ async def _hand_off_task_impl(
         )
     )
 
-    # The live sessions' recorded seals, read before any lock: a channel
-    # admin's switch is decided on them, and queued work only reaches a
-    # destination that could read the caller's session from here.
-    channel_admin = ChannelAdminCaller(
-        platform_user_id=auth.platform_user_id,
-        role_ids=frozenset(auth.platform_role_ids),
-        is_server_admin=auth.is_admin,
-    )
-    administered: frozenset[str] = frozenset()
-    if not auth.is_admin:
-        async with runtime.session_factory() as session:
-            administered = await load_administered_channel_ids(
-                session, tenant_id=auth.tenant_id, platform=platform, caller=channel_admin
-            )
+    # Queued work reaches only a destination that can read the caller's session.
+    admin = AdminCaller(platform_user_id=auth.platform_user_id, is_server_admin=auth.is_admin)
     recorded = (
         await recorded_thread_sessions(
             runtime.client,
@@ -216,7 +203,7 @@ async def _hand_off_task_impl(
             platform=platform,
             thread_id=origin.thread_id,
         )
-        if request is not None or origin.parent_channel_id in administered
+        if request is not None
         else None
     )
     handoff_destination = HandoffDestination(
@@ -242,7 +229,7 @@ async def _hand_off_task_impl(
                 thread_id=origin.thread_id,
                 caller=HandoffCaller(
                     account_id=auth.account_id,
-                    channel_admin=channel_admin,
+                    admin=admin,
                     via_agent_key=auth.agent_id is not None,
                 ),
                 destination=handoff_destination,
@@ -341,8 +328,7 @@ def _refusal_text(refusal: HandoffRefused, *, channel: str) -> str:
                 f"{refusal.destination_name} is not one of this channel's agents (the one "
                 "it answers with, or one whose agent rule names it), and handing a conversation to "
                 "another agent brings its repository, keys and connectors here, so only "
-                "a server admin can do it, or a channel admin of this channel when the agent "
-                "is one of their own that answers only in their channels.",
+                "a server admin can do it.",
                 "Tell the caller an admin can make the handoff, or ask in one of that "
                 "agent's own channels.",
                 "Nothing was changed. Do not retry.",
@@ -426,7 +412,7 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         changes who answers a channel; neither does this. The destination must
         already answer in this workspace. A member may hand only to an agent of
         this channel (the one it answers with, or one pinned to it); any other
-        needs a server admin or a channel admin of this channel.
+        needs a server admin.
 
         From the next message here, that agent answers, with its own keys,
         connections and memory; conversation, decisions and files move with the

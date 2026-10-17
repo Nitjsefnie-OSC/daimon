@@ -14,6 +14,7 @@ import discord
 import httpx
 import pytest
 import pytest_asyncio
+import structlog
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.oauth_github_personal import build_personal_link_routes
@@ -21,7 +22,6 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import github_connect as connect_tool
 from daimon.adapters.mcp.tools import github_linked_grant as linked
 from daimon.adapters.mcp.tools import github_linked_pending as linked_pending
-from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -35,13 +35,7 @@ from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import github_access
-from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_role
-from daimon.core.stores.channel_admins import (
-    delete_channel_admins,
-    list_channel_admins,
-    set_channel_admins,
-)
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
     SecondInstallationError,
@@ -89,6 +83,7 @@ def github_http(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         repo_visible=True,
         refresh_fail=False,
         installation_suspended=False,
+        installation_detail_status=None,
         second_installation=False,
         during_repo_get=None,
     )
@@ -168,6 +163,8 @@ def github_http(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
                 },
             )
         if request.url.path == "/app/installations/201":
+            if state.installation_detail_status is not None:
+                return httpx.Response(state.installation_detail_status)
             return httpx.Response(
                 200,
                 json={
@@ -1788,7 +1785,6 @@ def _locked_manages_now(setup_linked, *, before_read=None):
             ma_agent_id="ma_agent",
             default=DeploymentDefault(),
             is_daimon_managed=False,
-            members=None,
             lock_authority=True,
         )
 
@@ -1949,110 +1945,6 @@ async def test_resume_demotion_after_the_first_select_changes_nothing(
     assert await _count_pending(setup_linked) == 0
 
 
-@pytest.mark.asyncio
-async def test_channel_admin_grant_removed_after_the_snapshot_fails_the_recheck(
-    setup_linked,
-) -> None:
-    """Channel admin grants confer authority too, so the recheck locks them."""
-    async with setup_linked.sessionmaker.begin() as session:
-        tenant = setup_linked.tenant
-        member = await make_account(session, tenant=tenant)
-        await make_platform_principal(
-            session, platform="discord", external_id="helper", tenant=tenant, account=member
-        )
-        await set_channel_admins(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id="123",
-            role_ids=[],
-            user_ids=["helper"],
-            actor_account_id=None,
-        )
-
-    async def recheck(session: AsyncSession) -> bool:
-        return await requester_manages_agent(
-            session,
-            tenant_id=setup_linked.tenant.id,
-            account_id=member.id,
-            platform="discord",
-            platform_user_id="helper",
-            agent_name="Agent",
-            ma_agent_id="ma_agent",
-            default=DeploymentDefault(),
-            is_daimon_managed=False,
-            members=None,
-            lock_authority=True,
-        )
-
-    async def remove_grant() -> None:
-        async with setup_linked.sessionmaker.begin() as other:
-            await delete_channel_admins(
-                other, tenant_id=setup_linked.tenant.id, platform="discord", channel_id="123"
-            )
-
-    with pytest.raises(DBAPIError) as raised:
-        async with setup_linked.sessionmaker.begin() as session:
-            await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-            await session.execute(text("SELECT 1"))
-            await remove_grant()
-            await recheck(session)
-    assert getattr(raised.value.orig, "sqlstate", None) == "40001"
-    # Control: an unlocked read in the same position still sees the removed grant.
-    async with setup_linked.sessionmaker.begin() as other:
-        await set_channel_admins(
-            other,
-            tenant_id=setup_linked.tenant.id,
-            platform="discord",
-            channel_id="123",
-            role_ids=[],
-            user_ids=["helper"],
-            actor_account_id=None,
-        )
-    async with setup_linked.sessionmaker.begin() as session:
-        await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-        await session.execute(text("SELECT 1"))
-        await remove_grant()
-        assert (
-            len(
-                await list_channel_admins(
-                    session, tenant_id=setup_linked.tenant.id, platform="discord"
-                )
-            )
-            == 1
-        )
-
-
-async def _hold_agent_by_policy_rule(setup_linked, *, channel_id: str = "123") -> None:
-    """Make the requester a channel admin whose channel an agent rule limits the agent to."""
-    async with setup_linked.sessionmaker.begin() as session:
-        await set_channel_admins(
-            session,
-            tenant_id=setup_linked.tenant.id,
-            platform="discord",
-            channel_id=channel_id,
-            role_ids=[],
-            user_ids=["person"],
-            actor_account_id=None,
-        )
-        await set_access_policy(
-            session,
-            tenant_id=setup_linked.tenant.id,
-            policy=TenantAccessPolicy(agent_rules={"Agent": AgentRule(runs_in=(channel_id,))}),
-        )
-        await set_role(session, setup_linked.account.id, Role.USER)
-
-
-async def _move_agent_rule(sessionmaker: async_sessionmaker[AsyncSession], setup_linked) -> None:
-    """Another session limits the agent to a channel the requester does not administer."""
-    async with sessionmaker.begin() as session:
-        await set_access_policy(
-            session,
-            tenant_id=setup_linked.tenant.id,
-            policy=TenantAccessPolicy(agent_rules={"Agent": AgentRule(runs_in=("999",))}),
-        )
-
-
 @pytest_asyncio.fixture
 async def other_db(db_engine, db_schema):
     """A second connection pool, so a held-open grant transaction cannot block a writer."""
@@ -2061,92 +1953,6 @@ async def other_db(db_engine, db_schema):
     )
     yield async_sessionmaker(bind=engine, expire_on_commit=False)
     await engine.dispose()
-
-
-def _recheck(setup_linked, *, lock_authority: bool):
-    async def recheck(session: AsyncSession) -> bool:
-        return await requester_manages_agent(
-            session,
-            tenant_id=setup_linked.tenant.id,
-            account_id=setup_linked.account.id,
-            platform="discord",
-            platform_user_id="person",
-            agent_name="Agent",
-            ma_agent_id="ma_agent",
-            default=DeploymentDefault(),
-            is_daimon_managed=False,
-            members=None,
-            lock_authority=lock_authority,
-        )
-
-    return recheck
-
-
-@pytest.mark.asyncio
-async def test_agent_rule_changed_after_the_snapshot_fails_the_locked_recheck(
-    setup_linked, other_db
-) -> None:
-    """The access policy rule is what makes a channel admin hold the agent, so it is locked."""
-    await _hold_agent_by_policy_rule(setup_linked)
-    async with setup_linked.sessionmaker.begin() as session:
-        assert await _recheck(setup_linked, lock_authority=True)(session)
-
-    with pytest.raises(DBAPIError) as raised:
-        async with setup_linked.sessionmaker.begin() as session:
-            await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-            await session.execute(text("SELECT 1"))
-            await _move_agent_rule(other_db, setup_linked)
-            await _recheck(setup_linked, lock_authority=True)(session)
-    assert getattr(raised.value.orig, "sqlstate", None) == "40001"
-
-
-@pytest.mark.asyncio
-async def test_unlocked_recheck_misses_an_agent_rule_changed_after_the_snapshot(
-    setup_linked, other_db
-) -> None:
-    """Control: without the lock the old rule is still read, so authority outlives its removal."""
-    await _hold_agent_by_policy_rule(setup_linked)
-    async with setup_linked.sessionmaker.begin() as session:
-        await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-        await session.execute(text("SELECT 1"))
-        await _move_agent_rule(other_db, setup_linked)
-        assert await _recheck(setup_linked, lock_authority=False)(session)
-    async with setup_linked.sessionmaker.begin() as session:
-        assert not await _recheck(setup_linked, lock_authority=True)(session)
-
-
-@pytest.mark.asyncio
-async def test_agent_rule_removed_after_the_snapshot_changes_nothing_in_the_grant(
-    setup_linked, other_db, github_http
-) -> None:
-    """The grant reaches its recheck, the rule is gone: 40001, so no grant is saved."""
-    await _hold_agent_by_policy_rule(setup_linked)
-    await _narrow_owner_installation(setup_linked)
-    recheck = _recheck(setup_linked, lock_authority=True)
-
-    async def manages_now(session: AsyncSession) -> bool:
-        await _move_agent_rule(other_db, setup_linked)
-        return await recheck(session)
-
-    for repo_name in ("acme/widgets", "acme/*"):
-        with pytest.raises(DBAPIError) as raised:
-            await _linked_grant_with(setup_linked, manages_now, repo_name=repo_name)
-        assert getattr(raised.value.orig, "sqlstate", None) == "40001"
-        assert await _grant_count(setup_linked) == 0
-        # The writer committed, so put the rule back for the next shape.
-        async with setup_linked.sessionmaker.begin() as session:
-            await set_access_policy(
-                session,
-                tenant_id=setup_linked.tenant.id,
-                policy=TenantAccessPolicy(agent_rules={"Agent": AgentRule(runs_in=("123",))}),
-            )
-    async with setup_linked.sessionmaker() as session:
-        assert (
-            await list_owner_grants(
-                session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
-            )
-            == []
-        )
 
 
 @pytest.mark.asyncio
@@ -2878,9 +2684,96 @@ def test_the_lease_and_deadline_fit_inside_the_garbage_window() -> None:
     from daimon.core.stores import github_linked_pending as store
 
     assert (
-        store.PER_REQUEST_DEADLINE + store.FAILURE_DELIVERY_DEADLINE + store.CLAIM_LEASE
+        store.PER_REQUEST_DEADLINE
+        + store.FAILURE_DELIVERY_DEADLINE
+        + 2 * store.DB_STATEMENT_DEADLINE
+        + store.CLAIM_LEASE
         < store.CLAIMED_GARBAGE_AFTER
     )
+
+
+@pytest.mark.asyncio
+async def test_a_statement_timeout_on_the_heartbeat_fails_that_request_and_stops_the_batch(
+    setup_linked, other_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real lock wait past `lock_timeout` ends the heartbeat and the batch."""
+    from daimon.core.stores import github_linked_pending as store
+
+    await _save_request(setup_linked, thread_id="t1")
+    await _save_request(setup_linked, thread_id="t2")
+    monkeypatch.setattr(store, "DB_STATEMENT_DEADLINE", timedelta(milliseconds=200))
+    monkeypatch.setattr(linked_pending, "DB_STATEMENT_DEADLINE", timedelta(milliseconds=200))
+    holder = other_db.begin()
+    held: list[AsyncSession] = []
+    real_take = linked_pending._take_pending
+
+    async def take_then_lock(*args, **kwargs):
+        rows = await real_take(*args, **kwargs)
+        # Another transaction now holds the first row: the heartbeat's UPDATE waits on it.
+        held.append(await holder.__aenter__())
+        await held[0].execute(
+            text("SELECT 1 FROM github_linked_connect_pending WHERE thread_id = 't1' FOR UPDATE")
+        )
+        return rows
+
+    async def deliver(runtime, row, message) -> None:
+        if holder_open:
+            holder_open.clear()
+            await holder.__aexit__(None, None, None)
+
+    holder_open = [True]
+    delivery = AsyncMock(side_effect=deliver)
+    monkeypatch.setattr(linked_pending, "_take_pending", take_then_lock)
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+
+    async def outcome(runtime, row, **_kwargs) -> str:
+        return f"answered {row.thread_id}"
+
+    monkeypatch.setattr(linked_pending, "_outcome_message", outcome)
+    try:
+        result = await asyncio.wait_for(
+            linked_pending.resume_pending(_runtime(setup_linked), **_pending_scope(setup_linked)),
+            timeout=15,
+        )
+    finally:
+        if holder_open:
+            await holder.__aexit__(None, None, None)
+    assert result == [linked_pending.FAILED_MESSAGE]
+    assert [(c.args[1].thread_id, c.args[2]) for c in delivery.await_args_list] == [
+        ("t1", linked_pending.FAILED_MESSAGE),
+    ]
+    # Neither request is resolved (the database was not answering): both stay
+    # claimed until their lease lapses, then a later take runs them again.
+    assert await _pending_threads(setup_linked) == ["t1", "t2"]
+
+
+@pytest.mark.asyncio
+async def test_a_resolve_that_times_out_does_not_stop_the_batch(
+    setup_linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    await _save_request(setup_linked, thread_id="t2")
+    monkeypatch.setattr(linked_pending, "_deliver_result", AsyncMock())
+    real_resolve = linked_pending._resolve_pending
+    calls: list[str] = []
+
+    async def resolve(runtime, row) -> bool:
+        calls.append(row.thread_id)
+        if row.thread_id == "t1":
+            raise TimeoutError
+        return await real_resolve(runtime, row)
+
+    async def outcome(runtime, row, **_kwargs) -> str:
+        return f"answered {row.thread_id}"
+
+    monkeypatch.setattr(linked_pending, "_resolve_pending", resolve)
+    monkeypatch.setattr(linked_pending, "_outcome_message", outcome)
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked), **_pending_scope(setup_linked)
+    )
+    assert result == ["answered t1", "answered t2"]
+    assert calls == ["t1", "t2"]
+    assert await _pending_threads(setup_linked) == ["t1"]
 
 
 # --- app_unusable: the app is installed but cannot be used ---------------------
@@ -2916,6 +2809,61 @@ async def test_an_unusable_app_is_reported_by_the_grant_on_both_paths(
     two_orgs.installation_suspended = True
     result = await setup_linked.grant(repo_name=repo_name)
     assert (result.status, result.message) == ("app_unusable", _APP_UNUSABLE_ACME)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo_name", ["acme/widgets", "acme/*"])
+@pytest.mark.parametrize("status", [403, 404])
+async def test_a_refused_installation_lookup_is_an_unusable_app(
+    setup_linked, two_orgs, repo_name: str, status: int
+) -> None:
+    two_orgs.installation_detail_status = status
+    result = await setup_linked.grant(repo_name=repo_name)
+    assert (result.status, result.message) == ("app_unusable", _APP_UNUSABLE_ACME)
+    assert await _grant_count(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo_name", ["acme/widgets", "acme/*"])
+@pytest.mark.parametrize("status", [401, 500, 502])
+async def test_an_installation_lookup_that_fails_is_github_not_answering_never_a_relink(
+    setup_linked, two_orgs, repo_name: str, status: int
+) -> None:
+    """A 401 on the App's own JWT is Daimon's credential, not the person's link."""
+    two_orgs.installation_detail_status = status
+    with structlog.testing.capture_logs() as logs:
+        result = await setup_linked.grant(repo_name=repo_name)
+    assert (result.status, result.message) == (
+        "changed_try_again",
+        "GitHub didn't answer.\nAsk again in chat.",
+    )
+    assert result.status != "relink" and linked.RELINK_MESSAGE not in result.message
+    assert await _grant_count(setup_linked) == 0
+    [failure] = [
+        entry
+        for entry in logs
+        if entry["event"] == "github.linked_grant.installation_detail_failed"
+    ]
+    assert failure["status_code"] == status
+    assert failure["app_credential_rejected"] is (status == 401)
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_installation_lookup_is_not_an_unusable_app(
+    setup_linked, two_orgs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def limited(*_args: object, **_kwargs: object) -> None:
+        request = httpx.Request("GET", "https://api.github.com/app/installations/201")
+        raise httpx.HTTPStatusError(
+            "limited",
+            request=request,
+            response=httpx.Response(403, headers={"x-ratelimit-remaining": "0"}, request=request),
+        )
+
+    monkeypatch.setattr(linked, "get_app_installation_details", limited)
+    result = await setup_linked.grant(repo_name="acme/widgets")
+    assert result.status == "changed_try_again"
+    assert result.message == "GitHub didn't answer.\nAsk again in chat."
 
 
 @pytest.mark.asyncio

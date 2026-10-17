@@ -31,7 +31,6 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import github_access, github_app_installations
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_connect import digest, get_invitation
 from daimon.testing.factories import make_account, make_tenant
@@ -160,6 +159,41 @@ async def test_connected_repo_is_granted_immediately_in_chat(
             session, tenant_id=tenant.id, agent_id=agent_id
         )
         assert (grant.baseline_access, grant.ceiling_access) == ("read", "read")
+    # A server-wide repo of another org is refused with the approved copy, as a
+    # result and not as a raw error.
+    async with committing_sessionmaker.begin() as session:
+        await github_app_installations.upsert(
+            session,
+            installation_id=98766,
+            account_login="second",
+            repo_full_names=["second/repo"],
+        )
+        await session.execute(
+            text(
+                "INSERT INTO tenant_github_repos "
+                "(tenant_id, repo_id, scope_agent_id, owner_id, installation_id, "
+                "repo_full_name, max_access, authorized_by_github_user_id, "
+                "authorized_by_account_id) "
+                "VALUES (:tenant, 12347, NULL, 13, 98766, 'second/repo', "
+                "'write', 17, :account)"
+            ),
+            {"tenant": tenant.id, "account": account.id},
+        )
+    other = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(uuid.uuid4()), repo_name="second/repo"
+    )
+    assert other.status == "other_installation"
+    assert other.message == (
+        "Agent already has repos from owner.\n"
+        "An agent uses one GitHub account or org at a time. To switch, remove the owner repos first."
+    )
+    async with committing_sessionmaker() as session:
+        assert [
+            grant.repo_id
+            for grant in await github_access.list_agent_grants(
+                session, tenant_id=tenant.id, agent_id=agent_id
+            )
+        ] == [12345]
     missing = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime,
         auth,
@@ -172,66 +206,7 @@ async def test_connected_repo_is_granted_immediately_in_chat(
     assert "I can't see owner/missing yet." in missing.message
     assert "Add repos" not in missing.message
     delivery.assert_awaited_once()
-    other_agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ma_other")
     async with committing_sessionmaker.begin() as session:
-        channel_account = await make_account(session, tenant=tenant)
-        await set_channel_admins(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id="channel",
-            role_ids=[],
-            user_ids=["channel-admin"],
-            actor_account_id=None,
-        )
-        await set_access_policy(
-            session,
-            tenant_id=tenant.id,
-            policy=TenantAccessPolicy.model_validate(
-                {"agent_rules": {"Agent": {"runs_in": ["channel"]}}}
-            ),
-        )
-        await github_app_installations.upsert(
-            session,
-            installation_id=98765,
-            account_login="owner",
-            repo_full_names=["owner/repo", "owner/foreign"],
-        )
-        await session.execute(
-            text(
-                "INSERT INTO tenant_github_repos "
-                "(tenant_id, repo_id, scope_agent_id, owner_id, installation_id, "
-                "repo_full_name, max_access, authorized_by_github_user_id, "
-                "authorized_by_account_id) VALUES "
-                "(:tenant, 12346, :agent, 12, 98765, 'owner/foreign', 'read', 17, :account)"
-            ),
-            {"tenant": tenant.id, "agent": other_agent_id, "account": account.id},
-        )
-    channel_auth = AuthIdentity(
-        account_id=channel_account.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="discord",
-        external_id="workspace",
-        platform_user_id="channel-admin",
-    )
-    foreign = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime, channel_auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/foreign"
-    )
-    assert foreign.status == "client_agent"
-    assert foreign.message == (
-        "This agent only works in some channels, so it can't use the server's shared repos.\n"
-        "Ask whoever runs Daimon for this server to connect repos for it."
-    )
-    async with committing_sessionmaker() as session:
-        assert all(
-            grant.repo_id != 12346
-            for grant in await github_access.list_agent_grants(
-                session, tenant_id=tenant.id, agent_id=agent_id
-            )
-        )
-    async with committing_sessionmaker.begin() as session:
-        await set_access_policy(session, tenant_id=tenant.id, policy=TenantAccessPolicy())
         await session.execute(
             text("""
             UPDATE github_app_installations SET github_repo_full_names = ARRAY[]::text[]
@@ -469,96 +444,6 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
     )
     assert pinned.status == "sent"
     delivery.assert_awaited_once()
-
-    # So may a channel admin of the only channel it runs in, who is not a server admin.
-    async with committing_sessionmaker.begin() as session:
-        channel_admin = await make_account(session, tenant=tenant)
-        await set_channel_admins(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id="client-channel",
-            role_ids=[],
-            user_ids=["777"],
-            actor_account_id=None,
-        )
-    delivery.reset_mock()
-    channel_admin_auth = AuthIdentity(
-        account_id=channel_admin.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="discord",
-        external_id="workspace",
-        platform_user_id="777",
-        is_admin=False,
-    )
-    own = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime, channel_admin_auth, origin_context_id=str(uuid.uuid4())
-    )
-    assert own.status == "sent"
-    allowed = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime,
-        channel_admin_auth,
-        origin_context_id=str(uuid.uuid4()),
-        repo_name="owner/repo",
-    )
-    assert allowed.status == "sent"
-    assert "nothing is connected yet" in allowed.message
-    async with committing_sessionmaker.begin() as session:
-        await set_access_policy(
-            session,
-            tenant_id=tenant.id,
-            policy=TenantAccessPolicy.model_validate(
-                {"agent_rules": {"ConnectedBot": {"runs_in": ["other-channel"]}}}
-            ),
-        )
-    other_channel = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime,
-        channel_admin_auth,
-        origin_context_id=str(uuid.uuid4()),
-        repo_name="owner/repo",
-        confirmed=True,
-    )
-    assert other_channel.status == "ask_admin"
-    assert other_channel.message == (
-        "Only a server admin can give ConnectedBot repos.\n"
-        "Ask a server admin to say here: connect owner/repo to ConnectedBot."
-    )
-    async with committing_sessionmaker.begin() as session:
-        await set_access_policy(
-            session,
-            tenant_id=tenant.id,
-            policy=TenantAccessPolicy.model_validate(
-                {"agent_rules": {"ConnectedBot": {"runs_in": ["client-channel"]}}}
-            ),
-        )
-    assert delivery.await_args is not None
-    async with committing_sessionmaker() as session:
-        bound = (
-            await session.execute(
-                text(
-                    "SELECT requester_account_id, agent_ma_id "
-                    "FROM github_connect_click_intents WHERE id = :id"
-                ),
-                {"id": delivery.await_args.kwargs["intent_id"]},
-            )
-        ).one()
-        assert (bound.requester_account_id, bound.agent_ma_id) == (
-            channel_admin.id,
-            "agent_connected",
-        )
-    # A managed agent stays a server admin's.
-    agent.metadata = {"daimon_managed": "true"}
-    delivery.reset_mock()
-    managed = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime,
-        channel_admin_auth,
-        origin_context_id=str(uuid.uuid4()),
-        repo_name="owner/repo",
-    )
-    assert managed.status == "ask_admin"
-    assert managed.message == other_channel.message
-    delivery.assert_not_awaited()
 
 
 class _FakeTeams:

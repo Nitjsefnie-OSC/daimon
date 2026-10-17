@@ -40,9 +40,11 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
+    SecondInstallationError,
     is_concurrent_grant_change,
     list_agent_grants,
     list_authorized_repos,
+    other_installation_message,
     stage_grant,
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
@@ -266,7 +268,6 @@ async def _github_connect_impl(
 ) -> ConnectResult:
     if auth.platform not in ("discord", "slack", "teams") or auth.platform_user_id is None:
         raise ToolError("GitHub setup from chat is available in Discord, Slack and Teams.")
-    platform = auth.platform
     if auth.is_external:
         raise ToolError("GitHub setup is for members of this workspace.")
     root = runtime.settings.mcp.app_root_url
@@ -310,9 +311,8 @@ async def _github_connect_impl(
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = account.role == Role.ADMIN and auth.is_admin
-        # A channel admin may connect their own repos for an agent they manage,
-        # by their groups as the platform reports them now, not as cached.
-        lookups = runtime.group_lookups
+        # Whether the requester manages the agent by their stored role. The
+        # linked-grant path below needs this apart from the admin gate.
         policy_manages = await requester_manages_agent(
             session,
             tenant_id=auth.tenant_id,
@@ -324,11 +324,6 @@ async def _github_connect_impl(
             ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            members=(
-                lookups.live_members(auth.platform, auth.external_id)
-                if lookups is not None and auth.external_id is not None
-                else None
-            ),
         )
         manages = is_admin or policy_manages
         if not manages:
@@ -422,6 +417,11 @@ async def _github_connect_impl(
                             agent_id=agent_id,
                             repo_full_name=repo.repo_full_name,
                         )
+                    except SecondInstallationError as error:
+                        return ConnectResult(
+                            status="other_installation",
+                            message=other_installation_message(agent.name, error.org, error.kind),
+                        )
                     except ValueError as error:
                         raise ToolError(str(error)) from error
                     return ConnectResult(
@@ -452,11 +452,6 @@ async def _github_connect_impl(
                     ma_agent_id=str(agent.id),
                     default=runtime.deployment_default,
                     is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-                    members=(
-                        runtime.group_lookups.live_members(platform, auth.external_id)
-                        if runtime.group_lookups is not None and auth.external_id is not None
-                        else None
-                    ),
                     lock_authority=True,
                 )
 
@@ -609,10 +604,7 @@ async def _github_connect_impl(
             tool_name="github_connect",
             operation="github_connect",
             outcome="allowed",
-            reason=(
-                ("admin" if is_admin else "channel admin")
-                + (" connect button posted" if intent_id else " link minted")
-            ),
+            reason=("admin" + (" connect button posted" if intent_id else " link minted")),
         )
     try:
         if auth.platform == "discord":
@@ -707,8 +699,9 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ConnectResult:
         """Grant this agent owner/repo or all App-covered owner/* repositories.
 
-        Show a single-use connection button bound to the selected agent to a
-        server admin, or to a channel admin who manages that agent; repos
+        Use this when someone asks to let an agent read a private repository
+        at github.com/owner/repo. Show a single-use
+        connection button bound to the selected agent to a server admin; repos
         connected this way are for that agent only. Other members get Ask an
         admin and a recorded request. On Teams the card goes to the requester's
         1:1 chat. Never repeat a private link in a shared reply. For a setup

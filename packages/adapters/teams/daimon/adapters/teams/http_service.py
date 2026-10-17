@@ -28,7 +28,6 @@ from daimon.adapters.teams import (
 from daimon.adapters.teams.activity_feed import ActivityFeed, ChannelHomes
 from daimon.adapters.teams.app import DRAIN_GRACE_S, TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
-from daimon.adapters.teams.channel_admin_groups import fetch_team_owner_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.channel_settings import ChannelSettingsDialog
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
@@ -59,6 +58,7 @@ from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.adapters.teams.support import VERB as SUPPORT_VERB
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support import enabled as support_enabled
+from daimon.adapters.teams.team_owners import fetch_team_owner_ids
 from daimon.adapters.teams.thread_handoff import TeamsThreadHandoff
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.wizard import TeamsWizards

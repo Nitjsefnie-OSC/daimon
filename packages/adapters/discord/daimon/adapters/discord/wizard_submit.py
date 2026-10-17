@@ -77,7 +77,7 @@ from daimon.adapters.discord.bot import (
     _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
     admission_refusal_message,
 )
-from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
+from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.errors import (
     NOT_SET_UP_NOTICE,
     SETUP_OUT_OF_DATE_NOTICE,
@@ -491,9 +491,6 @@ async def run_wizard_submit_turn_observed(
                 thread_id=thread_id,
                 now=datetime.now(UTC),
                 role=Role.ADMIN if is_admin else Role.USER,
-                platform_role_ids=member_role_ids(author)
-                if isinstance(author, discord.Member)
-                else None,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
             )

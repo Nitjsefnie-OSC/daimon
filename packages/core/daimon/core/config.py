@@ -13,7 +13,6 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from functools import cache
 from pathlib import Path
 from typing import Annotated, Literal, cast
 from uuid import UUID
@@ -90,10 +89,22 @@ class DatabaseSettings(BaseModel):
     )
 
 
+ANTHROPIC_UNCONFIGURED_PLACEHOLDER = "sk-ant-unconfigured-openai-only-deployment"
+"""Never a valid credential. `AnthropicSettings.resolved_api_key()` returns
+this when no real key is configured, so every `AsyncAnthropic` client in the
+app can keep its existing non-optional constructor call: an OpenAI-only
+deployment that never exercises the Anthropic/default path never notices,
+and one that accidentally does gets a clean 401 instead of a crash at
+startup or a scattered `Optional` check at every call site."""
+
+
 class AnthropicSettings(BaseModel):
-    api_key: SecretStr = Field(
+    api_key: SecretStr | None = Field(
+        default=None,
         description=(
-            "Anthropic API key used to authenticate all Managed Agents SDK calls. Required."
+            "Anthropic API key used to authenticate all Managed Agents SDK calls. "
+            "Required unless this deployment is OpenAI-only (see docs/self-hosting.md's "
+            "'Self-host on OpenAI'), in which case leave it unset."
         ),
     )
     base_url: HttpUrl = Field(
@@ -112,6 +123,19 @@ class AnthropicSettings(BaseModel):
             "Other deployments in the same organization share that limit."
         ),
     )
+
+    def resolved_api_key(self) -> str:
+        """The real key, or a placeholder for an OpenAI-only deployment.
+
+        Never falls back to an ambient `ANTHROPIC_API_KEY`-style env var —
+        unset means unset, exactly like every other explicit credential in
+        this settings tree.
+        """
+        return (
+            self.api_key.get_secret_value()
+            if self.api_key is not None
+            else ANTHROPIC_UNCONFIGURED_PLACEHOLDER
+        )
 
 
 class CLISettings(BaseModel):
@@ -1515,52 +1539,7 @@ class FleetSettings(BaseModel):
     )
 
 
-class ChannelAdminsSettings(BaseModel):
-    enabled: bool = Field(
-        default=True,
-        description=(
-            "Enable channel admin grants. When false, only server or workspace admins "
-            "administer channels; grant rows are kept but ignored. Defaults to true for "
-            "self-hosted compatibility this release."
-        ),
-    )
-
-
-class _ChannelAdminsSettingsSource(BaseSettings):
-    channel_admins: ChannelAdminsSettings = Field(default_factory=ChannelAdminsSettings)
-
-    model_config = SettingsConfigDict(
-        env_prefix="DAIMON_", env_nested_delimiter="__", env_file=".env", extra="ignore"
-    )
-
-
-_primed_channel_admins_enabled: bool | None = None
-
-
-def prime_channel_admins_enabled(settings: Settings) -> None:
-    """Use the effective startup settings, including caller-supplied settings."""
-    global _primed_channel_admins_enabled
-    _primed_channel_admins_enabled = settings.channel_admins.enabled
-    channel_admins_enabled.cache_clear()
-
-
-def reset_channel_admins_enabled() -> None:
-    """Clear both startup and fallback state for tests."""
-    global _primed_channel_admins_enabled
-    _primed_channel_admins_enabled = None
-    channel_admins_enabled.cache_clear()
-
-
-@cache
-def channel_admins_enabled() -> bool:
-    """Use startup settings or read once as fallback; cutover requires a process restart."""
-    if _primed_channel_admins_enabled is not None:
-        return _primed_channel_admins_enabled
-    return _ChannelAdminsSettingsSource().channel_admins.enabled
-
-
 class Settings(BaseSettings):
-    channel_admins: ChannelAdminsSettings = Field(default_factory=ChannelAdminsSettings)
     security_audit_retention_days: int = Field(
         default=90,
         ge=0,
@@ -1589,7 +1568,7 @@ class Settings(BaseSettings):
         default_factory=dict[uuid.UUID, bool],
         description=(
             "Per-tenant switch for the channel budget notice, keyed by tenant UUID. "
-            "When a channel's budget is used up, its channel admins (else the server admins) "
+            "When a channel's budget is used up, the server admins "
             "get one DM per budget window on Discord, Slack and Teams. Missing/true sends it; "
             "false turns it off. Configure DAIMON_BUDGET_NOTICES as a JSON object."
         ),
@@ -1613,7 +1592,7 @@ class Settings(BaseSettings):
         ),
     )
     database: DatabaseSettings
-    anthropic: AnthropicSettings
+    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
     privacy_policy_url: HttpUrl = Field(
         default=HttpUrl("https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"),
         description=(
@@ -1708,7 +1687,6 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
     (`_env_file=None`) so they only see `monkeypatch.setenv` values.
     """
     settings = Settings(_env_file=_env_file)  # pyright: ignore[reportCallIssue]
-    prime_channel_admins_enabled(settings)
     if settings.turn.path == "mux" and settings.turn.channel_backends:
         from daimon.core.turn.runtime_manifest import validate_configured_runtime_manifest
 

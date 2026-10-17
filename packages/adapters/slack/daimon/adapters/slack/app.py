@@ -36,11 +36,6 @@ from daimon.adapters.slack.agent_setup.add_skill import (
     run_add_skill_submission,
 )
 from daimon.adapters.slack.agent_setup.avatar import evaluate_avatar_submission
-from daimon.adapters.slack.agent_setup.channel_admins import (
-    ChannelAdminsSubmission,
-    evaluate_channel_admins_submission,
-    run_channel_admins_submission,
-)
 from daimon.adapters.slack.agent_setup.channel_skills import (
     ChannelSkillsSubmission,
     evaluate_channel_skills_submission,
@@ -54,7 +49,6 @@ from daimon.adapters.slack.agent_setup.operator_tokens import (
 from daimon.adapters.slack.agent_setup.panel_views import (
     CALLBACK_ADD_SKILL,
     CALLBACK_AVATAR_UPLOAD,
-    CALLBACK_CHANNEL_ADMINS,
     CALLBACK_CHANNEL_SKILLS,
     CALLBACK_OPERATOR_MINT,
 )
@@ -88,7 +82,6 @@ from daimon.adapters.slack.boot_sweep import (
     snapshot_slack_card_intents,
 )
 from daimon.adapters.slack.budget_notice import with_budget_notifier
-from daimon.adapters.slack.channel_admin_groups import user_group_ids
 from daimon.adapters.slack.channel_reads import load_channel_read_policy
 from daimon.adapters.slack.context import (
     build_channel_context_xml,
@@ -281,7 +274,6 @@ from daimon.core.turn.thread_queue import (
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import (
     build_handoff_notice,
-    holds_current_channel_admin_grant,
     render_turn_origin,
     turn_origin,
 )
@@ -995,30 +987,6 @@ class SlackApp:
                             )
 
                     self._spawn(_run_redeem())
-            elif cb_id == CALLBACK_CHANNEL_ADMINS:
-                # Pure evaluate, then an empty ack closes the form over the
-                # routing view the background run refreshes.
-                _ca = evaluate_channel_admins_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id)
-                )
-                if _ca is not None:
-                    _ca_team: dict[str, Any] = payload.get("team") or {}
-                    _ca_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_channel_admins(
-                        *,
-                        _t: str = str(_ca_team.get("id") or ""),
-                        _u: str = str(_ca_user.get("id") or ""),
-                        _s: ChannelAdminsSubmission = _ca,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_channel_admins_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
-                            )
-
-                    self._spawn(_run_channel_admins())
             elif cb_id == CALLBACK_CHANNEL_SKILLS:
                 _cs = evaluate_channel_skills_submission(payload)
                 await client.send_socket_mode_response(
@@ -2116,13 +2084,6 @@ class SlackApp:
                 channel_id=channel,
                 thread_id=thread_id,
                 role=Role.ADMIN if is_admin else Role.USER,
-                platform_role_ids=()
-                if is_admin
-                else sorted(
-                    await user_group_ids(
-                        self.runtime, web_client, tenant_id=tenant_id, user_id=author_id
-                    )
-                ),
                 now=datetime.now(UTC),
             )
         except MissingTurnConfigError as err:
@@ -2742,7 +2703,6 @@ class SlackApp:
                         responder_handle=responder_handle(self.runtime.settings),
                         responder_account=account,
                         session_state=session_state,
-                        is_channel_admin=is_channel_admin,
                     )
                     + "\n"
                     + full_message
@@ -2827,14 +2787,7 @@ class SlackApp:
                     started_at=datetime.now(tz=UTC),
                 )
                 await s.commit()
-            is_channel_admin = await holds_current_channel_admin_grant(
-                self.runtime.sessionmaker,
-                tenant_id=tenant_id,
-                account_id=admission.account_id,
-                platform="slack",
-                parent_channel_id=channel,
-                role=Role.ADMIN if is_admin else Role.USER,
-            )
+
             try:
                 async with turn_origin(
                     self.runtime.sessionmaker,
@@ -2863,7 +2816,6 @@ class SlackApp:
                                 responder_handle=responder_handle(self.runtime.settings),
                                 responder_account=account,
                                 session_state=session_state,
-                                is_channel_admin=is_channel_admin,
                             )
                             + "\n"
                             + user_message
@@ -3153,16 +3105,6 @@ class SlackApp:
             channel_id=channel,
             thread_id=thread_id,
             role=role,
-            platform_role_ids=()
-            if role is Role.ADMIN
-            else sorted(
-                await user_group_ids(
-                    self.runtime,
-                    web_client,
-                    tenant_id=tenant_id,
-                    user_id=row.requester_external_user_id,
-                )
-            ),
             now=datetime.now(UTC),
             # A continuation owed to a private DM conversation is a DM turn:
             # outside every pin, with the DM memory rule.
@@ -3311,7 +3253,6 @@ class SlackApp:
                     responder_handle=responder_handle(self.runtime.settings),
                     responder_account=account,
                     handoff=handoff_notice,
-                    is_channel_admin=is_channel_admin,
                 )
                 + "\n"
                 + seed_user_message
@@ -3366,14 +3307,6 @@ class SlackApp:
                 )
             return new_lifecycle
 
-        is_channel_admin = await holds_current_channel_admin_grant(
-            self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            account_id=follow_admission.account_id,
-            platform="slack",
-            parent_channel_id=channel,
-            role=role,
-        )
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
@@ -3405,7 +3338,6 @@ class SlackApp:
                             responder_handle=responder_handle(self.runtime.settings),
                             responder_account=account,
                             handoff=handoff_notice,
-                            is_channel_admin=is_channel_admin,
                         )
                         + "\n"
                         + seed_user_message

@@ -16,7 +16,11 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
-from daimon.adapters.mcp.tools.github_linked_grant import CHANGED_MESSAGE, linked_grant
+from daimon.adapters.mcp.tools.github_linked_grant import (
+    CHANGED_MESSAGE,
+    GITHUB_DOWN_MESSAGE,
+    linked_grant,
+)
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
@@ -26,10 +30,12 @@ from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import is_concurrent_grant_change
 from daimon.core.stores.github_linked_pending import (
+    DB_STATEMENT_DEADLINE,
     FAILURE_DELIVERY_DEADLINE,
     PER_REQUEST_DEADLINE,
     ClaimLostError,
     PendingGrant,
+    bound_transaction,
     renew_claim,
     resolve,
     save,
@@ -42,7 +48,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _log = structlog.get_logger(__name__)
 
 AGENT_CHANGED_MESSAGE = "Agent access changed while you were linking.\nAsk again in chat."
-GITHUB_DOWN_MESSAGE = "GitHub didn't answer.\nAsk again in chat."
 FAILED_MESSAGE = "Something went wrong.\nAsk again."
 # The browser page shows "Ask again in chat" when every resumed request ended this way.
 REQUEST_CHANGED_MESSAGES = frozenset({AGENT_CHANGED_MESSAGE, CHANGED_MESSAGE})
@@ -89,26 +94,45 @@ async def _take_pending(
     platform: str,
     platform_user_id: str,
 ) -> list[PendingGrant]:
-    async with runtime.session_factory.begin() as session:
-        rows = await take(
-            session,
-            tenant_id=tenant_id,
-            account_id=account_id,
-            platform=platform,
-            platform_user_id=platform_user_id,
-        )
-        return rows
+    async with asyncio.timeout(DB_STATEMENT_DEADLINE.total_seconds()):
+        async with runtime.session_factory.begin() as session:
+            await bound_transaction(session)
+            return await take(
+                session,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                platform=platform,
+                platform_user_id=platform_user_id,
+            )
 
 
 async def _renew_claim(runtime: McpRuntime, claim_token: uuid.UUID | None) -> set[uuid.UUID]:
-    """Extend the lease of every request this callback still holds; return their ids."""
-    async with runtime.session_factory.begin() as session:
-        return await renew_claim(session, claim_token)
+    """Extend the lease of every request this callback still holds; return their ids.
+
+    Bounded by `DB_STATEMENT_DEADLINE`: a stalled database raises instead of
+    stopping the heartbeat silently.
+    """
+    async with asyncio.timeout(DB_STATEMENT_DEADLINE.total_seconds()):
+        async with runtime.session_factory.begin() as session:
+            await bound_transaction(session)
+            return await renew_claim(session, claim_token)
 
 
 async def _resolve_pending(runtime: McpRuntime, row: PendingGrant) -> bool:
-    async with runtime.session_factory.begin() as session:
-        return await resolve(session, row.id, row.claim_token)
+    async with asyncio.timeout(DB_STATEMENT_DEADLINE.total_seconds()):
+        async with runtime.session_factory.begin() as session:
+            await bound_transaction(session)
+            return await resolve(session, row.id, row.claim_token)
+
+
+async def _failure_line(runtime: McpRuntime, row: PendingGrant) -> str:
+    """Tell the thread this request failed, best effort and within its own deadline."""
+    try:
+        async with asyncio.timeout(FAILURE_DELIVERY_DEADLINE.total_seconds()):
+            await _deliver_result(runtime, row, FAILED_MESSAGE)
+    except Exception:
+        _log.warning("github.linked_resume.result_delivery_failed", request_id=str(row.id))
+    return FAILED_MESSAGE
 
 
 async def _deliver_result(runtime: McpRuntime, pending: PendingGrant, message: str) -> None:
@@ -149,6 +173,7 @@ async def _deliver_recovery(runtime: McpRuntime, pending: PendingGrant, *, statu
         if root is None:
             raise ValueError("GitHub linking is unavailable on this server.")
         async with runtime.session_factory.begin() as session:
+            await bound_transaction(session)
             url = await mint_link(
                 session,
                 tenant_id=pending.tenant_id,
@@ -231,11 +256,6 @@ async def _outcome_message(
             ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            members=(
-                runtime.group_lookups.live_members(platform, row.workspace_id)
-                if runtime.group_lookups is not None
-                else None
-            ),
             lock_authority=True,
         )
 
@@ -331,9 +351,13 @@ async def resume_pending(
     request with `FAILED_MESSAGE` and leaves the rest to run. Each request runs
     under `PER_REQUEST_DEADLINE`: one that hits it gets the same failure line and
     the next request still runs. Before each request the lease of every row this
-    callback still holds is renewed, which bounds the gap between renewals (see
-    `take`). A crash leaves unresolved requests claimed until their lease passes.
-    A request whose claim another callback took over is skipped.
+    callback still holds is renewed, and every database transaction here is
+    bounded by `DB_STATEMENT_DEADLINE`, which bounds the gap between renewals
+    (see `take`). A heartbeat the database does not answer fails that request
+    with the failure line and stops the batch; its rows and the ones behind it
+    stay claimed for a retake after the lease. A crash leaves
+    unresolved requests claimed until their lease passes. A request whose claim
+    another callback took over is skipped.
     """
     pending = await _take_pending(
         runtime,
@@ -350,8 +374,14 @@ async def resume_pending(
         try:
             held = await _renew_claim(runtime, row.claim_token)
         except Exception:
+            # The database did not answer in time (or at all). The request
+            # fails with the failure line and the batch stops: every later
+            # request needs the same database, and going on without renewals
+            # would let their leases lapse toward cleanup. The rows stay
+            # claimed and are retaken after the lease, as after a crash.
             _log.warning("github.linked_resume.renew_failed", request_id=str(row.id))
-            continue
+            results.append(await _failure_line(runtime, row))
+            break
         if row.id not in held:
             _log.warning("github.linked_resume.claim_lost", request_id=str(row.id))
             continue
@@ -371,12 +401,7 @@ async def resume_pending(
             continue
         except TimeoutError:
             _log.warning("github.linked_resume.request_timed_out", request_id=str(row.id))
-            message = FAILED_MESSAGE
-            try:
-                async with asyncio.timeout(FAILURE_DELIVERY_DEADLINE.total_seconds()):
-                    await _deliver_result(runtime, row, message)
-            except Exception:
-                _log.warning("github.linked_resume.result_delivery_failed", request_id=str(row.id))
+            message = await _failure_line(runtime, row)
         try:
             if not await _resolve_pending(runtime, row):
                 _log.info("github.linked_resume.already_resolved", request_id=str(row.id))

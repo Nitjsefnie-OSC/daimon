@@ -87,7 +87,6 @@ CONDITIONAL_MODULES = ("channels", "media")
 TAG_LABELS: dict[str, str] = {
     "admin": "admin only",
     "agent-chat": "agent tokens only",
-    "channel-admin": "channel admins too",
     "discord": "Discord callers",
     "scope:agents:archive": "operator tokens with agents:archive",
     "scope:channels:write": "operator tokens with channels:write",

@@ -233,7 +233,6 @@ from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import (
     HandoffNotice,
     SessionState,
-    holds_current_channel_admin_grant,
     render_turn_origin,
     turn_origin,
 )
@@ -3697,7 +3696,7 @@ class DaimonBot(commands.Bot):
         # The follow-up runs as the requester, so it carries their role as it
         # stands NOW -- re-read from the guild, never from anything the form
         # or the row recorded. A lookup that fails runs the turn as USER.
-        role, role_ids = await _requester_role(thread.guild, row.requester_external_user_id)
+        role, _role_ids = await _requester_role(thread.guild, row.requester_external_user_id)
         # A continuation posts into the thread too: a protected one is skipped
         # (the dispatcher logs it) before admission, which then reads the
         # parent the check cached.
@@ -3715,7 +3714,6 @@ class DaimonBot(commands.Bot):
             channel_id=row.parent_channel_id,
             thread_id=row.thread_id,
             role=role,
-            platform_role_ids=role_ids,
             now=datetime.now(UTC),
             category_id=category_id,
             category_unresolved=category_unresolved,
@@ -3952,7 +3950,6 @@ class DaimonBot(commands.Bot):
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
                     handoff=handoff_notice,
-                    is_channel_admin=is_channel_admin,
                 )
                 + "\n"
                 + seed_message
@@ -3997,14 +3994,6 @@ class DaimonBot(commands.Bot):
             lifecycle_holder[0] = new_lifecycle
             return new_lifecycle
 
-        is_channel_admin = await holds_current_channel_admin_grant(
-            self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            account_id=admission.account_id,
-            platform="discord",
-            parent_channel_id=row.parent_channel_id,
-            role=role,
-        )
         outcome: RunOutcome | None = None
         archive_after = False
         watch.phase = "running"
@@ -4037,7 +4026,6 @@ class DaimonBot(commands.Bot):
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
                             handoff=handoff_notice,
-                            is_channel_admin=is_channel_admin,
                         )
                         + "\n"
                         + seed_message
@@ -4428,9 +4416,6 @@ class DaimonBot(commands.Bot):
                 channel_id=parent_channel_id,
                 thread_id=str(thread.id) if thread else None,
                 role=role,
-                platform_role_ids=member_role_ids(author)
-                if isinstance(author, discord.Member)
-                else None,
                 now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC),
                 category_id=category_id,
                 category_unresolved=category_unresolved,
@@ -5248,7 +5233,6 @@ class DaimonBot(commands.Bot):
                     recovery_origin,
                     responder_handle=_responder_handle(self.runtime.settings),
                     session_state=session_state,
-                    is_channel_admin=is_channel_admin,
                 )
                 + "\n"
                 + full_message
@@ -5306,14 +5290,7 @@ class DaimonBot(commands.Bot):
             thread_id=thread.id,
             session_id=prepared.ma_session_id,
         )
-        is_channel_admin = await holds_current_channel_admin_grant(
-            self.runtime.sessionmaker,
-            tenant_id=tenant_id,
-            account_id=admission.account_id,
-            platform="discord",
-            parent_channel_id=parent_channel_id,
-            role=role,
-        )
+
         outcome: RunOutcome | None = None
         archive_after = False
         watch.phase = "running"
@@ -5336,7 +5313,6 @@ class DaimonBot(commands.Bot):
                             origin,
                             responder_handle=_responder_handle(self.runtime.settings),
                             session_state=session_state,
-                            is_channel_admin=is_channel_admin,
                         )
                         + "\n"
                         + user_message

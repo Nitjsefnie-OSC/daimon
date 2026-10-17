@@ -13,5 +13,4 @@ Subpackage structure:
   coding_tools.py — shell: mint and revoke per-agent MCP tokens
   actions.py      — shell: slash handler + block_actions handlers
   submit.py       — shell: the New agent view_submission
-  channel_admins.py — shell: the channel admins view_submission
 """

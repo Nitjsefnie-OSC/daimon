@@ -265,7 +265,7 @@ async def test_d5_real_member_edit_and_independent_revision_readback(case: Case)
     assert before.payload["description"] == "qa-original"
     start = len(case.binding.trace.requests)
     receipt = await case.edge.attempt_member_edit(MemberAgentEdit(case.member, "qa-unbound-c6"))
-    # Main #505 (bfaffd2a) now refuses unbound-agent mutations. Observe the
+    # Unbound-agent mutations require an admin. Observe the
     # actual member path; neither an identity refusal nor an operator edit
     # establishes this denial, and it is not a whole-scenario PASS.
     assert receipt.observations["before"] == before.model_dump(mode="json")
@@ -287,11 +287,8 @@ async def test_d5_real_member_edit_and_independent_revision_readback(case: Case)
     case.binding.trace.assert_consumed()
     assert receipt.status == "refused" and receipt.code == "ADMIN_MEMBER_EDIT_REFUSED"
     expected_error = (
-        "'qa-unbound-c6' is not limited by a channel rule exclusively to channels this caller "
-        "administers, so an admin must change its setup. Tell the caller to ask a workspace "
-        "or server admin to make the requested change to 'qa-unbound-c6'; carry the specific "
-        "action from the conversation into that handoff. Do not retry. An admin can provision "
-        "a channel-restricted agent that you administer."
+        "Changing 'qa-unbound-c6' needs a workspace or server admin. "
+        "Ask one to make the requested change. Do not retry."
     )
     assert receipt.observations["errors"] == [
         {"operation": operation, "error": expected_error}

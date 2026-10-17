@@ -2,15 +2,13 @@
 
 Spec edits (including skill add/remove) refuse defaults-managed targets even
 for admins, then allow admins. Attachment writes allow admins first, then
-refuse managed targets. All other callers must hold the target through an
-agent rule limited to their administered channels, with every answer and run
-also local to those channels. Being unreachable does not establish ownership.
+refuse managed targets. Other callers cannot make these shared-agent changes.
 
 New MCP connections are attachment writes: a private token or OAuth grant
 still adds servers and tools to the shared agent spec. Only key_add and
 keys_import retain the posted-token exception, which does not change the
 agent's spec. GitHub grants, and a GitHub Connect for one agent, require an
-admin or the same channel ownership and locality. A server-wide Connect has
+admin. A server-wide Connect has
 no agent target, so its facts are all False and only an admin passes.
 
 The I/O shells read TargetFacts and retain their own refusal wording.
@@ -68,23 +66,13 @@ class TargetFacts(BaseModel):
 
     Frozen: a decision is a pure function of these facts plus the caller's
     admin status, never mutated after construction. The locality fact
-    defaults to False, which is every caller with no channel admin grant.
+    defaults to False.
     """
 
     model_config = {"frozen": True}
 
     is_daimon_managed: bool
     is_reachable_in_tenant: bool
-    is_local_to_caller_channels: bool = False
-    # And it is theirs as a channel admin (`daimon.core.authz.channel_admin_holds`):
-    # restricted by an agent rule to channels they administer.
-    is_held_by_caller: bool = False
-    # Why a channel admin's agent is not local: an unattended run owed to someone
-    # with wider rights. Explains a refusal; decisions never read it.
-    runs_unattended_beyond_caller: bool = False
-    # Or another member's conversation or routine in a channel never recorded,
-    # which could be anywhere. Explains a refusal too.
-    has_unplaced_run: bool = False
 
 
 def _family(operation: OperationKind) -> OperationFamily:
@@ -111,16 +99,7 @@ def _decide_operation(
     fixed order (`Action.CHANGE_SHARED_AGENT`).
     """
     if operation in ("github_connect", "github_grant"):
-        return (
-            "allow"
-            if is_admin
-            or (
-                not target.is_daimon_managed
-                and target.is_local_to_caller_channels
-                and target.is_held_by_caller
-            )
-            else "needs_admin"
-        )
+        return "allow" if is_admin else "needs_admin"
     decision = authorize(
         _NO_POLICY,
         subject=Subject(is_admin=is_admin),
@@ -130,8 +109,6 @@ def _decide_operation(
         reach=AgentReach(
             managed=target.is_daimon_managed,
             reachable=target.is_reachable_in_tenant,
-            local_to_caller=target.is_local_to_caller_channels,
-            held_by_caller=target.is_held_by_caller,
         ),
     )
     if decision:
@@ -160,13 +137,7 @@ def needs_reachability_read(
     re-derived at each of the three call sites that gate a live DB read on
     it.
     """
-    if operation in _POSTED_TOKEN_OPERATIONS:
-        return False
-    if operation in ("github_connect", "github_grant"):
-        return not is_admin and not is_daimon_managed
-    # Both remaining families only consult reachability once neither the
-    # managed check nor the admin check has already settled the outcome.
-    return not is_admin and not is_daimon_managed
+    return False
 
 
 __all__ = [

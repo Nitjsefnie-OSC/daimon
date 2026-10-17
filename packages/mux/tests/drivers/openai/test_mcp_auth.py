@@ -352,6 +352,57 @@ def test_eleven_long_skill_pins_and_mcp_intent_both_survive_agent_round_trip() -
     assert len(object_json(body["metadata"])) <= 15
 
 
+def test_function_tool_decode_tolerates_the_provider_added_defer_loading_flag() -> None:
+    """Observed live against the real OpenAI API: every function tool on a
+    created agent echoes `defer_loading: false`, even though this driver
+    never sets it — see `_non_mcp_tool` in mcp_auth.py."""
+    from .conftest import FakeTransport
+
+    context = Context(FakeTransport(), "project", "openai.persistent_workspace", None)
+    body: Object = {
+        "name": "fixture",
+        "model": "gpt-6-luna",
+        "tools": [
+            {
+                "type": "function",
+                "name": "diag_tool",
+                "description": "diag",
+                "parameters": {"type": "object", "properties": {}},
+                "defer_loading": False,
+            }
+        ],
+    }
+    restored = agent_spec(body, context)
+    assert restored.tools == (
+        ToolSpec(
+            name="diag_tool",
+            kind="custom",
+            description="diag",
+            input_schema={"type": "object", "properties": {}},
+        ),
+    )
+
+
+def test_function_tool_decode_refuses_a_non_boolean_defer_loading_flag() -> None:
+    from .conftest import FakeTransport
+
+    context = Context(FakeTransport(), "project", "openai.persistent_workspace", None)
+    body: Object = {
+        "name": "fixture",
+        "model": "gpt-6-luna",
+        "tools": [
+            {
+                "type": "function",
+                "name": "diag_tool",
+                "parameters": {"type": "object", "properties": {}},
+                "defer_loading": "soon",
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="defer_loading"):
+        agent_spec(body, context)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("secret", ["", "token\rvalue", "token\nvalue", None, 123])
 async def test_invalid_resolved_secret_never_reaches_wire_or_error(secret: object) -> None:

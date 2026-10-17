@@ -161,7 +161,7 @@ async def set_rule(
         action=action,
         place=Place(channel_id=channel_id),
     ):
-        raise PermissionError("only an admin of this workspace or channel may edit its tool rules")
+        raise PermissionError("only a workspace admin may edit its tool rules")
     if channel_id is not None and not channel_id:
         raise ValueError("channel_id must name a parent channel")
     server, separator, tool = tool_key.partition("/")

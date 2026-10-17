@@ -6,7 +6,6 @@ from dataclasses import replace
 from typing import cast
 
 import structlog
-from daimon.adapters.teams.channel_admin_groups import stored_team_owners
 from daimon.adapters.teams.deployment_admins import live_admin_ids
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
@@ -52,7 +51,6 @@ def with_budget_notifier(runtime: TeamsRuntime, direct: DirectChats | None) -> T
         turn_deps=replace(
             deps,
             budget_notifier=notifier,
-            group_members=stored_team_owners(real),
             server_admins=live_admin_ids(real),
         ),
     )

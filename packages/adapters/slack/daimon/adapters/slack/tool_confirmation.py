@@ -23,13 +23,13 @@ import structlog
 from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.authz import Subject
-from daimon.core.channel_admins import load_live_subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
     ConfirmationHook,
     ConfirmationPrompt,
 )
+from daimon.core.native_admins import load_live_subject
 from daimon.core.posted_controls.confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
     NOT_YOURS_MESSAGE,
@@ -182,12 +182,12 @@ class SlackConfirmationCards:
 
         async def rule_subject(clicker: str) -> Subject:
             from daimon.adapters.slack.admin import resolve_is_admin
-            from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
+            from daimon.adapters.slack.admin_caller import admin_caller
 
             if runtime is None or tenant_id is None:
                 return Subject()
             admin = await resolve_is_admin(client, user_id=clicker)
-            caller = await channel_admin_caller(
+            caller = await admin_caller(
                 runtime, client, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
             )
             async with runtime.sessionmaker() as session:

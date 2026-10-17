@@ -364,6 +364,171 @@ async def test_a_cancel_while_the_github_post_is_in_flight_still_stores_the_rota
     assert decrypt_token(fernet, row.encrypted_refresh_token) == "refresh-7001-new"
 
 
+def _client_that_fails_once_closed(
+    seen: list[str], *, on_request: Any
+) -> tuple[httpx.AsyncClient, dict[str, bool]]:
+    """A fake GitHub whose answer needs the client still open when it comes."""
+    state = {"closed": False}
+    rotate = _rotating_handler(seen, on_request=on_request)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        response = await rotate(request)
+        if state["closed"]:
+            raise httpx.ConnectError("the client was closed under the refresh")
+        return response
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    real_aclose = client.aclose
+
+    async def aclose() -> None:
+        state["closed"] = True
+        await real_aclose()
+
+    client.aclose = aclose  # type: ignore[method-assign]
+    return client, state
+
+
+async def _stored_pair(
+    sessionmaker: async_sessionmaker[AsyncSession], fernet: MultiFernet, user_id: int
+) -> tuple[str, str, int]:
+    async with sessionmaker() as session:
+        row = await github_links.get_user(session, github_user_id=user_id)
+    assert row is not None and row.encrypted_refresh_token is not None
+    return (
+        decrypt_token(fernet, row.encrypted_access_token),
+        decrypt_token(fernet, row.encrypted_refresh_token),
+        row.token_generation,
+    )
+
+
+async def test_shutdown_order_drains_the_detached_refresh_before_closing_the_client(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+) -> None:
+    """Cancel the sweep mid-call, then drain, then close the client: the rotation lands."""
+    await _add_user(db_session_factory, fernet, 7001, refresh_in=timedelta(days=1))
+    seen: list[str] = []
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold(_spent: str) -> None:
+        in_flight.set()
+        await release.wait()
+
+    client, state = _client_that_fails_once_closed(seen, on_request=hold)
+    sweep = asyncio.create_task(_sweep(db_session_factory, client, fernet))
+    await asyncio.wait_for(in_flight.wait(), timeout=5)
+    sweep.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sweep
+    # GitHub answers a moment after the cancel: the drain has to wait for it.
+    asyncio.get_running_loop().call_later(0.1, release.set)
+    assert await github_requester_access.drain_detached_refreshes(5) == 0
+    await client.aclose()
+    assert state["closed"]
+    assert seen == ["refresh-7001"]
+    assert await _stored_pair(db_session_factory, fernet, 7001) == (
+        "refresh-7001-access",
+        "refresh-7001-new",
+        2,
+    )
+
+
+async def test_closing_the_client_before_the_drain_loses_the_rotation(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+) -> None:
+    """Control: the order the old shutdown had, which the drain exists to prevent."""
+    await _add_user(db_session_factory, fernet, 7001, refresh_in=timedelta(days=1))
+    seen: list[str] = []
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold(_spent: str) -> None:
+        in_flight.set()
+        await release.wait()
+
+    client, _ = _client_that_fails_once_closed(seen, on_request=hold)
+    sweep = asyncio.create_task(_sweep(db_session_factory, client, fernet))
+    await asyncio.wait_for(in_flight.wait(), timeout=5)
+    sweep.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await sweep
+    await client.aclose()
+    release.set()
+    await github_requester_access.drain_detached_refreshes(5)
+    # GitHub spent the old token and answered; nothing stored the new pair.
+    assert seen == ["refresh-7001"]
+    assert await _stored_pair(db_session_factory, fernet, 7001) == (
+        "access-7001",
+        "refresh-7001",
+        1,
+    )
+
+
+async def test_a_cancelled_caller_holds_its_client_open_until_the_refresh_is_stored(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+) -> None:
+    """`settle_detached_refreshes` in the client's `async with`: the cancel waits for the store."""
+    await _add_user(db_session_factory, fernet, 7001, refresh_in=timedelta(days=1))
+    seen: list[str] = []
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold(_spent: str) -> None:
+        in_flight.set()
+        await release.wait()
+
+    client, state = _client_that_fails_once_closed(seen, on_request=hold)
+
+    async def sweep_like_the_scheduler() -> None:
+        # The client's own `async with`, spelled out so its close is observable.
+        try:
+            async with github_requester_access.settle_detached_refreshes(5.0):
+                await _sweep(db_session_factory, client, fernet)
+        finally:
+            await client.aclose()
+
+    task = asyncio.create_task(sweep_like_the_scheduler())
+    await asyncio.wait_for(in_flight.wait(), timeout=5)
+    task.cancel()
+    asyncio.get_running_loop().call_later(0.1, release.set)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert state["closed"], "the client closes only after the settle"
+    assert await _stored_pair(db_session_factory, fernet, 7001) == (
+        "refresh-7001-access",
+        "refresh-7001-new",
+        2,
+    )
+
+
+async def test_drain_gives_up_at_its_timeout_and_reports_what_is_left(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+) -> None:
+    await _add_user(db_session_factory, fernet, 7001, refresh_in=timedelta(days=1))
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold(_spent: str) -> None:
+        in_flight.set()
+        await release.wait()
+
+    transport = httpx.MockTransport(_rotating_handler([], on_request=hold))
+    async with httpx.AsyncClient(transport=transport) as client:
+        sweep = asyncio.create_task(_sweep(db_session_factory, client, fernet))
+        await asyncio.wait_for(in_flight.wait(), timeout=5)
+        sweep.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sweep
+        assert await github_requester_access.drain_detached_refreshes(0.05) == 1
+        release.set()
+        assert await github_requester_access.drain_detached_refreshes(5) == 0
+    assert await github_requester_access.drain_detached_refreshes(0.05) == 0
+
+
 async def test_the_budget_stops_starting_people_without_cancelling_the_current_one(
     db_session_factory: async_sessionmaker[AsyncSession],
     fernet: MultiFernet,

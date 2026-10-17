@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Channel admins are deprecated. Hosted Daimon turns them off; self-hosters can set `DAIMON_CHANNEL_ADMINS__ENABLED=false` now. The next release defaults this switch to false, and a later release removes the feature. Existing grant data is kept.
+- Channel admins are removed. Grants no longer give any rights; server and workspace admins are unchanged. Stored grant rows are kept until a later release drops them.
 
 - GitHub repository access now uses the GitHub App for every agent. Migration deletes staged grants, keeps live App grants, carries a matching working repo, and retires saved GitHub keys. `daimon github retirement-preview` reports staged rows and saved-key coverage before migration. Private skill imports use an active App grant; missing access posts Connect GitHub. Operators can preview and delete retired Managed Agents vault credentials with `daimon github cleanup-legacy-vault` (`--apply` deletes them).
 
@@ -57,6 +57,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The permission is tenant-wide, so Daimon opens a shared file and saves its
   own only inside the channel's Files folder. Uploads take one request.
 
+### Added
+
+- **Self-host on OpenAI, with no Anthropic account at all.** `DAIMON_ANTHROPIC__API_KEY`
+  is now optional; `docker compose up` and `daimon defaults apply` succeed
+  without it. `daimon openai init` creates (or reuses) a project-scoped
+  OpenAI agent and hosted environment, seeds it with the same default skill
+  set an Anthropic deployment gets, and writes one row — optionally a
+  tenant-wide `"*"` default — into the provider runtime file. `daimon
+  agents backend set <agent> openai` routes that agent's channels to it, and
+  `daimon openai smoke` is a post-deploy check: one chat turn, one tool
+  call, one skill, pass/fail. See docs/self-hosting.md's "Self-host on
+  OpenAI" for what's different on OpenAI (no multi-agent delegation, no
+  mid-session resource swap, no workspace export/import, no cross-turn
+  memory, no Daimon model knobs).
+
 ### Removed
 
 - **`DAIMON_TEAMS__ADMIN_USER_IDS` is no longer read.** Make those admins
@@ -65,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Linked GitHub chat grants now recheck live manager policy and the link generation paired with the authorizing token. Relink and installation setup buttons stay private, pending grant results return to the originating thread, and first-use `owner/*` grants can associate an existing App installation. Owner exclusions match repo names regardless of case, and numbered GitHub App token names cannot enter mounted `.env` files. A role change or channel admin removal that commits while a chat grant is saving now stops the grant. Requests waiting on a GitHub link are kept until each has an answer, so one failing request no longer drops the others; a failed one says "Something went wrong." in its thread. An agent uses one GitHub account or org at a time, now including `owner/*` grants and grants that race each other, and is told what to remove to switch: the org's repos, or all of them when an `owner/*` grant is the blocker. When the Daimon app is installed for an owner but can't be used (suspended, missing permissions, wrong account), the result says to ask an owner to check the app in their GitHub settings, with no setup button. A repo Daimon can't reach says "Daimon can't reach {repo} with your GitHub account" and suggests asking an owner to add it to the Daimon app. The scheduler renews each linked GitHub token in the 30 days before its six-month refresh token expires, so someone who stops adding repos doesn't have to link GitHub again. A refresh GitHub has answered is always stored, shutdown waits for the person in progress, and a person whose refresh fails waits a day before the next try.
+- Linked GitHub chat grants now recheck live manager policy and the link generation paired with the authorizing token. Relink and installation setup buttons stay private, pending grant results return to the originating thread, and first-use `owner/*` grants can associate an existing App installation. Owner exclusions match repo names regardless of case, and numbered GitHub App token names cannot enter mounted `.env` files. A role change that commits while a chat grant is saving now stops the grant. Requests waiting on a GitHub link are kept until each has an answer, so one failing request no longer drops the others; a failed one says "Something went wrong." in its thread. An agent uses one GitHub account or org at a time, now including `owner/*` grants and grants that race each other, and is told what to remove to switch: the org's repos, or all of them when an `owner/*` grant is the blocker. When the Daimon app is installed for an owner but can't be used (suspended, missing permissions, wrong account), the result says to ask an owner to check the app in their GitHub settings, with no setup button. A repo Daimon can't reach says "Daimon can't reach {repo} with your GitHub account" and suggests asking an owner to add it to the Daimon app. The scheduler renews each linked GitHub token in the 30 days before its six-month refresh token expires, so someone who stops adding repos doesn't have to link GitHub again. A refresh GitHub has answered is always stored, shutdown waits for the person in progress and for any refresh still storing its answer, and a person whose refresh fails waits a day before the next try. Every database wait while resuming waiting requests is capped at 15 seconds, so a stalled database fails that request with "Something went wrong." and the rest still run. If GitHub's installation lookup is refused (403 or 404) the app counts as unusable; any other failure of it says "GitHub didn't answer." and never asks the person to link again.
 
 - A GitHub App token mint rejected for one repository group now leaves other groups available, queues an installation refresh, and tells the next turn which repositories are unavailable, including after token rotation or reconciliation. Each repository's first refusal starts a 60-minute exclusion; rotation skips fully excluded groups, and a later turn retries with a replacement session after expiry. Notices survive reconciliation and are sent once per continuous refusal. Authentication and transient failures still stop session setup and close pending token rows.
 

@@ -23,7 +23,6 @@ from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
     Settings,
-    reset_channel_admins_enabled,
 )
 from daimon.core.github_connect_delivery import claim_next, settle
 from daimon.core.github_credentials import build_multifernet
@@ -1125,200 +1124,6 @@ def test_agent_done_page_says_connected_and_close_tab() -> None:
     assert "old GitHub token" not in body
 
 
-@pytest.mark.parametrize("grant_state", ["kept", "revoked", "disabled"])
-async def test_channel_admin_completes_connect_for_their_agent(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-    grant_state: str,
-) -> None:
-    """A channel admin's link for the agent pinned to their channel adds repos for it only."""
-    from types import SimpleNamespace
-
-    from daimon.core.access_policy import TenantAccessPolicy
-    from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.scope import DeploymentDefault
-    from daimon.core.stores.access_policy import set_access_policy
-    from daimon.core.stores.channel_admins import delete_channel_admins, set_channel_admins
-
-    reset_channel_admins_enabled()
-    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
-    sessionmaker = committing_sessionmaker
-    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
-    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_bot")
-    async with sessionmaker.begin() as session:
-        tenant = await make_tenant(session, id=tenant_id, workspace_id="workspace")
-        account = await make_account(session, tenant=tenant, id=account_id)
-        await set_role(session, account_id, Role.USER)
-        await make_platform_principal(
-            session, platform="discord", external_id="u1", tenant=tenant, account=account
-        )
-        await set_channel_admins(
-            session,
-            tenant_id=tenant_id,
-            platform="discord",
-            channel_id="team-a",
-            role_ids=[],
-            user_ids=["u1"],
-            actor_account_id=None,
-        )
-        await set_access_policy(
-            session,
-            tenant_id=tenant_id,
-            policy=TenantAccessPolicy(agent_channel_pins={"Bot": ("team-a",)}),
-        )
-        invitation_token = await github_connect.mint_invitation(
-            session,
-            tenant_id=tenant_id,
-            requester_account_id=account_id,
-            requester_label="Ana",
-            requester_platform_user_id="u1",
-            agent_id=agent_id,
-            agent_name="Bot",
-            agent_ma_id="ag_bot",
-            agent_manager_verified=True,
-            origin_platform="discord",
-        )
-
-    def github_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/login/oauth/access_token":
-            return httpx.Response(200, json={"access_token": "user-token"})
-        if request.url.path == "/applications/client/token":
-            return httpx.Response(204)
-        if request.url.path == "/app/installations/77":
-            return httpx.Response(
-                200,
-                json={
-                    "id": 77,
-                    "account": {"id": 55, "login": "ana", "type": "User"},
-                    "repository_selection": "selected",
-                    "suspended_at": None,
-                    "permissions": _INSTALLATION_WRITE,
-                },
-            )
-        if request.url.path == "/user":
-            return httpx.Response(200, json={"id": 17})
-        if request.url.path == "/user/installations":
-            return httpx.Response(
-                200,
-                json={
-                    "installations": [
-                        {
-                            "id": 77,
-                            "account": {"id": 55, "login": "ana", "type": "User"},
-                            "repository_selection": "selected",
-                        }
-                    ]
-                },
-            )
-        if request.url.path == "/user/installations/77/repositories":
-            return httpx.Response(
-                200,
-                json={
-                    "repositories": [
-                        {
-                            "id": 101,
-                            "owner": {"id": 55},
-                            "full_name": "ana/thesis",
-                            "permissions": {"admin": True},
-                        }
-                    ]
-                },
-            )
-        raise AssertionError(f"unexpected GitHub path {request.url.path}")
-
-    looked_up: list[uuid.UUID] = []
-
-    async def find_agent(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object:
-        looked_up.append(agent_id)
-        return SimpleNamespace(name="Bot", metadata={})
-
-    monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
-    monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
-    key = Fernet.generate_key().decode()
-    connect, callback, setup, confirm = build_oauth_github_routes(
-        settings=_settings(key),
-        sessionmaker=sessionmaker,
-        fernet=build_multifernet((key,)),
-        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
-        deployment_default=DeploymentDefault(),
-        anthropic=object(),  # type: ignore[arg-type]
-        group_members=lambda _platform, _workspace: None,
-    )
-    app = Starlette(
-        routes=[
-            Route("/oauth/github/connect/{token}", connect),
-            Route("/oauth/github/callback", callback),
-            Route("/oauth/github/setup", setup),
-            Route("/oauth/github/confirm", confirm, methods=["GET", "POST"]),
-        ]
-    )
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
-    ) as browser:
-        start = await browser.get(f"/oauth/github/connect/{invitation_token}")
-        state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
-        await browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
-        picker = await browser.get("/oauth/github/confirm", params={"state": state})
-        assert "Bot&#x27;s GitHub repos" in picker.text
-        assert "Repos for this agent" in picker.text
-        assert "Save changes" in picker.text
-        fields = dict(
-            re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', picker.text)
-        )
-        if grant_state == "revoked":
-            async with sessionmaker.begin() as session:
-                await delete_channel_admins(
-                    session,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    channel_id="team-a",
-                )
-        elif grant_state == "disabled":
-            # The picker was opened before a process restart with the switch off.
-            reset_channel_admins_enabled()
-            monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
-        done = await browser.post(
-            "/oauth/github/confirm",
-            data={
-                **{key: html.unescape(value) for key, value in fields.items()},
-                "repo": "101",
-                "access": "read",
-                "working": "keep",
-            },
-        )
-        if grant_state == "kept":
-            used_link = await browser.get(f"/oauth/github/connect/{invitation_token}")
-            assert used_link.status_code == 200
-            assert "ana/thesis" not in used_link.text
-            async with sessionmaker.begin() as session:
-                await delete_channel_admins(
-                    session,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    channel_id="team-a",
-                )
-            revoked_receipt = await browser.get("/oauth/github/confirm", params={"state": state})
-            assert revoked_receipt.status_code == 403
-            assert "ana/thesis" not in revoked_receipt.text
-    assert looked_up and set(looked_up) == {agent_id}
-    async with sessionmaker() as session:
-        own = await github_access.list_authorized_repos(
-            session, tenant_id=tenant_id, agent_id=agent_id
-        )
-        shared = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
-    assert shared == []
-    if grant_state == "kept":
-        assert done.status_code == 200
-        assert "Repos saved" in done.text
-        assert [(repo.repo_id, repo.scope_agent_id, repo.max_access) for repo in own] == [
-            (101, agent_id, "write")
-        ]
-    else:
-        assert "Added" not in done.text
-        assert own == []
-    reset_channel_admins_enabled()
-
-
 @pytest.mark.asyncio
 async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
@@ -1611,6 +1416,46 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
             )
         assert after == before + 1
         assert grants == []
+
+        # The agent already uses another org: the confirmation shows the approved
+        # copy, with what to remove, not the store's raw wording.
+        async with sessionmaker.begin() as session:
+            await github_app_installations.upsert(
+                session, installation_id=88, account_login="other", repo_full_names=["other/repo"]
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO tenant_github_repos "
+                    "(tenant_id, repo_id, scope_agent_id, owner_id, installation_id, "
+                    "repo_full_name, max_access, authorized_by_github_user_id, "
+                    "authorized_by_account_id) "
+                    "VALUES (:tenant, 900, :agent, 66, 88, 'other/repo', 'write', 17, :account)"
+                ),
+                {"tenant": tenant_id, "agent": agent_id, "account": account_id},
+            )
+            await github_access.stage_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=900,
+                baseline_access="read",
+                ceiling_access="read",
+                granted_by_account_id=account_id,
+            )
+        _state, hidden, _rendered = await page()
+        refused = await save(hidden, repo="101", access_101="read")
+        assert refused.status_code == 400
+        assert "Editor already has repos from other." in html.unescape(refused.text)
+        assert (
+            "An agent uses one GitHub account or org at a time. "
+            "To switch, remove the other repos first."
+        ) in html.unescape(refused.text)
+        async with sessionmaker.begin() as session:
+            for table in ("agent_github_grants", "tenant_github_repos"):
+                await session.execute(
+                    text(f"DELETE FROM {table} WHERE tenant_id = :tenant AND repo_id = 900"),
+                    {"tenant": tenant_id},
+                )
 
         # CLI operator links omit agent_ma_id; they remain restricted to a
         # current tenant admin and still open this editor.

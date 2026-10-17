@@ -38,29 +38,60 @@ EXTENDS Naturals, FiniteSets
 \*                        failure line (off = a request can take any time).
 \* RenewException:        the renewal call itself can raise; the callback logs
 \*                        it and skips that request, leaving its row claimed.
+\* DbDeadline:            every database transaction of the resume loop (the
+\*                        renewal and the resolve) runs under statement_timeout
+\*                        and lock_timeout DB_STATEMENT_DEADLINE: a call still
+\*                        waiting after DbTicks ticks fails (HeartbeatTimeout,
+\*                        ResolveTimeout), the request gets a best-effort
+\*                        failure line, its row stays claimed and the loop goes
+\*                        on (off = a stalled database call waits without
+\*                        bound).
 \* CrashEnabled:          a worker can die mid-batch.
+\* RecoveryEnabled:       an outcome can ask for a fresh link (ProcessRecovery).
+\*                        Off only in `live`, to keep its liveness check
+\*                        inside the time guard; recovery is covered there by
+\*                        the safety configs.
 \*
 \* Time is counted in ticks, the same for every row and worker, with
-\* Lease < Deadline and Deadline + Lease < Garbage (code: CLAIM_LEASE 2 min,
-\* PER_REQUEST_DEADLINE 5 min, CLAIMED_GARBAGE_AFTER 60 min). A row's age is
+\* DbTicks < Deadline and Deadline + 2 * DbTicks < Garbage (code:
+\* DB_STATEMENT_DEADLINE 15 s, PER_REQUEST_DEADLINE + FAILURE_DELIVERY_DEADLINE
+\* 90 s, CLAIM_LEASE 2 min, CLAIMED_GARBAGE_AFTER 60 min). The lease is a free
+\* constant: the code has DbTicks < Deadline < Lease <= Deadline + 2 * DbTicks
+\* and the configs choose Lease within it or, to save states, below it (a
+\* shorter lease lapses earlier and cleans earlier, which only adds behaviors). A row's age is
 \* the ticks since claimed_until was last set; its lease lapses at age Lease
-\* and cleanup may delete it at age Lease + Garbage. A live worker never lets
-\* a request run past Deadline ticks (the tick action is disabled for it),
-\* the one timing assumption, which WithDeadline = FALSE removes. Expiry is
-\* not counted: expires_at can pass at any time.
+\* and cleanup may delete it at age Lease + Garbage.
+\*
+\* Time passes in every stage of the loop, and each stage has its own bound on
+\* a per-worker stage clock win[w] (ticks since the worker entered the stage):
+\*   request stage  outcome, recovery and result post, and the failure line
+\*                  after a timeout: at most Deadline ticks (asyncio.timeout
+\*                  plus the failure line's own deadline), the stage clock
+\*                  stops the tick at Deadline until the worker acts;
+\*   renewal stage  the renewal transaction before a request: at most DbTicks;
+\*   resolve stage  the resolve transaction after a request: at most DbTicks.
+\* The gap between two renewals is therefore at most Deadline + 2 * DbTicks
+\* (the sum of the three bounds), which the module asserts stays below
+\* Garbage. WithDeadline = FALSE removes the request bound and
+\* DbDeadline = FALSE removes the two database bounds. Expiry is not counted:
+\* expires_at can pass at any time. An event-loop stall that outlasts these
+\* bounds is treated as Crash (see README, Assumptions).
 CONSTANTS DeleteOnClaim, AbortOnException, ResolveBeforeDelivery,
           IgnoreLease, RenewChecksToken, ResolveChecksToken, AtomicRecovery,
-          ExpiryCleanup, CrashEnabled, Heartbeat, WithDeadline,
-          RenewException, Lease, Deadline, Garbage
+          ExpiryCleanup, CrashEnabled, RecoveryEnabled, Heartbeat, WithDeadline,
+          RenewException, DbDeadline, Lease, Deadline, DbTicks, Garbage
 ASSUME /\ DeleteOnClaim \in BOOLEAN /\ AbortOnException \in BOOLEAN
        /\ ResolveBeforeDelivery \in BOOLEAN /\ IgnoreLease \in BOOLEAN
        /\ RenewChecksToken \in BOOLEAN /\ ResolveChecksToken \in BOOLEAN
        /\ AtomicRecovery \in BOOLEAN /\ CrashEnabled \in BOOLEAN
+       /\ RecoveryEnabled \in BOOLEAN
        /\ ExpiryCleanup \in {"grace", "lapsed", "all"}
        /\ Heartbeat \in BOOLEAN /\ WithDeadline \in BOOLEAN
-       /\ RenewException \in BOOLEAN
-       /\ Lease \in Nat /\ Deadline \in Nat /\ Garbage \in Nat
-       /\ Lease < Deadline /\ Deadline + Lease < Garbage
+       /\ RenewException \in BOOLEAN /\ DbDeadline \in BOOLEAN
+       /\ Lease \in Nat /\ Deadline \in Nat /\ DbTicks \in Nat
+       /\ Garbage \in Nat
+       /\ DbTicks >= 1 /\ Deadline >= 1
+       /\ Deadline + 2 * DbTicks < Garbage
 
 \* Request ids double as the take order: oldest expires_at first.
 Requests == {1, 2}
@@ -75,7 +106,8 @@ None == "none"
 VARIABLES row, expired, claimedBy, age
 \* Worker memory, lost on a crash. step[w][r]: na | todo | started |
 \* needRecovery | recovered | outcome | sent | resolvedFirst | finished |
-\* skipped | aborted. win[w]: ticks since the worker's last renewal or take.
+\* skipped | aborted. win[w]: ticks the worker has spent in its current stage
+\* (renewal, request or resolve), counted only while that stage has a bound.
 VARIABLES wstate, step, win
 \* Ghosts, written by actions and never read by them.
 \*   reached        some worker computed an outcome (a grant result, a recovery
@@ -96,13 +128,17 @@ VARIABLES wstate, step, win
 \*   crashThenDone  the request reached an outcome and a post after that.
 \*   replSaved      a replacement pending row was saved for the request.
 \*   recov          the outcome asked for recovery (a fresh link).
+\*   dbTimeout      a renewal or resolve transaction hit its statement
+\*                  deadline: none | heartbeat | resolve.
 VARIABLES reached, attempted, visible, delivered, failed, lapseExcuse,
-          cleanedUnheld, crashVisible, crashThenDone, replSaved, recov
+          cleanedUnheld, crashVisible, crashThenDone, replSaved, recov,
+          dbTimeout
 
 dbVars == <<row, expired, claimedBy, age>>
 workVars == <<wstate, step, win>>
 ghostVars == <<reached, attempted, visible, delivered, failed, lapseExcuse,
-               cleanedUnheld, crashVisible, crashThenDone, replSaved, recov>>
+               cleanedUnheld, crashVisible, crashThenDone, replSaved, recov,
+               dbTimeout>>
 vars == <<dbVars, workVars, ghostVars>>
 
 Min(a, b) == IF a < b THEN a ELSE b
@@ -126,6 +162,7 @@ Init ==
   /\ crashThenDone = [r \in Requests |-> FALSE]
   /\ replSaved = [r \in Requests |-> FALSE]
   /\ recov = [r \in Requests |-> FALSE]
+  /\ dbTimeout = [r \in Requests |-> "none"]
 
 \* A worker is past its renewal for r (or, in the legacy loop, holds r at all).
 Flying == {"started", "needRecovery", "recovered", "outcome", "sent",
@@ -161,29 +198,41 @@ Active(w) == {r \in Requests : step[w][r] \in Flying \cup {"todo"}}
 Cur(w) == CHOOSE r \in Active(w) : \A s \in Active(w) : r <= s
 Working(w) == wstate[w] = "working" /\ Active(w) # {}
 
-\* Time passes by one tick for every claim. No time passes while a worker has a
-\* renewal pending (the take, the renewal and the start of the next request
-\* follow each other with only database calls between them), and a worker with a
-\* deadline cannot let a request run past Deadline ticks: the tick is disabled
-\* until the worker acts. Without a deadline a request can take any time.
-RenewPending(w) == Working(w) /\ step[w][Cur(w)] = "todo"
-InRequest(w) == Working(w) /\ step[w][Cur(w)] \in Flying
+\* Time passes by one tick for every claim. A live worker's tick is blocked once
+\* its current stage has used its bound (request: Deadline; renewal and resolve:
+\* DbTicks), until it acts: finishes, fails or times out. A stage without a
+\* bound (WithDeadline or DbDeadline off) lets any number of ticks pass. The
+\* legacy loop (DeleteOnClaim) has no renewal; a taken request starts at once.
+RenewStage(w) ==
+  Working(w) /\ ~DeleteOnClaim /\ step[w][Cur(w)] = "todo"
+ResolveStage(w) ==
+  Working(w) /\ ~ResolveBeforeDelivery /\ step[w][Cur(w)] = "sent"
+RequestStage(w) ==
+  Working(w) /\ step[w][Cur(w)] \in Flying /\ ~ResolveStage(w)
+DbStage(w) == RenewStage(w) \/ ResolveStage(w)
+LegacyTodo(w) == Working(w) /\ DeleteOnClaim /\ step[w][Cur(w)] = "todo"
+\* The stage clock of w runs.
+Timed(w) ==
+  \/ (DbDeadline /\ DbStage(w))
+  \/ (WithDeadline /\ RequestStage(w))
+CanTick(w) ==
+  /\ ~LegacyTodo(w)
+  /\ (DbDeadline /\ DbStage(w)) => win[w] < DbTicks
+  /\ (WithDeadline /\ RequestStage(w)) => win[w] < Deadline
 Tick ==
-  /\ \A w \in Workers :
-       /\ ~RenewPending(w)
-       /\ (WithDeadline /\ InRequest(w)) => win[w] < Deadline
+  /\ \A w \in Workers : CanTick(w)
   /\ age' = [r \in Requests |->
        IF row[r] = "pending" /\ claimedBy[r] # None
          THEN Min(age[r] + 1, Stale) ELSE 0]
   /\ win' = [w \in Workers |->
-       IF WithDeadline /\ InRequest(w) THEN win[w] + 1 ELSE win[w]]
+       IF Timed(w) THEN win[w] + 1 ELSE win[w]]
   /\ lapseExcuse' = [r \in Requests |->
        lapseExcuse[r]
        \/ (row[r] = "pending" /\ LeaseLive(r) /\ age[r] + 1 >= Lease
            /\ (InFlightAny(r) \/ delivered[r] > 0))]
   /\ UNCHANGED <<row, expired, claimedBy, wstate, step, reached, attempted,
                   visible, delivered, failed, cleanedUnheld, crashVisible,
-                  crashThenDone, replSaved, recov>>
+                  crashThenDone, replSaved, recov, dbTimeout>>
 
 \* take(): claim unexpired rows whose lease is unset or lapsed with a fresh
 \* token, then delete expired rows by the ExpiryCleanup rule. One call per
@@ -214,7 +263,8 @@ Take(w) ==
   /\ cleanedUnheld' = [r \in Requests |->
        cleanedUnheld[r] \/ (Cleanable(r) /\ ~HeldLive(r))]
   /\ UNCHANGED <<expired, reached, attempted, visible, delivered, failed,
-                  lapseExcuse, crashVisible, crashThenDone, replSaved, recov>>
+                  lapseExcuse, crashVisible, crashThenDone, replSaved, recov,
+                  dbTimeout>>
 
 \* Before each request: renew claimed_until, conditional on the worker's token.
 \* The heartbeat (renew_claim) renews, in one statement, every row that still
@@ -234,19 +284,38 @@ Renewed(w) ==
 
 Start(w) ==
   /\ Working(w) /\ step[w][Cur(w)] = "todo"
+  /\ win' = [win EXCEPT ![w] = 0]
   /\ \/ /\ DeleteOnClaim
         /\ step' = [step EXCEPT ![w][Cur(w)] = "started"]
-        /\ UNCHANGED <<age, win>>
+        /\ UNCHANGED age
      \/ /\ ~DeleteOnClaim /\ RenewException
         /\ step' = [step EXCEPT ![w][Cur(w)] = "skipped"]
-        /\ UNCHANGED <<age, win>>
+        /\ UNCHANGED age
      \/ /\ ~DeleteOnClaim
         /\ age' = [r \in Requests |->
              IF r \in Renewed(w) /\ RenewOk(w, r) THEN 0 ELSE age[r]]
-        /\ win' = [win EXCEPT ![w] = 0]
         /\ step' = [step EXCEPT ![w][Cur(w)] =
              IF RenewOk(w, Cur(w)) THEN "started" ELSE "skipped"]
   /\ UNCHANGED <<row, expired, claimedBy, wstate, ghostVars>>
+
+\* The renewal transaction waited DbTicks ticks (a lock wait or a stalled
+\* connection) and hit statement_timeout / lock_timeout: it rolled back, so no
+\* row is renewed. The request is a per-request failure: the callback posts
+\* the failure line (best effort; whether it reaches the thread is not
+\* tracked), skips the resolve, leaves the row claimed and goes on to the next
+\* request. The failure line's own deadline is not counted here (see README,
+\* Not modelled). delivered saturates at 2: the invariants only ask for <= 1.
+HeartbeatTimeout(w) ==
+  /\ DbDeadline /\ ~DeleteOnClaim
+  /\ RenewStage(w) /\ win[w] >= DbTicks
+  /\ step' = [step EXCEPT ![w][Cur(w)] = "skipped"]
+  /\ win' = [win EXCEPT ![w] = 0]
+  /\ attempted' = [attempted EXCEPT ![Cur(w)] = TRUE]
+  /\ delivered' = [delivered EXCEPT ![Cur(w)] = Min(@ + 1, 2)]
+  /\ lapseExcuse' = [lapseExcuse EXCEPT ![Cur(w)] = TRUE]
+  /\ dbTimeout' = [dbTimeout EXCEPT ![Cur(w)] = "heartbeat"]
+  /\ UNCHANGED <<dbVars, wstate, reached, visible, failed, cleanedUnheld,
+                  crashVisible, crashThenDone, replSaved, recov>>
 
 \* The agent lookup, authority check and grant, no exception, nothing to
 \* recover.
@@ -256,20 +325,20 @@ ProcessOk(w) ==
   /\ reached' = [reached EXCEPT ![Cur(w)] = TRUE]
   /\ UNCHANGED <<dbVars, wstate, win, attempted, visible, delivered, failed,
                   lapseExcuse, cleanedUnheld, crashVisible, crashThenDone,
-                  replSaved, recov>>
+                  replSaved, recov, dbTimeout>>
 
 \* The grant needs a fresh link (needs_link, relink): _deliver_recovery runs.
 \* Not explored for the legacy loop (DeleteOnClaim), which has no claim for the
 \* recovery transaction to resolve.
 ProcessRecovery(w) ==
-  /\ ~DeleteOnClaim
+  /\ ~DeleteOnClaim /\ RecoveryEnabled
   /\ Working(w) /\ step[w][Cur(w)] = "started"
   /\ step' = [step EXCEPT ![w][Cur(w)] = "needRecovery"]
   /\ reached' = [reached EXCEPT ![Cur(w)] = TRUE]
   /\ recov' = [recov EXCEPT ![Cur(w)] = TRUE]
   /\ UNCHANGED <<dbVars, wstate, win, attempted, visible, delivered, failed,
                   lapseExcuse, cleanedUnheld, crashVisible, crashThenDone,
-                  replSaved>>
+                  replSaved, dbTimeout>>
 
 \* Any exception while handling the request. The fixed code turns it into a
 \* failure line for that thread and goes on. AbortOnException models the old
@@ -290,15 +359,15 @@ ProcessFail(w) ==
             /\ failed' = [failed EXCEPT ![Cur(w)] = TRUE]
             /\ UNCHANGED <<wstate, crashVisible>>
   /\ UNCHANGED <<dbVars, win, attempted, visible, delivered, lapseExcuse,
-                  cleanedUnheld, crashThenDone, replSaved, recov>>
+                  cleanedUnheld, crashThenDone, replSaved, recov, dbTimeout>>
 
 \* The per-request deadline (asyncio.timeout around the outcome and its result
 \* post): a request still processing when its window is used up is cancelled
 \* and ends with a failure line, like an exception. A deadline that fires while
 \* the result is being posted is the Deliver action itself. The failure line
-\* has its own short deadline and the resolve follows at once: both take no
-\* ticks here, so Deadline stands for the request deadline plus the failure
-\* line deadline.
+\* has its own short deadline, which takes no separate ticks here: Deadline
+\* stands for the request deadline plus the failure line deadline. The resolve
+\* that follows is its own stage with its own bound (ResolveStage).
 Timeout(w) ==
   /\ WithDeadline
   /\ Working(w) /\ win[w] >= Deadline
@@ -308,7 +377,7 @@ Timeout(w) ==
   /\ failed' = [failed EXCEPT ![Cur(w)] = TRUE]
   /\ UNCHANGED <<dbVars, wstate, win, attempted, visible, delivered,
                   lapseExcuse, cleanedUnheld, crashVisible, crashThenDone,
-                  replSaved, recov>>
+                  replSaved, recov, dbTimeout>>
 
 \* _deliver_recovery, atomic design: one transaction saves the replacement row
 \* and resolves the original. The resolve must match (id, and the token when
@@ -327,7 +396,7 @@ RecoveryTx(w) ==
             /\ UNCHANGED <<row, age, replSaved>>
   /\ UNCHANGED <<expired, claimedBy, wstate, win, reached, attempted,
                   visible, delivered, failed, lapseExcuse, cleanedUnheld,
-                  crashVisible, crashThenDone, recov>>
+                  crashVisible, crashThenDone, recov, dbTimeout>>
 
 \* _deliver_recovery at 9441d430d: the replacement row commits on its own; the
 \* original stays until the loop's final resolve.
@@ -338,7 +407,7 @@ SaveReplacement(w) ==
   /\ replSaved' = [replSaved EXCEPT ![Cur(w)] = TRUE]
   /\ UNCHANGED <<dbVars, wstate, win, reached, attempted, visible, delivered,
                   failed, lapseExcuse, cleanedUnheld, crashVisible,
-                  crashThenDone, recov>>
+                  crashThenDone, recov, dbTimeout>>
 
 \* _post_personal_link: the private delivery attempt. A failure only changes
 \* the thread line, which the model does not distinguish.
@@ -348,7 +417,7 @@ PrivateDeliver(w) ==
   /\ attempted' = [attempted EXCEPT ![Cur(w)] = TRUE]
   /\ UNCHANGED <<dbVars, wstate, win, reached, visible, delivered, failed,
                   lapseExcuse, cleanedUnheld, crashVisible, crashThenDone,
-                  replSaved, recov>>
+                  replSaved, recov, dbTimeout>>
 
 \* _deliver_result: post the result line. The post can fail; the code logs it.
 Deliver(w, ok) ==
@@ -357,13 +426,14 @@ Deliver(w, ok) ==
                         ELSE "outcome")
   /\ step' = [step EXCEPT ![w][Cur(w)] =
        IF ResolveBeforeDelivery THEN "finished" ELSE "sent"]
+  /\ win' = IF ResolveBeforeDelivery THEN win ELSE [win EXCEPT ![w] = 0]
   /\ attempted' = [attempted EXCEPT ![Cur(w)] = TRUE]
   /\ visible' = [visible EXCEPT ![Cur(w)] = @ \/ ok]
-  /\ delivered' = [delivered EXCEPT ![Cur(w)] = @ + 1]
+  /\ delivered' = [delivered EXCEPT ![Cur(w)] = Min(@ + 1, 2)]
   /\ crashThenDone' = [crashThenDone EXCEPT ![Cur(w)] =
        @ \/ crashVisible[Cur(w)]]
-  /\ UNCHANGED <<dbVars, wstate, win, reached, failed, lapseExcuse,
-                  cleanedUnheld, crashVisible, replSaved, recov>>
+  /\ UNCHANGED <<dbVars, wstate, reached, failed, lapseExcuse,
+                  cleanedUnheld, crashVisible, replSaved, recov, dbTimeout>>
 
 \* resolve(): delete the row on id (and token when checked). A row that is
 \* already gone, or claimed by another worker, is left alone.
@@ -379,7 +449,22 @@ Resolve(w) ==
        IF row[Cur(w)] = "pending"
           /\ (ResolveChecksToken => claimedBy[Cur(w)] = w)
          THEN 0 ELSE @]
-  /\ UNCHANGED <<expired, claimedBy, wstate, win, ghostVars>>
+  /\ win' = IF ResolveBeforeDelivery THEN win ELSE [win EXCEPT ![w] = 0]
+  /\ UNCHANGED <<expired, claimedBy, wstate, ghostVars>>
+
+\* The resolve transaction waited DbTicks ticks and hit its statement deadline:
+\* it rolled back and the row stays claimed (retaken after the lease, the same
+\* as a crash between the post and the delete; a second line in the thread is
+\* accepted). The request already has its answer: the callback logs the failure
+\* and goes on, with no failure line.
+ResolveTimeout(w) ==
+  /\ DbDeadline /\ ResolveStage(w) /\ win[w] >= DbTicks
+  /\ step' = [step EXCEPT ![w][Cur(w)] = "finished"]
+  /\ win' = [win EXCEPT ![w] = 0]
+  /\ dbTimeout' = [dbTimeout EXCEPT ![Cur(w)] = "resolve"]
+  /\ UNCHANGED <<dbVars, wstate, reached, attempted, visible, delivered,
+                  failed, lapseExcuse, cleanedUnheld, crashVisible,
+                  crashThenDone, replSaved, recov>>
 
 \* The process dies: its in-flight state is gone, the claims stay, and the
 \* browser request shows a failure for every request it still held.
@@ -391,7 +476,7 @@ Crash(w) ==
        crashVisible[r] \/ r \in Active(w)]
   /\ UNCHANGED <<dbVars, win, reached, attempted, visible, delivered, failed,
                   lapseExcuse, cleanedUnheld, crashThenDone, replSaved,
-                  recov>>
+                  recov, dbTimeout>>
 
 Next ==
   \/ Tick
@@ -401,6 +486,7 @@ Next ==
        \/ ProcessFail(w) \/ Timeout(w) \/ RecoveryTx(w) \/ SaveReplacement(w)
        \/ PrivateDeliver(w) \/ Resolve(w) \/ Crash(w)
        \/ Deliver(w, TRUE) \/ Deliver(w, FALSE)
+       \/ HeartbeatTimeout(w) \/ ResolveTimeout(w)
 
 Spec == Init /\ [][Next]_vars
 
@@ -472,6 +558,20 @@ DeadlineNeverFires ==
 RenewExceptionNeverSkips ==
   ~(\E w \in Workers, r \in Requests :
       step[w][r] = "skipped" /\ row[r] = "pending" /\ claimedBy[r] = w)
+\* A renewal or resolve that hit its statement deadline: the request is skipped
+\* with its row still claimed (heartbeat), or finished with its row still
+\* present (resolve).
+HeartbeatTimeoutNeverFires ==
+  ~(\E w \in Workers, r \in Requests :
+      dbTimeout[r] = "heartbeat" /\ step[w][r] = "skipped"
+      /\ row[r] = "pending" /\ claimedBy[r] = w)
+ResolveTimeoutNeverFires ==
+  ~(\E w \in Workers, r \in Requests :
+      dbTimeout[r] = "resolve" /\ step[w][r] = "finished"
+      /\ row[r] = "pending")
+\* The request a resolve timeout left behind is taken and answered again.
+ResolveTimeoutRetake ==
+  ~(\E r \in Requests : dbTimeout[r] = "resolve" /\ row[r] = "gone")
 \* A claimed row survives past its lease: it is deleted only at age Stale.
 GraceNeverCleans ==
   ~(\E r \in Requests : cleanedUnheld[r] /\ claimedBy[r] # None)
@@ -481,6 +581,7 @@ WorkerStep ==
     Start(w) \/ ProcessOk(w) \/ ProcessRecovery(w) \/ ProcessFail(w)
     \/ Timeout(w) \/ RecoveryTx(w) \/ SaveReplacement(w) \/ PrivateDeliver(w)
     \/ Resolve(w) \/ Deliver(w, TRUE) \/ Deliver(w, FALSE)
+    \/ HeartbeatTimeout(w) \/ ResolveTimeout(w)
 
 \* A request some worker holds reaches an outcome (a grant result, a recovery
 \* decision or a failure line) even when another request in its batch fails,

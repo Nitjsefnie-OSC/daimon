@@ -9,7 +9,6 @@ alone would have let these through.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
 from typing import Any
 
 import pytest
@@ -17,14 +16,11 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.agent_removal import (
-    _detach_mcp_server_impl,  # pyright: ignore[reportPrivateUsage]
-    _remove_agent_key_impl,  # pyright: ignore[reportPrivateUsage]
-    _remove_skill_impl,  # pyright: ignore[reportPrivateUsage]
+    _detach_mcp_server_impl,
+    _remove_agent_key_impl,
+    _remove_skill_impl,
 )
-from daimon.adapters.mcp.tools.agents import (
-    _attach_mcp_server_impl,  # pyright: ignore[reportPrivateUsage]
-    _update_agent_impl,  # pyright: ignore[reportPrivateUsage]
-)
+from daimon.adapters.mcp.tools.agents import _attach_mcp_server_impl, _update_agent_impl
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
@@ -71,10 +67,39 @@ async def _pinned(
     return runtime, tenant.id
 
 
-def _member(
-    tenant_id: uuid.UUID, *, is_admin: bool = False, administered: Collection[str] = ()
-) -> AuthIdentity:
-    """A chat turn's credential: its role was checked live at admission."""
+@pytest.mark.parametrize(
+    "auth_kind",
+    ["agent-key", "agent-key-no-platform-user"],
+    ids=["agent-key", "agent-key-no-platform-user"],
+)
+async def test_the_guard_never_exempts_an_agent_key_even_an_admins(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    auth_kind: str,
+) -> None:
+    """A stored ADMIN role on an agent-scoped key is never trusted."""
+    runtime, tenant_id = await _pinned(db_session, db_session_factory)
+    agent = ma_agent(
+        id=_AGENT_ID,
+        name="other-display",
+        tenant_id=tenant_id,
+        metadata={"daimon_name": "Acme Display"},
+    )
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        platform="discord",
+        platform_user_id=None if auth_kind == "agent-key-no-platform-user" else "42",
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
+        is_admin=True,
+    )
+    with pytest.raises(ToolError):
+        await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
+
+
+def _member(tenant_id: uuid.UUID, *, is_admin: bool = False) -> AuthIdentity:
+    """A chat credential carrying only its native admin role."""
     return AuthIdentity(
         account_id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -83,8 +108,24 @@ def _member(
         platform_user_id="42",
         chat_agent_id=uuid.uuid4(),
         is_admin=is_admin,
-        administered_channel_ids=frozenset(administered),
     )
+
+
+async def test_the_guard_lets_an_admin_through(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    runtime, tenant_id = await _pinned(db_session, db_session_factory)
+    agent = ma_agent(
+        id=_AGENT_ID,
+        name="other-display",
+        tenant_id=tenant_id,
+        metadata={"daimon_name": "Acme Display"},
+    )
+    await require_pin_write_access(
+        runtime, _member(tenant_id, is_admin=True), ma_agent=agent, origin=None
+    )
+    with pytest.raises(ToolError):
+        await require_pin_write_access(runtime, _member(tenant_id), ma_agent=agent, origin=None)
 
 
 @pytest.mark.parametrize(
@@ -146,125 +187,3 @@ async def test_direct_tools_refuse_a_member_editing_a_pinned_agent(
             await _remove_skill_impl(
                 runtime, auth, agent_name="acme-config", skill_id="skill_1", **target
             )
-
-
-async def test_the_guard_lets_an_admin_through(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    runtime, tenant_id = await _pinned(db_session, db_session_factory)
-    agent = ma_agent(
-        id=_AGENT_ID,
-        name="other-display",
-        tenant_id=tenant_id,
-        metadata={"daimon_name": "Acme Display"},
-    )
-    await require_pin_write_access(
-        runtime, _member(tenant_id, is_admin=True), ma_agent=agent, origin=None
-    )
-    with pytest.raises(ToolError):
-        await require_pin_write_access(runtime, _member(tenant_id), ma_agent=agent, origin=None)
-
-
-async def test_the_guard_lets_an_admin_of_every_pinned_channel_through_without_an_origin(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """A direct tool has no origin; the admin of the pin's channel may still use it.
-
-    The grants are the verifier's read of the stored ones (`test_verifier.py`).
-    """
-    runtime, tenant_id = await _pinned(db_session, db_session_factory)
-    agent = ma_agent(
-        id=_AGENT_ID,
-        name="Acme Display",
-        tenant_id=tenant_id,
-        metadata={"daimon_name": "acme-config"},
-    )
-    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
-        await require_pin_write_access(
-            runtime, _member(tenant_id, administered={"C_OTHER"}), ma_agent=agent, origin=None
-        )
-
-    await require_pin_write_access(
-        runtime, _member(tenant_id, administered={"C_ACME"}), ma_agent=agent, origin=None
-    )
-    agent_key = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.USER,
-        platform="discord",
-        platform_user_id="42",
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
-        administered_channel_ids=frozenset({"C_ACME"}),
-    )
-    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
-        await require_pin_write_access(runtime, agent_key, ma_agent=agent, origin=None)
-
-
-@pytest.mark.parametrize("is_admin", [False, True], ids=["channel-admin", "server-admin"])
-async def test_the_guard_trusts_neither_admin_on_a_login_without_a_chat_turn(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    is_admin: bool,
-) -> None:
-    """Both exemptions read stored roles, so both need a chat turn's fresh credential."""
-    runtime, tenant_id = await _pinned(db_session, db_session_factory)
-    agent = ma_agent(id=_AGENT_ID, name="Acme Display", tenant_id=tenant_id, metadata={})
-    login = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN if is_admin else Role.USER,
-        platform="discord",
-        platform_user_id="42",
-        is_admin=is_admin,
-        administered_channel_ids=frozenset() if is_admin else frozenset({"C_ACME"}),
-    )
-    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
-        await require_pin_write_access(runtime, login, ma_agent=agent, origin=None)
-
-
-async def test_the_guard_refuses_a_channel_admin_of_only_part_of_a_pin(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    runtime, tenant_id = await _pinned(db_session, db_session_factory)
-    await set_access_policy(
-        db_session,
-        tenant_id=tenant_id,
-        policy=TenantAccessPolicy(agent_channel_pins={"Acme Display": ("C_ACME", "C_OPS")}),
-    )
-    await db_session.commit()
-    agent = ma_agent(id=_AGENT_ID, name="Acme Display", tenant_id=tenant_id, metadata={})
-    with pytest.raises(ToolError, match="rule runs it only in certain channels"):
-        await require_pin_write_access(
-            runtime, _member(tenant_id, administered={"C_ACME"}), ma_agent=agent, origin=None
-        )
-
-
-@pytest.mark.parametrize(
-    "auth_kind",
-    ["agent-key", "agent-key-no-platform-user"],
-    ids=["agent-key", "agent-key-no-platform-user"],
-)
-async def test_the_guard_never_exempts_an_agent_key_even_an_admins(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    auth_kind: str,
-) -> None:
-    """A stored ADMIN role on an agent-scoped key is never trusted."""
-    runtime, tenant_id = await _pinned(db_session, db_session_factory)
-    agent = ma_agent(
-        id=_AGENT_ID,
-        name="other-display",
-        tenant_id=tenant_id,
-        metadata={"daimon_name": "Acme Display"},
-    )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        platform="discord",
-        platform_user_id=None if auth_kind == "agent-key-no-platform-user" else "42",
-        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
-        is_admin=True,
-    )
-    with pytest.raises(ToolError):
-        await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)

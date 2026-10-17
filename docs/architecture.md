@@ -609,10 +609,10 @@ Who counts as an admin differs by path. `admit()` trusts only the live role the
 adapter passes; no role means non-admin. The MCP turn tools (`ask`,
 `start_turn`, `continue_turn`, on the hub and per agent, plus billed media)
 and routine fires have no live platform role, so they use the account's
-stored role (and role ids, for channel admins), refreshed on every chat turn. The operator path
+stored role, refreshed on every chat turn. The operator path
 (`platform_user_id` unset: CLI and internal tokens) is not a platform member
 and skips the policy, as it skips billing. An account marked external is
-never an admin or a channel admin on any path: admission stores no group ids
+never an admin on any path: admission stores no group ids
 for it, the MCP verifier reads the mark from the row on every request, and
 the identity middleware refuses it the setup, channel setup, credential and
 direct-message tools (`middleware/external_participants.py`). Ids are the
@@ -673,9 +673,7 @@ turn's `origin_context_id`, claimable only by a chat turn's own credential;
 agent-chat keys run outside every channel, so they never list, read or
 continue a limited conversation, and the hub does the same for members. A
 workspace admin may list and read any limited conversation from the hub, and
-a channel admin those of the channels they administer whose every recorded id
-lies there too (the channel, a thread in it, or its `channel:ts`), but
-continue none (see [Trust model](#trust-model)). Limiting a channel's readers
+no other account may read them (see [Trust model](#trust-model)). Limiting a channel's readers
 later covers its existing sessions, and opening it never releases a session
 that ran limited -- only that thread, when the thread had its own rule. A
 session from before the stamp that a thread ran on (`thread_sessions`) has no
@@ -696,16 +694,8 @@ as the place of the key's turns (`mcp_place`) and as the read origin, nowhere
 else, and re-decides both at the moment of action; the rule is read right
 before a session is created, and a conversation opened before its channel's
 readers were limited can be read but not continued. Keys minted anywhere else
-are unchanged. A server admin mints anywhere; a channel admin of every channel
-an agent's rule names mints for it only from inside one of those channels, and
-that token is always bound there (`authorize(MINT_CODING_TOKEN)`, through
+are unchanged. A server admin mints anywhere (`authorize(MINT_CODING_TOKEN)`, through
 `authorize_coding_token`).
-
-Rules are set by server admins and operator tokens (`channels:write`), never
-a channel admin: in chat with `set_channel_rule` and `set_agent_rule`, on the
-channel's **Permissions** screen (from Who answers where in the setup panel;
-Teams: the Channel settings dialog), or with the CLI. Each write is one transaction under the
-policy lock (`packages/core/daimon/core/channel_rules.py`):
 
 ```bash
 daimon channels rule set discord GUILD_ID CHANNEL_ID --readers own --writers own \
@@ -750,32 +740,11 @@ is: the policy is read on every call, and an agent with a rule is refused
 before any session is created or message sent. Only the operator's internal
 tokens, which carry no platform user, bypass it.
 
-Agent discovery uses the effective routing at the caller's verified location.
-A member's setup panel and MCP agent lookups show the channel and current thread
-responders, plus agents whose explicit rules allow that channel. Unrouted agents
-and shadowed workspace or deployment defaults are hidden. Aliases and channels
-kept to their own agents remain enforced. A missing or unverified location cannot
-expose unrestricted agents. In the hub, members see the effective workspace
-responder; stored workspace and channel admin exemptions remain unchanged.
-
 Cross-agent separation is complete only for agents with a rule: an agent
 without one still answers wherever the cascade sends it, so give every client
 project agent a rule. Beyond the rule, whatever an agent can reach (its repo,
 keys, connectors and memory) is also guarded where a member could otherwise
 borrow it:
-
-- `hand_off_task` and the Switch to agent button let a member hand a thread only
-  to an agent of that channel: the one it answers with, one whose rule names
-  it, or one of the channel's own agents. Any other destination needs a
-  server admin, or a channel admin of the parent channel when the thread's
-  readers aren't limited and they could make the agent its default: the same
-  rule, which also refuses a move that would take it out of another channel
-  admin's channels while it is theirs (below, and
-  [Same-thread handoff](#same-thread-handoff)).
-- `create_routine` and `update_routine` let a member schedule only the agent
-  they are talking to, or the agent the destination channel answers with.
-  Routines are listed and read only by their creator and admins.
-- `fork_agent` is admin-only and forks start credential-less (above).
 
 A rule naming a channel kept to its own agents must name it alone, and makes
 the agent one of them only if it could be the channel's own (custom, and
@@ -793,116 +762,7 @@ rule is keyed `channel_id:thread_ts` and only takes `readers: inside`). A
 Teams rule names a whole `19:…@thread.tacv2` channel; a thread id names its
 channel. Invalid input names the field and value and writes nothing.
 
-A private DM conversation (`dm:` scope) is outside every agent rule wherever
-it is checked: admission, `hand_off_task`, and continuations owed to a DM,
-which are admitted as DM turns. Adding a key or connector token to an agent with a rule (`request_agent_key`,
-`request_mcp_token`, `request_mcp_oauth`) or pointing it at a public repo (`bind_public_repo`)
-needs an admin, a channel admin of every channel its rule names, or a request
-made inside one of those channels. The form's submit (Discord, Slack and
-Teams) re-checks the rule against the agent as it is now, resolved by its
-stable id and checked by every name a rule can be keyed by
-(`core/agent_pins.py`), so a rule added later or a rename still holds; a
-target that can't be resolved while agent rules exist is refused. The direct
-configuration tools (`update_agent`, `attach_mcp_server`, `detach_mcp_server`,
-`remove_agent_key`, `remove_skill`) check it with no turn origin (an
-`origin_context_id` only finds the agent), so on an agent with a rule they are
-an admin's or a channel admin's of every channel it names; members inside its
-channels use the request tools. An agent key's self-edit tools
-(`set_repo_binding`/`clear_repo_binding`/`self_write_file`/`self_delete_file`)
-are refused on an agent with a rule: an agent key's stored roles are never
-trusted, so neither exemption applies to it. One guard
-(`tools/_pin_guard.py`) serves all of them. A sign-in (`request_mcp_oauth`)
-is re-checked when its callback arrives, before any grant or attach. Routines
-are checked against every name of the agent they run (at save and at every
-fire, after the scheduler self-heals to a replacement agent), and so is
-`hand_off_task`'s destination.
-
-**Channel admins.** A tenant can name, per channel, groups and members who run
-that channel on top of the server admins (`channel_admins`,
-`packages/core/daimon/core/channel_admins.py`). A group is a Discord role, a
-Slack user group, or a Teams team, whose owners it admits; a Teams member is
-named by Entra object id. Discord sends the member's roles with each event.
-Slack and Teams look up only the groups some grant names
-(`usergroups.users.list`; Graph's team owner list under the
-`TeamMember.Read.Group` consent), each cached for a minute, and a failed lookup
-grants nothing. `admit()` stores the member's matched group ids on the account
-(`accounts.platform_role_ids`) beside the role, so MCP tools test a grant
-without asking the platform for Discord roles. After admission, Discord and
-Slack turn controls also name a channel admin grant for the current parent
-channel; the model can then call setup tools, which independently check the
-target agent's reach. This does not change the account's server-admin role.
-Every Slack member can edit
-user groups by default, so a group grant admits whoever can join it and the
-workspace should limit group management to admins; outside a turn (the MCP
-verifier, hub reads, an OAuth callback, channel admin DMs) a stored Slack
-group or Teams team counts only while a live lookup still admits the person
-(`confirm_stored_group_ids`), and a private form's submit, which runs under
-the policy lock, ignores them. A stored Discord role is checked there against
-the member's current roles (`GET /guilds/{id}/members/{user}`, cached a
-minute), since listing a role's members needs a privileged intent; where no
-lookup runs it stands. A channel admin may do what a server admin may for
-an agent of theirs that is local to their channels -- not the tenant default or anyone's
-personal default, answering or running somewhere and only in channels they
-run (channel-scope rows, thread bindings, and other people's live sessions
-and routines, each by its channel), and no unattended run of it owed to a
-server admin or another channel's admin
-(`packages/core/daimon/core/agent_reach.py`) -- and may set or clear those
-channels' default agent (never a budget or the tenant balance, which stay
-with server admins: `SET_CHANNEL_BUDGET`). An agent is theirs when a channel
-admin made it from one of their channels (`agent_creation_channels`, written by
-`create_agent` from a verified turn origin and by each setup panel's New agent
-form), when a server admin's rule runs it inside their channels only, or when a
-server admin set it as one of their channels' default
-(`channel_config.agent_name_set_by_admin`; migration 0044 backfilled it from
-each setter's role at upgrade time, not when they set it); any other agent needs a server
-admin on every surface (`channel_admin_holds`). Handing a thread to an agent makes it answer
-there as a default would, so binding and handoff are one rule
-(`authorize(BIND_CHANNEL_DEFAULT)` and `authorize(HAND_OFF)` with `load_binding_reach`):
-neither may take an agent out of another channel admin's channels while it is
-theirs, read over all their user and group grants together. It guards these two
-moves only; a member's routine, for one, still adds a channel to an agent's reach. A `/dm` conversation counts as the channel it was
-started from. A session counts in the channel recorded when it was created
-(`thread_sessions.channel_id`) and in any its spend was attributed to, and a
-routine in the one its spend counts against; one with none recorded could run
-anywhere, and the refusal says so. An agent answering nowhere is local to
-nobody, so locality only narrows what key and MCP server replacements and
-removals and skill repo connects count as shared, never past it. In `daimon.core.authz` a channel admin
-is `Subject.administered_channel_ids`, filled from the stored grants and never
-`is_admin`: configuring an agent with a rule from anywhere is theirs once
-they administer every channel each of its rules names (a rule naming no
-channel stays with server admins), and so is minting it a coding-tools token bound to one of
-those channels (never an unbound one). A channel admin binds only a shared agent
-(managed or tenant-wide), or one a channel admin made from one of their
-channels or a server admin's rule runs inside them; a server admin's default does
-not make an agent theirs to move, and another channel's own agent never is. No chat tool, panel or CLI
-write (`daimon config set`, `daimon config propagate`) binds an agent with a
-rule as the default of a channel outside it, for server admins too
-(`authorize(BIND_CHANNEL_DEFAULT)`). Managed agents
-and the tenant default stay with server
-admins, and a tenant with no grant behaves as before. Setup details follow the same
-reach: `list_agents` and `get_agent` show a channel admin an agent's MCP servers, creation date
-and prompt only for an agent they could edit this way, and the agent's own guidance tells a
-channel admin its setup details only about agents that answer in their channel; every other
-non-admin sees capabilities only. Stored role ids refresh on
-the member's next chat turn; until then MCP calls, a coding-tools token
-included, keep the old grant. Unattended runs are routines and queued wakes
-(timers, handoffs, applied private input); each fires with its requester's
-rights, so a channel admin's edits reach them as they reach anyone chatting
-with the agent. A member's run carries that member's own read visibility, as
-their chat does, and a server admin who chats with an agent a channel admin
-edited runs its instructions with their own rights, as with any agent someone
-else wrote. The check reads requesters' rights at edit time, as stored at
-their last chat turn: a requester promoted later runs earlier edits with the
-new rights. Server admins edit grants
-with the `*_channel_admins` MCP tools, from Who answers where in the setup
-panel, or with the CLI (`discord`, `slack` or `teams`; a Slack or Teams thread
-id names its channel):
-
-```bash
-daimon channels admins get discord GUILD_ID [CHANNEL_ID] [--json]
-daimon channels admins set discord GUILD_ID CHANNEL_ID --role ROLE_ID --user USER_ID
-daimon channels admins clear discord GUILD_ID CHANNEL_ID
-```
+**Native admins.** Server and workspace admins retain the full setup and channel policy controls.
 
 **Channels kept to their own agents — `packages/core/daimon/core/channel_rules.py`.**
 A channel C with `readers: own` keeps its own agents to itself: those whose
@@ -956,82 +816,12 @@ channel is treated as inside any such channel until delivery places it
 executing agent (an operator token, the CLI) may still post into C, which is
 input, not a leak; the readers rule keeps reads inside.
 
-What callers see follows from where they stand. An MCP call is inside C when
-its verified turn origin is in C, when it carries a channel-bound coding-tool
-token for C, or when its chat turn's agent is one of C's; an agent key is
-never inside by its agent alone. The roster, agent and key tools take the
-turn's `origin_context_id` for this. A chat turn whose agent can't be found
-is refused while some readers are `own`, since it may be one of C's. From
-outside, C's agents are missing from `list_agents` and every by-name lookup,
-from handoff destinations, `explain_agent_resolution` and the hub, and so are
-their agent-scoped skills, their routines, routines posting into C and timers
-set in C; inside C only C's agents show. For members the setup panel's
-roster, details and Who answers where are filtered the same way at the
-panel's location, and `/memory` hides an agent wherever it may not run;
-server admins see everything. Server admins are exempt in their own DM and
-hub, and a channel admin of C there too, but C's agents still never post
-outside C. `get_tenant_summary` lists each channel with `own_agents_only`.
-Limits: tools on other MCP servers don't see the policy; an agent created
-inside C isn't C's own until its rule names C; `/dm` from C is refused; a call
-is held to C only where its tool takes a verified origin (not the send, DM,
-self-edit or routine edit tools), and a call that names none is judged from
-outside.
-
 When C closes, `archive_channel_copy` (server admins, or the `agents:archive`
 operator scope; `core/channel_copies.py`) archives the copy `set_channel_rule`
 made for it, stamped `daimon_isolation_copy`, with its rule and default in C.
 It archives no other agent and no default, and refuses a copy whose rule or a
 default names anywhere but the channel named as closing. C keeps its rule, so
 nothing answers there after.
-
-**Channel environments.** The environment a turn runs in resolves over the
-same tiers as the agent but on its own (`_pick_environment` in
-`packages/core/daimon/core/scope.py`), so a channel can keep its agent and run
-it with the packages one team needs; routines follow the channel they post to.
-Server admins set any channel's environment, or the tenant default by omitting
-the channel, with `set_channel_environment` and `clear_channel_environment`; a
-channel admin sets the channels they run, and a thread id resolves to its
-parent. Who answers where in the setup panels lists each channel's
-environment and gives server admins and this channel's admins a select for it
-(on Teams, in the Channel settings dialog, for a channel picked there)
-(`packages/core/daimon/core/channel_environments.py`); rows on the other
-side of a channel kept to its own agents are dropped, and inside one the
-workspace and deployment environments too. The name must match an existing
-environment in the tenant, looked up once so the network rule and the write
-judge the same one; conversations pick it up from their next message, keeping
-their files and their recorded readers, and `explain_agent_resolution` reports each tier's
-environment. `authorize(SET_CHANNEL_ENVIRONMENT)` decides every pick: in a
-channel with limited readers, or one holding such a thread (a Slack
-`channel:ts`, or a Discord thread the pick names or a session ran in under
-it), an environment with unrestricted
-networking (any network beyond package managers and MCP servers: anything but
-a cloud environment on limited networking with no allowed hosts) needs a
-server admin, and so does clearing a pick onto a default that has one. Even a
-server admin's such pick waits for a confirmation (`EnvironmentPick.needs_confirm`):
-`set_channel_environment` and `clear_channel_environment` take
-`confirm_open_network`, which the model passes only once the caller confirms,
-and the panels write nothing and point to chat. Changes beyond one channel ask
-the same when they move a channel with limited readers onto such a network: a
-workspace default that such channels without a pick of their own follow, an
-`update_environment` that opens the network of an environment one runs in, and
-an `archive_environment` whose cleared picks fall through onto one; both tools
-take `confirm_open_network` too. A limited Discord thread no session has run in
-yet counts as following the workspace default. A pick
-made before the rule never met it, so limiting a channel's readers when its
-own pick is open warns that a server admin should confirm it; who made
-a pick isn't recorded. An operator token's
-`channels:write` covers a channel's environment, never the tenant default. An
-environment name only channels kept to their own agents across the reader's
-line pick could name a client, so `list_environments`, `get_environment`, the
-environment-changing tools and the panel pickers treat it as missing, and
-`get_tenant_summary` blanks it, with other such channels' agent names
-(`hidden_environment_names`); operator tokens, and server admins on the
-panels, see every name. A
-channel with no environment of its own falls through, so nothing changes until
-one is set. Chat over MCP has no channel, so it uses the tenant or deployment
-default. The channel tools read a Slack or Teams thread id as its channel and
-a Discord thread through a lookup (`tools/_channel_target.py`); budgets and
-environments also check the caller can see the channel.
 
 **Channel skills — `packages/core/daimon/core/channel_skills.py`.** A channel
 can add skills to whatever agent answers there, for its turns only, so a
@@ -1097,71 +887,6 @@ skill and says to remove it from the agent or channel, instead of the generic
 "AI service couldn't accept the request"; a replacement session re-raises it
 rather than suggesting a retry.
 
-**Skill uploads.** One skill can be added to one agent by hand
-(`packages/core/daimon/core/skills/ingest.py` checks it, `skills/add.py` adds
-it): a pasted SKILL.md, a `.md` or `.zip` attached on the caller's own platform,
-or a GitHub folder read through the skill-repo fetch. `daimon skills add --agent
-NAME PATH|URL` adds a local folder, SKILL.md or `.zip`, or a public GitHub folder,
-from the CLI: it previews, asks unless `--yes`, and decides as a server admin
-(never a built-in agent, the agent rule asked again just before the upload and
-the attach). Archives refuse links,
-absolute or `..` paths, encryption and the repo sync's size caps; the
-frontmatter needs a lowercase name and a bounded description. The skill is
-uploaded under the agent-scoped title, never the shared library. A name a
-shared or built-in skill already holds, or one that would load under the same
-folder as an attached skill, is refused. A fork (`copy_agent`, also behind
-`set_channel_rule`'s copy) uploads the source's own skills again under the fork's
-title and upload row, so the two never share a skill id; another agent's
-skill, or one that fails to copy, is left off and named, and the fork still
-succeeds. One attached by id or kept by an older fork may still be
-shared, so a skill another agent also has attached is never versioned; the
-upload must take a new name. Its `user_skills` row has `source = "upload"`, an origin (a GitHub
-origin is `owner/repo/path@branch`, never the URL as typed) and the adding
-account, so no repo sync replaces, deletes or re-attaches it, and removing the
-skill forgets it. `add_skill` previews first and adds only when called again
-with the preview's hash, which is bound to the target agent; the model's word
-alone never adds it. With confirmation cards on, the person presses Approve on
-the card (below). The server checks the card can exist: the confirm needs a
-verified origin whose live session runs the origin's responder with
-`add_skill` on `always_ask` (`has_confirmation_gate`), as MA reports the
-session or, only when it reports the agent's own tools (leaving the
-per-session overrides out), as the bind recorded sending them. Where the
-deployment turned cards off (tool safety off), a chat preview is recorded
-instead, bound to the person, thread, target agent and previewed content. The
-person's next direct message in that thread settles it
-(`resolve_pending_skill_adds`): if the whole message, after mentions and a
-closing `.` and `!` are removed and commas and spaces collapsed, is one of
-`yes`, `y`, `yes please`, `yes pls`, `yep`, `yeah`, `ok`, `okay`, `sure`,
-`go ahead`, `do it`, `confirm` or `approve` (any case), it approves the add
-for the turn that message started, once, within 15 minutes; any other reply,
-including a question (`ok?`) or a condition (`yes but not now`,
-`sure, after lunch`), cancels it. A message queued behind a running turn
-leaves the preview open. Only Discord passes the person's message to the
-turn today; Slack and Teams do not, so there a reply never confirms. In an
-`agent_chat` session, or one whose tools have not caught up with tool safety
-yet, a chat confirm adds nothing; the preview and the refusal say which case
-it was and point to Add skill in the setup panels' Details (Discord takes a
-paste or a file, Slack a paste), where the person's own submit is the
-approval. The `skill_add` and
-`skill_remove` operations follow the shared-agent rule
-(`authorize(CHANGE_SHARED_AGENT)`, spec family): built-in agents never, server
-admins on any other, channel admins on agents of theirs local to their channels, anyone
-on agents nobody else uses. Sharing is read as widely as a key change
-(`WIDE_SHARING_OPERATIONS`): a default, a bound thread, someone's personal
-default, or another member's routine or live session. Prompt and setup edits
-(`agent_spec_edit`) and repo binds read sharing the same way, so an agent that
-only an admin's routine or a bound thread runs is not a member's to change. An
-agent with a rule takes a
-chat add only from a verified origin in its channels (`require_pin_write_access`
-with the card's origin), and a panel add only from its channels' panels
-(`pin_refusal` with the panel's channel and thread) at the button, the submit
-and the Add; `remove_skill`, like the other direct configuration tools, passes
-none. Rules and sharing are checked again on the fresh agent just before the
-upload and the attach, and refusals never name another agent. The target resolves from the turn's channel, so a
-setup thread under a channel kept to its own agents reaches only them, and
-nothing outside reaches them. Their uploads are hidden outside it like its other agent-scoped
-skills, keyed by the upload row's agent.
-
 **Stage two, `bind_session()` — `packages/core/daimon/core/turn/prepare.py`.**
 Finds the live `thread_sessions` row for this thread or creates a fresh MA
 session, assembles every `create_session` argument (credential env mount, MCP
@@ -1174,6 +899,17 @@ Whether an existing session may be reused, refreshed in place, or must be
 replaced is decided in `packages/core/daimon/core/session_preparation.py`
 against the fingerprints stored on the mapping row; the outcome rides back on
 `PreparedTurn.continuity` so the adapter can say what happened.
+
+A server admin who has linked their GitHub login can grant an agent a repo or
+`owner/*` straight from chat (`github_connect`). The grant is written only
+after the live App installation shows the repo, or every repo under the owner,
+is covered and the linked user can reach it; a request that cannot finish
+because the link is missing or expired is kept as a pending request and resumed
+once the person links, under a per-request deadline. An agent uses one GitHub
+installation at a time: a grant from a second account or org is refused until
+the first one's repos are removed (`remove_repo`).
+Linked-user tokens are refreshed by the scheduler sweep; a refresh that GitHub
+has answered is finished before shutdown.
 
 GitHub App mode uses the agent's live grants when assembling a turn. External
 askers get no App token. Each session gets one write token scoped to the agent's
@@ -1492,14 +1228,10 @@ output reaches no one but them:
 | Channel, thread, handoff, routine that posts to a channel | rules apply | rules apply |
 | DM (`admit(is_dm=True)`, Teams personal chats included) | agent with a rule refused | agent rule exempt |
 | Hub `ask` / `start_turn` / `continue_turn` | agent with a rule refused | agent rule exempt |
-| Hub `list_my_sessions` / `get_session` / `list_events` on a conversation with limited readers | refused | allowed, anyone's; a channel admin's in the channels they administer |
 | Hub `continue_turn` / `ask(handle)` on such a channel conversation | refused | refused: continue it in its channel |
-| Credential and configuration tools on an agent with a rule | from inside its channels only | allowed (a chat turn's admin, or channel admin of every channel it names) |
 | `fork_agent` of an agent with a rule | refused | refused |
-| "Use from your coding tools" | refused | allowed (a channel admin of every channel its rule names: bound to one of them) |
 | Agent chat and any agent-scoped key or bearer token with no platform user | rules apply | rules apply |
 | An agent key minted in a channel with limited readers, or one its agent's rule names | runs inside that channel only | runs inside that channel only |
-| A channel's own agent, or any agent from a turn inside a `readers: own` channel | runs, posts, reads and lists only in its channel; sends no DMs; publishes once the requester approves | the own agent also runs in their own DM and hub (so does a channel admin of that channel), but still posts and reads channels nowhere outside it; the hub's conversation reads above still apply |
 
 Channel and agent rules, the invoker allowlist and fork are decided by one
 pure function, `daimon.core.authz.authorize` (who is acting, what they want to
@@ -1513,26 +1245,6 @@ table are still decided where they are.
 **Decided again at the moment of action.** Admission is a decision about a
 turn that has not run yet, so it is asked again, on the policy as it is
 then, where it matters:
-
-- `bind_session` and the dead-session recovery call
-  `daimon.core.turn.admission.reauthorize` before a session is found,
-  reused, replaced or created. A rule or invoker change since admission
-  refuses the turn there; a readers limit added since joins the turn's
-  recorded ids, so the session is stamped with it and memory mounts
-  read-only.
-- Every channel send, card and direct message reads the policy when it is
-  made, as do the routine fire, the handoff and the form submit checks.
-- The MCP OAuth callback asks the agent rule's write check again after the
-  code exchange and before the grant is written to the vault.
-- A published report's reader variant carries its source agent's names
-  (`daimon_reader_source`), so a rule on the source holds for the reader, and
-  publishing the reader of an agent with a rule needs an admin or an
-  `origin_context_id` from inside its channels. A channel's own agent's
-  reader is never published (`require_reader_source_publishable`), admins
-  included.
-- An agent-scoped key is never exempt as an admin inside `authorize`,
-  whoever minted it, and never holds its minter's channel admin grants
-  (`build_subject`), so a channel-bound key reaches no channel but its own.
 
 A demoted admin keeps their stored role until their next platform turn
 refreshes it; that is accepted.
@@ -1554,34 +1266,12 @@ leak: the readers rule keeps C's messages readable only from inside it. A
 session that ran in a DM (a Slack IM, a Teams personal chat, or a `/dm`
 conversation) is private: admins never read it from the hub.
 
-A channel admin has a server admin's rights limited to the channels they
-administer, so only those rows' exemptions apply to them, and only there:
-configuring agents with rules, coding-tool tokens, hub reads of their
-channels' limited conversations, and `readers: own`, where a channel admin of
-C is exempt in their own DM and hub for C's agents only. That grant is the
-person's, never an agent key's. Other hub turns, DMs and forks treat them as
-members.
-
 Continuing a limited channel conversation from the hub stays refused for
 admins because a follow-up would join the channel's own conversation, which
 the channel goes on reusing. Branching a private copy for the admin is a
 possible follow-up.
 
 Who counts as an admin:
-
-- In admission (DMs), the live role the adapter passes for this turn. Teams
-  reads it from the owners of `DAIMON_TEAMS__ADMIN_TEAM_ID`'s team (Graph,
-  cached for a minute, failing closed), its only admins.
-- For credential and configuration tools, a chat turn's credential, whose
-  `is_admin` reads the account's stored role -- recorded from the platform by
-  that turn's admission, and as current as the person's last platform turn
-  when the same vault token is reused by their hub or routine sessions. The
-  operator's own internal token is trusted too; an agent-scoped key never.
-- In the hub, the account's stored role, and for a channel admin the stored
-  grants matched against the role ids of their last turn. The hub has no
-  live platform role, so a demotion or promotion takes effect on the
-  person's next Discord, Slack or Teams turn in that workspace, which
-  records the platform's current role.
 
 An operator token (below) is an admin only while its account's stored role is,
 checked on every request. Like the hub, it sees a demotion only once the
@@ -1593,14 +1283,6 @@ Agent-scoped keys, chat-turn credentials in the hub and tokens with no platform
 user are never admins on these surfaces, whatever role their account holds or
 who minted them. An agent rule binds a bearer with no platform user too: such
 callers skip billing, not admission.
-
-The agent rule decisions (turn admission, MCP and hub turns, routine save and
-fire, handoff, configuration writes and form submits), sends and direct
-messages, channel and session reads, fork, channel admins' configuration
-rights and channel default binds are decided by `authorize`; each caller keeps
-only its own I/O and refusal copy. The live writers and invoker checks in the
-scheduler and routine delivery and the OAuth no-request rule still use the
-same `permissions` predicates directly.
 
 ## Tenancy and isolation
 
@@ -1768,119 +1450,6 @@ admission before any of this runs.
   Slack `/here` reports channel routing only.
   Discord read and scoped search tools explain when the bot lacks View Channel
   or Read Message History permission, including on an otherwise empty read.
-
-- **GitHub connection invitations** are issued with `daimon github connect-link`
-  for a tenant admin, `/github connect` on Discord and Slack, or the
-  `github_connect` MCP tool from a conversation. They can target one agent.
-  Repos confirmed through a link for one agent belong to that agent
-  (`tenant_github_repos.scope_agent_id`): no other agent can be granted them
-  or get them in a token, and the same repo on two agents is two rows. A
-  server admin, or a channel admin for a non-managed agent local to and held
-  by their channels (the `github_grant` terms), may make such a link; the
-  confirm step checks again that the requester still manages the agent. A
-  confirmed link retires the agent's saved GitHub key only when its working
-  repo (with write) and private skill repos are among its repos; otherwise the
-  repos stay staged until a later connection supplies the required repos. An
-  agent limited to channels by a rule may use only repos connected for it.
-  In a setup conversation the agent asks whether it should keep one working
-  repo in its filesystem. `set_working_repo` selects an existing grant or
-  clears it with `none`; other grants provide token access for clones by name.
-  The tool checks the live server or channel-admin permission for that agent.
-  A clear request in chat gives an agent access to an already connected repo:
-  `github_connect` grants read and write access if the caller
-  may grant it. Otherwise it posts the Connect GitHub browser link for that repo.
-  A linked manager can also grant `owner/*`: a personal owner must match the
-  linked GitHub login, while an organization grant requires access to every
-  repository its tenant-associated App installation currently covers. Read is
-  the default; write requires write access to every covered repository. At
-  token mint, the grant resolves against the installation's latest GitHub
-  snapshot (or confirmed names before the first snapshot), so later covered
-  repositories join automatically and removed ones leave. The App mints scoped
-  name-based tokens in groups of at most 500 repositories, exposing further
-  groups as `GH_TOKEN_2`, `GH_TOKEN_3`, and so on.
-  `GH_TOKEN`, numbered `GH_TOKEN_<n>`, `GITHUB_TOKEN`, and numbered
-  `GITHUB_TOKEN_<n>` are reserved for App credentials. Uploaded secrets with
-  those names are refused and stored legacy rows are omitted from mounted
-  `.env` files, including during session refresh.
-  A single-repo grant
-  can coexist and the higher access wins; only an explicit single grant can
-  select the working repo. Removing one repo under `owner/*` keeps it excluded
-  across owner-grant removal and regrant until an explicit single grant clears
-  the exclusion.
-  Chat changes need no separate confirmation turn; the agent says what changed
-  and how to undo it. Browser edits apply only after **Save changes**.
-  When the `DAIMON_GITHUB_APP__*`
-  credentials and
-  encryption keys are configured, MCP serves `/oauth/github/connect/{token}`,
-  `/oauth/github/callback`, `/oauth/github/setup` and GET/POST
-  `/oauth/github/confirm`. The browser flow checks the confirming person's
-  GitHub permission before authorizing tenant repositories: write, maintain or
-  admin lets them offer a repo when the App installation can write. Each repo row records
-  the permission (`authorized_permission`). These routes
-  are absent when GitHub connection is unconfigured.
-  Discord `/github home` and Slack `/github`, plus agent setup on Discord,
-  Slack, and Teams, show GitHub repositories without grant controls. Each agent's
-  section lists one repo per line, names its working repo (or says there is none),
-  and directs changes to Connect GitHub or the setup conversation. Server-admin GitHub home screens
-  list agents and repo counts without grant controls. The Connect GitHub browser
-  link opens the browser editor. The setup conversation also supports
-  `github_connect`, `remove_repo` and `set_working_repo`, with the same grant
-  stores and live manager checks.
-  Connect links appear as buttons where the person asked. Discord slash
-  commands answer ephemerally; a conversational mention posts a Connect GitHub
-  button in the thread for the requester's invitation. Anyone in the thread may
-  click it: the first click mints the single-use invitation, every click reveals
-  the URL ephemerally to the person who clicked, and the requester must still
-  manage the agent at each click. What the clicker can grant is capped by their
-  own GitHub permission; the invitation stays the requester's, and the flow
-  never links the clicker's GitHub account to any Daimon account. Slack slash
-  commands and mentions use `chat.postEphemeral` in the originating channel or
-  thread. Neither platform sends a GitHub setup DM. After confirmation,
-  `requested_work` resumes the calling agent's task in its original thread.
-  A bare connect posts one confirmation: Slack uses `chat.postEphemeral`, while
-  Discord uses an interaction follow-up until it expires and then a count-only
-  line in the origin thread or channel. Failed notices back off and expire
-  after eight attempts or 24 hours.
-  For one agent, the connection page is titled "<Agent>'s repos". It lists
-  every recorded repo grant with its working-repo marker and unavailable status, including repos the signed-in GitHub account cannot
-  edit. The person may add repos, remove repos, and select or clear the one
-  working repo, then confirm with **Save changes**. **Add repos** opens a
-  centered dialog on desktop and a bottom sheet on mobile. Tick repos one by one,
-  or use the filter box (a case-insensitive match on the full repo name),
-  **Select all N shown** (only the repos the filter shows), **Clear**, or one
-  **Everything in <owner>** button per GitHub account the App is installed on.
-  Every selected repo is connected with read and write access. A repo needs
-  write permission from the signed-in person and the App installation. The dialog lists every repo GitHub
-  returns, with no limit per addition. Select **Grant N repos** (N is the live
-  count) in the dialog, then **Grant N repos** (or **Save changes** when
-  only removing) on the page. When the card came from a chat ask that named one
-  repo, the dialog opens with that repo already ticked if the person can add
-  it. Added and removed rows stay
-  visible as pending changes, and removals can be undone before saving.
-  Working-repo actions live on the repo row. An agent uses repos from one
-  GitHub installation; a second installation is refused on save.
-  Canceling shows **No changes saved** and leaves connected repos unchanged.
-  A missing working or skill repo remains visible as a setup requirement.
-  Repos that need write access can be confirmed again to finish setup.
-  The invitation requester must still manage the agent when the page opens
-  and when it saves. The signed-in GitHub account needs current write access
-  to each repo it adds. It needs permission on the previous working repo when
-  changing or clearing that selection. A repo that cannot be granted at write
-  stays listed as still needed.
-  The dialog notes how many repos are hidden because the account has no
-  permission on them. Other repos stay visible without edit controls.
-  Each save consumes one invitation and applies its changes in one database
-  transaction. A signed snapshot rejects edits made against an outdated page;
-  the person reloads if chat has changed the repo list or working selection.
-  Removing the working repo clears that selection. The saved page shows the
-  current list. The read-only setup panel and chat use the same stores.
-  Setting an agent as a default in more places adds
-  "<Agent>'s repos come too." to `set_agent_default`'s confirmation when the
-  agent has repos. The same browser can safely repeat a
-  successful submission; a signed invitation receipt also handles concurrent
-  submissions. New installation repos appear in the GitHub setup panel after
-  the UTC day closes. Confirmed installation removal cancels affected requests
-  and offers an ephemeral reconnect button when an admin next opens setup.
 
 - **Scheduled routines** go through
   `packages/core/daimon/core/headless_runner.py`, which creates a session with
@@ -2316,76 +1885,6 @@ filters on the same decisions records nothing. Arguments, messages, credentials,
 are never copied into the row. Tool names outside the supported identifier syntax
 are recorded as `<invalid>`.
 
-The audit transaction is independent of the tool transaction. Request completion
-queues an immutable metadata snapshot without awaiting the database. Timestamps
-capture request completion, preserving chronology when inserts finish out of order.
-The middleware
-tracks at most 128 writes, with two database writes in flight and a two-second
-bound including queue wait. Shutdown drains tracked writes. Writes are best effort:
-timeouts, cancellation, overflow and database failures emit `security_audit.write_failed`
-with an error type, never the error body. An unavailable audit store does not delay
-the tool response or change authorization behavior. Tool failures use outcome
-`error`; authorization and policy rejections use `denied`. When the verifier refuses a
-registered token (revoked, expired, a demoted admin, a kind that does not match its
-row), it writes a `denied` row under the token's own tenant with tool name
-`auth/verify` and the refusal as the reason. Other calls rejected before the JWT
-verifier establishes a tenant cannot be safely attributed and are outside this trail.
-`daimon mcp mint-operator-token`, `revoke-token` and `set-token-scopes` each write a
-row (tool name `cli/<command>`) in the same transaction as their change.
-Admin-tier setup and billing panel writes on Discord, Slack and Teams (channel
-rules, channel admins, a channel's environment and skills, coding-tool and operator token
-mint and revoke, promo redeem) each write their own row through
-`core/panel_audit.py`, allowed or refused, with tool name `panel:<op>`; the clicker
-is named only when they have an account, so privacy erasure can reach the row.
-The channel tidy tools (`edit_message`, `delete_message`, `archive_thread`,
-`delete_thread`) also write their own row per message mutation, committed before the
-platform call: `target_channel_id`, `target_message_id`, an HMAC-SHA256 of the
-text replaced (`content_hmac`, keyed from the first `DAIMON_CRYPTO__KEYS` key,
-else the MCP JWT secret, under its own label) and the turn (`turn_ref`), never
-the text. Those `allowed` rows are what the tidy limits count; `denied` rows
-count toward a separate hourly cap. MA identity and origin I/O finishes before
-locking. Each write takes the tidy per-agent advisory lock, the tenant policy
-lock (`FOR NO KEY UPDATE`), then the target post row (`FOR UPDATE`). The
-separate audit transaction skips the advisory lock already held by its caller.
-The policy is loaded and checked under the tenant lock, which stays
-held through the platform call (15-second timeout) and ledger completion.
-Policy writers, form consume, support (user lock first), handoff and preparation
-never acquire the tidy advisory lock or a post row before the tenant lock, so
-there is no reverse lock edge. Pool headroom is reserved before checkout.
-A refusal adds a `denied` row; a failed write adds an `error` row. An uncertain
-result retires the target and clears its hash, refusing retries; a definite
-platform refusal leaves the ledger intact. Discord `delete_thread` deletes
-only individually recorded own messages and keeps the thread, including human
-replies arriving mid-call. Slack also checks, audits and counts each deletion,
-and stops with partial progress on refusal. An agent may tidy only posts in
-`agent_posted_messages` under its own agent id, which `send_message` and
-`create_thread` write at send time (`source='tool'`). Discord and Slack also
-record the status card, answer chunks and in-thread notices of mention and
-continuation turns (`source='turn'`, with the turn's card intent and the
-requesting user). Discord records the thread it opens from a mention
-(`source='auto_thread'`, with the user who mentioned it). Turn error notices,
-setup-wizard turns, Slack DM answers (which have no card intent), and session-output files are not recorded. Each post belongs
-to the turn agent's derived id. A turn post may be tidied
-only once its card intent is retired or marked unrecoverable, and only for the user who started that
-turn, the user who opened the auto-thread it is in with the same agent, or a server
-admin; a turn row must name its turn (a CHECK enforces it) and erasure clears
-the requester id;
-archiving or clearing an auto-opened thread takes its opener or a server
-admin. `archive_thread` on the thread the caller's own turn runs in does not archive
-it at once (Discord refuses edits in an archived thread): once every check,
-including the locked policy re-check, has passed, it sets
-`turn_origins.archive_requested_at` on that turn's origin. The Discord adapter
-reads it when the run ends and archives the thread after the turn's last edit
-and reaction, and after any session-output files are posted. If a newer turn
-holds the thread by then (in flight, queued or a deferred continuation) the
-thread stays open; otherwise the adapter holds the thread in `_processing` for
-the archive call and hands any mention that queued meanwhile back to
-`on_message`. A turn that raises leaves the thread open. `daimon audit prune` also removes those
-records past the retention, and account erasure clears `content_hmac`.
-The policy remains synchronous and does no I/O outside an MCP audit scope; the
-separate hub OAuth applications (`/discord/mcp` and `/slack/mcp`, which use
-`HubIdentityMiddleware`) are not audited in this version. This trail is not a complete record of hub tool activity.
-
 Operators can read records using `daimon audit list TENANT_UUID --since
 2026-09-28T00:00:00Z --json`. Use `--account ACCOUNT_UUID` to include that person's
 audit metadata in an operator-assisted privacy export. Results are chronological;
@@ -2437,8 +1936,8 @@ registered and expire too, while older jti-less ones keep working.
 
 | Scope | Tools |
 | --- | --- |
-| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_admins`, `list_channel_skills`, `list_agent_tool_rules`, `list_environments` |
-| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_admins`, `clear_channel_admins`, `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill`, `set_agent_tool_rule`, `clear_agent_tool_rule` |
+| `tenant:read` | `get_tenant_summary`, `list_channel_budgets`, `get_channel_budget`, `list_channel_skills`, `list_agent_tool_rules`, `list_environments` |
+| `channels:write` | `set_channel_budget`, `clear_channel_budget`, `set_agent_default` and `clear_agent_default` (channel defaults only), `set_channel_rule`, `set_agent_rule`, `set_channel_environment` and `clear_channel_environment` (channels only), `add_channel_skill`, `remove_channel_skill`, `set_agent_tool_rule`, `clear_agent_tool_rule` |
 | `agents:archive` | `archive_channel_copy` |
 | `promo:redeem` | `redeem_promo_code` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |

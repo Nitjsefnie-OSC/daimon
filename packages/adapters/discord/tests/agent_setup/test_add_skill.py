@@ -30,7 +30,6 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails
 from daimon.core.agent_pins import PIN_WRITE_REFUSAL
-from daimon.core.config import reset_channel_admins_enabled
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
@@ -40,7 +39,6 @@ from daimon.core.roster import RosterAgent
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.testing import ma_agent
@@ -124,7 +122,6 @@ async def _world(factory: async_sessionmaker[AsyncSession], *, owned: bool = Fal
     world = _World(factory, tenant.id, account.id)
     if owned:
         await _pin(world, CHANNEL_ID)
-        await _make_channel_admin(world, CHANNEL_ID)
     return world
 
 
@@ -223,6 +220,46 @@ async def _route(
         )
 
 
+def _modal(view: DetailsView, agent: RosterAgent, *, paste: str = "", upload: Any = None) -> Any:
+    modal = AddSkillModal(view, agent)
+    modal.paste._value = paste  # pyright: ignore[reportPrivateUsage]  # set what Discord would submit
+    modal.upload._values = [upload] if upload is not None else []  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+    return modal
+
+
+def _attachment(data: bytes, filename: str) -> MagicMock:
+    attachment = MagicMock(spec=discord.Attachment)
+    attachment.filename, attachment.size = filename, len(data)
+    attachment.read = AsyncMock(return_value=data)
+    return attachment
+
+
+def test_the_preview_shows_the_description_as_plain_text() -> None:
+    md = _MD.replace("Take meeting notes.", "Ping @everyone in **bold**.")
+    text = preview_text(bundle_from_markdown(md).preview, agent_name="helper")
+    assert "@\u200beveryone" in text and "\\*\\*bold\\*\\*" in text
+
+
+async def _preview(world: _World, agent: RosterAgent) -> SkillPreviewView:
+    interaction = _interaction(admin=True)
+    await _modal(_details_view(world, agent), agent, paste=_MD).on_submit(interaction)
+    return _shown(interaction)
+
+
+OTHER_CHANNEL_ID = 900000000000000002
+
+
+async def _pin(world: _World, *channels: int) -> None:
+    async with world.factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=world.tenant_id,
+            policy=TenantAccessPolicy(
+                agent_channel_pins={"helper": tuple(str(c) for c in channels)}
+            ),
+        )
+
+
 async def test_an_unbound_agent_refuses_a_members_form(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -267,87 +304,12 @@ async def test_a_server_default_needs_a_server_admin(
     admin.response.send_modal.assert_awaited_once()
 
 
-async def test_a_channel_admin_may_add_to_an_agent_local_to_their_channel(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """An admin-set default alone is insufficient; the explicit rule grants ownership."""
-    world = await _world(db_session_factory)
-    agent = world.put_agent()
-    await _route(world, ChannelScopeRef(tenant_id=world.tenant_id, channel_id=str(CHANNEL_ID)))
-    member = _interaction()
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(member)
-    member.response.send_modal.assert_not_awaited()
-
-    async with db_session_factory.begin() as session:
-        await set_channel_admins(
-            session,
-            tenant_id=world.tenant_id,
-            platform="discord",
-            channel_id=str(CHANNEL_ID),
-            role_ids=[],
-            user_ids=[str(USER_ID)],
-            actor_account_id=None,
-        )
-    member_bound = _interaction()
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(member_bound)
-    member_bound.response.send_modal.assert_not_awaited()
-
-    await _route(
-        world, ChannelScopeRef(tenant_id=world.tenant_id, channel_id=str(CHANNEL_ID)), by_admin=True
-    )
-    await _pin(world, CHANNEL_ID)
-    channel_admin = _interaction()
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(channel_admin)
-    channel_admin.response.send_modal.assert_awaited_once()
-
-
-async def test_disabled_former_holder_cannot_open_or_submit_add_skill(
-    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    reset_channel_admins_enabled()
-    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
-    world = await _world(db_session_factory)
-    agent = world.put_agent()
-    await _route(
-        world, ChannelScopeRef(tenant_id=world.tenant_id, channel_id=str(CHANNEL_ID)), by_admin=True
-    )
-    await _pin(world, CHANNEL_ID)
-    await _make_channel_admin(world, CHANNEL_ID)
-    try:
-        reset_channel_admins_enabled()
-        monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
-        opener = _interaction()
-        await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(opener)
-        opener.response.send_modal.assert_not_awaited()
-        submitter = _interaction()
-        await _modal(_details_view(world, agent), agent, paste=_MD).on_submit(submitter)
-        assert _followups(submitter)
-        assert submitter.edit_original_response.await_count == 0
-        assert world.created == []
-    finally:
-        reset_channel_admins_enabled()
-
-
-def _modal(view: DetailsView, agent: RosterAgent, *, paste: str = "", upload: Any = None) -> Any:
-    modal = AddSkillModal(view, agent)
-    modal.paste._value = paste  # pyright: ignore[reportPrivateUsage]  # set what Discord would submit
-    modal.upload._values = [upload] if upload is not None else []  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
-    return modal
-
-
-def _attachment(data: bytes, filename: str) -> MagicMock:
-    attachment = MagicMock(spec=discord.Attachment)
-    attachment.filename, attachment.size = filename, len(data)
-    attachment.read = AsyncMock(return_value=data)
-    return attachment
-
-
 async def test_a_pasted_skill_is_previewed_and_nothing_is_uploaded(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     world = await _world(db_session_factory, owned=True)
     agent = world.put_agent()
-    interaction = _interaction()
+    interaction = _interaction(admin=True)
 
     await _modal(_details_view(world, agent), agent, paste=_MD).on_submit(interaction)
 
@@ -369,7 +331,7 @@ async def test_an_uploaded_zip_flags_its_scripts_and_an_oversized_file_is_never_
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("notes/SKILL.md", _MD)
         archive.writestr("notes/run.sh", "#!/bin/sh\n")
-    interaction = _interaction()
+    interaction = _interaction(admin=True)
     upload = _attachment(buffer.getvalue(), "notes.zip")
 
     await _modal(_details_view(world, agent), agent, upload=upload).on_submit(interaction)
@@ -381,7 +343,7 @@ async def test_an_uploaded_zip_flags_its_scripts_and_an_oversized_file_is_never_
 
     huge = _attachment(b"", "big.zip")
     huge.size = 10**9
-    refused = _interaction()
+    refused = _interaction(admin=True)
     await _modal(_details_view(world, agent), agent, upload=huge).on_submit(refused)
     huge.read.assert_not_awaited()
     assert "larger than a skill may be" in _followups(refused)[0]
@@ -402,12 +364,6 @@ async def test_exactly_one_of_paste_or_file_is_taken(
 
     assert "not both or neither" in _followups(interaction)[0]
     interaction.edit_original_response.assert_not_awaited()
-
-
-def test_the_preview_shows_the_description_as_plain_text() -> None:
-    md = _MD.replace("Take meeting notes.", "Ping @everyone in **bold**.")
-    text = preview_text(bundle_from_markdown(md).preview, agent_name="helper")
-    assert "@\u200beveryone" in text and "\\*\\*bold\\*\\*" in text
 
 
 async def test_a_file_of_the_wrong_kind_is_never_read(
@@ -440,12 +396,6 @@ async def test_a_failure_after_the_form_closes_is_reported(
     interaction.edit_original_response.assert_not_awaited()
 
 
-async def _preview(world: _World, agent: RosterAgent) -> SkillPreviewView:
-    interaction = _interaction()
-    await _modal(_details_view(world, agent), agent, paste=_MD).on_submit(interaction)
-    return _shown(interaction)
-
-
 async def test_add_uploads_the_agents_own_skill_and_records_who_added_it(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -453,7 +403,7 @@ async def test_add_uploads_the_agents_own_skill_and_records_who_added_it(
     agent = world.put_agent()
     preview = await _preview(world, agent)
     monkeypatch.setattr(add_skill_mod, "load_details_for", AsyncMock(return_value=_details()))
-    interaction = _interaction()
+    interaction = _interaction(admin=True)
 
     await _button(preview, ADD_LABEL).callback(interaction)
 
@@ -486,39 +436,12 @@ async def test_add_re_reads_the_agent_and_refuses_one_that_became_built_in(
     agent = world.put_agent()
     preview = await _preview(world, agent)
     world.put_agent(managed=True)
-    interaction = _interaction()
+    interaction = _interaction(admin=True)
 
     await _button(preview, ADD_LABEL).callback(interaction)
 
     assert _followups(interaction) == [BUILT_IN_MESSAGE]
     assert world.created == []
-
-
-OTHER_CHANNEL_ID = 900000000000000002
-
-
-async def _pin(world: _World, *channels: int) -> None:
-    async with world.factory.begin() as session:
-        await set_access_policy(
-            session,
-            tenant_id=world.tenant_id,
-            policy=TenantAccessPolicy(
-                agent_channel_pins={"helper": tuple(str(c) for c in channels)}
-            ),
-        )
-
-
-async def _make_channel_admin(world: _World, channel_id: int) -> None:
-    async with world.factory.begin() as session:
-        await set_channel_admins(
-            session,
-            tenant_id=world.tenant_id,
-            platform="discord",
-            channel_id=str(channel_id),
-            role_ids=[],
-            user_ids=[str(USER_ID)],
-            actor_account_id=None,
-        )
 
 
 async def test_a_pinned_agent_opens_add_skill_only_inside_its_channels_or_for_an_admin(
@@ -541,67 +464,22 @@ async def test_a_pinned_agent_opens_add_skill_only_inside_its_channels_or_for_an
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(admin)
     admin.response.send_modal.assert_awaited_once()
 
-    await _make_channel_admin(world, OTHER_CHANNEL_ID)
-    channel_admin = _interaction()
-    await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(channel_admin)
-    # An admin of every pinned channel may add from anywhere.
-    channel_admin.response.send_modal.assert_awaited_once()
 
-
-async def test_a_member_in_a_thread_of_a_pinned_channel_may_add(
+async def test_a_member_in_a_thread_of_a_pinned_channel_cannot_add(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The team member administers the channel named by its real rule."""
+    """A channel pin does not give a member skill editing rights."""
     world = await _world(db_session_factory)
     agent = world.put_agent()
     await _pin(world, OTHER_CHANNEL_ID)
-    await _make_channel_admin(world, OTHER_CHANNEL_ID)
 
     inside = _interaction(channel_id=THREAD_ID, thread_of=OTHER_CHANNEL_ID)
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(inside)
-    inside.response.send_modal.assert_awaited_once()
+    inside.response.send_modal.assert_not_awaited()
 
     elsewhere = _interaction(channel_id=THREAD_ID, thread_of=CHANNEL_ID)
     await _button(_details_view(world, agent), ADD_SKILL_LABEL).callback(elsewhere)
-    elsewhere.response.send_modal.assert_awaited_once()  # The verified rule owner may configure from anywhere.
-
-
-async def test_a_pin_added_after_the_button_refuses_the_submit_and_the_add(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    world = await _world(db_session_factory, owned=True)
-    agent = world.put_agent()
-    preview = await _preview(world, agent)
-    await _pin(world, OTHER_CHANNEL_ID)
-
-    submit = _interaction()
-    await _modal(_details_view(world, agent), agent, paste=_MD).on_submit(submit)
-    assert _followups(submit) == [PIN_WRITE_REFUSAL]
-    submit.edit_original_response.assert_not_awaited()
-
-    add = _interaction()
-    await _button(preview, ADD_LABEL).callback(add)
-    assert _followups(add) == [PIN_WRITE_REFUSAL]
-    assert world.created == [], "nothing was uploaded"
-
-
-async def test_an_agent_shared_after_the_button_refuses_the_submit_and_the_add(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    world = await _world(db_session_factory, owned=True)
-    agent = world.put_agent()
-    preview = await _preview(world, agent)
-    await _route(world, TenantScopeRef(tenant_id=world.tenant_id))
-
-    submit = _interaction()
-    await _modal(_details_view(world, agent), agent, paste=_MD).on_submit(submit)
-    assert "needs someone with Manage Server" in _followups(submit)[0]
-    submit.edit_original_response.assert_not_awaited()
-
-    add = _interaction()
-    await _button(preview, ADD_LABEL).callback(add)
-    assert "needs someone with Manage Server" in _followups(add)[0]
-    assert world.created == [], "nothing was uploaded"
+    elsewhere.response.send_modal.assert_not_awaited()
 
 
 async def test_an_agent_that_turned_built_in_during_the_upload_is_left_unattached(
@@ -624,7 +502,7 @@ async def test_an_agent_that_turned_built_in_during_the_upload_is_left_unattache
 
     world._skills = upload_then_pin  # type: ignore[method-assign]  # swap the fake mid-run
     preview.runtime = world.runtime()
-    interaction = _interaction()
+    interaction = _interaction(admin=True)
     await _button(preview, ADD_LABEL).callback(interaction)
 
     assert len(world.created) == 1, "uploaded before the change"

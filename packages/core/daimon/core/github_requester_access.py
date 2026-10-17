@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncGenerator, Callable, Coroutine, Mapping
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Final, Literal
 
 import httpx
 from cryptography.fernet import MultiFernet
@@ -24,6 +25,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 Access = Literal["none", "read", "write"]
+
+# How long a cancelled caller keeps its HTTP client open for a refresh detached
+# from it (`settle_detached_refreshes`): a GitHub POST (client timeout 15 to 20 s)
+# and the commit that stores its answer.
+DETACHED_REFRESH_SETTLE_S: Final = 25.0
 
 
 class _RepoPermissionPayload(BaseModel):
@@ -317,6 +323,44 @@ def _release_detached(task: asyncio.Task[tuple[str | None, int, int]]) -> None:
     if not task.cancelled():
         # Nobody awaits a detached refresh; its failure is the next use's to retry.
         _ = task.exception()
+
+
+async def drain_detached_refreshes(timeout: float) -> int:
+    """Wait up to `timeout` seconds for refreshes still running after their caller was cancelled.
+
+    GitHub retires the old token pair the moment it answers, so shutdown must
+    let each of these store its answer before the HTTP client closes and the
+    engine is disposed. Returns how many were still running at the deadline (0
+    when all finished); those are left running, not cancelled here.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        running = {task for task in _detached_refreshes if not task.done()}
+        if not running:
+            return 0
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return len(running)
+        await asyncio.wait(running, timeout=remaining)
+
+
+@asynccontextmanager
+async def settle_detached_refreshes(
+    timeout: float = DETACHED_REFRESH_SETTLE_S,
+) -> AsyncGenerator[None]:
+    """Hold the HTTP client of the enclosing `async with` open while its cancel settles.
+
+    Use it inside the client's own `async with` (listed after it, so it exits
+    first). If the body is cancelled while a refresh runs detached, the refresh
+    still needs the client to finish its GitHub call, so the cancel waits up to
+    `timeout` seconds for the refresh to store its answer before the client
+    closes. Other exits do not wait.
+    """
+    try:
+        yield
+    except asyncio.CancelledError:
+        await drain_detached_refreshes(timeout)
+        raise
 
 
 async def _shielded(

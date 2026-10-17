@@ -343,7 +343,6 @@ class AgentPermissions:
     """What one agent may do, from its rule and the rule of its home channel.
 
     For a member's turn. A server admin may also run an agent with a rule in
-    their own DM and hub, where only they see it, and so may a channel admin
     of its home with that channel's own agents. A turn inside a channel kept
     to its own agents keeps whatever agent runs it to that channel (`held_to`).
     """

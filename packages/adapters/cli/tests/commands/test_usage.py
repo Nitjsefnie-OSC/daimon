@@ -158,6 +158,7 @@ def test_settle_backlog_is_a_dry_run_unless_applied(
             anthropic=SimpleNamespace(
                 api_key=SimpleNamespace(get_secret_value=lambda: "key"),
                 base_url="https://api.anthropic.com",
+                resolved_api_key=lambda: "key",
             ),
             billing=SimpleNamespace(markup=Decimal("1.1")),
         ),

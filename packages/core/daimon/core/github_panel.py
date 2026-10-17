@@ -5,18 +5,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from daimon.core.agent_reach import load_target_facts
-from daimon.core.channel_admins import (
-    ChannelAdminCaller,
-    GroupLookupFailed,
-    GroupMembers,
-    confirm_stored_group_ids,
-    grant_group_ids,
-    read_stored_admin,
-)
-from daimon.core.config import Settings, channel_admins_enabled
+from daimon.core.config import Settings
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
-from daimon.core.operation_policy import decide_operation
+from daimon.core.native_admins import AdminCaller, read_stored_admin
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
@@ -66,35 +57,14 @@ async def can_manage_agent_github(
     *,
     tenant_id: uuid.UUID,
     platform: str,
-    caller: ChannelAdminCaller,
+    caller: AdminCaller,
     agent_names: tuple[str | None, ...],
     ma_agent_id: str,
     is_daimon_managed: bool,
     default: DeploymentDefault,
-    lock_authority: bool = False,
 ) -> bool:
-    """Whether the caller may connect, grant and remove repos for one agent.
-
-    A server admin, or a channel admin for a non-managed agent that is local to
-    and held by their channels (`github_connect`, the `github_grant` terms).
-    `lock_authority` is `requester_manages_agent`'s.
-    """
-    facts = await load_target_facts(
-        session,
-        "github_connect",
-        tenant_id=tenant_id,
-        platform=platform,
-        agent_names=agent_names,
-        ma_agent_id=ma_agent_id,
-        default=default,
-        caller=caller,
-        is_daimon_managed=is_daimon_managed,
-        caller_platform_user_id=caller.platform_user_id,
-        lock_authority=lock_authority,
-    )
-    return (
-        decide_operation("github_connect", is_admin=caller.is_server_admin, target=facts) == "allow"
-    )
+    """Only a server admin can connect, grant and remove repos for an agent."""
+    return caller.is_server_admin
 
 
 async def requester_manages_agent(
@@ -108,32 +78,15 @@ async def requester_manages_agent(
     ma_agent_id: str | None,
     default: DeploymentDefault,
     is_daimon_managed: bool | None,
-    members: GroupMembers | None,
     other_names: tuple[str | None, ...] = (),
     lock_authority: bool = False,
 ) -> bool:
-    """Whether the requester manages one agent, by their role and groups as they are now.
-
-    For confirming a link outside a chat turn, and for any check that must not
-    trust a cached group: pass a `members` lookup that asks the platform each
-    time (the MCP server's `GroupLookups.live_members`). `other_names` are the
-    agent's other names (`agent_pin_names`).
-
-    Reads the requester's stored role and channel admin grants, and counts a
-    group or Discord role only as `members` confirms it now. The caller reads
-    `is_daimon_managed` from the live agent. Fails closed: an unknown managed
-    status, a link without the agent's Managed Agents id, a non-admin without
-    a platform user ID or a failed group lookup is no.
+    """Use the stored native admin role for an out-of-turn GitHub save.
 
     `lock_authority` is for a commit-time recheck inside a SERIALIZABLE
-    transaction. It takes `FOR SHARE` locks on the rows that confer authority:
-    the requester's account, the tenant's channel admin grants and the access
-    policy row holding the agent's ownership rule (`channel_admin_holds`). A
-    demotion, a removed grant or an edited rule that committed after the
-    transaction's snapshot fails the transaction (40001) instead of being read
-    as it was. Reach facts (propagations, bindings, runs, DM origins) only
-    narrow the decision and are read unlocked, since a new binding or run is an
-    insert no row lock covers; live group membership comes from the platform.
+    transaction. It takes a `FOR SHARE` lock on the requester's account row, so
+    a demotion that committed after the transaction's snapshot fails the
+    transaction (40001) instead of being read as it was.
     """
     if not agent_name or not ma_agent_id or platform is None or is_daimon_managed is None:
         return False
@@ -145,38 +98,7 @@ async def requester_manages_agent(
         platform_user_id=platform_user_id,
         lock=lock_authority,
     )
-    if stored.is_admin:
-        return True
-    if not channel_admins_enabled():
-        return False
-    if platform_user_id is None:
-        # No one to look up: a stored role would count unchecked.
-        return False
-    try:
-        role_ids = (
-            await confirm_stored_group_ids(
-                platform,
-                platform_user_id,
-                stored.role_ids,
-                members,
-                named=grant_group_ids(stored.grants),
-            )
-            if members is not None
-            else frozenset[str]()
-        )
-    except GroupLookupFailed:
-        return False
-    return await can_manage_agent_github(
-        session,
-        tenant_id=tenant_id,
-        platform=platform,
-        caller=ChannelAdminCaller(platform_user_id=platform_user_id, role_ids=role_ids),
-        agent_names=(agent_name, *other_names),
-        ma_agent_id=ma_agent_id,
-        is_daimon_managed=is_daimon_managed,
-        default=default,
-        lock_authority=lock_authority,
-    )
+    return stored.is_admin
 
 
 async def sync_connect_admin(

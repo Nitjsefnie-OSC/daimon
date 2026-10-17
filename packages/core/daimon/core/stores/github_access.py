@@ -465,15 +465,33 @@ async def require_may_grant(
         raise ValueError(SERVER_WIDE_GRANT_MESSAGE)
 
 
+def other_installation_message(
+    agent_name: str, org: str | None, kind: Literal["repo", "owner"] = "repo"
+) -> str:
+    """The person-facing text for a refused second installation.
+
+    `kind` is what blocks: an owner-wide grant needs all the org's repos removed.
+    The store raises `SecondInstallationError` with this text, so every surface
+    that shows the exception (the browser confirmation, the tools) says it.
+    """
+    if org is None:
+        return (
+            f"{agent_name} already has repos from another GitHub account or org.\n"
+            "An agent uses one GitHub account or org at a time. "
+            "To switch, remove those repos first."
+        )
+    scope = f"all {org} repos" if kind == "owner" else f"the {org} repos"
+    return (
+        f"{agent_name} already has repos from {org}.\n"
+        f"An agent uses one GitHub account or org at a time. To switch, remove {scope} first."
+    )
+
+
 def _second_installation(
     agent_name: str | None, agent_id: uuid.UUID, org: str, kind: Literal["repo", "owner"]
 ) -> SecondInstallationError:
     return SecondInstallationError(
-        f"{agent_name or agent_id} already uses repos from {org}. "
-        "One agent can use one GitHub org. Use another agent for repos from a "
-        "different org.",
-        org=org,
-        kind=kind,
+        other_installation_message(agent_name or str(agent_id), org, kind), org=org, kind=kind
     )
 
 

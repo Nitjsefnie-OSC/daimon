@@ -9,20 +9,26 @@ from datetime import UTC, datetime
 from typing import Literal, cast
 
 import httpx
+import structlog
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.oauth_github import _installations  # pyright: ignore[reportPrivateUsage]
 from daimon.core.github_app_auth import (
+    AppInstallationDetails,
     build_app_jwt,
     get_app_installation_details,
     installation_supports_write,
     list_installation_repositories,
     mint_installation_listing_token,
 )
-from daimon.core.github_requester_access import linked_access_token_with_generation
+from daimon.core.github_requester_access import (
+    linked_access_token_with_generation,
+    settle_detached_refreshes,
+)
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.github_access import (
     SecondInstallationError,
     list_agent_grants,
+    other_installation_message,
     require_owner_grant_installations,
     stage_grant,
     upsert_linked_agent_authorization,
@@ -66,6 +72,9 @@ NEEDS_LINK_MESSAGE = "Link GitHub to check your repo access."
 RELINK_MESSAGE = "Your GitHub link needs renewing."
 CHANGED_MESSAGE = "Access changed while checking.\nAsk again."
 INSTALL_PENDING_MESSAGE = "Daimon is refreshing its repo list.\nTry again shortly."
+GITHUB_DOWN_MESSAGE = "GitHub didn't answer.\nAsk again in chat."
+
+_log = structlog.get_logger(__name__)
 
 
 def no_access_message(repo_name: str) -> str:
@@ -109,21 +118,47 @@ def app_unusable_message(owner: str) -> str:
     )
 
 
-def other_installation_message(
-    agent_name: str, org: str | None, kind: Literal["repo", "owner"] = "repo"
-) -> str:
-    """`kind` is what blocks: an owner-wide grant needs all the org's repos removed."""
-    if org is None:
-        return (
-            f"{agent_name} already has repos from another GitHub account or org.\n"
-            "An agent uses one GitHub account or org at a time. "
-            "To switch, remove those repos first."
+class _DetailUnavailable(Exception):
+    """GitHub did not give a usable answer about an installation; nothing says it is unusable."""
+
+
+async def _installation_detail(
+    client: httpx.AsyncClient, *, private_key: str, app_id: str, installation_id: int
+) -> AppInstallationDetails | None:
+    """The installation's details, or None when GitHub says the App cannot use it.
+
+    403 and 404 on the App's own request mean the installation is gone or refused
+    the App: unusable. Anything else is not a verdict on the installation. A 401
+    is Daimon's own App credential being rejected, not the person's link, so it
+    never maps to relink. Rate limits and 5xx are transient. Those raise
+    `_DetailUnavailable`, which the callers turn into the GitHub-didn't-answer
+    outcome.
+    """
+    try:
+        return await get_app_installation_details(
+            client,
+            jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
+            installation_id=installation_id,
         )
-    scope = f"all {org} repos" if kind == "owner" else f"the {org} repos"
-    return (
-        f"{agent_name} already has repos from {org}.\n"
-        f"An agent uses one GitHub account or org at a time. To switch, remove {scope} first."
-    )
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        rate_limited = (
+            exc.response.headers.get("x-ratelimit-remaining") == "0"
+            or "retry-after" in exc.response.headers
+        )
+        if status in (403, 404) and not rate_limited:
+            return None
+        _log.error(
+            "github.linked_grant.installation_detail_failed",
+            installation_id=installation_id,
+            status_code=status,
+            app_credential_rejected=status == 401,
+        )
+        raise _DetailUnavailable from exc
+
+
+def _github_down() -> LinkedOutcome:
+    return LinkedOutcome(status="changed_try_again", message=GITHUB_DOWN_MESSAGE)
 
 
 def _ability(access: Literal["read", "write"]) -> str:
@@ -230,7 +265,10 @@ async def linked_grant(
         user = await get_user(session, github_user_id=link.github_user_id)
         if user is None or user.status != "active":
             return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with (
+        httpx.AsyncClient(timeout=15.0) as client,
+        settle_detached_refreshes(),
+    ):
         try:
             access_token, checked_generation = await linked_access_token_with_generation(
                 sessionmaker,
@@ -261,13 +299,18 @@ async def linked_grant(
                     status="no_github_access",
                     message=no_access_message(repo_name),
                 )
-            detail = await get_app_installation_details(
-                client,
-                jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
-                installation_id=installation.id,
-            )
+            try:
+                detail = await _installation_detail(
+                    client,
+                    private_key=private_key,
+                    app_id=app_id,
+                    installation_id=installation.id,
+                )
+            except _DetailUnavailable:
+                return _github_down()
             if (
-                detail.account_id != installation.owner_id
+                detail is None
+                or detail.account_id != installation.owner_id
                 or detail.account_login.casefold() != installation.owner_login.casefold()
                 or detail.suspended_at is not None
                 or not installation_supports_write(detail.permissions)
@@ -457,7 +500,10 @@ async def linked_owner_grant(
         if user is None or user.status != "active":
             return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with (
+            httpx.AsyncClient(timeout=15.0) as client,
+            settle_detached_refreshes(),
+        ):
             token, checked_generation = await linked_access_token_with_generation(
                 sessionmaker,
                 client,
@@ -484,13 +530,18 @@ async def linked_owner_grant(
                         or current.account_login.casefold() != owner.casefold()
                     ):
                         continue
-                    detail = await get_app_installation_details(
-                        client,
-                        jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
-                        installation_id=candidate.id,
-                    )
+                    try:
+                        detail = await _installation_detail(
+                            client,
+                            private_key=private_key,
+                            app_id=app_id,
+                            installation_id=candidate.id,
+                        )
+                    except _DetailUnavailable:
+                        return _github_down()
                     if (
-                        detail.account_id != candidate.owner_id
+                        detail is None
+                        or detail.account_id != candidate.owner_id
                         or detail.account_login.casefold() != owner.casefold()
                         or detail.suspended_at is not None
                         or not installation_supports_write(detail.permissions)

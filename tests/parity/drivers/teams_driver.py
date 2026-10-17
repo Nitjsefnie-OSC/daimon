@@ -41,7 +41,6 @@ from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.teams.credential_requests import SUBMIT
 from daimon.adapters.teams.http_service import create_teams_http_service
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -52,6 +51,7 @@ from daimon.core.config import (
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.posted_controls import CardKind
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.purge import AccountPurgeResult

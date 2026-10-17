@@ -6,18 +6,14 @@ import uuid
 
 import pytest
 from cryptography.fernet import Fernet, MultiFernet
-from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
-from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.mcp_attach import (
     McpServerReplaceRefusedError,
     decide_mcp_connect,
-    decide_mcp_replacement,
 )
 from daimon.core.mcp_server_url import canonical_mcp_url, same_mcp_url
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault, UserScopeRef
-from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.channel_admins import set_channel_admins
+from daimon.core.native_admins import AdminCaller
+from daimon.core.scope import DeploymentDefault, UserScopeRef
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_account, make_tenant
@@ -48,151 +44,6 @@ def _agent(tenant_id: uuid.UUID, *, servers: list[dict[str, str]] | None = None)
 def test_one_canonical_url_form(left: str, right: str, same: bool) -> None:
     assert same_mcp_url(left, right) is same
     assert (canonical_mcp_url(left) == canonical_mcp_url(right)) is same
-
-
-@pytest.mark.parametrize("sharing", ["handoff-thread", "personal-default"])
-async def test_an_agent_answering_in_a_bound_thread_or_as_a_personal_default_is_shared(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    sharing: str,
-) -> None:
-    """Not a channel/tenant/deployment default, but it still answers other people."""
-    tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
-    if sharing == "handoff-thread":
-        await create_binding(
-            db_session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="1",
-            thread_id="2",
-            responder_ma_agent_id="ag_private",
-            responder_name="private-bot",
-            kind="handoff",
-        )
-    else:
-        await set_fields(
-            db_session,
-            scope=UserScopeRef(account_id=account.id),
-            tenant_id=tenant.id,
-            agent_name="private-bot",
-        )
-    await db_session.commit()
-    agent = _agent(tenant.id, servers=[{"name": "linear", "type": "url", "url": _URL}])
-
-    decision = await decide_mcp_connect(
-        db_session_factory,
-        tenant_id=tenant.id,
-        agent=agent,
-        agent_id=uuid.uuid4(),
-        server_name="linear",
-        url="https://attacker.example/mcp",
-        platform="discord",
-        caller=ChannelAdminCaller(platform_user_id="u1"),
-        default=DeploymentDefault(agent_name="other"),
-        shares_token=False,
-    )
-    assert decision.refused
-
-
-async def test_a_channel_admin_replaces_a_server_only_on_an_agent_local_to_them(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """Repointing a server goes through channel admin locality, as key changes do."""
-    tenant = await make_tenant(db_session)
-    await set_fields(
-        db_session,
-        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"),
-        tenant_id=tenant.id,
-        agent_name="private-bot",
-        mode="agent",
-    )
-    for channel_id, user_id in (("c1", "u1"), ("c9", "u9")):
-        await set_channel_admins(
-            db_session,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id=channel_id,
-            role_ids=[],
-            user_ids=[user_id],
-            actor_account_id=None,
-        )
-    await db_session.commit()
-
-    async def outcome(user_id: str, *, managed: bool = False, platform: str = "discord") -> str:
-        agent = _agent(tenant.id)
-        if managed:
-            agent = agent.model_copy(
-                update={"metadata": {**agent.metadata, "daimon_managed": "true"}}
-            )
-        return await decide_mcp_replacement(
-            db_session_factory,
-            tenant_id=tenant.id,
-            platform=platform,
-            agent=agent,
-            caller=ChannelAdminCaller(platform_user_id=user_id),
-            default=DeploymentDefault(agent_name="other"),
-        )
-
-    assert await outcome("u1") == "needs_admin", (
-        "an agent someone else made and a member bound to c1 is not c1's admin's"
-    )
-    await set_fields(
-        db_session,
-        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="c1"),
-        tenant_id=tenant.id,
-        agent_name="private-bot",
-        mode="agent",
-        set_by_admin=True,
-    )
-    await set_access_policy(
-        db_session,
-        tenant_id=tenant.id,
-        policy=TenantAccessPolicy(agent_channel_pins={"private-bot": ("c1",)}),
-    )
-    await db_session.commit()
-    assert await outcome("u1") == "allow", "c1's admin repoints the agent a server admin gave c1"
-    assert await outcome("u9") == "needs_admin", "an admin of another channel may not"
-    assert await outcome("u5") == "needs_admin", "a plain member may not"
-    assert await outcome("u1", managed=True) == "managed_agent", "managed stays a server admin's"
-    assert await outcome("u1", platform="teams") == "needs_admin", (
-        "grants are per platform: c1's Discord admin holds nothing as a Teams caller"
-    )
-    await set_channel_admins(
-        db_session,
-        tenant_id=tenant.id,
-        platform="teams",
-        channel_id="c1",
-        role_ids=[],
-        user_ids=["u1"],
-        actor_account_id=None,
-    )
-    await db_session.commit()
-    assert await outcome("u1", platform="teams") == "allow", "a Teams grant counts like Discord's"
-
-
-async def test_the_first_shared_token_for_an_already_connected_url_is_a_replacement(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    """No token row yet, but the agent already uses the URL: a member's token would
-    become everyone's credential for it."""
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-    agent = _agent(tenant.id, servers=[{"name": "linear", "type": "url", "url": _URL}])
-
-    decision = await decide_mcp_connect(
-        db_session_factory,
-        tenant_id=tenant.id,
-        agent=agent,
-        agent_id=uuid.uuid4(),
-        server_name="linear-2",
-        url=_URL + "/",
-        platform="discord",
-        caller=ChannelAdminCaller(platform_user_id="u1"),
-        default=DeploymentDefault(agent_name="private-bot"),
-        shares_token=True,
-    )
-    assert decision.replaces and decision.refused
 
 
 async def test_the_agent_wide_token_is_never_overwritten_when_replace_is_not_allowed(
@@ -486,3 +337,72 @@ async def test_no_reader_ever_sees_a_refused_members_token(
     await mirror()
     assert "member-token" not in seen, "no other session may ever mirror the refused token"
     assert vault_posts == [], "the submitter's own vault copy is written only after success"
+
+
+@pytest.mark.parametrize("sharing", ["handoff-thread", "personal-default"])
+async def test_an_agent_answering_in_a_bound_thread_or_as_a_personal_default_is_shared(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    sharing: str,
+) -> None:
+    """Not a channel/tenant/deployment default, but it still answers other people."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    if sharing == "handoff-thread":
+        await create_binding(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="1",
+            thread_id="2",
+            responder_ma_agent_id="ag_private",
+            responder_name="private-bot",
+            kind="handoff",
+        )
+    else:
+        await set_fields(
+            db_session,
+            scope=UserScopeRef(account_id=account.id),
+            tenant_id=tenant.id,
+            agent_name="private-bot",
+        )
+    await db_session.commit()
+    agent = _agent(tenant.id, servers=[{"name": "linear", "type": "url", "url": _URL}])
+
+    decision = await decide_mcp_connect(
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent=agent,
+        agent_id=uuid.uuid4(),
+        server_name="linear",
+        url="https://attacker.example/mcp",
+        platform="discord",
+        caller=AdminCaller(platform_user_id="u1"),
+        default=DeploymentDefault(agent_name="other"),
+        shares_token=False,
+    )
+    assert decision.refused
+
+
+async def test_the_first_shared_token_for_an_already_connected_url_is_a_replacement(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """No token row yet, but the agent already uses the URL: a member's token would
+    become everyone's credential for it."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    agent = _agent(tenant.id, servers=[{"name": "linear", "type": "url", "url": _URL}])
+
+    decision = await decide_mcp_connect(
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent=agent,
+        agent_id=uuid.uuid4(),
+        server_name="linear-2",
+        url=_URL + "/",
+        platform="discord",
+        caller=AdminCaller(platform_user_id="u1"),
+        default=DeploymentDefault(agent_name="private-bot"),
+        shares_token=True,
+    )
+    assert decision.replaces and decision.refused

@@ -7,9 +7,8 @@ shown exactly once: it is never logged, never written to channel history, and
 never leaves the ephemeral.
 
 Who may mint is `authorize(MINT_CODING_TOKEN)`'s call, re-resolved after the
-ack and never read from the rendered view: a workspace admin, or a channel
-admin of every channel the agent is pinned to, whose token is always bound to
-one of them. The button is visible to every member (hiding is not gating) and
+ack and never read from the rendered view: a workspace admin. The button is
+visible to every member (hiding is not gating) and
 a refused click gets an explanation instead of silence. Revoking is limited
 to the account that minted the token. Pressed in a sealed channel, or in one
 the agent is pinned to, the token is bound to that channel
@@ -25,19 +24,18 @@ from typing import Any, Final
 
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.agent_setup.panel_views import ACTION_REVOKE_TOKEN
 from daimon.adapters.slack.agent_setup.read import (
     coding_tools_available,
     load_panel_roster,
     public_mcp_url,
 )
-from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import AgentRef, Decision, build_agent_ref
-from daimon.core.channel_admins import ChannelAdminCaller, load_live_subject
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import (
     authorize_coding_token,
@@ -47,6 +45,7 @@ from daimon.core.mcp_auth import (
 )
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.permissions import any_agent_rules
 from daimon.core.roster import RosterAgent
@@ -76,8 +75,7 @@ COPY_NOW_LINE: Final[str] = "Copy the setup below now. The token is shown only o
 TOKEN_REVOKED_MESSAGE: Final[str] = "Token revoked."
 
 
-#: Who may mint is a workspace admin, or an admin of every channel the agent's
-#: rule runs it in, pressing inside one of them; the refusal names only the way out.
+#: Minting requires a workspace admin.
 NEEDS_ADMIN_MESSAGE: Final[str] = (
     "You can't create this token.\n\n"
     'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
@@ -204,7 +202,7 @@ async def handle_coding_tools_click(
             tenant_id=tenant_id,
             channel_id=channel_id or None,
             target=target,
-            caller=await channel_admin_caller(
+            caller=await admin_caller(
                 runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
             ),
         )
@@ -365,12 +363,11 @@ async def _authorize_mint(
     tenant_id: uuid.UUID,
     channel_id: str | None,
     target: RosterAgent,
-    caller: ChannelAdminCaller,
+    caller: AdminCaller,
 ) -> tuple[Decision, str | None]:
     """Whether the caller may mint here, and the channel the token is bound to.
 
-    A channel admin is one listed by user id or through a user group. The agent
-    is read only under a pin.
+    The agent is read only under a pin.
     """
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)

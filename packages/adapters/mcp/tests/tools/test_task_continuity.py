@@ -1249,87 +1249,6 @@ async def test_handoff_refuses_an_agent_pinned_by_its_display_name(
 # --- Same-thread switch to an agent scoped to this channel --------------------------
 
 
-async def _switch_as(
-    db_session: AsyncSession,
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    policy: TenantAccessPolicy | None,
-    channel_admin: bool = False,
-    administers_acme: bool = False,
-    managed: bool = False,
-) -> tuple[uuid.UUID, ToolError | None]:
-    """A member (optionally a channel admin of C_PARENT) hands T_THREAD to research-bot.
-
-    research-bot was made for C_ACME and answers there, not in C_PARENT, so it is
-    reachable but not the agent this channel answers with. `administers_acme`
-    makes the caller a channel admin of C_ACME too, so research-bot is theirs;
-    `managed` makes it a defaults-managed agent.
-    """
-    from daimon.core.stores.agent_creation_channels import record_creation_channel
-    from daimon.core.stores.channel_admins import set_channel_admins
-
-    tenant = await make_tenant(db_session)
-    caller = await make_account(db_session, tenant=tenant)
-    await set_fields(
-        db_session,
-        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="C_ACME"),
-        tenant_id=tenant.id,
-        agent_name=_DESTINATION_NAME,
-        mode="agent",
-    )
-    if policy is not None:
-        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
-    await record_creation_channel(
-        db_session,
-        tenant_id=tenant.id,
-        ma_agent_id=_DESTINATION_ID,
-        platform="discord",
-        channel_id="C_ACME",
-    )
-    granted = (("C_PARENT",) if channel_admin else ()) + (("C_ACME",) if administers_acme else ())
-    for channel_id in granted:
-        await set_channel_admins(
-            db_session,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id=channel_id,
-            role_ids=(),
-            user_ids=("42",),
-            actor_account_id=None,
-        )
-    await db_session.commit()
-    runtime = _runtime(
-        committing_sessionmaker,
-        _client([_destination(tenant.id, managed=managed)]),
-        default_agent_name="daimon",
-    )
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="discord",
-        platform_user_id="42",
-    )
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-    ) as origin:
-        try:
-            await _hand_off_task_impl(
-                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
-            )
-        except ToolError as error:
-            return tenant.id, error
-    return tenant.id, None
-
-
 async def _bound_to(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
 ) -> str | None:
@@ -1348,92 +1267,38 @@ async def test_a_member_hands_the_thread_to_an_agent_pinned_to_this_channel(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    tenant_id, error = await _switch_as(
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await set_access_policy(
         db_session,
-        committing_sessionmaker,
-        policy=TenantAccessPolicy(agent_channel_pins={_DESTINATION_NAME: ("C_ACME", "C_PARENT")}),
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_channel_pins={_DESTINATION_NAME: ("C_PARENT",)}),
     )
-    assert error is None, "an agent pinned here needs nobody's say-so"
-    assert await _bound_to(committing_sessionmaker, tenant_id) == _DESTINATION_ID
-
-
-@pytest.mark.parametrize("administers_acme", [True, False], ids=["their-own", "c-acmes-own"])
-async def test_a_channel_admin_hands_the_thread_only_to_an_agent_of_theirs(
-    db_session: AsyncSession,
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    administers_acme: bool,
-) -> None:
-    """research-bot was made for C_ACME. Unless the caller administers C_ACME too,
-    it is that channel's own agent, so bringing it into C_PARENT is a server admin's."""
-    tenant_id, error = await _switch_as(
-        db_session,
-        committing_sessionmaker,
-        policy=None,
-        channel_admin=True,
-        administers_acme=administers_acme,
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
     )
-    if administers_acme:
-        assert error is None, "a channel admin may hand the thread to their own agent"
-        assert await _bound_to(committing_sessionmaker, tenant_id) == _DESTINATION_ID
-    else:
-        assert error is not None and "only a server admin can do it" in str(error), (
-            "another channel's own agent needs a server admin"
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+    ) as origin:
+        result = await _hand_off_task_impl(
+            runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
         )
-        assert await _bound_to(committing_sessionmaker, tenant_id) is None, "nothing switched"
-
-
-async def test_a_channel_admin_hands_the_thread_to_a_defaults_managed_agent(
-    db_session: AsyncSession,
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """The MA metadata marks research-bot defaults-managed, so it is shared by design
-    and C_PARENT's channel admin may bring it in though it was made for C_ACME."""
-    tenant_id, error = await _switch_as(
-        db_session, committing_sessionmaker, policy=None, channel_admin=True, managed=True
-    )
-    assert error is None, "a managed agent is a channel admin's to hand a thread to"
-    assert await _bound_to(committing_sessionmaker, tenant_id) == _DESTINATION_ID
-
-
-@pytest.mark.parametrize(
-    ("policy", "channel_admin", "copy"),
-    [
-        (TenantAccessPolicy(sealed_channel_ids=("C_PARENT",)), True, "Only turns inside"),
-        (
-            TenantAccessPolicy(protected_channel_ids=("C_PARENT",)),
-            True,
-            "Daimon doesn't post here",
-        ),
-        (TenantAccessPolicy(invoker_user_ids=("99",)), True, "limits who can use Daimon"),
-        (
-            TenantAccessPolicy(
-                sealed_channel_ids=("C_PARENT",),
-                isolated_channel_ids=("C_PARENT",),
-            ),
-            True,
-            # Inside an isolated channel other agents aren't even listed.
-            "not in this workspace",
-        ),
-        (
-            TenantAccessPolicy(agent_channel_pins={_DESTINATION_NAME: ("C_ACME",)}),
-            True,
-            "only runs in other channels",
-        ),
-    ],
-    ids=["inside", "writers-none", "invoker", "own-agents", "runs-elsewhere"],
-)
-async def test_a_switch_the_policy_refuses_writes_nothing(
-    db_session: AsyncSession,
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    policy: TenantAccessPolicy,
-    channel_admin: bool,
-    copy: str,
-) -> None:
-    tenant_id, error = await _switch_as(
-        db_session, committing_sessionmaker, policy=policy, channel_admin=channel_admin
-    )
-    assert error is not None and copy in str(error)
-    assert await _bound_to(committing_sessionmaker, tenant_id) is None
+    assert result.destination_ma_agent_id == _DESTINATION_ID
+    assert await _bound_to(committing_sessionmaker, tenant.id) == _DESTINATION_ID
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,7 @@
 """Tenant summary: the balance, funding mode and every configured channel in one read.
 
 A channel is listed when it has its own agent or environment setting, a
-budget, channel admins or only its own agents running there. The private channels DM conversations
+budget or only its own agents running there. The private channels DM conversations
 run in are left out. The MCP `get_tenant_summary` tool and `daimon channels
 list` both read it, as a server admin sees each channel
 (`daimon.core.channel_overview`): its `readers` and `writers` are filled
@@ -17,16 +17,15 @@ from datetime import datetime
 
 from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAccessPolicy
 from daimon.core.channel_budget import ChannelBudgetStatus, load_budget_status
-from daimon.core.channel_overview import ChannelAdminSet, ChannelViewer, build_channel_overview
+from daimon.core.channel_overview import ChannelViewer, build_channel_overview
 from daimon.core.errors import StoreError
 from daimon.core.permissions import own_reader_channels
 from daimon.core.promo_credit import get_active_timed_credit
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow, merge
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.channel_budgets import list_channel_budgets
 from daimon.core.stores.direct_messages import list_dm_channel_ids
-from daimon.core.stores.domain import ChannelAdminsRow, FundingMode
+from daimon.core.stores.domain import FundingMode
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.tenant_ledger import get_balance
 from daimon.core.stores.tenants import get_tenant
@@ -37,13 +36,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 def _omitted(value: object) -> bool:
     return value is None
-
-
-@dataclass(frozen=True)
-class ChannelAdmins:
-    role_ids: list[str]
-    """Group ids: Discord roles, Slack user groups, or Teams teams (their owners)."""
-    user_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -65,8 +57,6 @@ class ChannelSummary:
     """The environment its sessions run in, resolved the same way."""
     own_agents_only: bool
     """Only its own agents run there (readers ``own``)."""
-    admins: ChannelAdmins
-    """Who administers the channel on top of the server admins; both lists empty for nobody."""
     budget: ChannelBudgetSummary | None
     readers: ChannelReaders | None = Field(default=None, exclude_if=_omitted)
     """Whose turns read it; omitted unless the caller may read the access policy."""
@@ -108,7 +98,6 @@ def build_channel_summaries(
     tenant_row: TenantConfigRow | None,
     default: DeploymentDefault,
     budgets: dict[str, ChannelBudgetStatus],
-    admins: dict[str, ChannelAdminsRow],
     dm_channel_ids: set[str],
     policy: TenantAccessPolicy,
     viewer: ChannelViewer,
@@ -121,7 +110,7 @@ def build_channel_summaries(
     """
     configs = {row.channel_id: row for row in channel_rows}
     summaries: list[ChannelSummary] = []
-    listed = configs.keys() | budgets.keys() | admins.keys() | set(own_reader_channels(policy))
+    listed = configs.keys() | budgets.keys() | set(own_reader_channels(policy))
     for channel_id in sorted(listed - dm_channel_ids):
         resolved = merge(channel=configs.get(channel_id), tenant=tenant_row, default=default)
         overview = build_channel_overview(
@@ -130,18 +119,13 @@ def build_channel_summaries(
             policy=policy,
             environment_name=resolved.environment_name,
             budget=budgets.get(channel_id),
-            admins=admins.get(channel_id),
         )
-        granted = overview.admins or ChannelAdminSet()
         summaries.append(
             ChannelSummary(
                 channel_id=channel_id,
                 agent_name=resolved.agent_name,
                 environment_name=overview.environment_name,
                 own_agents_only=overview.own_agents_only is True,
-                admins=ChannelAdmins(
-                    role_ids=list(granted.role_ids), user_ids=list(granted.user_ids)
-                ),
                 budget=_budget_summary(overview.budget) if overview.budget is not None else None,
                 readers=overview.readers,
                 writers=overview.writers,
@@ -173,10 +157,6 @@ async def load_tenant_summary(
         for budget in await list_channel_budgets(session, tenant_id=tenant_id)
         if budget.platform == tenant.platform
     }
-    admins = {
-        row.channel_id: row
-        for row in await list_channel_admins(session, tenant_id=tenant_id, platform=tenant.platform)
-    }
     dm_channel_ids = await list_dm_channel_ids(session, tenant_id=tenant_id)
     policy = await load_access_policy(session, tenant_id=tenant_id)
     resolved_default = merge(channel=None, tenant=tenant_row, default=default)
@@ -189,7 +169,6 @@ async def load_tenant_summary(
             tenant_row=tenant_row,
             default=default,
             budgets=budgets,
-            admins=admins,
             dm_channel_ids=dm_channel_ids,
             policy=policy,
             viewer=ChannelViewer(is_server_admin=True, reads_access_policy=with_access),

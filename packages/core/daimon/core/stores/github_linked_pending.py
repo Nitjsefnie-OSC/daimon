@@ -8,7 +8,7 @@ from typing import Any, Literal, cast
 
 from daimon.core._models import GitHubLinkedConnectPending
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import CursorResult, delete, or_, select, update
+from sqlalchemy import CursorResult, delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # How long a claimed request stays out of reach of another `take`. A request not
@@ -17,19 +17,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 CLAIM_LEASE = timedelta(minutes=2)
 # The longest one request may run, outcome and result delivery included. The
 # resume enforces it with `asyncio.timeout`; a request that hits it is answered
-# with a failure line and resolved, so the next request runs.
-PER_REQUEST_DEADLINE = timedelta(minutes=5)
+# with a failure line and resolved, so the next request runs. It stays well under
+# the MCP service's 300 s request timeout so a small batch finishes inside it.
+PER_REQUEST_DEADLINE = timedelta(seconds=60)
 # The longest the failure line for a request that hit its deadline may take.
 FAILURE_DELIVERY_DEADLINE = timedelta(seconds=30)
+# The longest one database transaction of the resume loop (heartbeat, take,
+# resolve, recovery) may wait or run. `bound_transaction` sets it as the
+# transaction's `statement_timeout` and `lock_timeout`, and the resume wraps each
+# such transaction in `asyncio.timeout` of the same length, so connection
+# checkout and commit are bounded too.
+DB_STATEMENT_DEADLINE = timedelta(seconds=15)
 # A claimed row is garbage once its lease lapsed this long ago. A live callback
 # renews every row it holds before each request, so the gap between two
-# renewals is at most `PER_REQUEST_DEADLINE + FAILURE_DELIVERY_DEADLINE` plus
-# database time, and the lease runs `CLAIM_LEASE` past each renewal. No live
+# renewals is at most `PER_REQUEST_DEADLINE + FAILURE_DELIVERY_DEADLINE +
+# 2 * DB_STATEMENT_DEADLINE` (the request, its failure line, the resolve and the
+# next heartbeat), and the lease runs `CLAIM_LEASE` past each renewal. No live
 # holder is an hour behind; the gap only clears rows a crashed holder left.
 CLAIMED_GARBAGE_AFTER = timedelta(hours=1)
-assert PER_REQUEST_DEADLINE + FAILURE_DELIVERY_DEADLINE + CLAIM_LEASE < CLAIMED_GARBAGE_AFTER, (
-    "a live holder must renew well inside the garbage window"
-)
+assert (
+    PER_REQUEST_DEADLINE + FAILURE_DELIVERY_DEADLINE + 2 * DB_STATEMENT_DEADLINE + CLAIM_LEASE
+    < CLAIMED_GARBAGE_AFTER
+), "a live holder must renew well inside the garbage window"
+
+
+async def bound_transaction(session: AsyncSession) -> None:
+    """Cap every statement and lock wait of this transaction at `DB_STATEMENT_DEADLINE`.
+
+    `SET LOCAL`, so it ends with the transaction and never leaks into a pooled
+    connection's next use. Call it first, before the transaction's statements.
+    """
+    milliseconds = int(DB_STATEMENT_DEADLINE.total_seconds() * 1000)
+    await session.execute(text(f"SET LOCAL statement_timeout = {milliseconds}"))
+    await session.execute(text(f"SET LOCAL lock_timeout = {milliseconds}"))
 
 
 class ClaimLostError(Exception):
@@ -113,16 +133,22 @@ async def take(
 
     That grace is safe because a live holder cannot be that far behind. Before
     each request it calls `renew_claim`, which extends the lease of every row
-    it still holds, and each request runs under `PER_REQUEST_DEADLINE`, so the
-    gap between two renewals is at most `PER_REQUEST_DEADLINE` plus one failure
-    delivery (`FAILURE_DELIVERY_DEADLINE`), under the hour (checked at import).
-    A holder whose row another `take` claimed anyway finds `renew_claim` no
-    longer returns it and skips that request.
+    it still holds. Every database transaction in the loop is bounded by
+    `DB_STATEMENT_DEADLINE`, and each request runs under `PER_REQUEST_DEADLINE`,
+    so the gap between two renewals is at most `PER_REQUEST_DEADLINE +
+    FAILURE_DELIVERY_DEADLINE + 2 * DB_STATEMENT_DEADLINE`, under the hour
+    (checked at import). A holder whose row another `take` claimed anyway finds
+    `renew_claim` no longer returns it and skips that request.
 
-    Stated limit: the resume runs inline in the OAuth callback request, so a
+    Stated limits: the resume runs inline in the OAuth callback request, so a
     crash shows the person a failed browser request and nothing retries it. Its
     requests become takeable again once the lease lapses, by the person's next
-    link callback, until they expire; no scheduler recovers them.
+    link callback, until they expire; no scheduler recovers them. A stall of the
+    event loop itself (synchronous blocking code, which no timeout can
+    interrupt) is crash-equivalent: it is bounded only by the MCP service's
+    request timeout, after which the person gets the browser error page the
+    crash case already shows. The deploy workflow reads that timeout from the live
+    service (default 300 s when unset); this repo does not configure it.
     """
     now = now or datetime.now(UTC)
     token = uuid.uuid4()
