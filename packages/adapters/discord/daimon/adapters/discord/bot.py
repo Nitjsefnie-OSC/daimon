@@ -2024,10 +2024,14 @@ class DaimonBot(commands.Bot):
             allow_missing_member=True,
         )
 
+    @property
+    def _non_production(self) -> bool:
+        name = self.runtime.settings.environment.name
+        return isinstance(name, str) and bool(name)  # pyright: ignore[reportUnnecessaryIsInstance]
+
     def _allows_guild(self, guild_id: int | None) -> bool:
         """Non-production accepts only configured guilds; DMs have no guild to allow."""
-        name = self.runtime.settings.environment.name
-        if not name:
+        if not self._non_production:
             return True
         settings = self.runtime.settings.discord
         return (
@@ -2059,7 +2063,7 @@ class DaimonBot(commands.Bot):
             if self.runtime.settings.discord is not None
             else set[int]()
         )
-        non_production = bool(environment_name)
+        non_production = self._non_production
         log.info(
             "discord_command_environment",
             environment=environment_name if non_production else "production",
@@ -2288,8 +2292,7 @@ class DaimonBot(commands.Bot):
             try:
                 guild_obj = discord.Object(id=guild.id)
                 self.tree.clear_commands(guild=guild_obj)
-                environment_name = self.runtime.settings.environment.name
-                if environment_name:
+                if self._non_production:
                     self.tree.copy_global_to(guild=guild_obj)
                 await self.tree.sync(guild=guild_obj)
                 log.info("synced_commands_on_join", guild_id=guild_id, guild_name=guild.name)
