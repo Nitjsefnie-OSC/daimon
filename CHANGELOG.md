@@ -57,6 +57,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The permission is tenant-wide, so Daimon opens a shared file and saves its
   own only inside the channel's Files folder. Uploads take one request.
 
+### Added
+
+- **Self-host on OpenAI, with no Anthropic account at all.** `DAIMON_ANTHROPIC__API_KEY`
+  is now optional; `docker compose up` and `daimon defaults apply` succeed
+  without it. `daimon openai init` creates (or reuses) a project-scoped
+  OpenAI agent and hosted environment, seeds it with the same default skill
+  set an Anthropic deployment gets, and writes one row — optionally a
+  tenant-wide `"*"` default — into the provider runtime file. `daimon
+  agents backend set <agent> openai` routes that agent's channels to it, and
+  `daimon openai smoke` is a post-deploy check: one chat turn, one tool
+  call, one skill, pass/fail. See docs/self-hosting.md's "Self-host on
+  OpenAI" for what's different on OpenAI (no multi-agent delegation, no
+  mid-session resource swap, no workspace export/import, no cross-turn
+  memory, no Daimon model knobs).
+
 ### Removed
 
 - **`DAIMON_TEAMS__ADMIN_USER_IDS` is no longer read.** Make those admins

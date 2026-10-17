@@ -20,18 +20,26 @@ from mux.drivers.openai.transport import Object, segment
 from mux.state.operations import request_digest
 
 _POST_PUBLISH_READ_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
-"""Bounded ~15.5s backoff for reads of a just-published skill version only.
+"""Bounded ~15.5s backoff applied to the version-metadata and content reads
+inside skill-pin resolution (`skill_bindings.resolve_pins`), never to
+`retrieve`/`list`/`delete` or any other skill call.
 
 Root-caused live against the QA OpenAI key (neutral-core F2-O probe, then
-confirmed independently against the same key): BOTH the version-metadata GET
-(`/skills/{id}/versions/{version}`) and its content GET
-(`.../content`) 404 immediately after `POST .../versions` (or the create
-call's own first version) returns 200, then read 200 within single-digit
-seconds — provider-side read-after-write lag, not a wrong or deleted skill,
-and not a path bug. Retrying any other 404 here would hide a real error, so
-this bounded retry applies only to these two post-publish reads, never to
-`retrieve`/`list`/`delete` or any other skill call. A 404 that survives the
-whole backoff is final.
+confirmed independently against the same key): a freshly published version's
+metadata GET (`/skills/{id}/versions/{version}`) and content GET
+(`.../content`) both 404 immediately after `POST .../versions` (or the
+create call's own first version) returns 200, then read 200 within
+single-digit seconds — provider-side read-after-write lag, not a wrong or
+deleted skill, and not a path bug.
+
+Caller tradeoff, by design: `resolve_pins` has no way to tell "this pin was
+just published" from "this pin has referenced a long-deleted skill for
+weeks" — both go through the same GET. A 404 on the latter now takes the
+full ~15.5s to surface instead of failing immediately, on every agent/session
+creation that touches it, not just once. That bounded slowdown on a genuinely
+stale reference is the accepted cost of not silently swallowing the real,
+common case this exists for. A 404 that survives the whole backoff is final
+either way.
 """
 
 

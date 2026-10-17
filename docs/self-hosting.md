@@ -158,7 +158,11 @@ docker compose up --build -d
 
 This brings up Postgres, runs migrations and seeds the default agents,
 environments and skills (the `init` service does both), then starts the
-`mcp`, `discord` and `scheduler` services.
+`mcp`, `discord` and `scheduler` services. `docker compose up -d` doesn't
+show `init`'s output; if you meant to run on Anthropic and forgot
+`DAIMON_ANTHROPIC__API_KEY`, the stack still starts (an OpenAI-only
+deployment needs it unset), so check `docker compose logs init` once —
+it prints plainly whether it seeded Anthropic defaults or skipped them.
 
 Set `DAIMON_DATABASE__POOL_SIZE`, `DAIMON_DATABASE__MAX_OVERFLOW` and
 `DAIMON_DATABASE__POOL_TIMEOUT` per process when sizing Postgres for more

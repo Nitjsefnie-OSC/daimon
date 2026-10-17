@@ -263,3 +263,102 @@ def test_init_skip_default_skills_flag_creates_a_bare_agent(
     deployment = OpenAIDeployment.model_validate(rows[0])
     assert deployment.skill_ids == ()
     assert "/v1/skills" not in [c.url.path for c in calls]
+
+
+def test_init_reuses_the_same_skill_idempotency_key_across_different_channels(
+    monkeypatch: pytest.MonkeyPatch, manifest_path: Path, tmp_path: Path
+) -> None:
+    """Two non-wildcard `init` runs for different channels (step 3's
+    per-channel alternative) must send the same skill-create idempotency
+    key, so the provider's own idempotency reuses one skill set instead of
+    uploading a fresh duplicate copy per channel."""
+    defaults_root = tmp_path / "defaults"
+    alpha = write_skill(defaults_root, "alpha")
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "sk-test-not-a-real-key")
+    calls: list[httpx.Request] = []
+    monkeypatch.setattr(
+        "daimon.adapters.cli.commands.openai.configured_transport",
+        fake_transport_factory(calls, [alpha, alpha]),
+    )
+
+    openai_init_command(
+        tenant_id=TENANT_ID,
+        project="proj_123",
+        model="gpt-6-luna",
+        manifest=tmp_path / "manifest-a.json",
+        defaults_root=defaults_root,
+        platform="discord",
+        channel_id="channel-a",
+        account_id="account-a",
+    )
+    openai_init_command(
+        tenant_id=TENANT_ID,
+        project="proj_123",
+        model="gpt-6-luna",
+        manifest=tmp_path / "manifest-b.json",
+        defaults_root=defaults_root,
+        platform="discord",
+        channel_id="channel-b",
+        account_id="account-b",
+    )
+
+    skill_create_keys = [c.headers["idempotency-key"] for c in calls if c.url.path == "/v1/skills"]
+    assert len(skill_create_keys) == 2
+    assert skill_create_keys[0] == skill_create_keys[1]
+    assert str(TENANT_ID) in skill_create_keys[0]
+    assert "channel-a" not in skill_create_keys[0]
+    assert "channel-b" not in skill_create_keys[0]
+
+
+def test_init_warns_when_reusing_a_row_with_a_different_api_key_env(
+    monkeypatch: pytest.MonkeyPatch, manifest_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "sk-test-not-a-real-key")
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY_2", "sk-test-not-a-real-key-2")
+    calls: list[httpx.Request] = []
+    monkeypatch.setattr(
+        "daimon.adapters.cli.commands.openai.configured_transport", fake_transport_factory(calls)
+    )
+
+    openai_init_command(
+        tenant_id=TENANT_ID,
+        project="proj_123",
+        model="gpt-6-luna",
+        manifest=manifest_path,
+        defaults_root=manifest_path.parent / "no-defaults",
+    )
+    capsys.readouterr()
+    openai_init_command(
+        tenant_id=TENANT_ID,
+        project="proj_123",
+        model="gpt-6-luna",
+        manifest=manifest_path,
+        defaults_root=manifest_path.parent / "no-defaults",
+        api_key_env="DAIMON_CHANNEL_OPENAI_KEY_2",
+    )
+
+    out = capsys.readouterr().out
+    assert "was not applied" in out
+    assert "DAIMON_CHANNEL_OPENAI_KEY_2" in out
+    rows = json.loads(manifest_path.read_text())
+    assert len(rows) == 1
+    assert rows[0]["api_key_env"] == "DAIMON_CHANNEL_OPENAI_KEY"
+
+
+def test_init_manifest_write_leaves_no_temp_file_behind(
+    monkeypatch: pytest.MonkeyPatch, manifest_path: Path
+) -> None:
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "sk-test-not-a-real-key")
+    monkeypatch.setattr(
+        "daimon.adapters.cli.commands.openai.configured_transport", fake_transport_factory([])
+    )
+
+    openai_init_command(
+        tenant_id=TENANT_ID,
+        project="proj_123",
+        model="gpt-6-luna",
+        manifest=manifest_path,
+        defaults_root=manifest_path.parent / "no-defaults",
+    )
+
+    assert [p.name for p in manifest_path.parent.iterdir()] == [manifest_path.name]

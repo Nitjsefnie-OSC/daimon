@@ -109,8 +109,13 @@ def _read_rows(path: Path) -> list[dict[str, object]]:
 
 
 def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    # Atomic write: the serving services read this same file live from a
+    # shared volume on every admission check. A plain write_text would let
+    # one briefly observe a truncated or partial document mid-write.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(rows, indent=2) + "\n")
+    tmp = path.with_suffix(f"{path.suffix}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(rows, indent=2) + "\n")
+    tmp.replace(path)
 
 
 def _skill_bundle(skill_dir: Path) -> SkillUpload:
@@ -221,6 +226,12 @@ def openai_init_command(
         (row for row in rows if all(row.get(k) == v for k, v in selector.items())), None
     )
     if existing is not None:
+        if existing.get("api_key_env") != api_key_env:
+            console.print(
+                f"openai init: this row still uses api_key_env={existing.get('api_key_env')!r} — "
+                f"--api-key-env {api_key_env!r} was not applied. Edit the manifest row directly "
+                "to change it; init never rewrites an existing row."
+            )
         console.print(
             "openai init: reused existing row "
             f"agent_id={existing.get('agent_id')} environment_id={existing.get('environment_id')}"
@@ -241,11 +252,15 @@ def openai_init_command(
         )
         default_skills: tuple[SkillRef, ...] = ()
         if profile == _PERSISTENT_WORKSPACE and not skip_default_skills:
-            skill_key_prefix = (
-                f"daimon-openai-init-skill:{tenant_id}:{platform}:{channel_id}:{account_id}"
-            )
+            # Tenant-scoped, not per-channel: skills are a shared resource an
+            # operator's narrower, per-channel `init` runs (step 3's
+            # non-wildcard alternative) should reuse rather than re-upload a
+            # fresh duplicate set for every channel.
             default_skills = await _seed_default_skills(
-                OpenAISkills(context), scope, defaults_root, key_prefix=skill_key_prefix
+                OpenAISkills(context),
+                scope,
+                defaults_root,
+                key_prefix=f"daimon-openai-init-skill:{tenant_id}",
             )
 
         agents = OpenAIAgents(context)
