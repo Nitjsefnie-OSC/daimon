@@ -54,7 +54,7 @@ from daimon.core.teams_graph import (
     message_text,
     skiptoken_of,
 )
-from daimon.core.teams_sharepoint import DriveItem
+from daimon.core.teams_sharepoint import DriveItem, version_of
 from daimon.core.teams_threads import is_group_chat
 from fastmcp.exceptions import ToolError
 
@@ -82,7 +82,7 @@ def _file(name: str, link: str | None, links: Mapping[str, DriveItem]) -> TeamsF
     item = links.get(link or "")
     if link is None or item is None:
         return TeamsFileRow(name=name)
-    return TeamsFileRow(name=name, url=item.download_url, link=link, version=item.e_tag)
+    return TeamsFileRow(name=name, url=item.download_url, link=link, version=version_of(item.e_tag))
 
 
 def _row(

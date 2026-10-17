@@ -564,7 +564,12 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"teams"})  # pyright: ignore[reportArgumentType]
     async def replace_channel_file(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, channel_id: str, link: str, version: str, file_handle: str
+        ctx: Context,
+        channel_id: str,
+        link: str,
+        version: str,
+        file_handle: str,
+        origin_context_id: str | None = None,
     ) -> TeamsReplacedFile:
         """Save an edited file over a Teams channel file as its new version.
 
@@ -577,17 +582,21 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``link`` and ``version`` come together from where you downloaded the
         file: an ``[attachment]`` line or ``<attachment>`` element of this
         conversation, or a file of read_channel, read_thread or get_message.
-        ``channel_id`` is this conversation's channel or thread id. Only a
-        file inside that channel's own Files folder can be replaced, and you
-        must be able to post there.
+        ``channel_id`` is this conversation's channel or thread id and
+        ``origin_context_id`` this turn's, from turn_controls: only a file
+        inside the Files folder of the channel this turn started in can be
+        replaced, and you must be able to post there.
 
         SharePoint keeps every earlier version, so an edit can be restored.
         Refusals say what to do: a file changed since you read it is not
         overwritten (download it again and redo the edit); a file open in a
-        desktop app is locked; a sensitivity label can block the write. Then
-        post your version as a new file with send_message instead. Put the
-        returned ``link`` line in your reply as it is: it opens the file in
-        Office for the web.
+        desktop app is locked; a permission, retention policy or sensitivity
+        label can block the write. Then post your version as a new file with
+        send_message instead. If saving did not finish, read the channel
+        before trying again: it may have been saved. Put the returned
+        ``markdown`` line in your reply as it is: it opens the file in Office
+        for the web. To replace it again, pass the returned ``link`` and
+        ``version``.
         """
         auth = await _auth(ctx)
         if auth.platform != "teams":
@@ -599,6 +608,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             link=link,
             version=version,
             file_handle=file_handle,
+            origin_context_id=origin_context_id or None,
         )
 
     _VALID_AUTHOR_TYPES = frozenset({"user", "bot", "webhook"})

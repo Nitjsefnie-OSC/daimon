@@ -2,7 +2,9 @@
 
 Files go through `_files`: saved to a channel's Files, offered in a 1:1 chat, or
 saved over a channel file as its new version (replace_channel_file), which is
-authorised as a post to that channel is.
+authorised as a post to that channel is and only in the channel the calling
+turn started in (its verified origin), so a turn never writes to another
+channel's files.
 
 The bot is the sender, so a caller could otherwise speak through it in a
 conversation they cannot see: the requester's Entra id must be on the target's
@@ -22,7 +24,11 @@ import httpx
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import require_channel_writable
+from daimon.adapters.mcp.tools._channel_policy import (
+    get_verified_origin,
+    require_channel_writable,
+    turn_origin_place,
+)
 from daimon.adapters.mcp.tools._file_handles import staged_uploads
 from daimon.adapters.mcp.tools._tidy import PostRecord, record_agent_posts
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
@@ -36,7 +42,7 @@ from daimon.core.media.filenames import sanitize_title
 from daimon.core.posted_controls import CardState, RefusalReason, card_for_request
 from daimon.core.posted_controls.teams_card import build_adaptive_card
 from daimon.core.stores.domain import CredentialRequestRow
-from daimon.core.teams_sharepoint import file_link
+from daimon.core.teams_sharepoint import file_link, version_of
 from daimon.core.teams_threads import conversation_of, is_group_chat
 from daimon.core.wizard.render import to_screen
 from daimon.core.wizard.spec import WizardSpec
@@ -160,9 +166,11 @@ class TeamsReplacedFile(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
-    version: str | None
-    """The new version (eTag): pass it to replace the file again."""
     link: str
+    """The link you passed: pass it with `version` to replace the file again."""
+    version: str | None
+    """The new version; None when SharePoint saved it without saying, so read it again first."""
+    markdown: str
     """A markdown line linking the file; put it in your reply, it opens in Office for the web."""
 
 
@@ -174,11 +182,24 @@ async def _teams_replace_file_impl(  # pyright: ignore[reportUnusedFunction]  # 
     link: str,
     version: str,
     file_handle: str,
+    origin_context_id: str | None,
 ) -> TeamsReplacedFile:
     conversation_id = _conversation_id(channel_id)
-    if not _CHANNEL.fullmatch(split_thread(conversation_id)[0]):
+    channel = split_thread(conversation_id)[0]
+    if not _CHANNEL.fullmatch(channel):
         raise ToolError("only a file in a Teams channel's Files can be replaced")
-    client = await _authorize(runtime, auth, conversation_id)
+    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    if origin is None:
+        raise ToolError(
+            "replace_channel_file needs this turn's origin_context_id from turn_controls, so "
+            "nothing was changed"
+        )
+    if origin.parent_channel_id != channel:
+        raise ToolError(
+            "only a file of the channel this conversation is in can be replaced, so nothing "
+            "was changed"
+        )
+    client = await _authorize(runtime, auth, conversation_id, turn_origin_place(origin))
     [(upload, data)] = await staged_uploads(
         [file_handle], session_factory=runtime.session_factory, tenant_id=auth.tenant_id
     )
@@ -193,7 +214,12 @@ async def _teams_replace_file_impl(  # pyright: ignore[reportUnusedFunction]  # 
         content=data,
     )
     name = sanitize_title(item.name or upload.display_filename)
-    return TeamsReplacedFile(name=name, version=item.e_tag, link=file_link(name, item.web_url))
+    return TeamsReplacedFile(
+        name=name,
+        link=link,
+        version=version_of(item.e_tag),
+        markdown=file_link(name, item.web_url),
+    )
 
 
 async def _record(

@@ -29,7 +29,8 @@ class TeamsFileRow(BaseModel):
     link: str | None = None
     """The file's SharePoint link, set with `url`: pass it to replace_channel_file."""
     version: str | None = None
-    """The file's version (eTag) when read: replace_channel_file refuses once it changes."""
+    """The file's version (its bare eTag) when read: replace_channel_file refuses once it
+    changes."""
 
 
 class TeamsReadMessage(BaseModel):
