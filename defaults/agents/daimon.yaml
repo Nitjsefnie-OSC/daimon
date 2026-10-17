@@ -202,6 +202,14 @@ skills:
     skill_id: exploratory-data-analysis
   - type: custom
     skill_id: eda-storytelling
+  # Anthropic's built-in Office skills: edit Word, PowerPoint and Excel files
+  # without losing formatting, comments or tracked changes.
+  - type: anthropic
+    skill_id: docx
+  - type: anthropic
+    skill_id: pptx
+  - type: anthropic
+    skill_id: xlsx
 tools:
   - type: agent_toolset_20260401
     configs:

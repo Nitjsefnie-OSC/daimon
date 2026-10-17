@@ -18,4 +18,8 @@ Layout:
 
 Operator workflow: edit YAML → `daimon defaults apply`.
 
+The `daimon` agent also references Anthropic's built-in `docx`, `pptx` and
+`xlsx` skills (`type: anthropic`). They have no directory here; a backend
+other than Anthropic runs the agent without them.
+
 The default environment installs `gh` for repository work in GitHub App sessions.
