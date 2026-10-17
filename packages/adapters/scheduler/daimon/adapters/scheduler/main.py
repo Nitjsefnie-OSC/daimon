@@ -745,13 +745,25 @@ _GITHUB_LINK_REFRESH_INTERVAL_S = 3600.0
 # cancels a refresh under way: one person's refresh ends within its lock timeout,
 # the HTTP client's timeout and database time.
 _GITHUB_LINK_REFRESH_DEADLINE_S = 120.0
-# How long shutdown waits for a sweep to finish its current person before it
-# cancels the sweep as a last resort. The refresh's own persistence survives that.
-# Grace plus drain stays inside the worker's 90 s stop_grace_period.
-_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S = 30.0
-# After the sweep is cancelled, how long shutdown waits for refreshes still
-# running detached from it to store their rotated tokens, before the HTTP
-# clients close and the engine is disposed.
+# One budget for everything GitHub-link-refresh related at shutdown, taken once
+# at the start of `run`'s `finally`. The worker's stop_grace_period is 90 s
+# (docker-compose.yml; `up --timeout 95`), so 45 s leaves 45 s for the rest
+# (dispatcher, health server, advisory unlock, client close, outcome drain,
+# engine dispose). Three waits come out of it, never in addition to it:
+#   1. the sweep gets up to `_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S` to finish
+#      its current person (the grace is also capped by what remains);
+#   2. past the grace the sweep is cancelled, and its HTTP-client context holds
+#      the client open while a refresh detached from it stores GitHub's answer,
+#      for at most what remains of the budget (`_SingleFlight.settle_s`);
+#   3. the final drain gets whatever remains, zero if nothing does.
+# A refresh still running when the budget is gone may lose GitHub's answer when
+# its client closes (GitHub retires the old token pair as it answers); that
+# person's link is then broken and they relink on next use. It is logged as
+# `scheduler.github_link_refresh.drain_timed_out`.
+_GITHUB_LINK_REFRESH_SHUTDOWN_BUDGET_S = 45.0
+_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S = 20.0
+# How long a sweep cancelled outside shutdown (no shared deadline, as in
+# `--once`) holds its client open for a detached refresh.
 _GITHUB_LINK_REFRESH_DRAIN_S = 30.0
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
@@ -1414,11 +1426,7 @@ async def run(
 
         return 0
     finally:
-        await link_refresh_flight.aclose()
-        # A refresh detached from the cancelled sweep must store its rotated
-        # tokens before the clients close and the engine is disposed.
-        if await drain_detached_refreshes(_GITHUB_LINK_REFRESH_DRAIN_S):
-            log.warning("scheduler.github_link_refresh.drain_timed_out")
+        await _shutdown_github_link_refresh(link_refresh_flight)
         await dispatcher.close()
         health_server.close()
         await health_server.wait_closed()
@@ -1434,6 +1442,21 @@ async def run(
         await drain_outcomes()
         if _engine_override is None:
             await engine.dispose()
+
+
+async def _shutdown_github_link_refresh(flight: _SingleFlight) -> None:
+    """Stop the sweep and settle detached refreshes inside one shared budget.
+
+    The deadline is taken once, here. The sweep's grace, the cancelled sweep's
+    settle and the final drain all come out of it (see the budget comment at
+    `_GITHUB_LINK_REFRESH_SHUTDOWN_BUDGET_S`). A refresh detached from the
+    cancelled sweep must store its rotated tokens before the clients close and
+    the engine is disposed.
+    """
+    deadline = time.monotonic() + _GITHUB_LINK_REFRESH_SHUTDOWN_BUDGET_S
+    await flight.aclose(deadline=deadline)
+    if await drain_detached_refreshes(max(0.0, deadline - time.monotonic())):
+        log.warning("scheduler.github_link_refresh.drain_timed_out")
 
 
 async def _drain_github_push_resync(
@@ -1494,11 +1517,21 @@ class _SingleFlight:
     `start` skips while the previous job is still running. `aclose` asks the job
     to stop through `stopping` and waits for it, so a job in the middle of
     something that must finish gets to; only past `grace_s` does it cancel.
+    Given a `deadline` (a `time.monotonic` value), the grace is cut to what
+    remains of it and the cancelled job's own cleanup reads the rest through
+    `settle_s`.
     """
 
     def __init__(self) -> None:
         self._task: asyncio.Task[None] | None = None
+        self._deadline: float | None = None
         self.stop_requested = asyncio.Event()
+
+    def settle_s(self, default: float) -> float:
+        """How long a cancelled job may keep clients open: the shutdown remainder, or `default`."""
+        if self._deadline is None:
+            return default
+        return max(0.0, self._deadline - time.monotonic())
 
     def stopping(self) -> bool:
         return self.stop_requested.is_set()
@@ -1512,11 +1545,21 @@ class _SingleFlight:
         self._task = asyncio.create_task(job())
         return True
 
-    async def aclose(self, *, grace_s: float = _GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S) -> None:
+    async def aclose(
+        self,
+        *,
+        grace_s: float | None = None,
+        deadline: float | None = None,
+    ) -> None:
+        if grace_s is None:
+            grace_s = _GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S
         self.stop_requested.set()
+        self._deadline = deadline
         task, self._task = self._task, None
         if task is None or task.done():
             return
+        if deadline is not None:
+            grace_s = min(grace_s, max(0.0, deadline - time.monotonic()))
         done, _ = await asyncio.wait({task}, timeout=grace_s)
         if done:
             return
@@ -1533,14 +1576,20 @@ async def _run_github_link_refresh(
     client_secret: str,
     backoff: dict[int, datetime],
     should_stop: Callable[[], bool] | None = None,
+    settle_s: Callable[[], float] | None = None,
 ) -> None:
-    """One sweep: it stops starting new people at its budget or on `should_stop`."""
+    """One sweep: it stops starting new people at its budget or on `should_stop`.
+
+    `settle_s` says, when the sweep is cancelled, how long its HTTP client stays
+    open for a refresh detached from it; the default is
+    `_GITHUB_LINK_REFRESH_DRAIN_S`. Shutdown passes what remains of its budget.
+    """
     try:
         async with (
             httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http_client,
             # A cancel mid-refresh leaves the refresh running detached; it needs
             # this client until it stores GitHub's answer.
-            settle_detached_refreshes(_GITHUB_LINK_REFRESH_DRAIN_S),
+            settle_detached_refreshes(settle_s or _GITHUB_LINK_REFRESH_DRAIN_S),
         ):
             counts = await refresh_expiring_links(
                 sm,
@@ -1598,6 +1647,11 @@ async def _refresh_expiring_github_links(
             client_secret=app.client_secret.get_secret_value(),
             backoff=backoff if backoff is not None else {},
             should_stop=flight.stopping if flight is not None else None,
+            settle_s=(
+                functools.partial(flight.settle_s, _GITHUB_LINK_REFRESH_DRAIN_S)
+                if flight is not None
+                else None
+            ),
         )
 
     if flight is None:

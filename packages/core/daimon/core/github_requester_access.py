@@ -13,6 +13,7 @@ from typing import Final, Literal
 import httpx
 from cryptography.fernet import MultiFernet
 from daimon.core.github_credentials import decrypt_token, encrypt_token
+from daimon.core.stores.github_linked_pending import DETACHED_REFRESH_SETTLE
 from daimon.core.stores.github_links import (
     GitHubUser,
     bump_link_generation,
@@ -28,8 +29,9 @@ Access = Literal["none", "read", "write"]
 
 # How long a cancelled caller keeps its HTTP client open for a refresh detached
 # from it (`settle_detached_refreshes`): a GitHub POST (client timeout 15 to 20 s)
-# and the commit that stores its answer.
-DETACHED_REFRESH_SETTLE_S: Final = 25.0
+# and the commit that stores its answer. The pending-grant store counts this
+# window in its renewal-gap bound, so the value lives there.
+DETACHED_REFRESH_SETTLE_S: Final = DETACHED_REFRESH_SETTLE.total_seconds()
 
 
 class _RepoPermissionPayload(BaseModel):
@@ -346,7 +348,7 @@ async def drain_detached_refreshes(timeout: float) -> int:
 
 @asynccontextmanager
 async def settle_detached_refreshes(
-    timeout: float = DETACHED_REFRESH_SETTLE_S,
+    timeout: float | Callable[[], float] = DETACHED_REFRESH_SETTLE_S,
 ) -> AsyncGenerator[None]:
     """Hold the HTTP client of the enclosing `async with` open while its cancel settles.
 
@@ -354,12 +356,13 @@ async def settle_detached_refreshes(
     first). If the body is cancelled while a refresh runs detached, the refresh
     still needs the client to finish its GitHub call, so the cancel waits up to
     `timeout` seconds for the refresh to store its answer before the client
-    closes. Other exits do not wait.
+    closes. Other exits do not wait. A callable `timeout` is read when the cancel
+    arrives, so a shutdown can pass what remains of its shared deadline.
     """
     try:
         yield
     except asyncio.CancelledError:
-        await drain_detached_refreshes(timeout)
+        await drain_detached_refreshes(timeout() if callable(timeout) else timeout)
         raise
 
 

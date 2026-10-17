@@ -22,23 +22,39 @@ CLAIM_LEASE = timedelta(minutes=2)
 PER_REQUEST_DEADLINE = timedelta(seconds=60)
 # The longest the failure line for a request that hit its deadline may take.
 FAILURE_DELIVERY_DEADLINE = timedelta(seconds=30)
+# How long a request cancelled by `PER_REQUEST_DEADLINE` keeps its HTTP client
+# open for a GitHub token refresh detached from it (`settle_detached_refreshes`):
+# a GitHub POST (client timeout 15 to 20 s) and the commit that stores its
+# answer. Defined here so the gap bound below can count it;
+# `core.github_requester_access` takes its default from this value.
+DETACHED_REFRESH_SETTLE = timedelta(seconds=25)
 # The longest one database transaction of the resume loop (heartbeat, take,
-# resolve, recovery) may wait or run. `bound_transaction` sets it as the
-# transaction's `statement_timeout` and `lock_timeout`, and the resume wraps each
-# such transaction in `asyncio.timeout` of the same length, so connection
-# checkout and commit are bounded too.
+# resolve) may wait or run. `bound_transaction` sets it as the transaction's
+# `statement_timeout` and `lock_timeout`, and the loop wraps each such
+# transaction in `asyncio.timeout` of the same length, so connection checkout
+# and commit are bounded too. Transactions inside a request (the authority
+# read, the grant writes, recovery) carry no `asyncio.timeout` of their own;
+# the request deadline bounds them.
 DB_STATEMENT_DEADLINE = timedelta(seconds=15)
 # A claimed row is garbage once its lease lapsed this long ago. A live callback
 # renews every row it holds before each request, so the gap between two
-# renewals is at most `PER_REQUEST_DEADLINE + FAILURE_DELIVERY_DEADLINE +
-# 2 * DB_STATEMENT_DEADLINE` (the request, its failure line, the resolve and the
-# next heartbeat), and the lease runs `CLAIM_LEASE` past each renewal. No live
-# holder is an hour behind; the gap only clears rows a crashed holder left.
+# renewals is at most `PER_REQUEST_DEADLINE + DETACHED_REFRESH_SETTLE +
+# FAILURE_DELIVERY_DEADLINE + 2 * DB_STATEMENT_DEADLINE` = 145 s: the request
+# (a request cancelled at its deadline may spend `DETACHED_REFRESH_SETTLE` more
+# settling a detached token refresh before the timeout returns), its failure
+# line, the resolve and the next heartbeat. The lease runs `CLAIM_LEASE` past
+# each renewal. No live holder is an hour behind; the gap only clears rows a
+# crashed holder left.
 CLAIMED_GARBAGE_AFTER = timedelta(hours=1)
-assert (
-    PER_REQUEST_DEADLINE + FAILURE_DELIVERY_DEADLINE + 2 * DB_STATEMENT_DEADLINE + CLAIM_LEASE
-    < CLAIMED_GARBAGE_AFTER
-), "a live holder must renew well inside the garbage window"
+RENEWAL_GAP_BOUND = (
+    PER_REQUEST_DEADLINE
+    + DETACHED_REFRESH_SETTLE
+    + FAILURE_DELIVERY_DEADLINE
+    + 2 * DB_STATEMENT_DEADLINE
+)
+assert RENEWAL_GAP_BOUND + CLAIM_LEASE < CLAIMED_GARBAGE_AFTER, (
+    "a live holder must renew well inside the garbage window"
+)
 
 
 async def bound_transaction(session: AsyncSession) -> None:
@@ -133,12 +149,17 @@ async def take(
 
     That grace is safe because a live holder cannot be that far behind. Before
     each request it calls `renew_claim`, which extends the lease of every row
-    it still holds. Every database transaction in the loop is bounded by
-    `DB_STATEMENT_DEADLINE`, and each request runs under `PER_REQUEST_DEADLINE`,
-    so the gap between two renewals is at most `PER_REQUEST_DEADLINE +
-    FAILURE_DELIVERY_DEADLINE + 2 * DB_STATEMENT_DEADLINE`, under the hour
-    (checked at import). A holder whose row another `take` claimed anyway finds
-    `renew_claim` no longer returns it and skips that request.
+    it still holds. The loop's own transactions (take, renew, resolve) carry
+    both `asyncio.timeout` and `bound_transaction`, each `DB_STATEMENT_DEADLINE`;
+    transactions inside a request (authority read, grant writes, recovery) are
+    bounded by the request deadline. Each request runs under
+    `PER_REQUEST_DEADLINE`, and one cancelled at it may spend
+    `DETACHED_REFRESH_SETTLE` settling a detached token refresh before the
+    timeout returns. So the gap between two renewals is at most
+    `PER_REQUEST_DEADLINE + DETACHED_REFRESH_SETTLE + FAILURE_DELIVERY_DEADLINE
+    + 2 * DB_STATEMENT_DEADLINE` = 145 s, under the hour (checked at import).
+    A holder whose row another `take` claimed anyway finds `renew_claim` no
+    longer returns it and skips that request.
 
     Stated limits: the resume runs inline in the OAuth callback request, so a
     crash shows the person a failed browser request and nothing retries it. Its

@@ -2683,20 +2683,31 @@ async def test_the_failure_line_after_a_deadline_is_best_effort(
 def test_the_lease_and_deadline_fit_inside_the_garbage_window() -> None:
     from daimon.core.stores import github_linked_pending as store
 
-    assert (
+    gap = (
         store.PER_REQUEST_DEADLINE
+        + store.DETACHED_REFRESH_SETTLE
         + store.FAILURE_DELIVERY_DEADLINE
         + 2 * store.DB_STATEMENT_DEADLINE
-        + store.CLAIM_LEASE
-        < store.CLAIMED_GARBAGE_AFTER
     )
+    assert gap == timedelta(seconds=145)
+    assert gap == store.RENEWAL_GAP_BOUND
+    assert gap + store.CLAIM_LEASE < store.CLAIMED_GARBAGE_AFTER
+
+
+def test_the_gap_bound_counts_the_settle_window_a_cancelled_request_waits() -> None:
+    from daimon.core import github_requester_access
+    from daimon.core.stores import github_linked_pending as store
+
+    assert (
+        store.DETACHED_REFRESH_SETTLE.total_seconds()
+    ) == github_requester_access.DETACHED_REFRESH_SETTLE_S
 
 
 @pytest.mark.asyncio
-async def test_a_statement_timeout_on_the_heartbeat_fails_that_request_and_stops_the_batch(
+async def test_a_statement_timeout_on_the_heartbeat_fails_every_remaining_request_and_stops(
     setup_linked, other_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A real lock wait past `lock_timeout` ends the heartbeat and the batch."""
+    """A real lock wait past `lock_timeout` fails the heartbeat: every held request hears it."""
     from daimon.core.stores import github_linked_pending as store
 
     await _save_request(setup_linked, thread_id="t1")
@@ -2738,9 +2749,10 @@ async def test_a_statement_timeout_on_the_heartbeat_fails_that_request_and_stops
     finally:
         if holder_open:
             await holder.__aexit__(None, None, None)
-    assert result == [linked_pending.FAILED_MESSAGE]
+    assert result == [linked_pending.FAILED_MESSAGE, linked_pending.FAILED_MESSAGE]
     assert [(c.args[1].thread_id, c.args[2]) for c in delivery.await_args_list] == [
         ("t1", linked_pending.FAILED_MESSAGE),
+        ("t2", linked_pending.FAILED_MESSAGE),
     ]
     # Neither request is resolved (the database was not answering): both stay
     # claimed until their lease lapses, then a later take runs them again.

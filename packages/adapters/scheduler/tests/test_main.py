@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import time
 import unittest.mock
 import uuid
 from collections.abc import Callable
@@ -3391,6 +3392,106 @@ async def test_shutdown_cancels_a_link_refresh_that_outlasts_the_grace(
         await asyncio.wait_for(flight.aclose(grace_s=0.1), timeout=2.0)
     assert cancelled.is_set()
     assert not flight.running()
+
+
+async def _stuck_sweep_with_a_detached_refresh(*_args: object, **_kwargs: object) -> object:
+    """A sweep that ignores `should_stop` while a refresh runs detached from it."""
+    from daimon.core import github_requester_access
+
+    async def refresh() -> tuple[str | None, int, int]:
+        await asyncio.sleep(30)
+        return None, 0, 0
+
+    await github_requester_access._shielded(refresh())  # pyright: ignore[reportPrivateUsage]
+    raise AssertionError("unreachable")
+
+
+async def _cancel_detached_refreshes() -> None:
+    from daimon.core import github_requester_access
+
+    leftover = list(github_requester_access._detached_refreshes)  # pyright: ignore[reportPrivateUsage]
+    for task in leftover:
+        task.cancel()
+    await asyncio.gather(*leftover, return_exceptions=True)
+
+
+async def test_shutdown_of_a_slow_sweep_and_a_detached_refresh_stays_inside_the_budget(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Grace, the cancelled sweep's settle and the final drain share one deadline."""
+    from daimon.adapters.scheduler import main as scheduler_main
+
+    budget = 1.0
+    flight = scheduler_main._SingleFlight()  # pyright: ignore[reportPrivateUsage]
+    try:
+        with (
+            unittest.mock.patch.object(
+                scheduler_main, "refresh_expiring_links", _stuck_sweep_with_a_detached_refresh
+            ),
+            unittest.mock.patch.object(
+                scheduler_main, "_GITHUB_LINK_REFRESH_SHUTDOWN_BUDGET_S", budget
+            ),
+            unittest.mock.patch.object(
+                scheduler_main, "_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S", 0.3
+            ),
+            # Far above the budget: without the shared deadline each wait would use it.
+            unittest.mock.patch.object(scheduler_main, "_GITHUB_LINK_REFRESH_DRAIN_S", 30.0),
+            unittest.mock.patch.object(scheduler_main.log, "warning") as warning,
+        ):
+            await scheduler_main._refresh_expiring_github_links(  # pyright: ignore[reportPrivateUsage]
+                sm=db_session_factory,
+                settings=_link_refresh_settings(with_oauth=True),
+                fernet=build_multifernet((Fernet.generate_key().decode(),)),
+                throttle=scheduler_main._IntervalThrottle(3600.0),  # pyright: ignore[reportPrivateUsage]
+                flight=flight,
+            )
+            await asyncio.sleep(0.1)
+            assert flight.running()
+            started = time.monotonic()
+            await asyncio.wait_for(
+                scheduler_main._shutdown_github_link_refresh(flight),  # pyright: ignore[reportPrivateUsage]
+                timeout=5.0,
+            )
+            elapsed = time.monotonic() - started
+        # The refresh outlived the budget: shutdown stopped waiting and said so.
+        assert budget * 0.9 <= elapsed <= budget + 0.4
+        assert (
+            unittest.mock.call("scheduler.github_link_refresh.drain_timed_out")
+            in warning.call_args_list
+        )
+    finally:
+        await _cancel_detached_refreshes()
+
+
+async def test_the_final_refresh_drain_gets_only_what_the_budget_has_left() -> None:
+    from daimon.adapters.scheduler import main as scheduler_main
+
+    async def run_shutdown(budget: float, grace: float) -> float:
+        async def stuck() -> None:
+            await asyncio.sleep(30)
+
+        flight = scheduler_main._SingleFlight()  # pyright: ignore[reportPrivateUsage]
+        flight.start(stuck)
+        drain = unittest.mock.AsyncMock(return_value=0)
+        with (
+            unittest.mock.patch.object(scheduler_main, "drain_detached_refreshes", drain),
+            unittest.mock.patch.object(
+                scheduler_main, "_GITHUB_LINK_REFRESH_SHUTDOWN_BUDGET_S", budget
+            ),
+            unittest.mock.patch.object(
+                scheduler_main, "_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S", grace
+            ),
+        ):
+            await scheduler_main._shutdown_github_link_refresh(flight)  # pyright: ignore[reportPrivateUsage]
+        drain.assert_awaited_once()
+        return drain.await_args.args[0]  # pyright: ignore[reportOptionalMemberAccess]
+
+    # The grace used 0.3 s of 1.0 s: the drain gets about the other 0.7 s.
+    remainder = await run_shutdown(budget=1.0, grace=0.3)
+    assert 0.5 <= remainder <= 0.7
+    # A grace longer than the budget is cut to it, and the drain gets nothing,
+    # never a negative wait.
+    assert await run_shutdown(budget=0.2, grace=5.0) == 0.0
 
 
 async def test_link_refresh_passes_its_failure_memory_to_every_sweep(

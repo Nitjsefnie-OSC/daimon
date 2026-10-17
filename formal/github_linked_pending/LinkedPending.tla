@@ -36,16 +36,24 @@ EXTENDS Naturals, FiniteSets
 \* WithDeadline:          each request is bounded by PER_REQUEST_DEADLINE: a
 \*                        request still processing at the deadline ends with a
 \*                        failure line (off = a request can take any time).
-\* RenewException:        the renewal call itself can raise; the callback logs
-\*                        it and skips that request, leaving its row claimed.
+\* RenewException:        the renewal call itself can raise (other than by its
+\*                        deadline). It takes the same path as a timeout:
+\*                        HeartbeatFailure.
+\* HbMode:                what the loop does when the renewal fails.
+\*   "all"        the design: the failure line (best effort) goes to the
+\*                current request and to every request still held, nothing is
+\*                resolved, the batch stops, and every row stays claimed for a
+\*                retake after the lease. The browser shows success: this is
+\*                not a crash and gives no visible failure.
+\*   "current"    the previous code: the failure line goes to the current
+\*                request only and the batch stops; the held requests behind
+\*                it get nothing and are abandoned (step "abandoned").
 \* DbDeadline:            every database transaction of the resume loop (the
 \*                        renewal and the resolve) runs under statement_timeout
 \*                        and lock_timeout DB_STATEMENT_DEADLINE: a call still
-\*                        waiting after DbTicks ticks fails (HeartbeatTimeout,
-\*                        ResolveTimeout), the request gets a best-effort
-\*                        failure line, its row stays claimed and the loop goes
-\*                        on (off = a stalled database call waits without
-\*                        bound).
+\*                        waiting after DbTicks ticks fails (HeartbeatTimeout:
+\*                        HeartbeatFailure; ResolveTimeout: logged, the loop
+\*                        goes on). Off = a stalled call waits without bound.
 \* CrashEnabled:          a worker can die mid-batch.
 \* RecoveryEnabled:       an outcome can ask for a fresh link (ProcessRecovery).
 \*                        Off only in `live`, to keep its liveness check
@@ -54,8 +62,9 @@ EXTENDS Naturals, FiniteSets
 \*
 \* Time is counted in ticks, the same for every row and worker, with
 \* DbTicks < Deadline and Deadline + 2 * DbTicks < Garbage (code:
-\* DB_STATEMENT_DEADLINE 15 s, PER_REQUEST_DEADLINE + FAILURE_DELIVERY_DEADLINE
-\* 90 s, CLAIM_LEASE 2 min, CLAIMED_GARBAGE_AFTER 60 min). The lease is a free
+\* DB_STATEMENT_DEADLINE 15 s, PER_REQUEST_DEADLINE + DETACHED_REFRESH_SETTLE_S
+\* + FAILURE_DELIVERY_DEADLINE 115 s, CLAIM_LEASE 2 min, CLAIMED_GARBAGE_AFTER
+\* 60 min). The lease is a free
 \* constant: the code has DbTicks < Deadline < Lease <= Deadline + 2 * DbTicks
 \* and the configs choose Lease within it or, to save states, below it (a
 \* shorter lease lapses earlier and cleans earlier, which only adds behaviors). A row's age is
@@ -64,10 +73,12 @@ EXTENDS Naturals, FiniteSets
 \*
 \* Time passes in every stage of the loop, and each stage has its own bound on
 \* a per-worker stage clock win[w] (ticks since the worker entered the stage):
-\*   request stage  outcome, recovery and result post, and the failure line
-\*                  after a timeout: at most Deadline ticks (asyncio.timeout
-\*                  plus the failure line's own deadline), the stage clock
-\*                  stops the tick at Deadline until the worker acts;
+\*   request stage  outcome, recovery and result post, the cancellation
+\*                  cleanup after a deadline (DETACHED_REFRESH_SETTLE_S) and
+\*                  the failure line after a timeout: at most Deadline ticks
+\*                  (PER_REQUEST_DEADLINE + the settle time + the failure
+\*                  line's own deadline), the stage clock stops the tick at
+\*                  Deadline until the worker acts;
 \*   renewal stage  the renewal transaction before a request: at most DbTicks;
 \*   resolve stage  the resolve transaction after a request: at most DbTicks.
 \* The gap between two renewals is therefore at most Deadline + 2 * DbTicks
@@ -79,7 +90,7 @@ EXTENDS Naturals, FiniteSets
 CONSTANTS DeleteOnClaim, AbortOnException, ResolveBeforeDelivery,
           IgnoreLease, RenewChecksToken, ResolveChecksToken, AtomicRecovery,
           ExpiryCleanup, CrashEnabled, RecoveryEnabled, Heartbeat, WithDeadline,
-          RenewException, DbDeadline, Lease, Deadline, DbTicks, Garbage
+          RenewException, DbDeadline, HbMode, Lease, Deadline, DbTicks, Garbage
 ASSUME /\ DeleteOnClaim \in BOOLEAN /\ AbortOnException \in BOOLEAN
        /\ ResolveBeforeDelivery \in BOOLEAN /\ IgnoreLease \in BOOLEAN
        /\ RenewChecksToken \in BOOLEAN /\ ResolveChecksToken \in BOOLEAN
@@ -88,6 +99,7 @@ ASSUME /\ DeleteOnClaim \in BOOLEAN /\ AbortOnException \in BOOLEAN
        /\ ExpiryCleanup \in {"grace", "lapsed", "all"}
        /\ Heartbeat \in BOOLEAN /\ WithDeadline \in BOOLEAN
        /\ RenewException \in BOOLEAN /\ DbDeadline \in BOOLEAN
+       /\ HbMode \in {"all", "current"}
        /\ Lease \in Nat /\ Deadline \in Nat /\ DbTicks \in Nat
        /\ Garbage \in Nat
        /\ DbTicks >= 1 /\ Deadline >= 1
@@ -106,7 +118,7 @@ None == "none"
 VARIABLES row, expired, claimedBy, age
 \* Worker memory, lost on a crash. step[w][r]: na | todo | started |
 \* needRecovery | recovered | outcome | sent | resolvedFirst | finished |
-\* skipped | aborted. win[w]: ticks the worker has spent in its current stage
+\* skipped | abandoned | aborted. win[w]: ticks the worker has spent in its current stage
 \* (renewal, request or resolve), counted only while that stage has a bound.
 VARIABLES wstate, step, win
 \* Ghosts, written by actions and never read by them.
@@ -176,6 +188,10 @@ HeldLive(r) ==
   \E w \in Workers :
     /\ wstate[w] = "working"
     /\ (step[w][r] \in Flying \/ step[w][r] = "todo")
+
+\* A holder gave the request up with no answer and no visible failure (HbMode
+\* "current"): expiry cleanup of it is a silent loss, not an excused one.
+Abandoned(r) == \E w \in Workers : step[w][r] = "abandoned"
 
 \* claimed_until in the future / in the past.
 LeaseLive(r) == claimedBy[r] # None /\ age[r] < Lease
@@ -261,7 +277,7 @@ Take(w) ==
        IF Cleanable(r) \/ (DeleteOnClaim /\ Takeable(r)) THEN "gone"
        ELSE row[r]]
   /\ cleanedUnheld' = [r \in Requests |->
-       cleanedUnheld[r] \/ (Cleanable(r) /\ ~HeldLive(r))]
+       cleanedUnheld[r] \/ (Cleanable(r) /\ ~HeldLive(r) /\ ~Abandoned(r))]
   /\ UNCHANGED <<expired, reached, attempted, visible, delivered, failed,
                   lapseExcuse, crashVisible, crashThenDone, replSaved, recov,
                   dbTimeout>>
@@ -288,9 +304,6 @@ Start(w) ==
   /\ \/ /\ DeleteOnClaim
         /\ step' = [step EXCEPT ![w][Cur(w)] = "started"]
         /\ UNCHANGED age
-     \/ /\ ~DeleteOnClaim /\ RenewException
-        /\ step' = [step EXCEPT ![w][Cur(w)] = "skipped"]
-        /\ UNCHANGED age
      \/ /\ ~DeleteOnClaim
         /\ age' = [r \in Requests |->
              IF r \in Renewed(w) /\ RenewOk(w, r) THEN 0 ELSE age[r]]
@@ -298,24 +311,41 @@ Start(w) ==
              IF RenewOk(w, Cur(w)) THEN "started" ELSE "skipped"]
   /\ UNCHANGED <<row, expired, claimedBy, wstate, ghostVars>>
 
-\* The renewal transaction waited DbTicks ticks (a lock wait or a stalled
-\* connection) and hit statement_timeout / lock_timeout: it rolled back, so no
-\* row is renewed. The request is a per-request failure: the callback posts
-\* the failure line (best effort; whether it reaches the thread is not
-\* tracked), skips the resolve, leaves the row claimed and goes on to the next
-\* request. The failure line's own deadline is not counted here (see README,
-\* Not modelled). delivered saturates at 2: the invariants only ask for <= 1.
-HeartbeatTimeout(w) ==
-  /\ DbDeadline /\ ~DeleteOnClaim
-  /\ RenewStage(w) /\ win[w] >= DbTicks
-  /\ step' = [step EXCEPT ![w][Cur(w)] = "skipped"]
+\* The renewal failed: it waited DbTicks ticks and hit statement_timeout /
+\* lock_timeout (HeartbeatTimeout), or the call raised (RenewRaise). Nothing is
+\* renewed. The loop (HbMode "all") posts the failure line, best effort, to the
+\* current request and to every request it still holds, resolves none of them
+\* and stops: every row stays claimed and is retaken after the lease. The
+\* browser shows success, so this is not crashVisible. HbMode "current" is the
+\* previous code: only the current request gets a line and the rest are
+\* abandoned. The failure lines' own deadlines are not counted as ticks (see
+\* README, Not modelled): once posted, deleting the row loses nothing.
+\* delivered saturates at 2: the invariants only ask for <= 1.
+HbFailed(w) == IF HbMode = "all" THEN Active(w) ELSE {Cur(w)}
+HeartbeatFailure(w, label) ==
+  /\ ~DeleteOnClaim
+  /\ RenewStage(w)
+  /\ step' = [step EXCEPT ![w] = [r \in Requests |->
+       IF r \in HbFailed(w) THEN "skipped"
+       ELSE IF r \in Active(w) THEN "abandoned"
+       ELSE step[w][r]]]
   /\ win' = [win EXCEPT ![w] = 0]
-  /\ attempted' = [attempted EXCEPT ![Cur(w)] = TRUE]
-  /\ delivered' = [delivered EXCEPT ![Cur(w)] = Min(@ + 1, 2)]
-  /\ lapseExcuse' = [lapseExcuse EXCEPT ![Cur(w)] = TRUE]
-  /\ dbTimeout' = [dbTimeout EXCEPT ![Cur(w)] = "heartbeat"]
+  /\ attempted' = [r \in Requests |-> attempted[r] \/ r \in HbFailed(w)]
+  /\ delivered' = [r \in Requests |->
+       IF r \in HbFailed(w) THEN Min(delivered[r] + 1, 2) ELSE delivered[r]]
+  /\ lapseExcuse' = [r \in Requests |-> lapseExcuse[r] \/ r \in HbFailed(w)]
+  /\ dbTimeout' = [r \in Requests |->
+       IF r \in HbFailed(w) THEN label ELSE dbTimeout[r]]
   /\ UNCHANGED <<dbVars, wstate, reached, visible, failed, cleanedUnheld,
                   crashVisible, crashThenDone, replSaved, recov>>
+
+HeartbeatTimeout(w) ==
+  /\ DbDeadline /\ win[w] >= DbTicks
+  /\ HeartbeatFailure(w, "heartbeat")
+
+RenewRaise(w) ==
+  /\ RenewException
+  /\ HeartbeatFailure(w, "heartbeat")
 
 \* The agent lookup, authority check and grant, no exception, nothing to
 \* recover.
@@ -486,14 +516,15 @@ Next ==
        \/ ProcessFail(w) \/ Timeout(w) \/ RecoveryTx(w) \/ SaveReplacement(w)
        \/ PrivateDeliver(w) \/ Resolve(w) \/ Crash(w)
        \/ Deliver(w, TRUE) \/ Deliver(w, FALSE)
-       \/ HeartbeatTimeout(w) \/ ResolveTimeout(w)
+       \/ HeartbeatTimeout(w) \/ RenewRaise(w) \/ ResolveTimeout(w)
 
 Spec == Init /\ [][Next]_vars
 
 \* A row is never removed unless one of these holds:
 \*   - its request reached an outcome and a post to the person was attempted;
 \*   - it expired and no live worker still intended to run it (never claimed,
-\*     or its holder died, skipped it or finished with it): cleanedUnheld;
+\*     or its holder died, skipped it or finished with it, but not when its
+\*     holder gave it up with no answer, HbMode "current"): cleanedUnheld;
 \*   - a worker that held it unfinished died or let an exception escape (the
 \*     person saw a failed browser request);
 \*   - the recovery transaction replaced it with a fresh pending row;
@@ -572,6 +603,12 @@ ResolveTimeoutNeverFires ==
 \* The request a resolve timeout left behind is taken and answered again.
 ResolveTimeoutRetake ==
   ~(\E r \in Requests : dbTimeout[r] = "resolve" /\ row[r] = "gone")
+\* One failed renewal puts a failure line on every held request: both rows are
+\* skipped, answered with a line, and still claimed.
+HeartbeatFailsWholeBatch ==
+  ~(dbTimeout[1] = "heartbeat" /\ dbTimeout[2] = "heartbeat"
+    /\ attempted[1] /\ attempted[2]
+    /\ row[1] = "pending" /\ row[2] = "pending")
 \* A claimed row survives past its lease: it is deleted only at age Stale.
 GraceNeverCleans ==
   ~(\E r \in Requests : cleanedUnheld[r] /\ claimedBy[r] # None)
@@ -581,7 +618,7 @@ WorkerStep ==
     Start(w) \/ ProcessOk(w) \/ ProcessRecovery(w) \/ ProcessFail(w)
     \/ Timeout(w) \/ RecoveryTx(w) \/ SaveReplacement(w) \/ PrivateDeliver(w)
     \/ Resolve(w) \/ Deliver(w, TRUE) \/ Deliver(w, FALSE)
-    \/ HeartbeatTimeout(w) \/ ResolveTimeout(w)
+    \/ HeartbeatTimeout(w) \/ RenewRaise(w) \/ ResolveTimeout(w)
 
 \* A request some worker holds reaches an outcome (a grant result, a recovery
 \* decision or a failure line) even when another request in its batch fails,

@@ -351,13 +351,21 @@ async def resume_pending(
     request with `FAILED_MESSAGE` and leaves the rest to run. Each request runs
     under `PER_REQUEST_DEADLINE`: one that hits it gets the same failure line and
     the next request still runs. Before each request the lease of every row this
-    callback still holds is renewed, and every database transaction here is
-    bounded by `DB_STATEMENT_DEADLINE`, which bounds the gap between renewals
-    (see `take`). A heartbeat the database does not answer fails that request
-    with the failure line and stops the batch; its rows and the ones behind it
-    stay claimed for a retake after the lease. A crash leaves
-    unresolved requests claimed until their lease passes. A request whose claim
-    another callback took over is skipped.
+    callback still holds is renewed. The loop's own transactions (take, renew,
+    resolve) carry both `asyncio.timeout` and `bound_transaction`, each
+    `DB_STATEMENT_DEADLINE`; transactions inside a request are bounded by the
+    request deadline. Together with the cleanup of a cancelled request
+    (`DETACHED_REFRESH_SETTLE`) and its failure line, that bounds the gap
+    between renewals at `PER_REQUEST_DEADLINE + DETACHED_REFRESH_SETTLE +
+    FAILURE_DELIVERY_DEADLINE + 2 * DB_STATEMENT_DEADLINE` = 145 s (see
+    `take`). A heartbeat the database does not answer gets the failure line
+    in the thread of the current request and of every request behind it, each
+    under its own `FAILURE_DELIVERY_DEADLINE`, and stops the batch. None of
+    those rows is resolved: they stay claimed and are retaken after the lease,
+    and the thread already says to ask again, so a later cleanup of them
+    loses nothing silently. A crash leaves unresolved requests claimed until
+    their lease passes. A request whose claim another callback took over is
+    skipped.
     """
     pending = await _take_pending(
         runtime,
@@ -367,20 +375,24 @@ async def resume_pending(
         platform_user_id=platform_user_id,
     )
     results: list[str] = []
-    for row in pending:
+    for index, row in enumerate(pending):
         # Heartbeat the whole claim: a slow earlier request must not let the
         # lease of the rows behind it lapse, and a row another callback took
         # over is missing from the held set, so this request is not answered.
         try:
             held = await _renew_claim(runtime, row.claim_token)
         except Exception:
-            # The database did not answer in time (or at all). The request
-            # fails with the failure line and the batch stops: every later
-            # request needs the same database, and going on without renewals
-            # would let their leases lapse toward cleanup. The rows stay
-            # claimed and are retaken after the lease, as after a crash.
+            # The database did not answer in time (or at all). Every request
+            # still held, this one and the ones behind it, gets the failure
+            # line and nothing is resolved (the database is not answering):
+            # a request left silent could be cleaned up later while the
+            # browser page reports success. Then the batch stops: going on
+            # without renewals would let the leases lapse toward cleanup. The
+            # rows stay claimed and are retaken after the lease, as after a
+            # crash.
             _log.warning("github.linked_resume.renew_failed", request_id=str(row.id))
-            results.append(await _failure_line(runtime, row))
+            for failed in pending[index:]:
+                results.append(await _failure_line(runtime, failed))
             break
         if row.id not in held:
             _log.warning("github.linked_resume.claim_lost", request_id=str(row.id))

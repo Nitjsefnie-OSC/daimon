@@ -504,6 +504,37 @@ async def test_a_cancelled_caller_holds_its_client_open_until_the_refresh_is_sto
     )
 
 
+async def test_a_callable_settle_timeout_is_read_when_the_cancel_arrives() -> None:
+    async def refresh() -> tuple[str | None, int, int]:
+        await asyncio.sleep(30)
+        return None, 0, 0
+
+    reads: list[float] = []
+
+    def remaining() -> float:
+        reads.append(0.05)
+        return 0.05
+
+    async def body() -> None:
+        async with github_requester_access.settle_detached_refreshes(remaining):
+            await github_requester_access._shielded(refresh())  # pyright: ignore[reportPrivateUsage]
+
+    task = asyncio.create_task(body())
+    await asyncio.sleep(0.05)
+    assert reads == [], "not read before a cancel"
+    task.cancel()
+    try:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        assert asyncio.get_running_loop().time() - started < 1.0
+        assert reads == [0.05]
+    finally:
+        for left in list(github_requester_access._detached_refreshes):  # pyright: ignore[reportPrivateUsage]
+            left.cancel()
+            await asyncio.gather(left, return_exceptions=True)
+
+
 async def test_drain_gives_up_at_its_timeout_and_reports_what_is_left(
     db_session_factory: async_sessionmaker[AsyncSession],
     fernet: MultiFernet,
