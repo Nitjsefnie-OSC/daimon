@@ -98,7 +98,7 @@ def test_candidate_is_not_promotable_until_staging_gates_pass() -> None:
     for gate in (
         "Run migrations (blocking gate)",
         "Deploy MCP registered minters",
-        "Drain legacy MCP turns before first verifier cutover",
+        "Cut over MCP to strict admission",
         "Refresh worker VM containers (recreate in place)",
         "Wait for notebook-host VM refresh",
         "Health gate",
@@ -220,13 +220,11 @@ def test_image_selection_shell_validation(
         "missing-cutoff",
     ],
 )
-def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
+def test_mcp_cutover_shell_switches_to_strict_admission_after_worker_refresh(
     tmp_path: Path, state: str
 ) -> None:
     """Execute both actual deploy phases offline, including old MCP requests."""
     import json
-
-    from daimon.core.turn.ceiling import TURN_CEILING_S
 
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
     names = [step.get("name") for step in steps]
@@ -234,7 +232,7 @@ def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
         "Refresh worker VM containers (recreate in place)"
     )
     assert names.index("Wait for notebook-host VM refresh") < names.index(
-        "Drain legacy MCP turns before first verifier cutover"
+        "Cut over MCP to strict admission"
     )
     clock = tmp_path / "clock"
     clock.write_text("1000")
@@ -261,7 +259,6 @@ def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
     commands = {
         "gcloud": '#!/bin/sh\nif [ "$3" = describe ]; then [ "$STATE" != missing-service ] || exit 1; cat "$RUNNER_TEMP/service.json"; else echo "$*" >> "$RUNNER_TEMP/updates"; fi\n',
         "date": '#!/bin/sh\nif [ "$1" = +%s ]; then cat "$RUNNER_TEMP/clock"; elif [ "$3" = "+5 hours" ]; then echo 2026-10-16T05:00:00Z; elif [ "$3" = "2026-10-16T05:00:00Z" ]; then echo 19000; elif [ "$3" = "2026-10-16T00:00:00Z" ]; then echo 500; else echo 2026-10-16T01:00:00Z; fi\n',
-        "sleep": '#!/bin/sh\necho "$(( $(cat "$RUNNER_TEMP/clock") + $1 ))" > "$RUNNER_TEMP/clock"\n',
     }
     for command, body in commands.items():
         executable = tmp_path / command
@@ -312,7 +309,7 @@ def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
         assert len((tmp_path / "updates").read_text().splitlines()) == 1
     elif state in {"first", "resume-live"}:
         assert second.returncode == 0, second.stderr
-        assert int(clock.read_text()) >= 1000 + 300 + TURN_CEILING_S + 60
+        assert clock.read_text() == "1000"
         assert "ALLOW_LEGACY_TOKENS=false" in (tmp_path / "updates").read_text().splitlines()[-1]
     else:
         assert second.returncode == 0 and clock.read_text() == "1000"

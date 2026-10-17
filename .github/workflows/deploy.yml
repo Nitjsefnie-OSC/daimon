@@ -221,7 +221,6 @@ jobs:
           }
           MODE=$(echo "$SERVICE" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((e.get("value", "") for e in d["spec"]["template"]["spec"]["containers"][0].get("env", []) if e["name"] == "DAIMON_MCP__ALLOW_LEGACY_TOKENS"), ""))')
           CUTOFF=$(echo "$SERVICE" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((e.get("value", "") for e in d["spec"]["template"]["spec"]["containers"][0].get("env", []) if e["name"] == "DAIMON_MCP__LEGACY_TOKEN_CUTOFF"), ""))')
-          REQUEST_TIMEOUT=$(echo "$SERVICE" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(int(d["spec"]["template"]["spec"].get("timeoutSeconds", 300)))')
           if [ -n "$CUTOFF" ]; then
             CUTOFF_EPOCH=$(date -u -d "$CUTOFF" +%s)
             if [ "$MODE" = false ] || [ "$CUTOFF_EPOCH" -le "$(date +%s)" ]; then
@@ -245,9 +244,6 @@ jobs:
           gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
             --image "${{ steps.images.outputs.daimon }}" \
             --update-env-vars "DAIMON_MCP__ALLOW_LEGACY_TOKENS=$LEGACY,DAIMON_MCP__LEGACY_TOKEN_CUTOFF=$CUTOFF"
-          # Old revision requests may finish preparation and mint after traffic
-          # has switched. Bound their last possible mint by the old request timeout.
-          echo "$(( $(date +%s) + REQUEST_TIMEOUT ))" > "$RUNNER_TEMP/mcp-legacy-minters-until"
 
       - name: Resolve seam URL for report-host
         id: seam
@@ -531,22 +527,16 @@ jobs:
           fi
           exit "$(cat "$RUNNER_TEMP/notebook-refresh.rc")"
 
-      - name: Drain legacy MCP turns before first verifier cutover
+      - name: Cut over MCP to strict admission
         id: mcp_cutover
         env:
           LEGACY_WINDOW: ${{ steps.mcp_minters.outputs.window }}
         run: |
           if [ "$LEGACY_WINDOW" = true ]; then
             test -f "$RUNNER_TEMP/workers-refreshed-at" || {
-              echo "Cannot verify registered minters were refreshed; verifier cutover refused" >&2
+              echo "Cannot verify registered minters were refreshed; strict cutover refused" >&2
               exit 1
             }
-            WORKERS_AT=$(cat "$RUNNER_TEMP/workers-refreshed-at")
-            MCP_AT=$(cat "$RUNNER_TEMP/mcp-legacy-minters-until")
-            LAST_MINTER=$(( WORKERS_AT > MCP_AT ? WORKERS_AT : MCP_AT ))
-            # Last old minter + the 45-minute turn ceiling + propagation margin.
-            DRAIN_UNTIL=$(( LAST_MINTER + 2760 ))
-            while [ "$(date +%s)" -lt "$DRAIN_UNTIL" ]; do sleep 30; done
             CUTOFF=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             gcloud run services update ${{ vars.GCP_AR_REPO }}-mcp --region "$REGION" \
               --update-env-vars "DAIMON_MCP__ALLOW_LEGACY_TOKENS=false,DAIMON_MCP__LEGACY_TOKEN_CUTOFF=$CUTOFF"
