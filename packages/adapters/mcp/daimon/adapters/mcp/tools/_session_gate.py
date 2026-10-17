@@ -26,7 +26,7 @@ from daimon.core.session_seal import session_facts
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import has_confirmation_gate
+from daimon.core.tool_safety import has_confirmation_gate, microsoft_send_tools
 from mux.errors import ScopeViolation
 
 _log = structlog.get_logger(__name__)
@@ -165,7 +165,8 @@ async def _recorded_as_gated(
             asks_before_publishing=asks_before_publishing,
             confirmed_tools=backend_switch_tools(
                 enabled=backend_selection_enabled(runtime.settings.turn)
-            ),
+            )
+            | microsoft_send_tools(enabled=runtime.settings.microsoft_accounts.configured),
         )
         if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
             [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name

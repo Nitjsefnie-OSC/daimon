@@ -51,6 +51,7 @@ from daimon.core.config import (
     DiscordSettings,
     GeminiSettings,
     McpSettings,
+    MicrosoftAccountsSettings,
     NotebookSettings,
     Settings,
     SlackSettings,
@@ -78,7 +79,7 @@ ISOLATED_ENV_NAMES = ("MCP_PUBLIC_URL",)
 # Registration groups `create_mcp_app` skips silently rather than failing
 # when their settings are absent. If one of these modules contributes nothing
 # the catalogue is quietly short, so it is an error instead.
-CONDITIONAL_MODULES = ("channels", "media")
+CONDITIONAL_MODULES = ("channels", "media", "microsoft.register")
 
 # What each visibility tag means, from the `Visibility(False, tags=...)`
 # baselines in `server.py` and the re-enabling in
@@ -165,6 +166,11 @@ def _fully_configured_settings() -> Settings:
             app_token=SecretStr("xapp-placeholder"),
         ),
         crypto=CryptoSettings(keys=(SecretStr(Fernet.generate_key().decode()),)),
+        microsoft_accounts=MicrosoftAccountsSettings(
+            client_id="client-id",
+            client_secret=SecretStr("placeholder"),
+            tenant_id="00000000-0000-0000-0000-000000000001",
+        ),
         gemini=GeminiSettings(api_key=SecretStr("placeholder")),
         notebook=NotebookSettings(
             host_url=HttpUrl("http://notebook-host:8001"),
