@@ -132,12 +132,21 @@ def _page(
     )
 
 
-def _back(platform: str, workspace_id: str, *, primary: bool = False) -> str:
-    """The way back to chat; a link, or the main button when nothing else is offered."""
+def _back(platform: str, workspace_id: str | None = None, *, primary: bool = False) -> str:
+    """The way back to chat; a link, or the main button when nothing else is offered.
+
+    With a workspace id the link opens that server or workspace. Only pages shown after the
+    browser and the chat identity are both verified may pass one; every other page leaves it
+    out, so the link names the platform and nothing about the person's server.
+    """
     if platform == "discord":
-        target = f"https://discord.com/channels/{html.escape(workspace_id, quote=True)}"
+        target = "https://discord.com/app"
+        if workspace_id:
+            target = f"https://discord.com/channels/{html.escape(workspace_id, quote=True)}"
     else:
-        target = f"https://app.slack.com/client/{html.escape(workspace_id, quote=True)}"
+        target = "https://app.slack.com/client/"
+        if workspace_id:
+            target = f"https://app.slack.com/client/{html.escape(workspace_id, quote=True)}"
     label = f"Back to {_platform_name(platform)}"
     return (
         f'<a class="{"gh-primary" if primary else "gh-secondary"}" href="{target}">'
@@ -145,17 +154,18 @@ def _back(platform: str, workspace_id: str, *, primary: bool = False) -> str:
     )
 
 
-def _expired(origin: tuple[str, str] | None = None) -> Response:
-    """An expired or used link. With a known link's (platform, workspace), offer the way back.
+def _expired(platform: str | None = None) -> Response:
+    """An expired or used link, reached without a verified browser.
 
-    When no link row matches the token or state, the platform is unknown and the page
-    has no button.
+    A known platform gets a platform-only way back. The page never carries the stored
+    workspace id, so opening someone else's link reveals nothing about their server. When no
+    link row matches the token or state, the platform is unknown and there is no button.
     """
     return _page(
         "Link expired",
         "This link expired. Ask again in chat.",
         mark="clock",
-        back=_back(origin[0], origin[1], primary=True) if origin is not None else None,
+        back=_back(platform, primary=True) if platform is not None else None,
     )
 
 
@@ -298,14 +308,12 @@ def build_personal_link_routes(
                 session, token_hash=digest(token), lock=True, include_expired=True
             )
             if intent is None:
-                return _expired((intent.platform, intent.platform_workspace_id) if intent else None)
+                return _expired(intent.platform if intent else None)
             if intent.expires_at <= datetime.now(UTC):
-                return _expired((intent.platform, intent.platform_workspace_id) if intent else None)
+                return _expired(intent.platform if intent else None)
             else:
                 if intent.phase != "new":
-                    return _expired(
-                        (intent.platform, intent.platform_workspace_id) if intent else None
-                    )
+                    return _expired(intent.platform if intent else None)
                 platform = intent.platform
                 workspace_id = intent.platform_workspace_id
                 configured = (
@@ -381,7 +389,7 @@ def build_personal_link_routes(
         async with sessionmaker() as session:
             intent = await find_by_state(session, state=state, phase="platform")
             if intent is None or intent.browser_cookie_hash != cookie_hash:
-                return _expired((intent.platform, intent.platform_workspace_id) if intent else None)
+                return _expired(intent.platform if intent else None)
             platform, expected_user, expected_workspace = (
                 intent.platform,
                 intent.platform_user_id,
@@ -406,7 +414,7 @@ def build_personal_link_routes(
                 "GitHub wasn't linked",
                 status=200,
                 tone="error",
-                back=_back(platform, expected_workspace),
+                back=_back(platform),
                 action=("Try again", fresh) if fresh else None,
             )
         if platform == "discord":
@@ -476,7 +484,7 @@ def build_personal_link_routes(
                 f"Ask in {_platform_name(platform)} for your own link.",
                 status=403,
                 tone="error",
-                back=_back(platform, expected_workspace, primary=True),
+                back=_back(platform, primary=True),
             )
         github_state = "link_" + secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(48)
@@ -488,7 +496,7 @@ def build_personal_link_routes(
         async with sessionmaker.begin() as session:
             intent = await find_by_state(session, state=state, phase="platform", lock=True)
             if intent is None or intent.browser_cookie_hash != cookie_hash:
-                return _expired((intent.platform, intent.platform_workspace_id) if intent else None)
+                return _expired(intent.platform if intent else None)
             intent.github_state = github_state
             intent.encrypted_verifier = encrypt_token(fernet, verifier)
             intent.phase = "github"
@@ -516,7 +524,7 @@ def build_personal_link_routes(
                 or intent.browser_cookie_hash != cookie_hash
                 or intent.encrypted_verifier is None
             ):
-                return _expired((intent.platform, intent.platform_workspace_id) if intent else None)
+                return _expired(intent.platform if intent else None)
             platform, workspace_id = intent.platform, intent.platform_workspace_id
             verifier = decrypt_token(fernet, intent.encrypted_verifier)
         if not code:
@@ -584,9 +592,7 @@ def build_personal_link_routes(
             async with sessionmaker.begin() as session:
                 intent = await find_by_state(session, state=state, phase="github", lock=True)
                 if intent is None or intent.browser_cookie_hash != cookie_hash:
-                    return _expired(
-                        (intent.platform, intent.platform_workspace_id) if intent else None
-                    )
+                    return _expired(intent.platform if intent else None)
                 if not await verified_platform_account(
                     session,
                     tenant_id=intent.tenant_id,
@@ -594,9 +600,7 @@ def build_personal_link_routes(
                     platform=intent.platform,
                     platform_user_id=intent.platform_user_id,
                 ):
-                    return _expired(
-                        (intent.platform, intent.platform_workspace_id) if intent else None
-                    )
+                    return _expired(intent.platform if intent else None)
                 await save_verified_link(
                     session,
                     intent_account_id=intent.account_id,

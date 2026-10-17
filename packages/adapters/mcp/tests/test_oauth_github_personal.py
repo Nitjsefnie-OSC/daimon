@@ -323,10 +323,11 @@ async def _world(
     platform: str,
     github_ok: bool = True,
     platform_user: Callable[[], str] | None = None,
+    workspace_id: str | None = None,
 ):
     """A tenant, a person and the three browser routes, with synthetic remote APIs."""
     key = Fernet.generate_key().decode()
-    workspace = "123" if platform == "discord" else "T123"
+    workspace = workspace_id or ("123" if platform == "discord" else "T123")
     person = "456" if platform == "discord" else "U456"
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session, platform=platform, workspace_id=workspace)
@@ -447,10 +448,20 @@ def _hrefs(page: httpx.Response) -> dict[str, str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "platform,back_label,back_url",
+    "platform,back_label,back_url,generic_url",
     [
-        ("discord", "Back to Discord", "https://discord.com/channels/123"),
-        ("slack", "Back to Slack", "https://app.slack.com/client/T123"),
+        (
+            "discord",
+            "Back to Discord",
+            "https://discord.com/channels/123",
+            "https://discord.com/app",
+        ),
+        (
+            "slack",
+            "Back to Slack",
+            "https://app.slack.com/client/T123",
+            "https://app.slack.com/client/",
+        ),
     ],
 )
 async def test_browser_outcomes_use_the_agreed_titles_and_buttons(
@@ -458,6 +469,7 @@ async def test_browser_outcomes_use_the_agreed_titles_and_buttons(
     platform: str,
     back_label: str,
     back_url: str,
+    generic_url: str,
 ) -> None:
     other = {"user": ""}
     world = await _world(
@@ -490,7 +502,8 @@ async def test_browser_outcomes_use_the_agreed_titles_and_buttons(
             f"This link was made for another person. Ask in {platform.title()} for your own link."
             in _text(wrong_person)
         )
-        assert _hrefs(wrong_person) == {back_label: back_url}
+        # The identity is not verified yet, so the way back names no server.
+        assert _hrefs(wrong_person) == {back_label: generic_url}
         pages.append(wrong_person)
         other["user"] = ""
 
@@ -523,6 +536,7 @@ async def test_browser_outcomes_use_the_agreed_titles_and_buttons(
         assert refused.status_code == 200
         assert _heading(refused) == "GitHub wasn't linked"
         assert list(_hrefs(refused)) == ["Try again", back_label]
+        assert _hrefs(refused)[back_label] == generic_url
         pages.append(refused)
 
     for page in pages:
@@ -634,8 +648,8 @@ def test_names_are_escaped_before_they_are_wrapped() -> None:
 @pytest.mark.parametrize(
     "platform,back_url",
     [
-        ("discord", "https://discord.com/channels/123"),
-        ("slack", "https://app.slack.com/client/T123"),
+        ("discord", "https://discord.com/app"),
+        ("slack", "https://app.slack.com/client/"),
     ],
 )
 async def test_expired_link_with_a_known_platform_offers_the_way_back(
@@ -664,9 +678,7 @@ async def test_back_button_is_an_outline_button_with_a_44px_tap_target(
         state = parse_qs(urlparse(opened.headers["location"]).query)["state"][0]
         refused = await browser.get("/oauth/github/link/platform-callback", params={"state": state})
     assert 'class="gh-primary"' in refused.text  # Try again
-    assert re.search(
-        r'<a class="gh-secondary" href="https://discord.com/channels/123">', refused.text
-    )
+    assert re.search(r'<a class="gh-secondary" href="https://discord.com/app">', refused.text)
     css = refused.text.split(".gh-secondary{", 1)[1].split("}", 1)[0]
     for rule in (
         "min-height:44px",
@@ -692,3 +704,98 @@ def test_a_name_that_looks_like_an_entity_cannot_break_the_escaping() -> None:
     bare = _nowrap("x27 & amp can't", ("x27", "amp"))
     assert "&amp;" in bare and "&#x27;" in bare
     assert bare.count("<span") == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["discord", "slack"])
+async def test_pages_without_a_verified_browser_never_carry_the_workspace_or_channel(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], platform: str
+) -> None:
+    workspace = "778899123456"
+    other = {"user": ""}
+    world = await _world(
+        committing_sessionmaker,
+        platform=platform,
+        workspace_id=workspace,
+        platform_user=lambda: other["user"] or world.person,
+    )
+    async with committing_sessionmaker.begin() as session:
+        await request_access(
+            session,
+            tenant_id=world.tenant.id,
+            requester_account_id=world.account.id,
+            requester_platform_user_id=world.person,
+            platform="discord" if platform == "discord" else "slack",
+            parent_channel_id="channel-554433",
+            thread_id="thread-998877",
+            agent_id=uuid.uuid4(),
+            ma_agent_id="ma-agent",
+            agent_name="Atlas",
+            repo_name="northwind-labs/analysis",
+            requested_work=None,
+            is_admin=False,
+        )
+    pages: dict[str, httpx.Response] = {}
+    async with world.browser() as browser:
+        link = await world.new_link()
+        assert (await browser.get(link)).status_code == 307
+        pages["expired: started link opened again"] = await browser.get(link)
+
+        # A browser without the link's cookie, at the platform and at the GitHub step.
+        link = await world.new_link()
+        opened = await browser.get(link)
+        state = parse_qs(urlparse(opened.headers["location"]).query)["state"][0]
+        async with world.browser() as stranger:
+            pages["cookie mismatch: platform step"] = await stranger.get(
+                "/oauth/github/link/platform-callback",
+                params={"state": state, "code": "platform-code"},
+            )
+        verified = await browser.get(
+            "/oauth/github/link/platform-callback",
+            params={"state": state, "code": "platform-code"},
+        )
+        async with world.browser() as stranger:
+            pages["cookie mismatch: github step"] = await stranger.get(
+                "/oauth/github/callback",
+                params={"state": _github_state(verified), "code": "github-code"},
+            )
+
+        # The platform step before the chat identity is verified.
+        other["user"] = "999"
+        pages["not your link"] = await _until_platform_verified(browser, await world.new_link())
+        other["user"] = ""
+        opened = await browser.get(await world.new_link())
+        state = parse_qs(urlparse(opened.headers["location"]).query)["state"][0]
+        pages["refused at the platform"] = await browser.get(
+            "/oauth/github/link/platform-callback", params={"state": state}
+        )
+
+    generic = {"discord": "https://discord.com/app", "slack": "https://app.slack.com/client/"}[
+        platform
+    ]
+    for name, page in pages.items():
+        for secret in (workspace, "channel-554433", "thread-998877"):
+            assert secret not in page.text, f"{name} leaks {secret}"
+        back = [href for label, href in _hrefs(page).items() if label.startswith("Back to")]
+        assert back in ([generic], []), name
+    assert pages["expired: started link opened again"].status_code == 400
+    assert _hrefs(pages["expired: started link opened again"]) == {
+        f"Back to {platform.title()}": generic
+    }
+    assert pages["cookie mismatch: platform step"].status_code == 400
+    assert pages["cookie mismatch: github step"].status_code == 400
+    assert pages["not your link"].status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_workspace_link_is_kept_after_the_browser_and_identity_are_verified(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(committing_sessionmaker, platform="discord", workspace_id="778899123456")
+    async with world.browser() as browser:
+        verified = await _until_platform_verified(browser, await world.new_link())
+        linked = await browser.get(
+            "/oauth/github/callback",
+            params={"state": _github_state(verified), "code": "github-code"},
+        )
+    assert _hrefs(linked) == {"Back to Discord": "https://discord.com/channels/778899123456"}
