@@ -86,7 +86,8 @@ cp .env.example .env
 
 Open `.env`, then uncomment and fill in:
 
-- `DAIMON_ANTHROPIC__API_KEY`: your Anthropic API key.
+- `DAIMON_ANTHROPIC__API_KEY`: your Anthropic API key. Leave unset if you're
+  self-hosting on OpenAI only — see [Self-host on OpenAI](#self-host-on-openai).
 - `DAIMON_MCP__JWT_SECRET`: any random string, e.g. `openssl rand -hex 32`.
 - `DAIMON_MCP__PUBLIC_URL`: `http://localhost:8765/mcp` is fine for local use.
 - `POSTGRES_PASSWORD`: a strong, URL-safe value (avoid `@ : / % #`).
@@ -99,9 +100,11 @@ Open `.env`, then uncomment and fill in:
   [Agent environment encryption](#agent-environment-encryption)). Back it up
   separately from the database.
 
-The first four must be set before the first `docker compose` command:
-`docker-compose.yml` interpolates them for every service with fail-fast
-`${VAR:?...}` guards. Set `DAIMON_CRYPTO__KEYS` at the same time; after the
+`DAIMON_MCP__JWT_SECRET`, `DAIMON_MCP__PUBLIC_URL` and `POSTGRES_PASSWORD`
+must be set before the first `docker compose` command: `docker-compose.yml`
+interpolates them for every service with fail-fast `${VAR:?...}` guards.
+`DAIMON_ANTHROPIC__API_KEY` has no such guard — an OpenAI-only deployment
+needs it left unset. Set `DAIMON_CRYPTO__KEYS` at the same time; after the
 stack is up, `docker compose run --rm init "daimon crypto verify"` confirms it
 is set and that no agent key is stored in plaintext. `.env` is gitignored, so secrets never get committed.
 `.env.example` documents every other setting.
