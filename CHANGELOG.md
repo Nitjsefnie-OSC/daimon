@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The staged MCP upgrade no longer waits a fixed 45 minutes between worker refresh and the strict-admission cutover; it flips immediately. A turn whose MCP connection was minted under the old credential at the exact moment of the flip sees one failed tool call, then renews and resumes.
+- The hosted deploy workflow no longer runs the one-time, 45-minute MCP legacy-token drain and cutover on every deploy. Staging and production already completed that cutover, so the wait was dead weight blocking every later release; the workflow now just ships MCP's image like any other service. The drain and cutover are still required for a brand-new environment's first upgrade — see the staged steps in `docs/self-hosting.md`, now run by hand.
 
 - Channel admins are deprecated. Hosted Daimon turns them off; self-hosters can set `DAIMON_CHANNEL_ADMINS__ENABLED=false` now. The next release defaults this switch to false, and a later release removes the feature. Existing grant data is kept.
 

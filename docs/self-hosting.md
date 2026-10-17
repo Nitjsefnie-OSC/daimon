@@ -28,26 +28,37 @@ preserving those turns matters.
    credentials are refused immediately, including during this window; replace
    any external callers with registered credentials before updating MCP.
 2. Update every credential minter, including platform workers, the scheduler
-   and any separately installed CLI. Refresh notebook services too.
-3. Once worker refresh completes, set `DAIMON_MCP__ALLOW_LEGACY_TOKENS=false`
-   on every MCP replica. After this flip, or when the deadline passes, every
-   unregistered credential is refused regardless of issuance time. Keep
-   clients on the updated minters. Any turn whose MCP connection was minted
-   under the old credential sees one failed tool call at the exact moment of
-   the flip; it renews and resumes immediately after.
+   and any separately installed CLI. Refresh notebook services too. Record when
+   worker refresh completes and when the new MCP revision finishes deploying.
+   Old MCP requests can still create credentials after traffic switches, so
+   add the old revision's request timeout to its deployment completion time.
+3. From the later of worker completion and that last possible old MCP mint,
+   allow the existing 45-minute turn ceiling plus one minute. Complete this
+   drain before the original deadline. This matters: a session created before
+   the flip keeps its now-rejected credential for the rest of that session,
+   not just its current turn, so every MCP call in it fails until a new
+   session is created. Skipping the drain trades deploy time for live
+   sessions breaking mid-use.
+4. Set `DAIMON_MCP__ALLOW_LEGACY_TOKENS=false` on every MCP replica. After this
+   flip, or when the deadline passes, every unregistered credential is refused
+   regardless of issuance time. Keep clients on the updated minters.
 
-The deployment workflow automates this order for an existing MCP service and
-flips to strict admission immediately after worker refresh, with no added
-wait. A retry preserves the original deadline; it never extends or reopens
-the window. An expired deadline allows boot but remains strict. Configuration
+Run this by hand against `DAIMON_MCP__ALLOW_LEGACY_TOKENS` /
+`DAIMON_MCP__LEGACY_TOKEN_CUTOFF` on the MCP service; the hosted deployment
+workflow does not perform the drain or the flip. It only ships MCP's image
+like any other service, which is safe once step 4 above has already run once
+for that environment — reopening the window needs the manual steps again. A
+retry preserves the original deadline; it never extends or reopens the
+window. An expired deadline allows boot but remains strict. Configuration
 refuses dates before 2026-10-16 UTC, naive/invalid dates and deadlines over
 six hours ahead. Enabling compatibility without an explicit deadline is also
 refused.
 
-A missing MCP service needs deliberate provisioning before this workflow. A
-stopped worker cannot provide a refresh receipt; resume and update it before
-attempting the first cutover. Do not fabricate a receipt. Rolling back to old
-minters after strict admission is unsupported: their output will be refused.
+A missing MCP service needs deliberate provisioning before this upgrade.
+Confirm every worker instance has actually restarted before starting the
+drain clock in step 3 — a stopped worker never completes it. Rolling back to
+old minters after strict admission is unsupported: their output will be
+refused.
 
 ### Interrupted rollout and recovery
 
