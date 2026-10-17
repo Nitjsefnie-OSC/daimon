@@ -84,9 +84,9 @@ a JSON object.
 `dict[UUID, bool]` · optional · default `{}`
 
 Per-tenant switch for the channel budget notice, keyed by tenant UUID. When a channel's
-budget is used up, the server admins get one DM per budget
-window on Discord, Slack and Teams. Missing/true sends it; false turns it off. Configure
-DAIMON_BUDGET_NOTICES as a JSON object.
+budget is used up, the server admins get one DM per budget window on Discord, Slack and
+Teams. Missing/true sends it; false turns it off. Configure DAIMON_BUDGET_NOTICES as a
+JSON object.
 
 ### `DAIMON_DIRECT_MESSAGE_POLICIES`
 

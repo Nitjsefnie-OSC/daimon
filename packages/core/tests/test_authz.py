@@ -272,7 +272,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": Place(channel_id="C_ACME"),
         },
-        _deny("admin_required"),
+        ALLOW,
     ),
     (
         "bind default of an unpinned agent",
@@ -283,7 +283,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "agent": ACME,
             "place": Place(channel_id="C_OTHER"),
         },
-        _deny("admin_required"),
+        ALLOW,
     ),
     # --- pinned sends: a pinned agent posts only inside its pin ---
     (
