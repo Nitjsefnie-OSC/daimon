@@ -89,10 +89,22 @@ class DatabaseSettings(BaseModel):
     )
 
 
+ANTHROPIC_UNCONFIGURED_PLACEHOLDER = "sk-ant-unconfigured-openai-only-deployment"
+"""Never a valid credential. `AnthropicSettings.resolved_api_key()` returns
+this when no real key is configured, so every `AsyncAnthropic` client in the
+app can keep its existing non-optional constructor call: an OpenAI-only
+deployment that never exercises the Anthropic/default path never notices,
+and one that accidentally does gets a clean 401 instead of a crash at
+startup or a scattered `Optional` check at every call site."""
+
+
 class AnthropicSettings(BaseModel):
-    api_key: SecretStr = Field(
+    api_key: SecretStr | None = Field(
+        default=None,
         description=(
-            "Anthropic API key used to authenticate all Managed Agents SDK calls. Required."
+            "Anthropic API key used to authenticate all Managed Agents SDK calls. "
+            "Required unless this deployment is OpenAI-only (see docs/self-hosting.md's "
+            "'Self-host on OpenAI'), in which case leave it unset."
         ),
     )
     base_url: HttpUrl = Field(
@@ -111,6 +123,19 @@ class AnthropicSettings(BaseModel):
             "Other deployments in the same organization share that limit."
         ),
     )
+
+    def resolved_api_key(self) -> str:
+        """The real key, or a placeholder for an OpenAI-only deployment.
+
+        Never falls back to an ambient `ANTHROPIC_API_KEY`-style env var —
+        unset means unset, exactly like every other explicit credential in
+        this settings tree.
+        """
+        return (
+            self.api_key.get_secret_value()
+            if self.api_key is not None
+            else ANTHROPIC_UNCONFIGURED_PLACEHOLDER
+        )
 
 
 class CLISettings(BaseModel):
@@ -1567,7 +1592,7 @@ class Settings(BaseSettings):
         ),
     )
     database: DatabaseSettings
-    anthropic: AnthropicSettings
+    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
     privacy_policy_url: HttpUrl = Field(
         default=HttpUrl("https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"),
         description=(

@@ -74,7 +74,9 @@ original HTTP error; the original ten-minute expiry remains its upper bound.
   needs BuildKit) with Compose.
 - An Anthropic API key **in a workspace dedicated to this deployment**.
   Daimon manages the workspace's Managed Agents resources as its own, so
-  sharing the workspace with anything else causes collisions.
+  sharing the workspace with anything else causes collisions. Skip this if
+  you're self-hosting on OpenAI only — see
+  [Self-host on OpenAI](#self-host-on-openai).
 
 ## 1. Configure the environment
 
@@ -84,7 +86,8 @@ cp .env.example .env
 
 Open `.env`, then uncomment and fill in:
 
-- `DAIMON_ANTHROPIC__API_KEY`: your Anthropic API key.
+- `DAIMON_ANTHROPIC__API_KEY`: your Anthropic API key. Leave unset if you're
+  self-hosting on OpenAI only — see [Self-host on OpenAI](#self-host-on-openai).
 - `DAIMON_MCP__JWT_SECRET`: any random string, e.g. `openssl rand -hex 32`.
 - `DAIMON_MCP__PUBLIC_URL`: `http://localhost:8765/mcp` is fine for local use.
 - `POSTGRES_PASSWORD`: a strong, URL-safe value (avoid `@ : / % #`).
@@ -97,9 +100,11 @@ Open `.env`, then uncomment and fill in:
   [Agent environment encryption](#agent-environment-encryption)). Back it up
   separately from the database.
 
-The first four must be set before the first `docker compose` command:
-`docker-compose.yml` interpolates them for every service with fail-fast
-`${VAR:?...}` guards. Set `DAIMON_CRYPTO__KEYS` at the same time; after the
+`DAIMON_MCP__JWT_SECRET`, `DAIMON_MCP__PUBLIC_URL` and `POSTGRES_PASSWORD`
+must be set before the first `docker compose` command: `docker-compose.yml`
+interpolates them for every service with fail-fast `${VAR:?...}` guards.
+`DAIMON_ANTHROPIC__API_KEY` has no such guard — an OpenAI-only deployment
+needs it left unset. Set `DAIMON_CRYPTO__KEYS` at the same time; after the
 stack is up, `docker compose run --rm init "daimon crypto verify"` confirms it
 is set and that no agent key is stored in plaintext. `.env` is gitignored, so secrets never get committed.
 `.env.example` documents every other setting.
@@ -153,7 +158,11 @@ docker compose up --build -d
 
 This brings up Postgres, runs migrations and seeds the default agents,
 environments and skills (the `init` service does both), then starts the
-`mcp`, `discord` and `scheduler` services.
+`mcp`, `discord` and `scheduler` services. `docker compose up -d` doesn't
+show `init`'s output; if you meant to run on Anthropic and forgot
+`DAIMON_ANTHROPIC__API_KEY`, the stack still starts (an OpenAI-only
+deployment needs it unset), so check `docker compose logs init` once —
+it prints plainly whether it seeded Anthropic defaults or skipped them.
 
 Set `DAIMON_DATABASE__POOL_SIZE`, `DAIMON_DATABASE__MAX_OVERFLOW` and
 `DAIMON_DATABASE__POOL_TIMEOUT` per process when sizing Postgres for more
@@ -227,6 +236,120 @@ carries its own token, so `mcp` replicas need no sticky sessions behind a load
 balancer, and a redeploy does not strand connected clients. The hourly limits
 on notebook publishes and bundle uploads are kept in memory, so each replica
 counts its own.
+
+## Self-host on OpenAI
+
+Daimon can run on just your own OpenAI key — no Anthropic account needed at
+all. The OpenAI driver (`daimon-mux[openai]`) ships in the default install
+already, so there is no separate install step. Leave
+`DAIMON_ANTHROPIC__API_KEY` unset in `.env`: `init` detects there's no
+Anthropic key and skips the Anthropic default-agent/skill reconciliation
+step instead of failing, and every service starts without one. This section
+covers the OpenAI-only setup: provisioning resources and routing channels to
+them.
+
+### What's different on OpenAI
+
+- **No multi-agent delegation.** OpenAI's hosted-workspace profile doesn't
+  support it at all — not a config gap, a capability the driver doesn't have.
+- **No mid-session resource changes.** A session's initial file mounts (the
+  main case: a GitHub-connected working copy) work; swapping them after the
+  session starts doesn't.
+- **No workspace export/import** — there's no way to export a live OpenAI
+  session's workspace or restore one from a saved export.
+- **No memory across turns.** Every OpenAI-routed turn starts fresh.
+- **No Daimon model knobs.** The OpenAI driver fixes its own model and
+  container defaults (see `docs/mux.md`'s "OpenAI deployment runtime" and
+  "Preserving source capabilities in an OpenAI hosted workspace" sections).
+
+Everything else — the chat platforms, the default skill set, scheduled
+routines — works the same regardless of provider.
+
+### 1. Get an OpenAI API key and project
+
+Create (or choose) an OpenAI project and an API key scoped to it. Add it to
+`.env` under its own name, never the reserved `OPENAI_*` namespace Daimon
+refuses to read credentials from:
+
+```bash
+DAIMON_CHANNEL_OPENAI_KEY=sk-...
+```
+
+`DAIMON_CHANNEL_OPENAI_KEY` is the default name both `daimon openai init` and
+the runtime file expect; pass `--api-key-env` to `init` if you'd rather name
+it something else. The name is all the runtime file ever records — never the
+key itself.
+
+### 2. Provision the agent, environment and default skills
+
+```bash
+docker compose run --rm init "daimon openai init --tenant-id <your-tenant-uuid> --project <openai-project-id> --model <openai-model-id>"
+```
+
+This creates (or reuses, if you run it again) one OpenAI agent, one hosted
+environment, and uploads every skill under `defaults/skills/` onto that
+agent — the same default skill set an Anthropic deployment gets from `daimon
+defaults apply` — then writes one row for them into the provider runtime
+file. It's idempotent: an identical tenant/platform/channel/account selector
+prints the existing IDs instead of provisioning (or re-seeding skills)
+twice. Pass `--skip-default-skills` for a bare agent instead. It prints only
+the created IDs — never the API key.
+
+Find your tenant UUID with `daimon tenants list` once the stack has
+auto-discovered it from a first message on another channel, or pick any
+UUID you control if this is a fresh, OpenAI-only deployment from the start.
+
+### 3. Point channels at it
+
+The one-command way: route your existing default agent's new threads to
+OpenAI entirely —
+
+```bash
+docker compose run --rm init "daimon agents backend set <agent-name-or-id> openai"
+```
+
+— after which every channel using that agent goes to OpenAI, with no
+per-channel setup. This is the same command any backend switch uses; nothing
+OpenAI-specific about it.
+
+If you'd rather route only specific channels and leave the rest on
+Anthropic, use `daimon channels rule set` per channel instead, scoped with
+`--platform`/`--channel-id`/`--account-id` on `daimon openai init` (its
+default is `*` — every platform, channel and account under your tenant, the
+single-entry default most self-hosters want, so the runtime file never needs
+one entry per channel).
+
+The wildcard is scoped to your tenant and nothing wider: `tenant_id` is
+never wildcardable, by construction — the loader refuses a manifest row that
+tries (see `docs/mux.md`'s "OpenAI deployment runtime"). One deployment's
+OpenAI resources can never serve a different tenant through this entry, even
+with every other field left as `*`; an exact, narrower row always wins over
+a coexisting wildcard default for the same tenant.
+
+Either way, add to `.env` (the `init`/`mcp`/`discord`/`slack`/`teams`/
+`scheduler` services already share `./runtime` as `/app/runtime`, see
+`docker-compose.yml`):
+
+```bash
+DAIMON_TURN__PATH=mux
+DAIMON_TURN__CHANNEL_BACKENDS=true
+DAIMON_TURN__PROVIDER_RUNTIME_FILE=/app/runtime/openai.json
+```
+
+and point step 2's `init` command at the same path with
+`--manifest /app/runtime/openai.json` (or rely on the env var above, which
+`daimon openai init` reads by default).
+
+### 4. Verify it
+
+```bash
+docker compose run --rm init "daimon openai smoke --project <openai-project-id> --model <openai-model-id>"
+```
+
+This provisions its own small dedicated agent, environment and skill
+(separate from your real one), runs one chat turn that must make one tool
+call, and exits nonzero with a clear reason unless it completed. It's
+billed — a single cheap turn, same as `daimon smoke` for Anthropic.
 
 ## Slack (optional)
 

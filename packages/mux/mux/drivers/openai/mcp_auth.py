@@ -101,7 +101,8 @@ def _non_mcp_tool(native: Object) -> Object:
         if set(native) != {"type"}:
             raise ValueError("undeclared builtin tool fields")
         return {"type": kind}
-    if kind != "function" or set(native) - {"type", "name", "description", "parameters", "strict"}:
+    allowed = {"type", "name", "description", "parameters", "strict", "defer_loading"}
+    if kind != "function" or set(native) - allowed:
         raise ValueError("unsupported native tool shape")
     name = text(native["name"])
     if not name:
@@ -116,6 +117,13 @@ def _non_mcp_tool(native: Object) -> Object:
         if not isinstance(native["strict"], bool):
             raise ValueError("invalid function strict flag")
         result["strict"] = native["strict"]
+    if "defer_loading" in native:
+        # Observed live: the API echoes this on every function tool, including
+        # ones this driver creates without ever setting it. Round-trip it like
+        # `strict` rather than silently dropping a value we didn't choose.
+        if not isinstance(native["defer_loading"], bool):
+            raise ValueError("invalid function defer_loading flag")
+        result["defer_loading"] = native["defer_loading"]
     return result
 
 

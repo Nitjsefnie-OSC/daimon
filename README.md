@@ -68,7 +68,9 @@ prefer them; on Teams they are plain words (`setup`, `routines`, `help`) sent in
 ## Quickstart
 
 You need [Docker](https://docs.docker.com/get-docker/) and an Anthropic API
-key in a workspace dedicated to this deployment.
+key in a workspace dedicated to this deployment. Want to run on just an
+OpenAI key instead, no Anthropic account at all? Skip to
+[Run on OpenAI](#run-on-openai) below.
 
 1. Configure the environment.
 
@@ -98,6 +100,23 @@ key in a workspace dedicated to this deployment.
 
 `@mention` the bot in a channel. It replies in a new thread. If it stays
 silent, check `docker compose logs discord`.
+
+### Run on OpenAI
+
+No Anthropic account needed — leave `DAIMON_ANTHROPIC__API_KEY` unset and
+provision an OpenAI agent instead, after step 3 above:
+
+```bash
+docker compose run --rm init "daimon openai init --tenant-id <your-tenant-uuid> --project <openai-project-id> --model <openai-model-id>"
+docker compose run --rm init "daimon agents backend set <agent-name-or-id> openai"
+```
+
+The first command creates an OpenAI agent, a hosted environment and seeds
+the default skill set; the second routes that agent's channels to it. See
+[Self-host on OpenAI](docs/self-hosting.md#self-host-on-openai) for the OpenAI
+key setup, per-channel routing, verifying the install, and what's different
+on OpenAI (no multi-agent delegation, no cross-turn memory, and a few other
+gaps listed there).
 
 The [self-hosting guide](docs/self-hosting.md) covers Discord permissions in
 detail, running without Docker, Slack, Microsoft Teams, the Claude Code login

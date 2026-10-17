@@ -15,7 +15,7 @@ from pydantic import JsonValue, TypeAdapter
 
 from mux.contracts.ids import Scope, SkillRef
 from mux.drivers.openai._common import Context, text
-from mux.drivers.openai.skills import verify_content
+from mux.drivers.openai.skills import retry_not_found, verify_content
 from mux.drivers.openai.transport import Object, object_json, segment
 
 KEY = "mux_skill_pins"
@@ -122,7 +122,7 @@ async def resolve_pins(
         path = "/skills/" + segment(pin.id)
         if pin.version is not None:
             path += "/versions/" + segment(pin.version)
-        raw = await context.call("GET", path)
+        raw = await retry_not_found(lambda path=path: context.call("GET", path))
         if pin.version is None:
             if raw.get("id") != pin.id:
                 raise ValueError("wrong skill identity")

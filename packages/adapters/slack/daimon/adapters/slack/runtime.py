@@ -144,7 +144,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
     billing_config = load_billing_config()
     async with (
         AsyncAnthropic(
-            api_key=settings.anthropic.api_key.get_secret_value(),
+            api_key=settings.anthropic.resolved_api_key(),
             base_url=str(settings.anthropic.base_url),
             max_retries=MA_MAX_RETRIES,
             http_client=DefaultAsyncHttpxClient(

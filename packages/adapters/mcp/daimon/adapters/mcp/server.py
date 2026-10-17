@@ -337,7 +337,7 @@ def create_mcp_app(
         # the SDK's own default of 2 is not enough to ride out a sustained
         # provider overage (see MA_MAX_RETRIES's docstring).
         effective_anthropic = AsyncAnthropic(
-            api_key=effective_settings.anthropic.api_key.get_secret_value(),
+            api_key=effective_settings.anthropic.resolved_api_key(),
             max_retries=MA_MAX_RETRIES,
             http_client=DefaultAsyncHttpxClient(
                 transport=SkillsRateLimitedTransport(

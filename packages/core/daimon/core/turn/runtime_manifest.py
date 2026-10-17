@@ -60,6 +60,15 @@ if TYPE_CHECKING:
 _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_BYTES = 1_048_576
+_WILDCARD = "*"
+"""Reserved sentinel for 'every value' on `platform`, `channel_id` and
+`account_id` only. Never accepted for `tenant_id` or `profile`: a manifest
+row always authorizes resources for exactly one tenant, so the one hard
+scope boundary (`tenant_id`) and the chosen native profile stay exact-match
+always. This lets one row authorize "this tenant's OpenAI resources for
+every channel/account", the deployment-wide default self-host operators
+need, without ever letting a row serve a different tenant."""
+_WILDCARDABLE_FIELDS = ("platform", "channel_id", "account_id")
 _ADMISSION_FACTS = {
     name: TypeAdapter(annotation)
     for name, annotation in get_type_hints(Admission).items()
@@ -1144,15 +1153,26 @@ async def read_frozen_preparation(
 class ProviderRuntimeConfigurationError(RuntimeError):
     """Static, typed operator errors; never include manifest content or paths."""
 
-    def __init__(self, reason: Literal["reserved_key_reference", "invalid_manifest"]) -> None:
+    def __init__(
+        self,
+        reason: Literal["reserved_key_reference", "invalid_manifest", "wildcard_tenant_or_profile"],
+    ) -> None:
         self.reason = reason
-        message = (
-            "Provider runtime api_key_env uses a reserved provider prefix "
-            "(OPENAI_, ANTHROPIC_, GOOGLE_, GEMINI_). Use a host-scoped name such as "
-            "DAIMON_CHANNEL_OPENAI_KEY or DAIMON_CHANNEL_GEMINI_KEY."
-            if reason == "reserved_key_reference"
-            else "Provider runtime manifest must be a readable JSON list of objects, at most 1 MiB."
-        )
+        if reason == "reserved_key_reference":
+            message = (
+                "Provider runtime api_key_env uses a reserved provider prefix "
+                "(OPENAI_, ANTHROPIC_, GOOGLE_, GEMINI_). Use a host-scoped name such as "
+                "DAIMON_CHANNEL_OPENAI_KEY or DAIMON_CHANNEL_GEMINI_KEY."
+            )
+        elif reason == "wildcard_tenant_or_profile":
+            message = (
+                'Provider runtime manifest rows may use "*" on platform, channel_id or '
+                'account_id only. "*" is never valid for tenant_id or profile.'
+            )
+        else:
+            message = (
+                "Provider runtime manifest must be a readable JSON list of objects, at most 1 MiB."
+            )
         super().__init__(message)
 
 
@@ -1192,6 +1212,8 @@ def validate_configured_runtime_manifest() -> None:
         reference = row.get("api_key_env")
         if isinstance(reference, str):
             validate_api_key_env(reference)
+        if row.get("tenant_id") == _WILDCARD or row.get("profile") == _WILDCARD:
+            raise ProviderRuntimeConfigurationError("wildcard_tenant_or_profile")
 
 
 class ConfigurationGrant(BaseModel):
@@ -2472,10 +2494,48 @@ def validate_counterpart_pins(
         raise ValueError("a counterpart requires a native agent identity")
 
 
+def _matching_rows(
+    rows: list[dict[str, JsonValue]],
+    revision: ConfigRevision,
+    request: ProviderPreparationRequest,
+    *,
+    allow_wildcard: bool,
+) -> list[dict[str, JsonValue]]:
+    """`profile` and `tenant_id` are always exact. The other scope fields are
+    exact-matched first; `allow_wildcard` additionally accepts `_WILDCARD` rows
+    on those fields only — the caller tries exact-only before falling back."""
+
+    def field_matches(row: dict[str, JsonValue], field: str, actual: object) -> bool:
+        value = row.get(field)
+        if value == actual:
+            return True
+        return allow_wildcard and value == _WILDCARD
+
+    return [
+        row
+        for row in rows
+        if row.get("profile") == revision.profile
+        and row.get("tenant_id") == request.scope.tenant_id
+        and field_matches(row, "platform", revision.channel.platform)
+        and field_matches(row, "channel_id", revision.channel.channel_id)
+        and field_matches(row, "account_id", request.scope.account_id)
+        and manifest_configuration_matches(row, revision)
+    ]
+
+
 def select_runtime_manifest[Plan: CounterpartPlan](
     request: ProviderPreparationRequest, plan_type: type[Plan]
 ) -> Plan:
-    """Select exactly one installed scope/configuration grant before credential discovery."""
+    """Select exactly one installed scope/configuration grant before credential discovery.
+
+    A deployment-wide default is one row with `_WILDCARD` ("*") on `platform`,
+    `channel_id` and/or `account_id` — never on `tenant_id` or `profile`. An
+    exact match always wins over a wildcard row (computed first, tried first);
+    wildcard rows are only consulted when no exact row matches, and the
+    existing "exactly one candidate or refuse" rule is unchanged for each pass.
+    The resolved plan always carries the request's real platform/channel_id/
+    account_id — a wildcard row is a template, never a literal "*" identity.
+    """
 
     revision = request.admission.backend_revision
     if revision is None:
@@ -2488,19 +2548,21 @@ def select_runtime_manifest[Plan: CounterpartPlan](
             raw = manifest.read(_MAX_BYTES + 1)
         if len(raw) > _MAX_BYTES:
             raise AdmissionDenied(reason="backend_unsupported")
-        selected = [
-            row
-            for row in _ROWS.validate_json(raw)
-            if row.get("profile") == revision.profile
-            and row.get("tenant_id") == request.scope.tenant_id
-            and row.get("platform") == revision.channel.platform
-            and row.get("channel_id") == revision.channel.channel_id
-            and row.get("account_id") == request.scope.account_id
-            and manifest_configuration_matches(row, revision)
-        ]
+        rows = _ROWS.validate_json(raw)
+        selected = _matching_rows(rows, revision, request, allow_wildcard=False)
+        if not selected:
+            selected = _matching_rows(rows, revision, request, allow_wildcard=True)
         if len(selected) != 1:
             raise AdmissionDenied(reason="backend_unsupported")
-        return plan_type.model_validate(selected[0])
+        resolved = dict(selected[0])
+        for field, actual in (
+            ("platform", revision.channel.platform),
+            ("channel_id", revision.channel.channel_id),
+            ("account_id", request.scope.account_id),
+        ):
+            if resolved.get(field) == _WILDCARD:
+                resolved[field] = actual
+        return plan_type.model_validate(resolved)
     except (OSError, ValidationError):
         raise AdmissionDenied(reason="backend_unsupported") from None
 

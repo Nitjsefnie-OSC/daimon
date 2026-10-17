@@ -180,7 +180,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
     async with (
         hold_owner_key(engine, owner_key),
         AsyncAnthropic(
-            api_key=settings.anthropic.api_key.get_secret_value(),
+            api_key=settings.anthropic.resolved_api_key(),
             base_url=str(settings.anthropic.base_url),
             max_retries=MA_MAX_RETRIES,
         ) as anthropic,

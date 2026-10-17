@@ -165,7 +165,9 @@ def install_host(
             database=SimpleNamespace(url="postgresql://offline-test"),
             crypto=SimpleNamespace(keys=[SecretStr("offline-test")]),
             anthropic=SimpleNamespace(
-                api_key=SecretStr("offline-test"), base_url="https://api.anthropic.com"
+                api_key=SecretStr("offline-test"),
+                base_url="https://api.anthropic.com",
+                resolved_api_key=lambda: "offline-test",
             ),
             github_app=SimpleNamespace(),
         ),
