@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -29,9 +30,15 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import get_account, set_role
+from daimon.core.stores.channel_admins import (
+    delete_channel_admins,
+    list_channel_admins,
+    set_channel_admins,
+)
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import list_agent_grants, list_authorized_repos
 from daimon.core.stores.github_app_installations import get as get_installation
@@ -39,10 +46,13 @@ from daimon.core.stores.github_installation_reconciliation import get as get_rec
 from daimon.core.stores.github_linked_pending import take as take_pending
 from daimon.core.stores.github_links import get_account_link, save_verified_link, unlink_account
 from daimon.core.stores.github_owner_grants import exclude_repo, list_owner_grants
+from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.pool import NullPool
 from starlette.applications import Starlette
 from starlette.routing import Route
 
@@ -59,6 +69,8 @@ def github_http(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         repo_visible=True,
         refresh_fail=False,
         installation_suspended=False,
+        second_installation=False,
+        during_repo_get=None,
     )
     original_client = httpx.AsyncClient
 
@@ -79,16 +91,60 @@ def github_http(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             key: key == state.permission for key in ("admin", "maintain", "push", "triage", "pull")
         }
         if request.url.path == "/user/installations":
+            installations = [
+                {
+                    "id": 201,
+                    "account": {"id": 12, "login": "acme", "type": "Organization"},
+                    "repository_selection": "selected",
+                }
+            ]
+            if state.second_installation:
+                installations.append(
+                    {
+                        "id": 202,
+                        "account": {"id": 13, "login": "gadgets", "type": "Organization"},
+                        "repository_selection": "selected",
+                    }
+                )
+            return httpx.Response(200, json={"installations": installations})
+        if request.url.path == "/app/installations/202":
             return httpx.Response(
                 200,
                 json={
-                    "installations": [
+                    "id": 202,
+                    "account": {"id": 13, "login": "gadgets", "type": "Organization"},
+                    "repository_selection": "selected",
+                    "suspended_at": None,
+                    "permissions": {
+                        "metadata": "read",
+                        "contents": "write",
+                        "issues": "write",
+                        "pull_requests": "write",
+                    },
+                },
+            )
+        if request.url.path == "/user/installations/202/repositories":
+            return httpx.Response(
+                200,
+                json={
+                    "repositories": [
                         {
-                            "id": 201,
-                            "account": {"id": 12, "login": "acme", "type": "Organization"},
-                            "repository_selection": "selected",
+                            "id": 102,
+                            "full_name": "gadgets/tools",
+                            "owner": {"id": 13, "login": "gadgets"},
+                            "permissions": permissions,
                         }
                     ]
+                },
+            )
+        if request.url.path == "/repos/gadgets/tools":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 102,
+                    "full_name": "gadgets/tools",
+                    "owner": {"id": 13},
+                    "permissions": permissions,
                 },
             )
         if request.url.path == "/app/installations/201":
@@ -139,10 +195,16 @@ def github_http(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             )
         raise AssertionError(request.url)
 
+    async def respond_async(request: httpx.Request) -> httpx.Response:
+        # Lets a test change state while the repository permission GET is outstanding.
+        if request.url.path == "/repos/acme/widgets" and state.during_repo_get is not None:
+            await state.during_repo_get()
+        return respond(request)
+
     monkeypatch.setattr(
         linked.httpx,
         "AsyncClient",
-        lambda **kwargs: original_client(transport=httpx.MockTransport(respond)),
+        lambda **kwargs: original_client(transport=httpx.MockTransport(respond_async)),
     )
     monkeypatch.setattr(linked, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
     state.original_client = original_client
@@ -345,8 +407,8 @@ async def test_tool_uses_verified_turn_account_and_private_link(
     )
     assert result.status == "needs_install"
     assert result.message == (
-        "The Daimon app isn't set up for acme/new.\n"
-        "Ask an owner or repo admin to add it on GitHub, then ask again here."
+        "Daimon can't reach acme/new with your GitHub account.\n"
+        "The Daimon app may not be set up for it, or your account may not have access."
     )
     assert "http" not in result.message and "github.com" not in result.message
     assert post_link.await_args.kwargs["label"] == "Open GitHub setup"
@@ -826,6 +888,21 @@ async def test_new_selected_installation_needs_no_prior_rows(setup_linked, githu
 async def test_selected_installation_needs_install(setup_linked, github_http) -> None:
     github_http.repo_visible = False
     assert (await setup_linked.grant()).status == "needs_install"
+
+
+@pytest.mark.asyncio
+async def test_invisible_private_repo_does_not_claim_the_app_is_missing(
+    setup_linked, github_http
+) -> None:
+    """A repo the person cannot see looks the same as one the app does not cover."""
+    github_http.repo_visible = False
+    result = await setup_linked.grant()
+    assert result.status == "needs_install"
+    assert result.message == (
+        "Daimon can't reach acme/widgets with your GitHub account.\n"
+        "The Daimon app may not be set up for it, or your account may not have access."
+    )
+    assert "isn't set up" not in result.message
 
 
 @pytest.mark.asyncio
@@ -1332,8 +1409,8 @@ async def test_each_linked_state_uses_the_agreed_status_and_supporting_line(
             "Ask a server admin who can open this repo on GitHub."
         ),
         "needs_install": (
-            "The Daimon app isn't set up for acme/new.\n"
-            "Ask an owner or repo admin to add it on GitHub, then ask again here."
+            "Daimon can't reach acme/new with your GitHub account.\n"
+            "The Daimon app may not be set up for it, or your account may not have access."
         ),
         "relink": "Your GitHub link needs renewing.",
         "needs_link": "Link GitHub to check your repo access.",
@@ -1348,8 +1425,12 @@ async def test_each_linked_state_uses_the_agreed_status_and_supporting_line(
         linked.INSTALL_PENDING_MESSAGE == "Daimon is refreshing its repo list.\nTry again shortly."
     )
     assert linked.needs_install_message("acme repos") == (
-        "The Daimon app isn't set up for acme repos.\n"
-        "Ask an owner or repo admin to add it on GitHub, then ask again here."
+        "Daimon can't reach acme repos with your GitHub account.\n"
+        "The Daimon app may not be set up for it, or your account may not have access."
+    )
+    assert linked.other_installation_message("Agent", "widgets-org") == (
+        "Agent already uses repos from widgets-org.\n"
+        "An agent can use one GitHub account or org at a time."
     )
 
 
@@ -1536,3 +1617,599 @@ async def test_private_delivery_failure_is_a_plain_message_without_a_button(
     assert link.message == "I couldn't send the private GitHub link. Try again."
     for result in (install, link):
         assert "http" not in result.message
+
+
+# --- Commit-time authority, pending claims and second installations ---------------
+
+
+def _runtime(setup_linked) -> McpRuntime:
+    return McpRuntime(
+        session_factory=setup_linked.sessionmaker,
+        client=AsyncMock(),
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
+            anthropic=AnthropicSettings(api_key=SecretStr("test")),
+            mcp=McpSettings(public_url=HttpUrl("https://mcp.test/mcp")),
+            github_app=GithubAppSettings(
+                app_id="42",
+                app_slug="sample-app",
+                private_key=SecretStr("pem"),
+                client_id="client",
+                client_secret=SecretStr("secret"),
+            ),
+        ),
+        deployment_default=DeploymentDefault(),
+        fernet=setup_linked.fernet,
+    )
+
+
+def _admin_auth(setup_linked) -> AuthIdentity:
+    return AuthIdentity(
+        account_id=setup_linked.account.id,
+        tenant_id=setup_linked.tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        external_id=setup_linked.tenant.external_id,
+        platform_user_id="person",
+        is_admin=True,
+    )
+
+
+def _origin() -> SimpleNamespace:
+    return SimpleNamespace(
+        configuration_target_name="Agent",
+        configuration_target_ma_agent_id="ma_agent",
+        responder_name="Daimon",
+        responder_ma_agent_id="ma_daimon",
+        parent_channel_id="123",
+        thread_id="456",
+    )
+
+
+def _patch_tool_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=_origin()))
+    monkeypatch.setattr(
+        connect_tool,
+        "resolve_setup_agent",
+        AsyncMock(return_value=SimpleNamespace(id="ma_agent", name="Agent", metadata={})),
+    )
+
+
+async def _save_request(setup_linked, *, thread_id: str, repo_name: str = "acme/widgets") -> None:
+    async with setup_linked.sessionmaker.begin() as session:
+        await linked_pending.save_pending(
+            session,
+            tenant_id=setup_linked.tenant.id,
+            account_id=setup_linked.account.id,
+            agent_id=setup_linked.agent_id,
+            ma_agent_id="ma_agent",
+            agent_name="Agent",
+            repo_name=repo_name,
+            platform="discord",
+            platform_user_id="person",
+            workspace_id=setup_linked.tenant.external_id,
+            parent_channel_id="123",
+            thread_id=thread_id,
+        )
+
+
+async def _count_pending(setup_linked) -> int:
+    async with setup_linked.sessionmaker() as session:
+        return int(
+            await session.scalar(text("SELECT count(*) FROM github_linked_connect_pending")) or 0
+        )
+
+
+async def _grant_count(setup_linked) -> int:
+    async with setup_linked.sessionmaker() as session:
+        return len(
+            await list_agent_grants(
+                session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+            )
+        )
+
+
+@pytest_asyncio.fixture
+async def demote(setup_linked, db_engine, db_schema):
+    """Demote the requester from another connection, so a held-open transaction cannot block it.
+
+    The test engine's pool has two connections and the direct tool holds both.
+    """
+    engine = build_test_engine(
+        db_engine.url.render_as_string(hide_password=False), db_schema, poolclass=NullPool
+    )
+    other = async_sessionmaker(bind=engine, expire_on_commit=False)
+
+    async def run() -> None:
+        async with other.begin() as session:
+            await set_role(session, setup_linked.account.id, Role.USER)
+
+    yield run
+    await engine.dispose()
+
+
+def _locked_manages_now(setup_linked, *, before_read=None):
+    """The authority recheck the tools run, optionally racing a demotion before it reads."""
+
+    async def manages_now(session: AsyncSession) -> bool:
+        if before_read is not None:
+            await before_read()
+        account = await get_account(session, setup_linked.account.id, for_share=True)
+        if account is None or account.role != Role.ADMIN:
+            return False
+        return await requester_manages_agent(
+            session,
+            tenant_id=setup_linked.tenant.id,
+            account_id=setup_linked.account.id,
+            platform="discord",
+            platform_user_id="person",
+            agent_name="Agent",
+            ma_agent_id="ma_agent",
+            default=DeploymentDefault(),
+            is_daimon_managed=False,
+            members=None,
+            lock_authority=True,
+        )
+
+    return manages_now
+
+
+async def _linked_grant_with(setup_linked, manages_now, *, repo_name: str = "acme/widgets"):
+    return await linked.linked_grant(
+        setup_linked.sessionmaker,
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        agent_id=setup_linked.agent_id,
+        agent_name="Agent",
+        repo_name=repo_name,
+        fernet=setup_linked.fernet,
+        client_id="synthetic",
+        client_secret="synthetic",
+        app_id="42",
+        private_key="synthetic",
+        manages_now=manages_now,
+    )
+
+
+async def _narrow_owner_installation(setup_linked) -> None:
+    async with setup_linked.sessionmaker.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE github_app_installations SET repo_full_names = ARRAY['acme/widgets'] "
+                "WHERE installation_id = 201"
+            )
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo_name", ["acme/widgets", "acme/*"])
+async def test_unlocked_role_read_misses_a_demotion_after_the_first_select(
+    setup_linked, demote, github_http, repo_name: str
+) -> None:
+    """Control: a plain read in the SERIALIZABLE transaction still sees the old ADMIN role."""
+    await _narrow_owner_installation(setup_linked)
+
+    async def manages_now(session: AsyncSession) -> bool:
+        await demote()
+        account = await get_account(session, setup_linked.account.id)
+        return account is not None and account.role == Role.ADMIN
+
+    result = await _linked_grant_with(setup_linked, manages_now, repo_name=repo_name)
+    assert result.status in ("granted", "granted_read_only")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo_name", ["acme/widgets", "acme/*"])
+async def test_locked_role_read_fails_the_grant_when_a_demotion_commits_after_the_snapshot(
+    setup_linked, demote, github_http, repo_name: str
+) -> None:
+    await _narrow_owner_installation(setup_linked)
+    manages_now = _locked_manages_now(setup_linked, before_read=demote)
+    with pytest.raises(DBAPIError) as raised:
+        await _linked_grant_with(setup_linked, manages_now, repo_name=repo_name)
+    assert getattr(raised.value.orig, "sqlstate", None) == "40001"
+    assert await _grant_count(setup_linked) == 0
+    async with setup_linked.sessionmaker() as session:
+        assert (
+            await list_owner_grants(
+                session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+            )
+            == []
+        )
+        repos = await list_authorized_repos(
+            session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+        )
+    assert {r.repo_full_name for r in repos} == {"acme/base"}
+
+
+@pytest.mark.asyncio
+async def test_locked_role_read_waits_for_the_grant_when_the_demotion_comes_later(
+    setup_linked, demote, github_http
+) -> None:
+    """A demotion after the lock blocks until the grant commits: grant first, valid order."""
+    demotion: asyncio.Task[None] | None = None
+
+    async def after_lock(session: AsyncSession) -> bool:
+        nonlocal demotion
+        allowed = await _locked_manages_now(setup_linked)(session)
+        demotion = asyncio.create_task(demote())
+        await asyncio.sleep(0.3)
+        assert not demotion.done()
+        return allowed
+
+    result = await _linked_grant_with(setup_linked, after_lock)
+    assert result.status == "granted"
+    assert demotion is not None
+    await demotion
+    assert await _grant_count(setup_linked) == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_demotion_after_the_first_select_changes_nothing(
+    setup_linked, demote, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_tool_agent(monkeypatch)
+    real_get_account = connect_tool.get_account
+    demoted = False
+
+    async def get_account_after_demotion(session, account_id, **kwargs):
+        nonlocal demoted
+        if kwargs.get("for_share") and not demoted:
+            demoted = True
+            await demote()
+        return await real_get_account(session, account_id, **kwargs)
+
+    monkeypatch.setattr(connect_tool, "get_account", get_account_after_demotion)
+    result = await connect_tool._github_connect_impl(
+        _runtime(setup_linked),
+        _admin_auth(setup_linked),
+        origin_context_id="synthetic",
+        repo_name="acme/widgets",
+    )
+    assert demoted
+    assert result.status == "changed_try_again"
+    assert result.message == linked.CHANGED_MESSAGE
+    assert await _grant_count(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_demotion_after_the_first_select_changes_nothing(
+    setup_linked, demote, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    delivery = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    real_get_account = linked_pending.get_account
+    locked_reads = 0
+
+    async def get_account_after_demotion(session, account_id, **kwargs):
+        nonlocal locked_reads
+        if kwargs.get("for_share"):
+            locked_reads += 1
+            # The first locked read is the precheck outside the grant transaction.
+            if locked_reads == 2:
+                await demote()
+        return await real_get_account(session, account_id, **kwargs)
+
+    monkeypatch.setattr(linked_pending, "get_account", get_account_after_demotion)
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked),
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        platform="discord",
+        platform_user_id="person",
+    )
+    assert locked_reads == 2
+    assert result == [linked.CHANGED_MESSAGE]
+    assert delivery.await_args.args[2] == linked.CHANGED_MESSAGE
+    assert await _grant_count(setup_linked) == 0
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_channel_admin_grant_removed_after_the_snapshot_fails_the_recheck(
+    setup_linked,
+) -> None:
+    """Channel admin grants confer authority too, so the recheck locks them."""
+    async with setup_linked.sessionmaker.begin() as session:
+        tenant = setup_linked.tenant
+        member = await make_account(session, tenant=tenant)
+        await make_platform_principal(
+            session, platform="discord", external_id="helper", tenant=tenant, account=member
+        )
+        await set_channel_admins(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="123",
+            role_ids=[],
+            user_ids=["helper"],
+            actor_account_id=None,
+        )
+
+    async def recheck(session: AsyncSession) -> bool:
+        return await requester_manages_agent(
+            session,
+            tenant_id=setup_linked.tenant.id,
+            account_id=member.id,
+            platform="discord",
+            platform_user_id="helper",
+            agent_name="Agent",
+            ma_agent_id="ma_agent",
+            default=DeploymentDefault(),
+            is_daimon_managed=False,
+            members=None,
+            lock_authority=True,
+        )
+
+    async def remove_grant() -> None:
+        async with setup_linked.sessionmaker.begin() as other:
+            await delete_channel_admins(
+                other, tenant_id=setup_linked.tenant.id, platform="discord", channel_id="123"
+            )
+
+    with pytest.raises(DBAPIError) as raised:
+        async with setup_linked.sessionmaker.begin() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
+            await session.execute(text("SELECT 1"))
+            await remove_grant()
+            await recheck(session)
+    assert getattr(raised.value.orig, "sqlstate", None) == "40001"
+    # Control: an unlocked read in the same position still sees the removed grant.
+    async with setup_linked.sessionmaker.begin() as other:
+        await set_channel_admins(
+            other,
+            tenant_id=setup_linked.tenant.id,
+            platform="discord",
+            channel_id="123",
+            role_ids=[],
+            user_ids=["helper"],
+            actor_account_id=None,
+        )
+    async with setup_linked.sessionmaker.begin() as session:
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
+        await session.execute(text("SELECT 1"))
+        await remove_grant()
+        assert (
+            len(
+                await list_channel_admins(
+                    session, tenant_id=setup_linked.tenant.id, platform="discord"
+                )
+            )
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", ["agent_lookup", "grant"])
+async def test_one_failed_request_does_not_lose_the_rest_of_the_batch(
+    setup_linked, github_http, monkeypatch: pytest.MonkeyPatch, fails: str
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    await _save_request(setup_linked, thread_id="t2")
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    delivery = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    if fails == "agent_lookup":
+        monkeypatch.setattr(
+            linked_pending,
+            "find_agent_by_daimon_tag",
+            AsyncMock(side_effect=[RuntimeError("agent lookup down"), agent]),
+        )
+    else:
+        monkeypatch.setattr(
+            linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent)
+        )
+        real_linked_grant = linked_pending.linked_grant
+        calls = 0
+
+        async def flaky_grant(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("grant exploded")
+            return await real_linked_grant(*args, **kwargs)
+
+        monkeypatch.setattr(linked_pending, "linked_grant", flaky_grant)
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked),
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        platform="discord",
+        platform_user_id="person",
+    )
+    assert result == [
+        "Something went wrong.\nAsk again in chat.",
+        "Agent can now read and change acme/widgets.\n"
+        "Everyone who talks to Agent can use this repo through Agent.",
+    ]
+    assert [(c.args[1].thread_id, c.args[2]) for c in delivery.await_args_list] == [
+        ("t1", result[0]),
+        ("t2", result[1]),
+    ]
+    assert await _grant_count(setup_linked) == 1
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_failure_after_the_grant_keeps_it_resolves_the_row_and_runs_the_next(
+    setup_linked, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    await _save_request(setup_linked, thread_id="t2")
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    delivery = AsyncMock(side_effect=[RuntimeError("thread unavailable"), None])
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked),
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        platform="discord",
+        platform_user_id="person",
+    )
+    assert [r.splitlines()[0] for r in result] == [
+        "Agent can now read and change acme/widgets."
+    ] * 2
+    assert delivery.await_count == 2
+    assert await _grant_count(setup_linked) == 1
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_crash_after_the_claim_leaves_requests_retakeable_after_the_lease(
+    setup_linked, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    await _save_request(setup_linked, thread_id="t2")
+    scope = {
+        "tenant_id": setup_linked.tenant.id,
+        "account_id": setup_linked.account.id,
+        "platform": "discord",
+        "platform_user_id": "person",
+    }
+    claimed_at = datetime.now(UTC)
+    async with setup_linked.sessionmaker.begin() as session:
+        taken = await take_pending(session, **scope, now=claimed_at)
+    assert [row.thread_id for row in taken] == ["t1", "t2"]
+    # The process dies here: nothing resolves the rows.
+    assert await _count_pending(setup_linked) == 2
+    async with setup_linked.sessionmaker.begin() as session:
+        assert await take_pending(session, **scope, now=claimed_at) == []
+        assert await take_pending(session, **scope, now=claimed_at + timedelta(seconds=119)) == []
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    delivery = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    runtime = _runtime(setup_linked)
+    # Still leased: a second callback finds nothing.
+    assert await linked_pending.resume_pending(runtime, **scope) == []
+    async with setup_linked.sessionmaker.begin() as session:
+        await session.execute(
+            text("UPDATE github_linked_connect_pending SET claimed_until = :past"),
+            {"past": datetime.now(UTC) - timedelta(seconds=1)},
+        )
+    result = await linked_pending.resume_pending(runtime, **scope)
+    assert len(result) == 2
+    assert delivery.await_count == 2
+    assert await _count_pending(setup_linked) == 0
+    assert await _grant_count(setup_linked) == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_requests_are_deleted_not_claimed(setup_linked) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    scope = {
+        "tenant_id": setup_linked.tenant.id,
+        "account_id": setup_linked.account.id,
+        "platform": "discord",
+        "platform_user_id": "person",
+    }
+    async with setup_linked.sessionmaker.begin() as session:
+        assert (
+            await take_pending(session, **scope, now=datetime.now(UTC) + timedelta(hours=1)) == []
+        )
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_second_installation_is_a_defined_result(setup_linked, github_http) -> None:
+    github_http.second_installation = True
+    assert (await setup_linked.grant()).status == "granted"
+    result = await setup_linked.grant(repo_name="gadgets/tools")
+    assert result.status == "other_installation"
+    assert result.message == (
+        "Agent already uses repos from acme.\nAn agent can use one GitHub account or org at a time."
+    )
+    assert "http" not in result.message
+    assert await _grant_count(setup_linked) == 1
+    async with setup_linked.sessionmaker() as session:
+        assert await get_installation(session, installation_id=202) is None
+        repos = await list_authorized_repos(
+            session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+        )
+    assert 102 not in {r.repo_id for r in repos}
+
+
+@pytest.mark.asyncio
+async def test_second_installation_through_the_public_tool_sends_no_private_card(
+    setup_linked, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github_http.second_installation = True
+    assert (await setup_linked.grant()).status == "granted"
+    _patch_tool_agent(monkeypatch)
+    post_link = AsyncMock()
+    monkeypatch.setattr(connect_tool, "_post_personal_link", post_link)
+    result = await connect_tool._github_connect_impl(
+        _runtime(setup_linked),
+        _admin_auth(setup_linked),
+        origin_context_id="synthetic",
+        repo_name="gadgets/tools",
+    )
+    assert result.status == "other_installation"
+    assert result.message == (
+        "Agent already uses repos from acme.\nAn agent can use one GitHub account or org at a time."
+    )
+    post_link.assert_not_awaited()
+    assert await _grant_count(setup_linked) == 1
+
+
+@pytest.mark.asyncio
+async def test_second_installation_on_resume_posts_to_the_thread_and_runs_the_next(
+    setup_linked, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    github_http.second_installation = True
+    assert (await setup_linked.grant()).status == "granted"
+    await _save_request(setup_linked, thread_id="t1", repo_name="gadgets/tools")
+    await _save_request(setup_linked, thread_id="t2")
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    delivery = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked),
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        platform="discord",
+        platform_user_id="person",
+    )
+    assert result[0] == (
+        "Agent already uses repos from acme.\nAn agent can use one GitHub account or org at a time."
+    )
+    assert result[1].startswith("Agent can now read and change acme/widgets.")
+    assert [(c.args[1].thread_id, c.args[2]) for c in delivery.await_args_list] == [
+        ("t1", result[0]),
+        ("t2", result[1]),
+    ]
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_coverage_removed_while_the_repo_permission_get_is_outstanding(
+    setup_linked, github_http
+) -> None:
+    """Discovery sees the repo, then coverage goes: nothing is granted or restored."""
+
+    async def remove_coverage() -> None:
+        async with setup_linked.sessionmaker.begin() as session:
+            await session.execute(
+                text(
+                    "UPDATE github_app_installations SET repo_full_names = ARRAY['acme/base'] "
+                    "WHERE installation_id = 201"
+                )
+            )
+
+    github_http.during_repo_get = remove_coverage
+    result = await setup_linked.grant()
+    assert result.status == "changed_try_again"
+    assert await _grant_count(setup_linked) == 0
+    async with setup_linked.sessionmaker() as session:
+        installation = await get_installation(session, installation_id=201)
+        repos = await list_authorized_repos(
+            session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
+        )
+    assert installation is not None
+    assert list(installation.repo_full_names) == ["acme/base"]
+    assert {r.repo_full_name for r in repos} == {"acme/base"}

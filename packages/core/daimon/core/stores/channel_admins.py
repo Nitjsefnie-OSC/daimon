@@ -21,9 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def list_channel_admins(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, for_share: bool = False
 ) -> list[ChannelAdminsRow]:
-    """Every channel with admins in this tenant, ordered by channel id."""
+    """Every channel with admins in this tenant, ordered by channel id.
+
+    `for_share` locks the rows (`SELECT ... FOR SHARE`) for a commit-time
+    authority recheck: see `get_account`.
+    """
     if not channel_admins_enabled():
         return []
     stmt = (
@@ -31,6 +35,8 @@ async def list_channel_admins(
         .where(ChannelAdmin.tenant_id == tenant_id, ChannelAdmin.platform == platform)
         .order_by(ChannelAdmin.channel_id.asc())
     )
+    if for_share:
+        stmt = stmt.with_for_update(read=True).execution_options(populate_existing=True)
     rows = (await session.execute(stmt)).scalars().all()
     return [ChannelAdminsRow.model_validate(row) for row in rows]
 

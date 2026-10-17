@@ -41,6 +41,7 @@ def upgrade() -> None:
         sa.Column("parent_channel_id", sa.Text(), nullable=False),
         sa.Column("thread_id", sa.Text(), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("claimed_until", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index(
         "ix_github_linked_connect_pending_account",

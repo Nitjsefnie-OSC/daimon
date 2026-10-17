@@ -80,6 +80,7 @@ class ConnectResult(BaseModel):
         "no_github_access",
         "needs_install",
         "install_pending",
+        "other_installation",
         "changed_try_again",
         "ask_admin",
         "delivery_failed",
@@ -427,7 +428,11 @@ async def _github_connect_impl(
                     )
 
             async def manages_now(current_session: AsyncSession) -> bool:
-                current_account = await get_account(current_session, auth.account_id)
+                # Runs inside the SERIALIZABLE grant transaction: lock the rows that
+                # confer authority so a demotion committed since the snapshot fails it.
+                current_account = await get_account(
+                    current_session, auth.account_id, for_share=True
+                )
                 if (
                     current_account is None
                     or current_account.tenant_id != auth.tenant_id
@@ -450,6 +455,7 @@ async def _github_connect_impl(
                         if runtime.group_lookups is not None and auth.external_id is not None
                         else None
                     ),
+                    lock_authority=True,
                 )
 
             if not policy_manages:

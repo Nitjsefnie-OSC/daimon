@@ -21,6 +21,7 @@ from daimon.core.github_app_auth import (
 from daimon.core.github_requester_access import linked_access_token_with_generation
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.github_access import (
+    SecondInstallationError,
     list_agent_grants,
     stage_grant,
     upsert_linked_agent_authorization,
@@ -52,6 +53,7 @@ LinkedStatus = Literal[
     "no_github_access",
     "needs_install",
     "install_pending",
+    "other_installation",
     "changed_try_again",
 ]
 
@@ -79,9 +81,20 @@ def owner_no_access_message(owner: str) -> str:
 
 
 def needs_install_message(target: str) -> str:
+    # A repo missing from the person's installation listing may be private and
+    # invisible to them, outside the app's repos, or waiting on an install, and
+    # the listing cannot tell these apart, so the text claims none of them.
     return (
-        f"The Daimon app isn't set up for {target}.\n"
-        "Ask an owner or repo admin to add it on GitHub, then ask again here."
+        f"Daimon can't reach {target} with your GitHub account.\n"
+        "The Daimon app may not be set up for it, or your account may not have access."
+    )
+
+
+def other_installation_message(agent_name: str, org: str | None) -> str:
+    source = org or "another GitHub account or org"
+    return (
+        f"{agent_name} already uses repos from {source}.\n"
+        "An agent can use one GitHub account or org at a time."
     )
 
 
@@ -298,81 +311,90 @@ async def linked_grant(
             return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
     await _before_commit()
 
-    async with sessionmaker.begin() as session:
-        await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-        current_link = await get_account_link_for_update(session, account_id=account_id)
-        current_user = await get_user_for_update(session, github_user_id=link.github_user_id)
-        current_installation = await get_for_update(session, installation_id=installation.id)
-        if (
-            current_link is None
-            or current_link.github_user_id != link.github_user_id
-            or current_user is None
-            or current_user.status != "active"
-            or current_user.link_generation != checked_generation
-            or (
-                current_installation is not None
-                and (
-                    not originally_present
-                    or not installation_covers_repo(current_installation, repo.full_name)
-                    or set(current_installation.repo_full_names) != original_names
+    try:
+        async with sessionmaker.begin() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
+            current_link = await get_account_link_for_update(session, account_id=account_id)
+            current_user = await get_user_for_update(session, github_user_id=link.github_user_id)
+            current_installation = await get_for_update(session, installation_id=installation.id)
+            if (
+                current_link is None
+                or current_link.github_user_id != link.github_user_id
+                or current_user is None
+                or current_user.status != "active"
+                or current_user.link_generation != checked_generation
+                or (
+                    current_installation is not None
+                    and (
+                        not originally_present
+                        or not installation_covers_repo(current_installation, repo.full_name)
+                        or set(current_installation.repo_full_names) != original_names
+                    )
                 )
+                or (originally_present and current_installation is None)
+                or not await manages_now(session)
+            ):
+                return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
+            await upsert_linked_agent_authorization(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=repo_id,
+                owner_id=owner_id,
+                installation_id=installation.id,
+                repo_full_name=repo.full_name,
+                access=access,
+                github_user_id=link.github_user_id,
+                account_id=account_id,
+                permission=permission,
             )
-            or (originally_present and current_installation is None)
-            or not await manages_now(session)
-        ):
-            return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
-        await upsert_linked_agent_authorization(
-            session,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            repo_id=repo_id,
-            owner_id=owner_id,
-            installation_id=installation.id,
-            repo_full_name=repo.full_name,
-            access=access,
-            github_user_id=link.github_user_id,
-            account_id=account_id,
-            permission=permission,
-        )
-        await upsert_github_app(
-            session,
-            installation_id=installation.id,
-            account_id=installation.owner_id,
-            account_login=installation.owner_login,
-            account_type=installation.owner_type,
-            repository_selection=installation.repository_selection,
-            suspended_at=None,
-        )
-        await enqueue_reconciliation(
-            session,
-            installation_id=installation.id,
-            delivery_id=f"connect:{uuid.uuid4()}",
-            event="connect",
-            deleted=False,
-            now=datetime.now(UTC),
-        )
-        existing = next(
-            (
-                g
-                for g in await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
-                if g.repo_id == repo_id
-            ),
-            None,
-        )
-        await stage_grant(
-            session,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            repo_id=repo_id,
-            baseline_access=access,
-            ceiling_access=access,
-            granted_by_account_id=account_id,
-            mount_path=existing.mount_path if existing else None,
-            is_working_repo=existing.is_working_repo if existing else False,
-            agent_name=agent_name,
-        )
-        await clear_exclusion(
-            session, tenant_id=tenant_id, agent_id=agent_id, repo_full_name=repo.full_name
+            await upsert_github_app(
+                session,
+                installation_id=installation.id,
+                account_id=installation.owner_id,
+                account_login=installation.owner_login,
+                account_type=installation.owner_type,
+                repository_selection=installation.repository_selection,
+                suspended_at=None,
+            )
+            await enqueue_reconciliation(
+                session,
+                installation_id=installation.id,
+                delivery_id=f"connect:{uuid.uuid4()}",
+                event="connect",
+                deleted=False,
+                now=datetime.now(UTC),
+            )
+            existing = next(
+                (
+                    g
+                    for g in await list_agent_grants(
+                        session, tenant_id=tenant_id, agent_id=agent_id
+                    )
+                    if g.repo_id == repo_id
+                ),
+                None,
+            )
+            await stage_grant(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=repo_id,
+                baseline_access=access,
+                ceiling_access=access,
+                granted_by_account_id=account_id,
+                mount_path=existing.mount_path if existing else None,
+                is_working_repo=existing.is_working_repo if existing else False,
+                agent_name=agent_name,
+            )
+            await clear_exclusion(
+                session, tenant_id=tenant_id, agent_id=agent_id, repo_full_name=repo.full_name
+            )
+    except SecondInstallationError as exc:
+        # The transaction rolled back, so no authorization or grant row was saved.
+        return LinkedOutcome(
+            status="other_installation",
+            message=other_installation_message(agent_name, exc.org),
         )
     return LinkedOutcome(
         status="granted" if access == "write" else "granted_read_only",

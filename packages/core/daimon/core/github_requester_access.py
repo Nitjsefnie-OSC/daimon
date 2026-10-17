@@ -270,8 +270,15 @@ async def linked_access_token_with_generation(
     fernet: MultiFernet,
     client_id: str,
     client_secret: str,
+    refresh_if_refresh_expires_before: datetime | None = None,
 ) -> tuple[str | None, int | None]:
-    """Return the token and link generation from the same stored credential row."""
+    """Return the token and link generation from the same stored credential row.
+
+    ``refresh_if_refresh_expires_before`` also refreshes a still-valid access token,
+    but only while the row's refresh token still expires before that moment, judged
+    under the refresh lock. A refresh another caller finished first is reused, never
+    spent again.
+    """
     for _ in range(3):
         async with sessionmaker() as session:
             row = await get_user(session, github_user_id=user_id)
@@ -287,6 +294,7 @@ async def linked_access_token_with_generation(
                 client_id=client_id,
                 client_secret=client_secret,
                 cache=PermissionCache(ttl_seconds=0),
+                refresh_if_refresh_expires_before=refresh_if_refresh_expires_before,
             )
             return token, link_generation
         except _RefreshRace:
@@ -304,9 +312,21 @@ async def _linked_access_token_once(
     client_id: str,
     client_secret: str,
     cache: PermissionCache,
+    refresh_if_refresh_expires_before: datetime | None = None,
 ) -> tuple[str | None, int, int]:
-    now = datetime.now(UTC)
-    if row.access_expires_at <= now + timedelta(minutes=1):
+    def needs_refresh(candidate: GitHubUser) -> bool:
+        now = datetime.now(UTC)
+        if candidate.access_expires_at <= now + timedelta(minutes=1):
+            return True
+        # Keep-alive: a live refresh token that is close to its own expiry.
+        return (
+            refresh_if_refresh_expires_before is not None
+            and candidate.encrypted_refresh_token is not None
+            and candidate.refresh_expires_at is not None
+            and now < candidate.refresh_expires_at <= refresh_if_refresh_expires_before
+        )
+
+    if needs_refresh(row):
         async with sessionmaker.begin() as session:
             # A transaction-scoped advisory lock serializes refreshes across workers.
             # Unlike FOR UPDATE, it never locks the token row during the GitHub call.
@@ -321,7 +341,7 @@ async def _linked_access_token_once(
             if fresh is None or fresh.status != "active":
                 return None, row.token_generation, row.link_generation
             row = fresh
-            if row.access_expires_at <= datetime.now(UTC) + timedelta(minutes=1):
+            if needs_refresh(row):
                 if row.encrypted_refresh_token is None or (
                     row.refresh_expires_at is not None
                     and row.refresh_expires_at <= datetime.now(UTC)

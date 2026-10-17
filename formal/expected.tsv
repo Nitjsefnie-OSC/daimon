@@ -350,10 +350,25 @@ tool_rules	ToolRules	ToolRulesAnyClicker	violates:RunAuthorized	61	-	unsafe: a n
 tool_rules	ToolRules	ToolRulesBlindUpsert	violates:NoResurrection	553	-	unsafe: a save from before a clear restores the rule
 tool_rules	ToolRules	ToolRulesSaveIfLost	violates:SaveFollowsSettlement	534	-	unsafe: a click that lost to expiry or Deny still saves a rule
 # ---- linked GitHub chat grants ----
-github_linked_grant	GitHubChatGrant	clean	clean	5435	-seed 1 -fp 0	chat link identity, replay, commit authority and permission gap
-github_linked_grant	GitHubChatGrant	no_platform_identity	violates:NoForeignLink	140	-seed 1 -fp 0	chat link identity, replay, commit authority and permission gap
-github_linked_grant	GitHubChatGrant	no_commit_recheck	violates:GrantRestsOnCurrentAuthority	1388	-seed 1 -fp 0	chat link identity, replay, commit authority and permission gap
-github_linked_grant	GitHubChatGrant	permission_gap	violates:NoStalePermission	1644	-seed 1 -fp 0	chat link identity, replay, commit authority and permission gap
+github_linked_grant	GitHubChatGrant	clean	clean	25926	-seed 1 -fp 0	link identity, single use, coverage at lookup and commit, role read under lock, permission gap
+github_linked_grant	GitHubChatGrant	no_platform_identity	violates:NoForeignLink	233	-seed 1 -fp 0	unsafe: a forwarded link attaches another person's GitHub account
+github_linked_grant	GitHubChatGrant	no_commit_recheck	violates:GrantRestsOnCurrentAuthority	14208	-seed 1 -fp 0	unsafe: commit trusts the earlier lookup
+github_linked_grant	GitHubChatGrant	permission_gap	violates:NoStalePermission	17220	-seed 1 -fp 0	witness: GitHub permission revoked after its response is not re-read in the transaction
+github_linked_grant	GitHubChatGrant	late_snapshot_sets_only	violates:NoGrantAfterCoverageRemoval	22380	-seed 1 -fp 0	unsafe: coverage removed during the repo GET; late snapshot and lock compare name sets only, grant restores coverage
+github_linked_grant	GitHubChatGrant	lock_check_only	clean	30438	-seed 1 -fp 0	witness: the check under the installation lock alone also stops a removal during the repo GET
+github_linked_grant	GitHubChatGrant	late_check_only	clean	25926	-seed 1 -fp 0	witness: the late snapshot check plus the name-set comparison also stops it
+github_linked_grant	GitHubChatGrant	role_read_unlocked	violates:NoStaleRoleRead	12519	-seed 1 -fp 0	unsafe: plain role read after a demotion committed since the snapshot sees the old role
+github_linked_grant	GitHubChatGrant	role_lock_no_abort	violates:NoStaleRoleRead	12518	-seed 1 -fp 0	unsafe: FOR SHARE that returns the snapshot value instead of aborting (PostgreSQL abort assumption removed)
+# ---- linked GitHub pending requests ----
+github_linked_pending	LinkedPending	safe	clean	173161	-seed 1 -fp 0 -lncheck final	claim lease, per-request outcome, delete after delivery attempt; crash, lease lapse, expiry, second take
+github_linked_pending	LinkedPending	live	clean	75697	-seed 1 -fp 0 -lncheck final	a held request reaches an outcome while another in its batch fails (no crash, weak fairness on worker steps)
+github_linked_pending	LinkedPending	delete_on_claim	violates:NoSilentLoss	8	-seed 1 -fp 0 -lncheck final	unsafe: take deletes the rows it returns
+github_linked_pending	LinkedPending	resolve_before_delivery	violates:NoSilentLoss	102	-seed 1 -fp 0 -lncheck final	unsafe: row deleted before the result is posted
+github_linked_pending	LinkedPending	take_ignores_lease	violates:NoDoubleProcessing	424	-seed 1 -fp 0 -lncheck final	unsafe: a second take returns rows whose lease is live
+github_linked_pending	LinkedPending	abort_batch_on_exception	violates:HeldReachesOutcome	63969	-seed 1 -fp 0 -lncheck final	unsafe: one exception ends the batch, later requests get no outcome
+github_linked_pending	LinkedPending	retake_after_crash_witness	violates:RetakeAfterCrashNeverFinishes	6760	-seed 1 -fp 0 -lncheck final	witness: a request claimed by a crashed worker is retaken after the lease and finished
+github_linked_pending	LinkedPending	failure_does_not_block_witness	violates:FailureNeverUnblocksOthers	5023	-seed 1 -fp 0 -lncheck final	witness: after one request fails the next in the batch finishes
+github_linked_pending	LinkedPending	delivery_failure_witness	violates:DeliveryFailureAlwaysVisible	303	-seed 1 -fp 0 -lncheck final	witness (accepted gap): a failed post is logged, not retried, and the row is deleted
 # ---- GitHub owner grants ----
 github_owner_grant	OwnerGrant	clean	clean	66096	-seed 1 -fp 0	owner coverage, exclusions and future repositories
 github_owner_grant	OwnerGrant	no_exclusion	violates:ExcludedNeverMinted	114	-seed 1 -fp 0	owner coverage, exclusions and future repositories

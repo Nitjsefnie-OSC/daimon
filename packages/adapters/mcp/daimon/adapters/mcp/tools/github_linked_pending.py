@@ -23,7 +23,7 @@ from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
-from daimon.core.stores.github_linked_pending import PendingGrant, save, take
+from daimon.core.stores.github_linked_pending import PendingGrant, resolve, save, take
 from daimon.core.stores.github_personal_links import mint_link
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +32,7 @@ _log = structlog.get_logger(__name__)
 
 AGENT_CHANGED_MESSAGE = "Agent access changed while you were linking.\nAsk again in chat."
 GITHUB_DOWN_MESSAGE = "GitHub didn't answer.\nAsk again in chat."
+FAILED_MESSAGE = "Something went wrong.\nAsk again in chat."
 # The browser page shows "Ask again in chat" when every resumed request ended this way.
 REQUEST_CHANGED_MESSAGES = frozenset({AGENT_CHANGED_MESSAGE, CHANGED_MESSAGE})
 
@@ -86,6 +87,11 @@ async def _take_pending(
             platform_user_id=platform_user_id,
         )
         return rows
+
+
+async def _resolve_pending(runtime: McpRuntime, request_id: uuid.UUID) -> None:
+    async with runtime.session_factory.begin() as session:
+        await resolve(session, request_id)
 
 
 async def _deliver_result(runtime: McpRuntime, pending: PendingGrant, message: str) -> None:
@@ -160,6 +166,99 @@ async def _deliver_recovery(runtime: McpRuntime, pending: PendingGrant, *, statu
     )
 
 
+async def _outcome_message(
+    runtime: McpRuntime,
+    row: PendingGrant,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    platform_user_id: str,
+) -> str:
+    """The thread message for one request: runs the grant when the agent is unchanged."""
+    agent = await find_agent_by_daimon_tag(runtime.client, tenant_id=tenant_id, name=row.agent_name)
+    if (
+        agent is None
+        or str(agent.id) != row.ma_agent_id
+        or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)) != row.agent_id
+    ):
+        return AGENT_CHANGED_MESSAGE
+
+    async def manages_now(
+        session: AsyncSession,
+        *,
+        agent: BetaManagedAgentsAgent = agent,
+        row: PendingGrant = row,
+    ) -> bool:
+        # Runs inside the SERIALIZABLE grant transaction: lock the rows that
+        # confer authority so a demotion committed since the snapshot fails it.
+        account = await get_account(session, account_id, for_share=True)
+        if account is None or account.tenant_id != tenant_id or account.is_external:
+            return False
+        return await requester_manages_agent(
+            session,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            platform=platform,
+            platform_user_id=platform_user_id,
+            agent_name=agent.name,
+            other_names=(
+                row.agent_name,
+                str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""),
+            ),
+            ma_agent_id=str(agent.id),
+            default=runtime.deployment_default,
+            is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+            members=(
+                runtime.group_lookups.live_members(platform, row.workspace_id)
+                if runtime.group_lookups is not None
+                else None
+            ),
+            lock_authority=True,
+        )
+
+    async with runtime.session_factory() as session:
+        allowed = await manages_now(session)
+    if not allowed:
+        return AGENT_CHANGED_MESSAGE
+    config = runtime.settings.github_app
+    message: str
+    try:
+        outcome = await linked_grant(
+            runtime.session_factory,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            agent_id=row.agent_id,
+            agent_name=agent.name,
+            repo_name=row.repo_name,
+            fernet=runtime.fernet,
+            client_id=config.client_id or "",
+            client_secret=config.client_secret.get_secret_value() if config.client_secret else "",
+            app_id=config.app_id or "",
+            private_key=config.private_key.get_secret_value() if config.private_key else "",
+            manages_now=manages_now,
+            requested_access=row.requested_access,
+        )
+        message = outcome.message
+        if outcome.status in ("needs_install", "needs_link", "relink"):
+            try:
+                await _deliver_recovery(runtime, row, status=outcome.status)
+            except Exception:
+                # Private delivery can fail per person; the rest of the
+                # batch still runs and the thread says what to do.
+                _log.warning(
+                    "github.linked_resume.recovery_delivery_failed", request_id=str(row.id)
+                )
+                message = "I couldn't send the private GitHub link. Ask me again."
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) not in ("40001", "23505"):
+            raise
+        message = CHANGED_MESSAGE
+    except httpx.HTTPError:
+        message = GITHUB_DOWN_MESSAGE
+    return message
+
+
 async def resume_pending(
     runtime: McpRuntime,
     *,
@@ -168,6 +267,13 @@ async def resume_pending(
     platform: str,
     platform_user_id: str,
 ) -> list[str]:
+    """Run each claimed request on its own and answer it in its thread.
+
+    A request leaves the table only after it has an outcome and its result
+    delivery was attempted. Any failure of one request, including after its grant
+    committed, ends that request with `FAILED_MESSAGE` and leaves the rest to run.
+    A crash leaves unresolved requests claimed until their lease passes.
+    """
     pending = await _take_pending(
         runtime,
         tenant_id=tenant_id,
@@ -177,91 +283,26 @@ async def resume_pending(
     )
     results: list[str] = []
     for row in pending:
-        agent = await find_agent_by_daimon_tag(
-            runtime.client, tenant_id=tenant_id, name=row.agent_name
-        )
-        if (
-            agent is None
-            or str(agent.id) != row.ma_agent_id
-            or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)) != row.agent_id
-        ):
-            message = AGENT_CHANGED_MESSAGE
-        else:
-
-            async def manages_now(
-                session: AsyncSession,
-                *,
-                agent: BetaManagedAgentsAgent = agent,
-                row: PendingGrant = row,
-            ) -> bool:
-                account = await get_account(session, account_id)
-                if account is None or account.tenant_id != tenant_id or account.is_external:
-                    return False
-                return await requester_manages_agent(
-                    session,
-                    tenant_id=tenant_id,
-                    account_id=account_id,
-                    platform=platform,
-                    platform_user_id=platform_user_id,
-                    agent_name=agent.name,
-                    other_names=(
-                        row.agent_name,
-                        str(agent.metadata.get(MA_METADATA_KEY_NAME) or ""),
-                    ),
-                    ma_agent_id=str(agent.id),
-                    default=runtime.deployment_default,
-                    is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-                    members=(
-                        runtime.group_lookups.live_members(platform, row.workspace_id)
-                        if runtime.group_lookups is not None
-                        else None
-                    ),
-                )
-
-            async with runtime.session_factory() as session:
-                allowed = await manages_now(session)
-            if not allowed:
-                message = AGENT_CHANGED_MESSAGE
-            else:
-                config = runtime.settings.github_app
-                try:
-                    outcome = await linked_grant(
-                        runtime.session_factory,
-                        tenant_id=tenant_id,
-                        account_id=account_id,
-                        agent_id=row.agent_id,
-                        agent_name=agent.name,
-                        repo_name=row.repo_name,
-                        fernet=runtime.fernet,
-                        client_id=config.client_id or "",
-                        client_secret=config.client_secret.get_secret_value()
-                        if config.client_secret
-                        else "",
-                        app_id=config.app_id or "",
-                        private_key=config.private_key.get_secret_value()
-                        if config.private_key
-                        else "",
-                        manages_now=manages_now,
-                        requested_access=row.requested_access,
-                    )
-                    message = outcome.message
-                    if outcome.status in ("needs_install", "needs_link", "relink"):
-                        try:
-                            await _deliver_recovery(runtime, row, status=outcome.status)
-                        except Exception:
-                            # Private delivery can fail per person; the rest of the
-                            # batch still runs and the thread says what to do.
-                            _log.warning("github.linked_resume.recovery_delivery_failed")
-                            message = "I couldn't send the private GitHub link. Ask me again."
-                except DBAPIError as exc:
-                    if getattr(exc.orig, "sqlstate", None) not in ("40001", "23505"):
-                        raise
-                    message = CHANGED_MESSAGE
-                except httpx.HTTPError:
-                    message = GITHUB_DOWN_MESSAGE
+        try:
+            message = await _outcome_message(
+                runtime,
+                row,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                platform=platform,
+                platform_user_id=platform_user_id,
+            )
+        except Exception:
+            _log.exception("github.linked_resume.request_failed", request_id=str(row.id))
+            message = FAILED_MESSAGE
         try:
             await _deliver_result(runtime, row, message)
         except Exception:
-            _log.warning("github.linked_resume.result_delivery_failed")
+            _log.warning("github.linked_resume.result_delivery_failed", request_id=str(row.id))
+        try:
+            await _resolve_pending(runtime, row.id)
+        except Exception:
+            # The lease expires and the request runs again, which is idempotent.
+            _log.warning("github.linked_resume.resolve_failed", request_id=str(row.id))
         results.append(message)
     return results

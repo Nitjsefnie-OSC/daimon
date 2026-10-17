@@ -107,6 +107,7 @@ async def requester_manages_agent(
     is_daimon_managed: bool | None,
     members: GroupMembers | None,
     other_names: tuple[str | None, ...] = (),
+    lock_authority: bool = False,
 ) -> bool:
     """Whether the requester manages one agent, by their role and groups as they are now.
 
@@ -120,6 +121,14 @@ async def requester_manages_agent(
     `is_daimon_managed` from the live agent. Fails closed: an unknown managed
     status, a link without the agent's Managed Agents id, a non-admin without
     a platform user ID or a failed group lookup is no.
+
+    `lock_authority` is for a commit-time recheck inside a SERIALIZABLE
+    transaction. It takes `FOR SHARE` locks on the requester's account and the
+    tenant's channel admin grants, the rows that confer authority, so a demotion
+    that committed after the transaction's snapshot fails the transaction (40001)
+    instead of reading the old role. Reach facts (propagations, bindings, runs,
+    the access policy) are read unlocked, and live group membership comes from
+    the platform.
     """
     if not agent_name or not ma_agent_id or platform is None or is_daimon_managed is None:
         return False
@@ -129,6 +138,7 @@ async def requester_manages_agent(
         platform=platform,
         account_id=account_id,
         platform_user_id=platform_user_id,
+        lock=lock_authority,
     )
     if stored.is_admin:
         return True

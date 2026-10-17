@@ -3066,6 +3066,8 @@ class GitHubLinkedConnectPending(Base):
     parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Set while a resume holds the request; cleared by deleting the row once resolved.
+    claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AgentGitHubOwnerGrant(Base):

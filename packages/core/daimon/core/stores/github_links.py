@@ -168,6 +168,25 @@ async def get_user_for_update(session: AsyncSession, *, github_user_id: int) -> 
     return GitHubUser.model_validate(row) if row is not None else None
 
 
+async def list_users_with_expiring_refresh(
+    session: AsyncSession, *, now: datetime, before: datetime, limit: int
+) -> list[int]:
+    """Active users whose live refresh token expires by ``before``, soonest first."""
+    rows = await session.scalars(
+        select(GitHubUserLink.github_user_id)
+        .where(
+            GitHubUserLink.status == "active",
+            GitHubUserLink.encrypted_refresh_token.is_not(None),
+            GitHubUserLink.refresh_expires_at.is_not(None),
+            GitHubUserLink.refresh_expires_at > now,
+            GitHubUserLink.refresh_expires_at <= before,
+        )
+        .order_by(GitHubUserLink.refresh_expires_at, GitHubUserLink.github_user_id)
+        .limit(limit)
+    )
+    return list(rows)
+
+
 async def rotate_user_tokens(
     session: AsyncSession,
     *,

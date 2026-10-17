@@ -25,6 +25,7 @@ import contextlib
 import functools
 import signal
 import sys
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -65,6 +66,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_installation_reconcile import (
     drain_github_installation_reconciliations,
 )
+from daimon.core.github_link_refresh import refresh_expiring_links
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
@@ -734,6 +736,7 @@ _last_app_access_checks: dict[str, datetime] = {}
 # Session id -> (consecutive failures, earliest next attempt). A failing refresh
 # mints fresh tokens each attempt, so retries back off from 1 to 30 minutes.
 _app_refresh_failures: dict[str, tuple[int, datetime]] = {}
+_GITHUB_LINK_REFRESH_INTERVAL_S = 3600.0
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
 # A turn running continuously for longer than this is treated as abandoned and
@@ -1244,6 +1247,7 @@ async def run(
     )
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     push_resync_fernet = build_multifernet(crypto_keys) if crypto_keys else None
+    link_refresh_throttle = _IntervalThrottle(_GITHUB_LINK_REFRESH_INTERVAL_S)
 
     lock_conn = await _acquire_advisory_lock(engine, scheduler_settings.advisory_lock_key)
     if lock_conn is None:
@@ -1321,6 +1325,9 @@ async def run(
                 fernet=push_resync_fernet,
             )
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+            await _refresh_expiring_github_links(
+                sm=sm, settings=settings, fernet=push_resync_fernet, throttle=link_refresh_throttle
+            )
             return 0
 
         async def tick() -> None:
@@ -1355,6 +1362,9 @@ async def run(
                 fernet=push_resync_fernet,
             )
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+            await _refresh_expiring_github_links(
+                sm=sm, settings=settings, fernet=push_resync_fernet, throttle=link_refresh_throttle
+            )
 
         async def usage_sweep() -> None:
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
@@ -1429,6 +1439,55 @@ async def _drain_github_installation_reconciliations(
             )
     except Exception:
         log.exception("scheduler.github_installation_reconciliation.failed")
+
+
+class _IntervalThrottle:
+    """Let a job run at most once per interval within this process."""
+
+    def __init__(self, interval_s: float) -> None:
+        self._interval_s = interval_s
+        self._next_at = 0.0
+
+    def due(self) -> bool:
+        now = time.monotonic()
+        if now < self._next_at:
+            return False
+        self._next_at = now + self._interval_s
+        return True
+
+
+async def _refresh_expiring_github_links(
+    *,
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    fernet: MultiFernet | None,
+    throttle: _IntervalThrottle,
+) -> None:
+    """Keep linked GitHub tokens from reaching refresh-token expiry; hourly, best effort."""
+    app = settings.github_app
+    if fernet is None or app.client_id is None or app.client_secret is None:
+        return
+    if not throttle.due():
+        return
+    try:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http_client:
+            counts = await refresh_expiring_links(
+                sm,
+                http_client,
+                fernet=fernet,
+                client_id=app.client_id,
+                client_secret=app.client_secret.get_secret_value(),
+                now=datetime.now(UTC),
+            )
+        if counts.refreshed or counts.broken or counts.failed:
+            log.info(
+                "scheduler.github_link_refresh",
+                refreshed=counts.refreshed,
+                broken=counts.broken,
+                failed=counts.failed,
+            )
+    except Exception:
+        log.exception("scheduler.github_link_refresh.failed")
 
 
 def run_sync() -> None:

@@ -1,5 +1,10 @@
 config	verdict	distinct_states
-clean	clean	5435
-no_platform_identity	violates:NoForeignLink	140
-no_commit_recheck	violates:GrantRestsOnCurrentAuthority	1388
-permission_gap	violates:NoStalePermission	1644
+clean	clean	25926
+no_platform_identity	violates:NoForeignLink	233
+no_commit_recheck	violates:GrantRestsOnCurrentAuthority	14208
+permission_gap	violates:NoStalePermission	17220
+late_snapshot_sets_only	violates:NoGrantAfterCoverageRemoval	22380
+lock_check_only	clean	30438
+late_check_only	clean	25926
+role_read_unlocked	violates:NoStaleRoleRead	12519
+role_lock_no_abort	violates:NoStaleRoleRead	12518

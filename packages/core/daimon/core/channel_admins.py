@@ -541,12 +541,15 @@ async def read_stored_admin(
     platform: str | None,
     account_id: uuid.UUID,
     platform_user_id: str | None,
+    lock: bool = False,
 ) -> StoredAdmin:
     """The DB half of a stored subject; `confirm_stored_subject` is the live half.
 
-    A server admin's grants are not read; they need none.
+    A server admin's grants are not read; they need none. `lock` takes
+    `FOR SHARE` locks on the account and grant rows it reads, for a commit-time
+    recheck in a SERIALIZABLE transaction (`get_account`).
     """
-    account = await get_account(session, account_id)
+    account = await get_account(session, account_id, for_share=lock)
     # One held as from another organisation administers nothing.
     if account is None or account.role is Role.ADMIN or account.is_external:
         return StoredAdmin(
@@ -555,7 +558,7 @@ async def read_stored_admin(
             platform_user_id=platform_user_id,
         )
     grants = (
-        await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
+        await list_channel_admins(session, tenant_id=tenant_id, platform=platform, for_share=lock)
         if platform in CHANNEL_ADMIN_PLATFORMS
         else []
     )

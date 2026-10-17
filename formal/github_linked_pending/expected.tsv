@@ -1,0 +1,10 @@
+config	verdict	distinct_states
+safe	clean	173161
+live	clean	75697
+delete_on_claim	violates:NoSilentLoss	8
+resolve_before_delivery	violates:NoSilentLoss	102
+take_ignores_lease	violates:NoDoubleProcessing	424
+abort_batch_on_exception	violates:HeldReachesOutcome	63969
+retake_after_crash_witness	violates:RetakeAfterCrashNeverFinishes	6760
+failure_does_not_block_witness	violates:FailureNeverUnblocksOthers	5023
+delivery_failure_witness	violates:DeliveryFailureAlwaysVisible	303

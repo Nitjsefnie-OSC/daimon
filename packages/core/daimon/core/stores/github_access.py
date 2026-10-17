@@ -53,7 +53,14 @@ class AgentGrant(BaseModel):
 
 
 class SecondInstallationError(ValueError):
-    """A grant would make one agent use two GitHub installations."""
+    """A grant would make one agent use two GitHub installations.
+
+    `org` is the owner login of the installation the agent already uses.
+    """
+
+    def __init__(self, message: str, *, org: str | None = None) -> None:
+        super().__init__(message)
+        self.org = org
 
 
 async def lock_agent_grants(
@@ -465,7 +472,8 @@ async def stage_grant(
             raise SecondInstallationError(
                 f"{agent_name or agent_id} already uses repos from {org}. "
                 "One agent can use one GitHub org. Use another agent for repos from a "
-                "different org."
+                "different org.",
+                org=org,
             )
     if is_working_repo:
         working = await session.scalars(

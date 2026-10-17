@@ -19,7 +19,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Literal
+from typing import Literal, cast
 
 import httpx
 import pytest
@@ -3043,3 +3043,87 @@ async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
     async with db_session_factory() as session:
         assert await get_mcp_token(session, jti=expired_jti) is None
         assert await get_mcp_token(session, jti=recent_jti) is not None
+
+
+def _link_refresh_settings(*, with_oauth: bool) -> Settings:
+    return cast(
+        Settings,
+        SimpleNamespace(
+            github_app=SimpleNamespace(
+                client_id="client" if with_oauth else None,
+                client_secret=SecretStr("secret") if with_oauth else None,
+            )
+        ),
+    )
+
+
+async def test_link_refresh_runs_hourly_with_the_app_oauth_credentials(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.scheduler.main import (
+        _IntervalThrottle,  # pyright: ignore[reportPrivateUsage]
+        _refresh_expiring_github_links,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.github_link_refresh import LinkRefreshCounts
+
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    throttle = _IntervalThrottle(3600.0)
+    sweep = unittest.mock.AsyncMock(return_value=LinkRefreshCounts(refreshed=1))
+    with unittest.mock.patch("daimon.adapters.scheduler.main.refresh_expiring_links", sweep):
+        for _ in range(3):
+            await _refresh_expiring_github_links(
+                sm=db_session_factory,
+                settings=_link_refresh_settings(with_oauth=True),
+                fernet=fernet,
+                throttle=throttle,
+            )
+    assert sweep.await_count == 1, "ticks inside the hour must not sweep again"
+    assert sweep.await_args is not None
+    kwargs = sweep.await_args.kwargs
+    assert (kwargs["client_id"], kwargs["client_secret"]) == ("client", "secret")
+    assert kwargs["fernet"] is fernet
+
+
+async def test_link_refresh_is_skipped_without_oauth_credentials_or_fernet(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.scheduler.main import (
+        _IntervalThrottle,  # pyright: ignore[reportPrivateUsage]
+        _refresh_expiring_github_links,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    sweep = unittest.mock.AsyncMock()
+    with unittest.mock.patch("daimon.adapters.scheduler.main.refresh_expiring_links", sweep):
+        await _refresh_expiring_github_links(
+            sm=db_session_factory,
+            settings=_link_refresh_settings(with_oauth=False),
+            fernet=fernet,
+            throttle=_IntervalThrottle(3600.0),
+        )
+        await _refresh_expiring_github_links(
+            sm=db_session_factory,
+            settings=_link_refresh_settings(with_oauth=True),
+            fernet=None,
+            throttle=_IntervalThrottle(3600.0),
+        )
+    sweep.assert_not_awaited()
+
+
+async def test_link_refresh_swallows_a_failing_sweep(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.scheduler.main import (
+        _IntervalThrottle,  # pyright: ignore[reportPrivateUsage]
+        _refresh_expiring_github_links,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    sweep = unittest.mock.AsyncMock(side_effect=RuntimeError("boom"))
+    with unittest.mock.patch("daimon.adapters.scheduler.main.refresh_expiring_links", sweep):
+        await _refresh_expiring_github_links(  # must not raise
+            sm=db_session_factory,
+            settings=_link_refresh_settings(with_oauth=True),
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            throttle=_IntervalThrottle(3600.0),
+        )
+    sweep.assert_awaited_once()
