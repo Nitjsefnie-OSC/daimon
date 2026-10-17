@@ -38,7 +38,6 @@ from daimon.adapters.discord.credential_repo_bind import (
     resolve_repo_binding_credential,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -46,7 +45,6 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import scoped_config_write
-from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
@@ -246,74 +244,6 @@ async def test_unbound_target_remains_admin_only_after_its_default_is_removed(
     )
     assert refused_when_unreachable is True, "unbound agents remain admin-only"
     assert _sent_message(unscoped_interaction) == _SHARED_AGENT_MESSAGE
-
-
-async def test_channel_admin_binds_to_an_agent_local_to_their_channel_only(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A role grant on the only channel of an agent made for it opens the gate; the server
-    default, and an agent someone else made that a member bound, stay shut."""
-    from daimon.core.scope import ChannelScopeRef
-    from daimon.core.stores.agent_creation_channels import record_creation_channel
-    from daimon.core.stores.channel_admins import set_channel_admins
-
-    async with db_session_factory() as session, session.begin():
-        tenant = await make_tenant(session, platform="discord", workspace_id=str(_GUILD_ID))
-        for channel in ("500", "501"):
-            await set_channel_admins(
-                session,
-                tenant_id=tenant.id,
-                platform="discord",
-                channel_id=channel,
-                role_ids=["77"],
-                user_ids=[],
-                actor_account_id=None,
-            )
-        for name, scope in (
-            ("local-bot", ChannelScopeRef(tenant_id=tenant.id, channel_id="500")),
-            ("bound-bot", ChannelScopeRef(tenant_id=tenant.id, channel_id="501")),
-            ("wide-bot", TenantScopeRef(tenant_id=tenant.id)),
-        ):
-            await scoped_config_write.set_fields(
-                session, scope=scope, tenant_id=tenant.id, agent_name=name, mode="agent"
-            )
-        await record_creation_channel(
-            session,
-            tenant_id=tenant.id,
-            ma_agent_id="agent_local-bot",
-            platform="discord",
-            channel_id="500",
-        )
-    agents = [
-        _make_agent(ma_agent_id=f"agent_{name}", tenant_id=tenant.id, name=name, managed=False)
-        for name in ("local-bot", "bound-bot", "wide-bot")
-    ]
-    runtime = _runtime(
-        sessionmaker=db_session_factory,
-        anthropic=build_fake_anthropic(_list_agents_handler(agents)),
-    )
-
-    async def refused(name: str) -> bool:
-        interaction = _member_interaction()
-        role = MagicMock(spec=discord.Role)
-        role.id = 77
-        role.is_default.return_value = False
-        interaction.user.roles = [role]
-        agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=f"agent_{name}")
-        return await refuse_if_shared_and_not_admin_for_request(
-            interaction, runtime=runtime, tenant_id=tenant.id, agent_id=agent_id
-        )
-
-    assert await refused("local-bot") is True, "creation alone is insufficient"
-    async with db_session_factory.begin() as session:
-        await set_access_policy(
-            session,
-            tenant_id=tenant.id,
-            policy=TenantAccessPolicy(agent_channel_pins={"local-bot": ("500",)}),
-        )
-    assert await refused("local-bot") is False, "an explicit local rule grants ownership"
-    assert await refused("bound-bot") is True, "a member's binding does not make it the admin's"
-    assert await refused("wide-bot") is True, "the server default stays with server admins"
 
 
 async def test_unbound_target_member_refused(

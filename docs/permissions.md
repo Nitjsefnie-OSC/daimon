@@ -4,9 +4,7 @@
 
 A current human workspace admin can set `allow`, `ask` or `deny` for one
 third-party MCP tool on one agent with `daimon agents tool-rules` or the
-`set_agent_tool_rule` MCP tool. A channel admin can set and clear such rules
-for any agent in a channel they administer, using `--channel` or `channel_id`;
-they cannot set an agent-wide rule or one for another channel. An agent-wide
+`set_agent_tool_rule` MCP tool. An agent-wide
 rule applies where the agent runs; a channel rule applies in its parent
 channel and threads under it. When both match, `deny` wins over `ask`, which
 wins over `allow`. The key is exactly `server/tool`. A rule is
@@ -23,8 +21,7 @@ are inactive until both `DAIMON_TOOL_SAFETY__ENABLED` and
 
 With both settings on, a card for a third-party MCP write classified as needing
 approval also has **Always allow**. A current workspace admin can press it to
-save an agent-wide `allow` rule for chat. A channel admin can press it in a
-channel they administer to save a rule for that parent channel and its threads.
+save an agent-wide `allow` rule for chat.
 The admin may be someone other than the requester. The click approves the
 pending call and saves the rule for that agent, tool and attached server URL.
 The admin's permission is checked when they click. A non-admin's click leaves
@@ -188,12 +185,6 @@ publishes.
   configure agents with rules from anywhere and see every agent listed.
   Agent rules and `readers: own` still hold for them in channels, threads,
   routines and handoffs. Nothing writes where `writers` is `none`.
-- **Channel admins** of a `readers: own` channel have the same exemption for
-  its own agents. They configure an agent whose rule names only channels
-  they administer, and read those channels' sessions from the hub. In Discord
-  and Slack chat, the agent is told when the requester administers the current
-  channel, so it can try the requested setup tool. Each tool still checks the
-  target agent's reach before changing instructions, skills or keys.
 - A **setup thread** under a `readers: own` channel answers as the built-in
   agent.
 
@@ -202,7 +193,7 @@ Agent keys and tokens with no person behind them are never exempt.
 
 ## Changing the rules
 
-Rules are server or workspace admins' calls, never a channel admin's:
+Rules are server or workspace admins' calls, :
 
 - chat: `set_channel_rule` and `set_agent_rule` ([MCP tools](mcp-tools.md));
 - panels: the channel's **Permissions** screen, from Who answers where in the
@@ -225,5 +216,5 @@ isolated channels and channel pins) reads as the same rules and is rewritten
 in the new shape on its next change, so no migration runs.
 
 The invoker allowlist, the Teams guests counted as members, read-only DM
-memory, channel admins, environments, budgets and operator tokens are not
+memory, environments, budgets and operator tokens are not
 channel or agent rules. They say who may act and who may change the rules.

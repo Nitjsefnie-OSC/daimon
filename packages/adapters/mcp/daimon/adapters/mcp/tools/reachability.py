@@ -21,38 +21,23 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
-from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_default
 from daimon.core.authz import Action, AgentRef, Place, authorize
-from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
-from daimon.core.config import channel_admins_enabled
-from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
+from daimon.core.native_admins import AdminCaller
+from daimon.core.operation_policy import OperationKind, TargetFacts
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.channel_admins import get_channel_admins
 from fastmcp.exceptions import ToolError
 
 REACHABILITY_GATED_FIELDS: Final[frozenset[str]] = frozenset(
     {"system", "model", "skills", "mcp_servers", "tools", "description"}
 )
 
-UNPLACED_RUN_REASON: Final[str] = (
-    "has other people's conversations or routines whose channel is unknown, so they could "
-    "be in any channel"
-)
-"""Refusal wording for `TargetFacts.has_unplaced_run`, after the agent's name."""
 
-NOT_HELD_REASON: Final[str] = (
-    "is not limited by a channel rule exclusively to channels this caller administers"
-)
-"""Refusal wording for a local agent that is not the channel admin's, after its name."""
-
-
-def channel_admin_caller(auth: AuthIdentity) -> ChannelAdminCaller:
-    """The caller as channel admin grants see them. An agent credential is nobody."""
-    return ChannelAdminCaller(
+def admin_caller(auth: AuthIdentity) -> AdminCaller:
+    """The caller's native admin status; an agent key has no admin authority."""
+    return AdminCaller(
         platform_user_id=auth.platform_user_id if auth.agent_id is None else None,
-        role_ids=frozenset(auth.platform_role_ids) if auth.agent_id is None else frozenset(),
-        is_server_admin=auth.is_admin,
+        is_server_admin=auth.is_admin and auth.agent_id is None,
     )
 
 
@@ -65,47 +50,18 @@ async def target_facts(
     ma_agent_id: str | None,
     is_daimon_managed: bool,
 ) -> TargetFacts:
-    """Policy facts for the agent carrying `agent_names` in the caller's own tenant."""
-    async with runtime.session_factory() as session:
-        return await load_target_facts(
-            session,
-            operation,
-            tenant_id=auth.tenant_id,
-            platform=auth.platform or "",
-            agent_names=agent_names,
-            ma_agent_id=ma_agent_id,
-            default=runtime.deployment_default,
-            caller=channel_admin_caller(auth),
-            is_daimon_managed=is_daimon_managed,
-            caller_account_id=auth.account_id,
-            caller_platform_user_id=auth.platform_user_id,
-        )
+    return TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
 
 
-async def require_channel_admin(
-    runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str
-) -> None:
-    """Raise ``ToolError`` unless the caller is a server admin or administers `channel_id`."""
-    if auth.is_admin:
+async def require_admin(runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str) -> None:
+    """Refuse a channel change unless the caller is a native admin."""
+    if auth.is_admin and auth.agent_id is None:
         return
-    grant = None
-    if auth.platform is not None and auth.agent_id is None:
-        async with runtime.session_factory() as session:
-            grant = await get_channel_admins(
-                session, tenant_id=auth.tenant_id, platform=auth.platform, channel_id=channel_id
-            )
-    if not is_channel_admin(channel_admin_caller(auth), grant=grant):
-        if not channel_admins_enabled():
-            raise ToolError(
-                "This change needs a workspace or server admin. Tell the caller who can make "
-                "it and give them a sentence that admin can say, preserving the requested "
-                "action and channel. Do not retry."
-            )
-        raise ToolError(
-            "This change needs a workspace or server admin, or an admin of that channel, "
-            "and the caller is neither. Tell them who can make it and give them a sentence "
-            "that admin can say, preserving the requested action and channel. Do not retry."
-        )
+    raise ToolError(
+        "This change needs a workspace or server admin. Tell the caller who can make "
+        "it and give them a sentence that admin can say, preserving the requested "
+        "action and channel. Do not retry."
+    )
 
 
 def _target_names(agent_name: str, agent: BetaManagedAgentsAgent | None) -> tuple[str | None, ...]:
@@ -124,8 +80,7 @@ async def require_bindable_as_channel_default(
     agent: BetaManagedAgentsAgent | None,
     is_daimon_managed: bool,
 ) -> None:
-    """Raise ``ToolError`` when the agent is pinned elsewhere, or a channel admin
-    binds another channel's own agent or one another channel admin holds."""
+    """Raise ``ToolError`` when the caller cannot bind this agent here."""
     names = tuple(name for name in _target_names(agent_name, agent) if name)
     async with runtime.session_factory() as session:
         try:
@@ -148,33 +103,17 @@ async def require_bindable_as_channel_default(
                 f"only they can be its default, and '{agent_name}' is not one. Nothing was "
                 "changed. Pick one of its own agents, or ask a server admin. Do not retry."
             )
-        if not decision:
+        if decision.reason == "runs_elsewhere":
             raise ToolError(
                 f"'{agent_name}'s rule runs it only in other channels, so it would refuse "
                 "every turn here and cannot be this channel's default. Nothing was changed. "
                 "Pick another agent, or ask an admin to change its rule. Do not retry."
             )
-        if await may_bind_as_channel_default(
-            session,
-            tenant_id=auth.tenant_id,
-            platform=auth.platform or "",
-            channel_id=channel_id,
-            agent_names=names,
-            ma_agent_id=str(agent.id) if agent is not None else None,
-            default=runtime.deployment_default,
-            caller=channel_admin_caller(auth),
-            is_daimon_managed=is_daimon_managed,
-            caller_account_id=auth.account_id,
-        ):
+        if auth.is_admin and auth.agent_id is None:
             return
     raise ToolError(
-        f"'{agent_name}' was not made for or limited by its rule to the channels this caller "
-        "administers, answers in channels they do not administer, has other people's "
-        "conversations or routines whose channel is unknown, runs unattended for someone with "
-        "wider rights, or another channel admin holds it in channels without this one, so only "
-        "a workspace or server admin can make it this channel's default. A channel admin may "
-        "pick a built-in agent, the workspace default, or an agent made for or limited by its "
-        "rule to their channels that answers nowhere else. Nothing was changed. Do not retry."
+        "Only a workspace or server admin can make this the channel's default. "
+        "Nothing was changed. Do not retry."
     )
 
 
@@ -185,49 +124,10 @@ async def require_admin_for_reachable_agent(
     agent_name: str,
     agent: BetaManagedAgentsAgent | None = None,
 ) -> None:
-    """Raise ``ToolError`` unless the caller owns this rule-bound agent or is an admin.
-
-    Returns immediately for an admin caller without touching the database.
-    For a non-admin caller, reads the tenant's config cascade and raises when
-    ``agent_name`` currently resolves for any user in this tenant (channel,
-    tenant, or deployment tier), unless its rule names only channels the caller administers
-    and every answer and run stays inside those channels. ``tenant_id`` always
-    comes from ``auth.tenant_id`` —
-    never from a caller-supplied parameter — so a caller cannot point the read
-    at another tenant's config rows. The decision itself is
-    `daimon.core.operation_policy.decide_operation`'s. Pass the resolved
-    ``agent`` so every name it carries and its bound threads count.
-    """
-    if auth.is_admin:
+    """Require an admin for an agent setup change."""
+    if auth.is_admin and auth.agent_id is None:
         return
-    facts = await target_facts(
-        runtime,
-        auth,
-        "agent_spec_edit",
-        agent_names=_target_names(agent_name, agent),
-        ma_agent_id=str(agent.id) if agent is not None else None,
-        is_daimon_managed=False,
+    raise ToolError(
+        f"Changing '{agent_name}' needs a workspace or server admin. Ask one to make "
+        "the requested change. Do not retry."
     )
-    outcome = decide_operation("agent_spec_edit", is_admin=False, target=facts)
-    if outcome == "needs_admin":
-        if facts.runs_unattended_beyond_caller:
-            why = (
-                "runs unattended (a routine or queued wake) for someone with wider rights "
-                "than this caller"
-            )
-        elif facts.has_unplaced_run:
-            why = UNPLACED_RUN_REASON
-        elif not facts.is_held_by_caller:
-            why = NOT_HELD_REASON
-        else:
-            why = (
-                "is currently a default agent here and answers or runs outside the channels "
-                "this caller administers"
-            )
-        raise ToolError(
-            f"'{agent_name}' {why}, so an admin must change its setup. Tell the caller to "
-            f"ask a workspace or server admin to make the requested change to '{agent_name}'; "
-            "carry the "
-            "specific action from the conversation into that handoff. Do not retry. "
-            "An admin can provision a channel-restricted agent that you administer."
-        )

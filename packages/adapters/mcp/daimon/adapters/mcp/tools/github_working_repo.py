@@ -68,7 +68,6 @@ async def set_working_repo_impl(
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = account.role == Role.ADMIN and auth.is_admin
-        lookups = runtime.group_lookups
         manages = is_admin or await requester_manages_agent(
             session,
             tenant_id=auth.tenant_id,
@@ -80,14 +79,9 @@ async def set_working_repo_impl(
             ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            members=(
-                lookups.live_members(auth.platform, auth.external_id)
-                if lookups is not None and auth.external_id is not None
-                else None
-            ),
         )
         if not manages:
-            raise ToolError("Ask a server admin or an admin for this agent's channels.")
+            raise ToolError("Ask a server admin.")
         try:
             saved = await set_working_repo(
                 session,
@@ -123,8 +117,7 @@ def register_github_working_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         A clear ask is enough: set it right away and reply with the returned
         line. Ask once in plain words during agent setup. Use an owner/repo already on
         this agent's list. Other repos have token access; clone one with gh repo clone when
-        asked. Only a server admin or an admin for this non-managed agent's
-        channels may change this setting. Pass the current turn origin and the
+        asked. Only a server admin may change this setting. Pass the current turn origin and the
         selected agent's name and MA id. If the repo is not on its list, offer
         the single Connect GitHub link.
         """

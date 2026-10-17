@@ -22,10 +22,10 @@ from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.externals import Membership
 from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_external, set_role
 from daimon.core.stores.domain import Role, TurnCardIntentRow

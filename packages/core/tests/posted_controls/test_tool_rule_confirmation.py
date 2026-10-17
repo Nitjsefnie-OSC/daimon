@@ -110,23 +110,6 @@ def test_flag_off_card_stays_legacy_and_flag_on_card_names_the_actor() -> None:
     )
 
 
-def test_any_clicker_cannot_claim_a_rule_scope() -> None:
-    reference = _prompt(uuid.uuid4()).tool_rule
-    assert reference is not None
-    assert allowed_rule_scope(reference, Subject(platform_user_id="requester")) is None
-    assert allowed_rule_scope(reference, Subject(platform_user_id="other")) is None
-    assert (
-        allowed_rule_scope(
-            reference,
-            Subject(platform_user_id="channel-admin", administered_channel_ids=frozenset({"home"})),
-        )
-        == "channel"
-    )
-    assert (
-        allowed_rule_scope(reference, Subject(platform_user_id="admin", is_admin=True)) == "agent"
-    )
-
-
 @pytest.mark.parametrize("loser", ["deny", "expiry"])
 async def test_save_if_lost_admin_check_returns_after_settlement(loser: str) -> None:
     """ToolRulesSaveIfLost: the role lookup awaits while the card settles."""
@@ -188,89 +171,6 @@ async def test_approved_click_without_save_has_no_rule_to_replay(
         )
 
 
-@pytest.mark.parametrize("intervening_rule", [None, "ask"])
-async def test_blind_upsert_and_scoped_saves(
-    intervening_rule: Literal["ask"] | None,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """ToolRulesBlindUpsert: a clear or set after posting makes the click's CAS stale."""
-    tenant = Tenant(platform="discord", external_id=str(uuid.uuid4()))
-    db_session.add(tenant)
-    await db_session.flush()
-    await db_session.commit()
-    prompt = await snapshot_tool_rule(_prompt(tenant.id), db_session_factory)
-    reference = prompt.tool_rule
-    assert reference is not None
-    assert reference.agent_revision == reference.channel_revision == 0
-    admin = Subject(is_admin=True, platform_user_id="admin")
-    async with db_session_factory() as session:
-        await store.set_rule(
-            session,
-            tenant_id=tenant.id,
-            agent_id="ma-1",
-            agent_name="Helper",
-            tool_key="remote/append_note",
-            server_url=reference.server_url,
-            rule=intervening_rule,
-            set_by="other-admin",
-            actor=admin,
-        )
-        await session.commit()
-    assert (
-        await save_always_allow(
-            db_session_factory, reference=reference, scope="agent", subject=admin, clicker="admin"
-        )
-        == "stale"
-    )
-    async with db_session_factory() as session:
-        row = await store.get_rule(
-            session, tenant_id=tenant.id, agent_id="ma-1", tool_key="remote/append_note"
-        )
-        assert row is not None and row.rule == intervening_rule and row.revision == 1
-    channel_admin = Subject(
-        platform_user_id="channel-admin", administered_channel_ids=frozenset({"home"})
-    )
-    assert (
-        await save_always_allow(
-            db_session_factory,
-            reference=reference,
-            scope="channel",
-            subject=channel_admin,
-            clicker="channel-admin",
-        )
-        == "saved"
-    )
-    async with db_session_factory() as session:
-        scoped = await store.get_rule(
-            session,
-            tenant_id=tenant.id,
-            agent_id="ma-1",
-            tool_key="remote/append_note",
-            channel_id="home",
-        )
-        assert scoped is not None and scoped.rule == "allow" and scoped.scope == "chat"
-        assert scoped.set_by == "channel-admin"
-    fresh = await snapshot_tool_rule(_prompt(tenant.id), db_session_factory)
-    assert fresh.tool_rule is not None
-    assert (
-        await save_always_allow(
-            db_session_factory,
-            reference=fresh.tool_rule,
-            scope="agent",
-            subject=admin,
-            clicker="admin",
-        )
-        == "saved"
-    )
-    async with db_session_factory() as session:
-        global_rule = await store.get_rule(
-            session, tenant_id=tenant.id, agent_id="ma-1", tool_key="remote/append_note"
-        )
-        assert global_rule is not None and global_rule.rule == "allow"
-        assert global_rule.set_by == "admin" and global_rule.revision == 2
-
-
 async def test_committed_save_waits_for_ack_before_reporting_saved(
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
@@ -321,3 +221,100 @@ async def test_committed_save_waits_for_ack_before_reporting_saved(
         finally:
             release.set()
     assert await asyncio.wait_for(save, 1) == "saved"
+
+
+def test_any_clicker_cannot_claim_a_rule_scope() -> None:
+    reference = _prompt(uuid.uuid4()).tool_rule
+    assert reference is not None
+    assert allowed_rule_scope(reference, Subject(platform_user_id="requester")) is None
+    assert allowed_rule_scope(reference, Subject(platform_user_id="other")) is None
+    assert (
+        allowed_rule_scope(
+            reference,
+            Subject(platform_user_id="member"),
+        )
+        is None
+    )
+    assert (
+        allowed_rule_scope(reference, Subject(platform_user_id="admin", is_admin=True)) == "agent"
+    )
+
+
+@pytest.mark.parametrize("intervening_rule", [None, "ask"])
+async def test_blind_upsert_and_scoped_saves(
+    intervening_rule: Literal["ask"] | None,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ToolRulesBlindUpsert: a clear or set after posting makes the click's CAS stale."""
+    tenant = Tenant(platform="discord", external_id=str(uuid.uuid4()))
+    db_session.add(tenant)
+    await db_session.flush()
+    await db_session.commit()
+    prompt = await snapshot_tool_rule(_prompt(tenant.id), db_session_factory)
+    reference = prompt.tool_rule
+    assert reference is not None
+    assert reference.agent_revision == reference.channel_revision == 0
+    admin = Subject(is_admin=True, platform_user_id="admin")
+    async with db_session_factory() as session:
+        await store.set_rule(
+            session,
+            tenant_id=tenant.id,
+            agent_id="ma-1",
+            agent_name="Helper",
+            tool_key="remote/append_note",
+            server_url=reference.server_url,
+            rule=intervening_rule,
+            set_by="other-admin",
+            actor=admin,
+        )
+        await session.commit()
+    assert (
+        await save_always_allow(
+            db_session_factory, reference=reference, scope="agent", subject=admin, clicker="admin"
+        )
+        == "stale"
+    )
+    async with db_session_factory() as session:
+        row = await store.get_rule(
+            session, tenant_id=tenant.id, agent_id="ma-1", tool_key="remote/append_note"
+        )
+        assert row is not None and row.rule == intervening_rule and row.revision == 1
+    assert (
+        await save_always_allow(
+            db_session_factory,
+            reference=reference,
+            scope="channel",
+            subject=admin,
+            clicker="admin",
+        )
+        == "saved"
+    )
+    async with db_session_factory() as session:
+        scoped = await store.get_rule(
+            session,
+            tenant_id=tenant.id,
+            agent_id="ma-1",
+            tool_key="remote/append_note",
+            channel_id="home",
+        )
+        assert scoped is not None and scoped.rule == "allow" and scoped.scope == "chat"
+        assert scoped.set_by == "admin"
+    fresh = await snapshot_tool_rule(_prompt(tenant.id), db_session_factory)
+    assert fresh.tool_rule is not None
+    assert (
+        await save_always_allow(
+            db_session_factory,
+            reference=fresh.tool_rule,
+            scope="agent",
+            subject=admin,
+            clicker="admin",
+        )
+        == "saved"
+    )
+    async with db_session_factory() as session:
+        global_rule = await store.get_rule(
+            session, tenant_id=tenant.id, agent_id="ma-1", tool_key="remote/append_note"
+        )
+        assert global_rule is not None and global_rule.rule == "allow"
+        assert global_rule.set_by == "admin" and global_rule.revision == 2

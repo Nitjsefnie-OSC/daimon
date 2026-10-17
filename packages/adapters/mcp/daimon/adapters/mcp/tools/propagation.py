@@ -30,8 +30,8 @@ from daimon.adapters.mcp.tools._rule_view import (
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.adapters.mcp.tools.reachability import (
+    require_admin,
     require_bindable_as_channel_default,
-    require_channel_admin,
 )
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
@@ -99,7 +99,7 @@ class ClearDefaultResult:
 async def _require_scope_admin(
     runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None
 ) -> None:
-    """The workspace default needs a server admin; a channel's also admits its channel admins.
+    """Only a server or workspace admin may change a default agent.
 
     Operator tokens change only channel defaults, never the workspace one."""
     if channel_id is None:
@@ -107,7 +107,7 @@ async def _require_scope_admin(
             raise ToolError("An operator token changes only a channel's default; pass channel_id.")
         _require_admin(auth)
     else:
-        await require_channel_admin(runtime, auth, channel_id=channel_id)
+        await require_admin(runtime, auth, channel_id=channel_id)
 
 
 async def _set_agent_default_impl(
@@ -174,7 +174,6 @@ async def _set_agent_default_impl(
             agent_name=agent_name,
             mode="agent",
             actor_account_id=auth.account_id,
-            # What makes a channel's default its channel admins' to administer.
             set_by_admin=auth.is_admin and auth.agent_id is None,
         )
 
@@ -465,7 +464,7 @@ async def _explain_agent_resolution_impl(
 
 
 def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_agent_default(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -479,10 +478,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
-        core).  Requires Manage Server (admin); an admin of the channel may set
-        that channel's default to a built-in agent, the workspace default, an
-        agent that answers nowhere yet, or one that answers only in channels
-        they administer.
+        core). Requires Manage Server (admin).
 
         Discord: ``channel_id`` MUST be the parent channel's id — the one
         your context gives as
@@ -500,7 +496,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime, await _auth(ctx), agent_name, channel_id, expected_ma_agent_id
         )
 
-    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def clear_agent_default(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         channel_id: str | None = None,
@@ -511,8 +507,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
-        default the call is a no-op (idempotent).  Requires Manage Server (admin);
-        an admin of the channel may clear that channel's default.
+        default the call is a no-op (idempotent). Requires Manage Server (admin).
 
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),

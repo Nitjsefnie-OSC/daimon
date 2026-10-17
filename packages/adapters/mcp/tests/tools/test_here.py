@@ -1,4 +1,4 @@
-"""The model-facing card cannot inherit a channel admin's private view."""
+"""The model-facing card cannot inherit an admin's private view."""
 
 from __future__ import annotations
 

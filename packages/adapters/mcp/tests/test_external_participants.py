@@ -87,14 +87,13 @@ def _app(captured: list[AuthIdentity], sessionmaker: async_sessionmaker[AsyncSes
     return mcp
 
 
-@pytest.mark.parametrize("external", [True, False])
+@pytest.mark.parametrize("external", [False, True])
 async def test_an_external_token_is_never_an_admin_and_is_refused_setup_tools(
     sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     external: bool,
 ) -> None:
-    claims = {EXTERNAL_CLAIM: external, "administered_channel_ids": ["c-1"]}
-    token = AccessToken(token="t", client_id="c", scopes=[], claims=claims)
+    token = AccessToken(token="t", client_id="c", scopes=[], claims={EXTERNAL_CLAIM: external})
     monkeypatch.setattr(
         "daimon.adapters.mcp.middleware.mcp_identity.get_access_token", lambda: token
     )
@@ -107,14 +106,9 @@ async def test_an_external_token_is_never_an_admin_and_is_refused_setup_tools(
                     await client.call_tool(name, {})
         else:
             assert (await client.call_tool("create_routine", {})).data == "created"
-            assert (await client.call_tool("brand_new_tool", {})).data == "new", (
-                "a new tool is refused only to people from another organisation"
-            )
-
+            assert (await client.call_tool("brand_new_tool", {})).data == "new"
     [identity] = captured
-    assert (identity.is_external, identity.is_admin) == (external, not external), (
-        "an admin role and internal claims count only for our own people"
-    )
+    assert (identity.is_external, identity.is_admin) == (external, not external)
 
 
 async def test_the_search_proxy_reaches_only_allowed_tools_for_an_external(

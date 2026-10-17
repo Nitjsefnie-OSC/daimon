@@ -22,7 +22,6 @@ from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.channel_admins import GroupLookupFailed, GroupMembers
 from daimon.core.config import (
     PrivateChannelMessagesSettings,
     SupportSettings,
@@ -32,6 +31,7 @@ from daimon.core.config import (
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.native_admins import GroupLookupFailed, GroupMembers
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY

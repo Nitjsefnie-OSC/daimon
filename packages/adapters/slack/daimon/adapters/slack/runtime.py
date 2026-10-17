@@ -13,9 +13,8 @@ from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.billing import BillingConfig, load_billing_config
-from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.channel_budget_notice import drain_budget_notices
-from daimon.core.config import Settings, prime_channel_admins_enabled
+from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
@@ -48,8 +47,6 @@ class SlackRuntime:
     # The MCP token form's live check; None (tests) means "do not probe".
     # Production wires `daimon.core.mcp_oauth.probe_bearer_token`.
     mcp_token_probe: McpTokenProbe | None = None
-    # Channel admin user groups' members, kept briefly (`channel_admin_groups`).
-    group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
     # One connection pool for every workspace's per-event AsyncWebClient; None
     # (tests) lets slack_sdk open a throwaway session per call.
     slack_http: aiohttp.ClientSession | None = None
@@ -128,7 +125,6 @@ def open_slack_http_session() -> aiohttp.ClientSession:
 
 @asynccontextmanager
 async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
-    prime_channel_admins_enabled(settings)
     engine = build_engine(
         str(settings.database.url),
         pool_size=settings.database.pool_size,

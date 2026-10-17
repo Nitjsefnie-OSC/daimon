@@ -23,13 +23,10 @@ from daimon.adapters.teams.channel_settings_card import (
 )
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
-from daimon.core.channel_skills import REFUSALS
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
-from daimon.core.stores.channel_admins import get_channel_admins, set_channel_admins
-from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import ChannelSkillRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -70,6 +67,30 @@ LIBRARY_SKILL = {
 }
 
 
+@asynccontextmanager
+async def _running(
+    db_factory: async_sessionmaker[AsyncSession], fake: TeamsApiFake
+) -> AsyncIterator[TeamsHttpService]:
+    """Run a two-channel team with a native server admin."""
+    async with db_factory.begin() as session:
+        await record_teams_installation(
+            session, tenant_id=TENANT, team_id=TEAM, group_id=str(uuid.uuid4()), name="Lab"
+        )
+        for channel in (GROWTH, LEGAL):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel),
+                tenant_id=TENANT,
+                agent_name="analyst",
+                mode="agent",
+            )
+    fake.channels.update({GROWTH: "Growth", LEGAL: "Legal"})
+    runtime = build_teams_runtime(db_factory, anthropic=_anthropic(), admins=(ADMIN,))
+    with patched_turns():
+        async with running_service(runtime, fake) as service:
+            yield service
+
+
 def _anthropic() -> Any:
     state = FakeMAState()
     analyst = ma_agent(id="agent_analyst", tenant_id=TENANT, name="analyst")
@@ -90,39 +111,6 @@ def _anthropic() -> Any:
     return build_fake_anthropic(handler)
 
 
-@asynccontextmanager
-async def _running(
-    db_factory: async_sessionmaker[AsyncSession], fake: TeamsApiFake
-) -> AsyncIterator[TeamsHttpService]:
-    """ADMIN is a server admin; LEAD administers GROWTH; the team lists both channels."""
-    async with db_factory.begin() as session:
-        await record_teams_installation(
-            session, tenant_id=TENANT, team_id=TEAM, group_id=str(uuid.uuid4()), name="Lab"
-        )
-        await set_channel_admins(
-            session,
-            tenant_id=TENANT,
-            platform="teams",
-            channel_id=GROWTH,
-            role_ids=[],
-            user_ids=[LEAD],
-            actor_account_id=None,
-        )
-        for channel in (GROWTH, LEGAL):
-            await set_fields(
-                session,
-                scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel),
-                tenant_id=TENANT,
-                agent_name="analyst",
-                mode="agent",
-            )
-    fake.channels.update({GROWTH: "Growth", LEGAL: "Legal"})
-    runtime = build_teams_runtime(db_factory, anthropic=_anthropic(), admins=(ADMIN,))
-    with patched_turns():
-        async with running_service(runtime, fake) as service:
-            yield service
-
-
 def _open(user: str) -> dict[str, object]:
     return make_invoke("task/fetch", {"data": {"dialog_id": CHANNEL_DIALOG}}, user=user)
 
@@ -138,7 +126,42 @@ async def _events(db_factory: async_sessionmaker[AsyncSession]) -> list[tuple[st
     return [(e.tool_name, e.outcome, e.reason or "") for e in events]
 
 
-async def test_a_server_admin_picks_a_channel_and_changes_all_three(
+def test_the_skills_dialog_says_when_more_exist_than_it_can_tick() -> None:
+    """Past the cap the list folds and the ticks say how to reach the rest."""
+    rows = tuple(
+        ChannelSkillRow(
+            tenant_id=TENANT,
+            platform="teams",
+            channel_id=GROWTH,
+            skill_id=f"skill_{index}",
+            version="v1",
+            name=f"skill-{index}",
+            owner_agent_name=None,
+            added_by_account_id=None,
+            added_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        for index in range(MAX_LISTED_SKILLS + 1)
+    )
+
+    def form(skills: tuple[ChannelSkillRow, ...]) -> str:
+        settings = ChannelSettings(
+            channel_id=GROWTH,
+            label="growth",
+            picker=None,
+            rule=None,
+            skills=skills,
+        )
+        return json.dumps(
+            channel_settings_form(settings).model_dump(by_alias=True), ensure_ascii=False
+        )
+
+    full, short = form(rows), form(rows[:MAX_LISTED_SKILLS])
+    assert "…and 1 more" in full and "remove some to reach the rest" in full, "more exist"
+    assert f"skill_{MAX_LISTED_SKILLS}" not in full, "only the first ones can be ticked"
+    assert "reach the rest" not in short, "nothing more to reach"
+
+
+async def test_a_server_admin_picks_a_channel_and_changes_environment_and_rule(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     async with _running(db_session_factory, teams_api_fake) as service:
@@ -151,98 +174,23 @@ async def test_a_server_admin_picks_a_channel_and_changes_all_three(
             service,
             _submit(ADMIN, "rule", channel=LEGAL, readers="any", writers="any", extra="copy"),
         )
-        granted = await post_activity(
-            service, _submit(ADMIN, "admins", channel=f"{LEGAL};messageid=1", admins=NEW_ADMIN)
-        )
 
     assert "Growth" in picker and "Legal" in picker, "a server admin picks any listed channel"
     assert_card_renders(opened["task"]["value"]["card"]["content"])
     form = json.dumps(opened)
-    assert "Who can read it" in form and "Entra object ids" in form, "and sees every control"
+    assert "Who can read it" in form, "and sees the rule control"
     assert "science environment" in json.dumps(saved)
     assert "Made legal, a copy of analyst, for this channel." in json.dumps(kept)
-    assert "Channel admins saved." in json.dumps(granted), "a thread id names its channel"
     async with db_session_factory() as session:
         scope = await get_scope(session, scope=ChannelScopeRef(tenant_id=TENANT, channel_id=LEGAL))
         policy = await load_access_policy(session, tenant_id=TENANT)
-        grant = await get_channel_admins(
-            session, tenant_id=TENANT, platform="teams", channel_id=LEGAL
-        )
     assert scope is not None and scope.environment_name == "science"
     assert policy.channel_rules == {LEGAL: ChannelRule(readers="own", writers="own")}
     assert policy.agent_rules == {"legal": AgentRule(runs_in=(LEGAL,))}, "a copy named after it"
-    assert grant is not None and grant.user_ids == (NEW_ADMIN,)
     assert await _events(db_session_factory) == [
         ("panel:environment", "allowed", "completed"),
         ("panel:channel_rule", "allowed", "completed"),
-        ("panel:channel_admins", "allowed", "completed"),
     ], "every write is audited"
-
-
-async def test_a_channel_admin_sets_only_their_own_channels_environment(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
-) -> None:
-    async with _running(db_session_factory, teams_api_fake) as service:
-        picker = json.dumps(await post_activity(service, _open(LEAD)))
-        form = json.dumps(await post_activity(service, _submit(LEAD, "pick", channel=GROWTH)))
-        saved = await post_activity(
-            service, _submit(LEAD, "environment", channel=GROWTH, environment="env:science")
-        )
-        elsewhere = await post_activity(
-            service, _submit(LEAD, "environment", channel=LEGAL, environment="env:science")
-        )
-        typed = await post_activity(service, _submit(LEAD, "pick", channel_id=LEGAL))
-        rule = await post_activity(
-            service, _submit(LEAD, "rule", channel=GROWTH, readers="own", writers="own")
-        )
-        grant = await post_activity(
-            service, _submit(LEAD, "admins", channel=GROWTH, admins=NEW_ADMIN)
-        )
-
-    assert "Growth" in picker and "Legal" not in picker, "only the channels they run"
-    assert "Or a channel id" not in picker, "and no free entry"
-    assert "Environment" in form and "Who can read it" not in form and "Entra" not in form
-    assert "science environment" in json.dumps(saved), "their own channel's environment is theirs"
-    assert elsewhere["task"]["value"] == channel_settings.CHANNELS_NEED_ADMIN
-    assert "Who can read it" not in json.dumps(typed), "a typed id is a server admin's only"
-    assert rule["task"]["value"] == channel_settings.SERVER_ADMIN_ONLY
-    assert grant["task"]["value"] == channel_settings.SERVER_ADMIN_ONLY
-    async with db_session_factory() as session:
-        legal = await get_scope(session, scope=ChannelScopeRef(tenant_id=TENANT, channel_id=LEGAL))
-        policy = await load_access_policy(session, tenant_id=TENANT)
-        admins = await get_channel_admins(
-            session, tenant_id=TENANT, platform="teams", channel_id=GROWTH
-        )
-    assert legal is not None and legal.environment_name is None, "the other channel is untouched"
-    assert policy == TenantAccessPolicy(), "a forged rule writes nothing"
-    assert admins is not None and admins.user_ids == (LEAD,), "nor a forged grant"
-    assert await _events(db_session_factory) == [
-        ("panel:environment", "allowed", "completed"),
-        ("panel:environment", "denied", "needs_admin"),
-        ("panel:channel_rule", "denied", "needs_admin"),
-        ("panel:channel_admins", "denied", "needs_admin"),
-    ]
-
-
-async def test_a_channel_admin_puts_no_open_network_where_only_turns_inside_read(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
-) -> None:
-    """The same `authorize_environment_pick` rule as Discord and Slack."""
-    async with db_session_factory.begin() as session:
-        await set_access_policy(
-            session,
-            tenant_id=TENANT,
-            policy=TenantAccessPolicy(channel_rules={GROWTH: ChannelRule(readers="inside")}),
-        )
-    async with _running(db_session_factory, teams_api_fake) as service:
-        refused = await post_activity(
-            service, _submit(LEAD, "environment", channel=GROWTH, environment="env:science")
-        )
-
-    assert "unrestricted" in json.dumps(refused).lower(), json.dumps(refused)
-    assert await _events(db_session_factory) == [
-        ("panel:environment", "denied", "authz:not_a_reader")
-    ]
 
 
 async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network(
@@ -279,87 +227,7 @@ async def test_a_member_gets_no_dialog_and_no_button(
             for user in (member, LEAD, ADMIN)
         }
 
-    assert refused["task"]["value"] == channel_settings.CHANNELS_NEED_ADMIN
+    assert refused["task"]["value"] == channel_settings.channels_need_admin_message()
     assert "Channel settings" not in routing[member], "a member is offered nothing"
-    assert "Channel settings" in routing[LEAD] and "Channel settings" in routing[ADMIN]
-
-
-async def test_a_server_admin_adds_and_removes_channel_skills_and_a_channel_admin_cannot(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
-) -> None:
-    async with _running(db_session_factory, teams_api_fake) as service:
-        lead_form = json.dumps(await post_activity(service, _submit(LEAD, "pick", channel=GROWTH)))
-        forged = await post_activity(
-            service, _submit(LEAD, "skills", channel=GROWTH, skill_add="pdf-tools")
-        )
-        added = await post_activity(
-            service, _submit(ADMIN, "skills", channel=GROWTH, skill_add="pdf-tools")
-        )
-        unknown = await post_activity(
-            service, _submit(ADMIN, "skills", channel=GROWTH, skill_add="nope")
-        )
-        removed = await post_activity(
-            service, _submit(ADMIN, "skills", channel=GROWTH, skill_remove="skill_lib,forged")
-        )
-        again = await post_activity(
-            service, _submit(ADMIN, "skills", channel=GROWTH, skill_remove="skill_lib")
-        )
-
-    assert "Channel skills" not in lead_form, "a channel's own admins don't see them"
-    assert forged["task"]["value"] == channel_settings.SERVER_ADMIN_ONLY, "nor save them"
-    assert_card_renders(added["task"]["value"]["card"]["content"])
-    form = json.dumps(added, ensure_ascii=False)
-    assert "Added pdf-tools." in form and "`pdf-tools` (v3)" in form, "listed with its version"
-    assert REFUSALS["not_found"] in json.dumps(unknown)
-    assert "Removed 1." in json.dumps(removed) and "No extra skills." in json.dumps(removed), (
-        "a forged id is not counted"
-    )
-    assert "Those were already removed." in json.dumps(again), "a second Save removes nothing"
-    async with db_session_factory() as session:
-        rows = await list_channel_skills(
-            session, tenant_id=TENANT, platform="teams", channel_id=GROWTH
-        )
-    assert rows == [], "removed again"
-    assert await _events(db_session_factory) == [
-        ("panel:channel_skills", "denied", "needs_admin"),
-        ("panel:channel_skills", "allowed", "completed"),
-        ("panel:channel_skills", "denied", "not_found"),
-        ("panel:channel_skills", "allowed", "completed"),
-        ("panel:channel_skills", "allowed", "completed"),
-    ], "every write is audited"
-
-
-def test_the_skills_dialog_says_when_more_exist_than_it_can_tick() -> None:
-    """Past the cap the list folds and the ticks say how to reach the rest."""
-    rows = tuple(
-        ChannelSkillRow(
-            tenant_id=TENANT,
-            platform="teams",
-            channel_id=GROWTH,
-            skill_id=f"skill_{index}",
-            version="v1",
-            name=f"skill-{index}",
-            owner_agent_name=None,
-            added_by_account_id=None,
-            added_at=datetime(2026, 1, 1, tzinfo=UTC),
-        )
-        for index in range(MAX_LISTED_SKILLS + 1)
-    )
-
-    def form(skills: tuple[ChannelSkillRow, ...]) -> str:
-        settings = ChannelSettings(
-            channel_id=GROWTH,
-            label="growth",
-            picker=None,
-            rule=None,
-            admin_user_ids=None,
-            skills=skills,
-        )
-        return json.dumps(
-            channel_settings_form(settings).model_dump(by_alias=True), ensure_ascii=False
-        )
-
-    full, short = form(rows), form(rows[:MAX_LISTED_SKILLS])
-    assert "…and 1 more" in full and "remove some to reach the rest" in full, "more exist"
-    assert f"skill_{MAX_LISTED_SKILLS}" not in full, "only the first ones can be ticked"
-    assert "reach the rest" not in short, "nothing more to reach"
+    assert "Channel settings" not in routing[LEAD]
+    assert "Channel settings" in routing[ADMIN]

@@ -144,12 +144,9 @@ async def _policy_gate(
             subject=(
                 # The hub mounts a person's own agent identity, never an
                 # agent key; a demoted hub admin is held like any member.
-                # A channel admin keeps their grants: an isolated channel's
-                # own agent answers them in their hub, as it does an admin.
                 build_subject(
                     is_admin=False,
                     platform_user_id=auth.platform_user_id,
-                    administered_channel_ids=auth.administered_channel_ids,
                 )
                 if pin_exempt
                 else mcp_subject(auth)

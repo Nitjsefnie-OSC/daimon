@@ -17,7 +17,6 @@ import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.anthropic_spend import spend_limit_error
-from daimon.core.channel_admins import InvalidChannelAdminIds
 from daimon.core.channel_budget import ChannelBudgetError
 from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.cron import InvalidScheduleError
@@ -116,8 +115,6 @@ def _guidance(exc: BaseException) -> str | None:
         return "The notebook publishing limit has been reached. Try again later."
     if isinstance(exc, InvalidScheduleError):
         return "That schedule isn't valid. Check its cron expression and timezone, then try again."
-    if isinstance(exc, InvalidChannelAdminIds):
-        return "That admin selection isn't valid. Check the selected people and try again."
     return None
 
 

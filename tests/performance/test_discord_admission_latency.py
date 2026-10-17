@@ -36,7 +36,6 @@ from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_platform_role_ids
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_write import set_fields
@@ -130,15 +129,6 @@ async def _seed(
         )
         await make_channel_budget(
             session, tenant=tenant, channel_id=channel_id, limit_usd=Decimal("100")
-        )
-        await set_channel_admins(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id=channel_id,
-            role_ids=[],
-            user_ids=["200000000000000000"],
-            actor_account_id=None,
         )
     if isolated:
         await set_access_policy(
@@ -308,7 +298,6 @@ async def _run_batch(
         "set_role",
         "set_platform_role_ids",
         "load_access_policy",
-        "load_administered_channel_ids",
         "resolve_config",
         "resolve_agent",
         "resolve_environment",

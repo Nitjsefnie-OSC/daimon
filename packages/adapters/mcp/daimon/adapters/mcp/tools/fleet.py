@@ -213,7 +213,6 @@ class HostFleetToolService:
             or parent.agent_id != caller.chat_agent_id
             or parent.subject.via_agent_key
             or (parent.subject.is_admin and not caller.is_admin)
-            or not parent.subject.administered_channel_ids <= caller.administered_channel_ids
             or caller.is_external
             or caller.agent_id is not None
         ):

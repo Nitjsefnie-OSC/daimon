@@ -560,8 +560,7 @@ def authorize_coding_token(
     """Whether `subject` may mint a coding-tool token pressed in `channel_id`, and its binding.
 
     The binding is `coding_token_channel`'s; `authorize(MINT_CODING_TOKEN)`
-    then decides the mint at that place, so a server admin mints as before and
-    a channel admin only a token bound to a channel they administer.
+    then decides the mint at that place. A server admin may mint the token.
     """
     bound_channel_id = coding_token_channel(policy, agent=agent, channel_id=channel_id)
     decision = authorize(

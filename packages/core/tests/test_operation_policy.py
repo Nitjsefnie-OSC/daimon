@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import get_args
 
-from daimon.core.agent_reach import WIDE_SHARING_OPERATIONS
 from daimon.core.operation_policy import (
     OperationKind,
     TargetFacts,
@@ -41,59 +40,10 @@ def test_attachment_allows_admin_on_managed_agent() -> None:
     )
 
 
-def test_github_connect_for_an_agent_follows_github_grant() -> None:
-    assert "github_connect" in WIDE_SHARING_OPERATIONS
-    for managed in (False, True):
-        for local in (False, True):
-            for held in (False, True):
-                target = TargetFacts(
-                    is_daimon_managed=managed,
-                    is_reachable_in_tenant=True,
-                    is_local_to_caller_channels=local,
-                    is_held_by_caller=held,
-                )
-                for is_admin in (False, True):
-                    assert decide_operation(
-                        "github_connect", is_admin=is_admin, target=target
-                    ) == decide_operation("github_grant", is_admin=is_admin, target=target)
-                assert decide_operation("github_connect", is_admin=False, target=target) == (
-                    "allow" if local and held and not managed else "needs_admin"
-                )
-    assert needs_reachability_read("github_connect", is_admin=False, is_daimon_managed=False)
-    assert not needs_reachability_read("github_connect", is_admin=True, is_daimon_managed=False)
-
-
 def test_server_wide_github_connect_stays_admin_only() -> None:
     no_target = TargetFacts(is_daimon_managed=False, is_reachable_in_tenant=False)
     assert decide_operation("github_connect", is_admin=False, target=no_target) == "needs_admin"
     assert decide_operation("github_connect", is_admin=True, target=no_target) == "allow"
-
-
-def test_github_grant_requires_server_admin_or_local_channel_admin_holding_agent() -> None:
-    assert "github_grant" in WIDE_SHARING_OPERATIONS
-    for local in (False, True):
-        for held in (False, True):
-            target = TargetFacts(
-                is_daimon_managed=False,
-                is_reachable_in_tenant=True,
-                is_local_to_caller_channels=local,
-                is_held_by_caller=held,
-            )
-            assert decide_operation("github_grant", is_admin=False, target=target) == (
-                "allow" if local and held else "needs_admin"
-            )
-            assert decide_operation("github_grant", is_admin=True, target=target) == "allow"
-    assert needs_reachability_read("github_grant", is_admin=False, is_daimon_managed=False)
-    assert not needs_reachability_read("github_grant", is_admin=True, is_daimon_managed=False)
-    managed = TargetFacts(
-        is_daimon_managed=True,
-        is_reachable_in_tenant=True,
-        is_local_to_caller_channels=True,
-        is_held_by_caller=True,
-    )
-    assert decide_operation("github_grant", is_admin=False, target=managed) == "needs_admin"
-    assert decide_operation("github_grant", is_admin=True, target=managed) == "allow"
-    assert not needs_reachability_read("github_grant", is_admin=False, is_daimon_managed=True)
 
 
 def test_posted_token_operations_allow_non_admin_on_shared_agent() -> None:
@@ -195,56 +145,15 @@ def test_every_operation_kind_has_a_rule() -> None:
                 )
 
 
-def test_channel_admin_locality_allows_reachable_agent_but_not_managed_one() -> None:
-    local = TargetFacts(
-        is_daimon_managed=False,
-        is_reachable_in_tenant=True,
-        is_local_to_caller_channels=True,
-        is_held_by_caller=True,
-    )
-    managed_local = local.model_copy(update={"is_daimon_managed": True})
-    for operation in ("agent_spec_edit", "key_replace", "key_remove", "mcp_remove", "repo_bind"):
-        assert decide_operation(operation, is_admin=False, target=local) == "allow", operation
-        assert (
-            decide_operation(operation, is_admin=False, target=managed_local) == "managed_agent"
-        ), f"{operation}: a managed agent stays refused to a channel admin"
-
-
-def test_locality_counts_only_on_an_agent_that_is_the_channel_admins() -> None:
-    """A local agent a channel admin did not make, nor got from a server admin, is not theirs."""
-    unheld = TargetFacts(
-        is_daimon_managed=False, is_reachable_in_tenant=True, is_local_to_caller_channels=True
-    )
-    held_elsewhere = unheld.model_copy(
-        update={"is_local_to_caller_channels": False, "is_held_by_caller": True}
-    )
-    for operation in ("agent_spec_edit", "key_replace", "mcp_remove", "repo_bind", "skill_add"):
-        assert decide_operation(operation, is_admin=False, target=unheld) == "needs_admin", (
-            f"{operation}: locality alone no longer makes an agent a channel admin's"
-        )
-        assert decide_operation(operation, is_admin=False, target=held_elsewhere) == (
-            "needs_admin"
-        ), f"{operation}: an agent of theirs that lost its locality needs a server admin"
-
-
-def test_locality_defaults_off_so_reachable_agent_still_needs_admin() -> None:
-    assert _facts(managed=False, reachable=True).is_local_to_caller_channels is False, (
-        "locality is off by default"
-    )
+def test_reachable_agent_still_needs_admin() -> None:
     outcome = decide_operation(
         "agent_spec_edit", is_admin=False, target=_facts(managed=False, reachable=True)
     )
-    assert outcome == "needs_admin", "no channel admins configured means no change"
+    assert outcome == "needs_admin"
 
 
 def test_skill_add_and_remove_follow_the_spec_family() -> None:
-    """Managed refused for all; admin allowed; channel admin on local; unrouted refused."""
-    local = TargetFacts(
-        is_daimon_managed=False,
-        is_reachable_in_tenant=True,
-        is_local_to_caller_channels=True,
-        is_held_by_caller=True,
-    )
+    """Managed refused for all; admin allowed; other callers refused."""
     for operation in ("skill_add", "skill_remove"):
         managed = decide_operation(
             operation, is_admin=True, target=_facts(managed=True, reachable=False)
@@ -254,9 +163,6 @@ def test_skill_add_and_remove_follow_the_spec_family() -> None:
         assert decide_operation(operation, is_admin=True, target=shared) == "allow", operation
         assert decide_operation(operation, is_admin=False, target=shared) == "needs_admin", (
             f"{operation}: a member may not change an agent others talk to"
-        )
-        assert decide_operation(operation, is_admin=False, target=local) == "allow", (
-            f"{operation}: a channel admin may change an agent local to their channels"
         )
         unrouted = _facts(managed=False, reachable=False)
         assert decide_operation(operation, is_admin=False, target=unrouted) == "needs_admin", (

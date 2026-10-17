@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
+from daimon.adapters.mcp.tools._authz_facts import mcp_place
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, AgentRef, Place, SessionFacts, Surface, authorize
+from daimon.core.authz import Place
 from daimon.core.stores.domain import Role
 
 _POLICY = TenantAccessPolicy(
@@ -44,46 +43,3 @@ def test_mcp_place_is_only_a_bound_agent_keys_channel(
     assert mcp_place(_caller(agent_key=agent_key, bound=bound)) == expected, (
         "only an agent key's own binding places an MCP call in a channel"
     )
-
-
-def test_a_bound_key_holds_no_channel_admin_grants_even_if_its_account_does() -> None:
-    """The binding narrows where the key runs; it never lends it the minter's grants."""
-    auth = replace(
-        _caller(agent_key=True, bound="c-1"), administered_channel_ids=frozenset({"c-1", "c-2"})
-    )
-    subject = mcp_subject(auth)
-
-    assert subject.via_agent_key, "an agent key is marked as one"
-    assert subject.administered_channel_ids == frozenset(), "and holds no grants"
-    assert not authorize(
-        _POLICY,
-        subject=subject,
-        action=Action.CONFIGURE,
-        surface=Surface.CONFIG,
-        agent=AgentRef.of("beta"),
-        place=mcp_place(auth),
-    ), "a grant on c-2 never lets a key bound to c-1 configure c-2's pinned agent"
-    assert not authorize(
-        _POLICY,
-        subject=subject,
-        action=Action.RUN_AGENT,
-        surface=Surface.AGENT_CHAT,
-        agent=AgentRef.of("beta"),
-        place=mcp_place(auth),
-    ), "nor run it outside the key's own channel"
-    assert not authorize(
-        _POLICY,
-        subject=subject,
-        action=Action.READ_SESSION,
-        surface=Surface.HUB,
-        origin_channel_ids=frozenset({"c-1"}),
-        session=SessionFacts(channel="c-2", seal_ids=frozenset({"c-2"}), owned=False),
-    ), "nor read another member's sealed c-2 conversation"
-    assert authorize(
-        _POLICY,
-        subject=subject,
-        action=Action.RUN_AGENT,
-        surface=Surface.AGENT_CHAT,
-        agent=AgentRef.of("acme"),
-        place=mcp_place(auth),
-    ), "inside its own channel the pin admits it"

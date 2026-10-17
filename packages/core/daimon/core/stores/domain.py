@@ -99,20 +99,6 @@ class AccountIdentityRow(BaseModel):
     is_external: bool = False
 
 
-class ChannelAdminsRow(BaseModel):
-    """One channel's admins beyond the server admins: role ids and user ids."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    platform: str
-    channel_id: str
-    role_ids: tuple[str, ...]
-    user_ids: tuple[str, ...]
-    updated_by_account_id: uuid.UUID | None
-    updated_at: datetime
-
-
 class ChannelSkillRow(BaseModel):
     """One extra skill a channel's sessions run with, at the version it was added at."""
 

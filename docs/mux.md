@@ -2868,7 +2868,7 @@ separate installation steps; this persistence API alone enables no fleet task.
 The financial grant ceiling covers workers only. The ordinary orchestrator root
 retains its normal billing and input path; whole-root financial and input
 controls must be installed separately before a fleet live retry.
-Operator policy mutations can verify Discord authority through `core.channel_admins.verify_backend_actor`. It reads the registered guild, current owner/roles/member and existing account binding with bounded requests; unknown or revoked authority refuses. Verification never creates an account, promotes a stored role or saves an authorization token. The mutation owner still checks its policy revision and writes its audit atomically.
+Operator policy mutations can verify Discord authority through `core.native_admins.verify_backend_actor`. It reads the registered guild, current owner/roles/member and existing account binding with bounded requests; unknown or revoked authority refuses. Verification never creates an account, promotes a stored role or saves an authorization token. The mutation owner still checks its policy revision and writes its audit atomically.
 
 ### Operator tenant backend policy
 

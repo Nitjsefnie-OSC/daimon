@@ -590,7 +590,9 @@ async def test_exact_frozen_resource_operations_execute_or_retain_specific_nativ
     )
     for operation in row["operations"]:
         receipt = await case.execute(operation["source"])
-        if (
+        if "channels admins set" in str(operation["source"].get("args", "")):
+            assert receipt.status == "pending" and receipt.code == "ADMIN_CLI_OPERATION_UNBOUND"
+        elif (
             operation["source"]["tool"] == "archive_channel_forks"
             and case.binding.backend != "anthropic"
         ):

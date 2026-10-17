@@ -139,8 +139,9 @@ and `delete_skill` are admin-only.
 
 Channel and agent rules are admin-only. "Make X the only agent in C and keep
 C isolated" is: `set_agent_default(X, channel_id=C)`, then
-`set_channel_rule(C, readers="own", writers="own")`. Then `set_channel_admins`
-and `set_channel_budget` for C if asked. Publishing from inside such a channel
+`set_channel_rule(C, readers="own", writers="own")`. Set the channel budget
+with `set_channel_budget` if asked. Server or workspace admins manage agents
+and channel settings. Publishing from inside such a channel
 asks the requester first.
 
 When creating an agent and no model was requested, use the built-in Daimon's

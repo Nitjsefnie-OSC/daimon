@@ -42,12 +42,11 @@ class TestDiscordRuntime:
             "resolver_cache",
             "turn_deps",
             "mcp_token_probe",
-            "group_members",
             "owner_key",
             "ownership_lost",
             "gateway_lease",
             "fleet_card_factory",
-        }, f"expected 14 fields, got {fields}"
+        }, f"expected 13 fields, got {fields}"
         factory_field = next(
             field
             for field in dataclasses.fields(DiscordRuntime)

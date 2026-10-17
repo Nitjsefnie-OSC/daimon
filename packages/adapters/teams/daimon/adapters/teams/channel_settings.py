@@ -1,13 +1,10 @@
 """The channel settings dialog, opened from Who answers where: environment,
-permissions, channel admins and channel skills of one channel the caller picks.
+permissions and channel skills of one channel the caller picks.
 
 The panel lives in the 1:1 chat, so the caller names the channel. The rights
-mirror Discord and Slack: a channel admin sets only their own channels'
-environment, through `authorize_environment_pick`; permissions and channel
-admin grants and channel skills stay with server admins, permissions go
-through core `set_channel_rule` and skills through `add_skill_to_channel`.
-Every submit re-verifies the clicker and re-reads their grants, so a stale or
-forged card grants nothing, and every write, allowed or not, is audited with
+mirror Discord and Slack: server admins set environments, permissions, and
+channel skills. Permissions go through core `set_channel_rule`; skills use
+`add_skill_to_channel`. Every submit re-verifies the clicker, and writes are audited with
 `record_panel_write`.
 """
 
@@ -35,12 +32,6 @@ from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.answering_map import load_answering_map
 from daimon.core.authz import Subject, build_subject
-from daimon.core.channel_admins import (
-    ChannelAdminCaller,
-    InvalidChannelAdminIds,
-    load_live_subject,
-    normalize_channel_admin_ids,
-)
 from daimon.core.channel_environments import (
     NOT_OFFERED_NOTE,
     authorize_environment_pick,
@@ -56,6 +47,7 @@ from daimon.core.channel_environments import (
     plan_environment_picker,
     save_scope_environment,
 )
+from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.channel_rules import (
     ChannelRuleRefused,
     as_readers,
@@ -64,18 +56,12 @@ from daimon.core.channel_rules import (
     set_channel_rule,
 )
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel
-from daimon.core.config import channel_admins_enabled
 from daimon.core.errors import DaimonError, SkillsListTruncatedError
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.permissions import channel_rule, own_reader_channels
 from daimon.core.routine_delivery import teams_channel_of
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.channel_admins import (
-    delete_channel_admins,
-    get_channel_admins,
-    list_channel_admins,
-    set_channel_admins,
-)
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
 from daimon.core.stores.teams_installations import list_teams_installations
 from microsoft_teams.api import (
@@ -90,16 +76,14 @@ log = structlog.get_logger(__name__)
 ChannelNames = Callable[[str], Awaitable[Mapping[str, str | None]]]
 """One team's standard channels by id, with their names; empty when unreadable."""
 
-CHANNELS_NEED_ADMIN: Final = "Only a server admin or this channel's admin can change this."
 SERVER_ADMIN_ONLY: Final = (
-    "Only a server admin can change a channel's permissions, admins or skills. Nothing changed."
+    "Only a server admin can change a channel's permissions or skills. Nothing changed."
 )
 SKILLS_UNREADABLE: Final = "Couldn't read all the skills.\n\nNo skill was added."
 UNKNOWN_CHANNEL: Final = "That isn't a Teams channel id. Nothing changed."
 _AUDIT_OPS: Final[Mapping[cards.ChannelOp, PanelOp]] = {
     "environment": "environment",
     "rule": "channel_rule",
-    "admins": "channel_admins",
     "skills": "channel_skills",
 }
 _MAX_ENVIRONMENT_OPTIONS: Final = 99
@@ -107,9 +91,7 @@ _MAX_OPTION_VALUE: Final = 250
 
 
 def channels_need_admin_message() -> str:
-    return (
-        CHANNELS_NEED_ADMIN if channel_admins_enabled() else "Only a server admin can change this."
-    )
+    return "Only a server admin can change this."
 
 
 async def _guarded[T](work: Awaitable[T], failed: T) -> T:
@@ -122,10 +104,8 @@ def _channel(raw: object) -> str | None:
     if channel is None:
         return None
     try:
-        normalized, _, _ = normalize_channel_admin_ids(
-            "teams", channel_id=channel, role_ids=(), user_ids=()
-        )
-    except InvalidChannelAdminIds:
+        normalized = normalize_channel_id("teams", channel)
+    except InvalidChannelId:
         return None
     return normalized
 
@@ -153,9 +133,7 @@ class ChannelSettingsDialog:
                 session,
                 tenant_id=actor.tenant_id,
                 platform="teams",
-                caller=ChannelAdminCaller(
-                    platform_user_id=actor.user_id, is_server_admin=actor.is_admin
-                ),
+                caller=AdminCaller(platform_user_id=actor.user_id, is_server_admin=actor.is_admin),
             )
 
     async def _listed(self, tenant_id: uuid.UUID) -> dict[str, str | None]:
@@ -170,18 +148,9 @@ class ChannelSettingsDialog:
         self, actor: Actor, subject: Subject, notice: str | None = None
     ) -> TaskModuleInvokeResponse:
         listed = await self._listed(actor.tenant_id)
-        if actor.is_admin:
-            async with self._runtime.sessionmaker() as session:
-                policy = await load_access_policy(session, tenant_id=actor.tenant_id)
-                grants = await list_channel_admins(
-                    session, tenant_id=actor.tenant_id, platform="teams"
-                )
-            # Channels already set up stay reachable when their team can't be listed.
-            extra = [*own_reader_channels(policy), *(grant.channel_id for grant in grants)]
-            channels = cards.visible_channels(listed, extra)
-        else:
-            mine = sorted(subject.administered_channel_ids)
-            channels = cards.visible_channels({c: listed.get(c) for c in mine}, ())
+        async with self._runtime.sessionmaker() as session:
+            policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+        channels = cards.visible_channels(listed, own_reader_channels(policy))
         form = cards.channel_picker_form(channels, free_entry=actor.is_admin, notice=notice)
         return dialog("Channel settings", form)
 
@@ -190,7 +159,7 @@ class ChannelSettingsDialog:
         if actor is None:
             return dialog_message(DENIED)
         subject = await self._subject(actor)
-        if not actor.is_admin and not subject.administered_channel_ids:
+        if not actor.is_admin:
             return dialog_message(channels_need_admin_message())
         return await self._picker(actor, subject)
 
@@ -210,9 +179,6 @@ class ChannelSettingsDialog:
                 default=self._runtime.deployment_default,
             )
             policy = await load_access_policy(session, tenant_id=tenant_id)
-            grant = await get_channel_admins(
-                session, tenant_id=tenant_id, platform="teams", channel_id=channel_id
-            )
             skills = await list_channel_skills(
                 session, tenant_id=tenant_id, platform="teams", channel_id=channel_id
             )
@@ -247,9 +213,6 @@ class ChannelSettingsDialog:
             label=cards.channel_label(channel_id, name),
             picker=picker,
             rule=channel_rule_status(policy, channel_id) if actor.is_admin else None,
-            admin_user_ids=(grant.user_ids if grant else ())
-            if actor.is_admin and channel_admins_enabled()
-            else None,
             skills=tuple(skills) if actor.is_admin else None,
         )
         return dialog("Channel settings", cards.channel_settings_form(settings, notice=notice))
@@ -277,15 +240,12 @@ class ChannelSettingsDialog:
         if op not in get_args(cards.ChannelOp):
             return await self._picker(actor, subject)
         op = cast("cards.ChannelOp", op)
-        if op == "admins" and not channel_admins_enabled():
-            await self._audit(actor, "channel_admins", outcome="denied", reason="disabled")
-            return dialog_message("Channel admins are disabled. Nothing changed.")
         typed = data.get("channel_id") if actor.is_admin else None
         channel_id = _channel(typed or data.get("channel"))
         if channel_id is None:
             return await self._picker(actor, subject, UNKNOWN_CHANNEL)
         audit_op = _AUDIT_OPS.get(op)
-        if not actor.is_admin and channel_id not in subject.administered_channel_ids:
+        if not actor.is_admin:
             if audit_op is not None:
                 await self._audit(actor, audit_op, outcome="denied", reason="needs_admin")
             return dialog_message(channels_need_admin_message())
@@ -301,7 +261,7 @@ class ChannelSettingsDialog:
         elif audit_op == "channel_skills":
             notice = await self._save_skills(actor, channel_id, data)
         else:
-            notice = await self._save_admins(actor, channel_id, data)
+            notice = None
         return await self._settings(actor, subject, channel_id, notice)
 
     async def _save_environment(
@@ -407,43 +367,6 @@ class ChannelSettingsDialog:
             return f"{exc} Nothing changed."
         await self._audit(actor, "channel_rule", outcome="allowed", reason="completed")
         return "\n\n".join(change.notes)
-
-    async def _save_admins(
-        self,
-        actor: Actor,
-        channel_id: str,
-        data: Mapping[str, object],
-    ) -> str:
-        """A server admin's grant: Entra object ids, as the chat tools take them."""
-        try:
-            _, _, users = normalize_channel_admin_ids(
-                "teams",
-                channel_id=channel_id,
-                role_ids=(),
-                user_ids=cards.parse_admin_ids(str(data.get("admins") or "")),
-            )
-        except InvalidChannelAdminIds as exc:
-            await self._audit(actor, "channel_admins", outcome="error", reason="invalid_ids")
-            return f"{exc}. Nothing changed."
-        account_id = await get_or_create_account(self._runtime, actor)
-        async with self._runtime.sessionmaker.begin() as session:
-            if users:
-                await set_channel_admins(
-                    session,
-                    tenant_id=actor.tenant_id,
-                    platform="teams",
-                    channel_id=channel_id,
-                    role_ids=[],
-                    user_ids=users,
-                    actor_account_id=account_id,
-                )
-            else:
-                await delete_channel_admins(
-                    session, tenant_id=actor.tenant_id, platform="teams", channel_id=channel_id
-                )
-        await self._audit(actor, "channel_admins", outcome="allowed", reason="completed")
-        log.info("teams.channel_settings.channel_admins_saved", users=len(users))
-        return "Channel admins saved." if users else "The channel has no admins of its own now."
 
     async def _save_skills(
         self,

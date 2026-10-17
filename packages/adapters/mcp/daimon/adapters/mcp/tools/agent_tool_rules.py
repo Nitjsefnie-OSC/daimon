@@ -40,7 +40,7 @@ def _require_rule_access(auth: AuthIdentity, channel_id: str | None) -> None:
     )
     if not decision:
         record_authz_denial(action, decision.reason)
-        raise ToolError("Only an admin of this workspace or channel can manage its tool rules.")
+        raise ToolError("Only a workspace or server admin can manage tool rules.")
     record_policy_decision(action, "allow")
 
 
@@ -162,14 +162,14 @@ async def _clear(
 
 
 def register_agent_tool_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("tenant:read")})
+    @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
     async def list_agent_tool_rules(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, agent_name: str, channel_id: str | None = None
     ) -> dict[str, object]:
-        """List an agent's rules. Channel admins pass their channel id."""
+        """List an agent's tool rules, optionally for one channel."""
         return await _list(runtime, await _auth(ctx), agent_name, channel_id)
 
-    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def set_agent_tool_rule(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
@@ -178,15 +178,15 @@ def register_agent_tool_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         scope: store.Scope = "chat",
         channel_id: str | None = None,
     ) -> dict[str, object]:
-        """Set one agent's tool rule. Channel admins may act in their channels."""
+        """Set one agent's tool rule."""
         return await _set(runtime, await _auth(ctx), agent_name, tool_key, rule, scope, channel_id)
 
-    @mcp.tool(tags={"admin", "channel-admin", *scope_tags("channels:write")})
+    @mcp.tool(tags={"admin", *scope_tags("channels:write")})
     async def clear_agent_tool_rule(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         agent_name: str,
         tool_key: str,
         channel_id: str | None = None,
     ) -> dict[str, object]:
-        """Clear one agent's tool rule. Channel admins may act in their channels."""
+        """Clear one agent's tool rule."""
         return await _clear(runtime, await _auth(ctx), agent_name, tool_key, channel_id)
