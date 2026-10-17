@@ -7,7 +7,7 @@ import base64
 import httpx
 import pytest
 from daimon.core.teams_graph import GraphClient, GraphUnavailable
-from daimon.core.teams_sharepoint import MAX_FOLDER_DEPTH, DriveFolder, SharePoint
+from daimon.core.teams_sharepoint import MAX_FOLDER_DEPTH, DriveFolder, DriveItem, SharePoint
 
 _FOLDER = DriveFolder(drive_id="b!d", item_id="general")
 _LIBRARY = "https://example.sharepoint.com/sites/team/Shared%20Documents"
@@ -94,3 +94,71 @@ async def test_a_file_directly_in_the_folder_costs_no_folder_read() -> None:
     seen: list[str] = []
     await _sharepoint(seen).download_url(f"{_LIBRARY}/general/a.xlsx", folder=_FOLDER)
     assert seen[1:] == ["/v1.0/drives/b!d/items/file-in-general"], "two calls, no folder read"
+
+
+_ITEM = DriveItem.model_validate(
+    {"id": "deck", "name": "deck.pptx", "eTag": '"{A},1"', "parentReference": {"driveId": "b!d"}}
+)
+
+
+def _writer(status: int, seen: list[httpx.Request]) -> SharePoint:
+    """Graph answering every write with `status`; a 200 returns the new version."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if status != 200:
+            return httpx.Response(status, json={"error": {"code": "refused"}})
+        return httpx.Response(200, json={"id": "deck", "name": "deck.pptx", "eTag": '"{A},2"'})
+
+    async def token() -> str:
+        return "graph-token"
+
+    return SharePoint(GraphClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)), token))
+
+
+async def test_shared_item_carries_the_etag_a_replace_needs() -> None:
+    """The item read by drive and id brings its eTag, the version a later write checks."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/v1.0/shares/"):
+            return httpx.Response(200, json={"id": "deck", "parentReference": {"driveId": "b!d"}})
+        ref = {"driveId": "b!d", "id": "general"}
+        return httpx.Response(200, json={"id": "deck", "eTag": '"{A},1"', "parentReference": ref})
+
+    async def token() -> str:
+        return "graph-token"
+
+    graph = GraphClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)), token)
+    item = await SharePoint(graph).shared_item(f"{_LIBRARY}/general/deck.pptx", folder=_FOLDER)
+    assert item.e_tag == '"{A},1"', "the item's eTag is read, not the share's view of it"
+
+
+async def test_replace_puts_the_bytes_over_the_item_only_at_its_etag() -> None:
+    """One PUT to the item's content, with `If-Match`; the reply is the new version."""
+    seen: list[httpx.Request] = []
+    saved = await _writer(200, seen).replace(_ITEM, b"new deck", etag='"{A},1"')
+    assert [(r.method, r.url.path) for r in seen] == [
+        ("PUT", "/v1.0/drives/b!d/items/deck/content")
+    ], "one write, to the item itself rather than by name"
+    assert seen[0].headers["If-Match"] == '"{A},1"', "the write is conditional on the eTag"
+    assert seen[0].headers["Authorization"] == "Bearer graph-token", "the token still goes"
+    assert seen[0].content == b"new deck", "the staged bytes are the body"
+    assert saved.e_tag == '"{A},2"', "the new version's eTag comes back"
+    assert saved.parent_reference is not None and saved.parent_reference.drive_id == "b!d", (
+        "a reply without its drive keeps the item's"
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "why"),
+    [(412, "changed since it was read"), (423, "locked"), (403, "refused")],
+)
+async def test_replace_raises_graphs_refusal_with_its_status_and_never_retries(
+    status: int, why: str
+) -> None:
+    """The caller tells a changed, locked or refused file apart by the status."""
+    seen: list[httpx.Request] = []
+    with pytest.raises(GraphUnavailable) as refused:
+        await _writer(status, seen).replace(_ITEM, b"new deck", etag='"{A},1"')
+    assert refused.value.status == status, f"a file {why} keeps Graph's status"
+    assert len(seen) == 1, "a write is never retried"

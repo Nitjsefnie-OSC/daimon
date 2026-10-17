@@ -10,9 +10,12 @@ one, never one from another site, library or folder. Inside means the
 folder's id is among the file's parents' ids, which survive a rename and need
 no case folding or percent-decoding. Uploads never overwrite
 (`conflictBehavior=rename`) and go up in one `PUT`: upload sessions need
-`Sites.ReadWrite.All` app-only. An uploaded item's first-page thumbnail is a
-pre-authorised URL too, which its caller fetches without a token. Any
-failure raises `GraphUnavailable`.
+`Sites.ReadWrite.All` app-only. `replace` is the one write over an existing
+file: a new version of an item found inside the folder, sent with the eTag it
+was read at (`If-Match`), so a file changed since then is refused (412), not
+overwritten; SharePoint's version history keeps the earlier ones. An
+uploaded item's first-page thumbnail is a pre-authorised URL too, which its
+caller fetches without a token. Any failure raises `GraphUnavailable`.
 """
 
 from __future__ import annotations
@@ -55,6 +58,8 @@ class DriveItem(_Model):
     id: str
     name: str | None = None
     web_url: str | None = None
+    # Changes with every write to the item; what `replace` sends as `If-Match`.
+    e_tag: str | None = None
     parent_reference: _Parent | None = None
     download_url: str | None = Field(default=None, alias="@microsoft.graph.downloadUrl")
 
@@ -125,8 +130,30 @@ class SharePoint:
         sets = _parse(_ThumbnailSets, data).value
         return sets[0].large.url if sets and sets[0].large is not None else None
 
+    async def replace(self, item: DriveItem, content: bytes, *, etag: str) -> DriveItem:
+        """Write `content` over `item` as a new version, only while its eTag is still `etag`.
+
+        Graph answers 412 when the file changed since `etag` was read, and 423 while
+        it is locked, such as open in a desktop app; both raise `GraphUnavailable`.
+        """
+        if item.parent_reference is None or item.parent_reference.drive_id is None:
+            raise GraphUnavailable("item without a drive")
+        drive = item.parent_reference.drive_id
+        target = f"{GRAPH_ROOT}/drives/{path_segment(drive)}/items/{path_segment(item.id)}/content"
+        data = await self._graph.send(
+            "PUT", target, content=content, headers={"If-Match": etag}, timeout=UPLOAD_TIMEOUT_S
+        )
+        saved = _parse(DriveItem, data)
+        if saved.parent_reference is None or saved.parent_reference.drive_id is None:
+            saved = saved.model_copy(update={"parent_reference": _Parent(drive_id=drive)})
+        return saved
+
     async def download_url(self, content_url: str, *, folder: DriveFolder) -> str:
         """The pre-authorised download URL of the shared file at `content_url`, inside `folder`."""
+        return download_url_of(await self.shared_item(content_url, folder=folder))
+
+    async def shared_item(self, content_url: str, *, folder: DriveFolder) -> DriveItem:
+        """The shared file at `content_url`, read by drive and id, only inside `folder`."""
         # Teams sends the path unencoded: a `#` or `?` there is part of the file's name.
         url = _url(content_url.replace("#", "%23").replace("?", "%3F"))
         parts = url.path.strip("/").split("/")
@@ -148,10 +175,7 @@ class SharePoint:
         # folder may be one its members cannot open, and the URL works for anyone.
         if not await self._is_inside(item, folder):
             raise GraphUnavailable("outside the channel's folder", status=200)
-        download = item.download_url
-        if download is None or not is_sharepoint_host(_url(download)):
-            raise GraphUnavailable("no SharePoint download URL", status=200)
-        return download
+        return item
 
     async def _is_inside(self, item: DriveItem, folder: DriveFolder) -> bool:
         """Whether `folder` is among `item`'s parents, up to `MAX_FOLDER_DEPTH` levels."""
@@ -166,6 +190,14 @@ class SharePoint:
             )
             parent = _parse(DriveItem, data).parent_reference
         return False
+
+
+def download_url_of(item: DriveItem) -> str:
+    """`item`'s pre-authorised download URL; `GraphUnavailable` unless it is on SharePoint."""
+    download = item.download_url
+    if download is None or not is_sharepoint_host(_url(download)):
+        raise GraphUnavailable("no SharePoint download URL", status=200)
+    return download
 
 
 def file_link(name: str, web_url: str | None) -> str:
