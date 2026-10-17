@@ -78,7 +78,7 @@ from daimon.core.teams_file_offers import (
     verify_offer,
 )
 from daimon.core.teams_graph import GraphUnavailable, is_sharepoint_host
-from daimon.core.teams_sharepoint import SAVED_FILES_HEADING, DriveItem, file_link
+from daimon.core.teams_sharepoint import DriveItem, file_link
 from microsoft_teams.api import (
     Attachment,
     FileConsentCard,
@@ -408,7 +408,7 @@ class TeamsOutputDelivery:
             sleep=self._sleep,
         )
         # Links and images in one edit of the answer; refused, each goes as on its own.
-        text = "\n".join([SAVED_FILES_HEADING, *links])
+        text = "\n".join(links)
         if not links:
             await self._show_previews(inbound, previews, append)
         elif not (previews and append is not None and await append(text, previews)):
@@ -571,8 +571,7 @@ class TeamsOutputDelivery:
             return False
         name = display_filename_for(file.filename, file.mime_type)
         item = await files.upload(inbound, name, file.content)
-        link = file_link(sanitize_title(item.name or name), item.web_url)
-        text = f"{SAVED_FILES_HEADING}\n{link}"
+        text = file_link(sanitize_title(item.name or name), item.web_url)
         if append is not None and await append(text, ()):
             return True
         if inbound.unprompted:

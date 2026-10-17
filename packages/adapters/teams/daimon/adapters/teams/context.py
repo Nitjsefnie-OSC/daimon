@@ -30,7 +30,7 @@ from daimon.core.teams_graph import (
     linked_files,
     message_text,
 )
-from daimon.core.teams_sharepoint import SAVED_FILES_HEADING
+from daimon.core.teams_sharepoint import file_link
 from daimon.core.thread_participation import ClassifierMessage
 from daimon.core.untrusted import untrusted_block
 
@@ -43,14 +43,14 @@ HISTORY_IMAGE_LIMIT = 4
 HISTORY_FILE_LIMIT = 10
 # What the agent does, in a channel where files cannot be saved, when asked for one.
 _FILES_HINT = (
-    "Files you make cannot be saved in this channel: Microsoft Graph refused daimon its Files "
-    "folder. A Microsoft 365 admin must grant daimon's app the Files.ReadWrite.All application "
-    "permission, with admin consent. Say so when someone asks for a file here; do not swap in "
-    "an artifact, report or notebook unless they ask for one."
+    "Files can't be attached in this channel until a Microsoft 365 admin grants daimon's app "
+    "the Files.ReadWrite.All application permission, with admin consent. Mention it only if "
+    "someone asks for a file here; do not swap in an artifact, report or notebook unless they "
+    "ask for one."
 )
 _GROUP_FILES_HINT = (
-    "Files you make cannot be shared in a group chat. Say so when someone asks for a file "
-    "here; they can ask you for it in their 1:1 chat with you."
+    "Files can't be attached in a group chat. Mention it only if someone asks for a file "
+    "here: they can ask you for it in their 1:1 chat with you."
 )
 # A 1:1 chat has no Graph thumbnails: the agent may picture a document itself
 # (`output_delivery.is_preview_output`). Page one only: typst's PNG export of a multi-page
@@ -120,8 +120,27 @@ def _files(message: GraphMessage) -> list[SharedFile]:
     return shared + [SharedFile(name, url) for name, url in linked_files(message)]
 
 
-# daimon's own saved-files footer: replayed, the agent copied it into its next answer.
-_SAVED_FOOTER = re.compile(rf"\n*^{re.escape(SAVED_FILES_HEADING)}(?:\n+- [^\n]*)*", re.M)
+# Headed daimon's file links until the list stood alone; older answers still carry it.
+_LEGACY_HEADING = "Saved to this channel's files:"
+
+
+def _without_saved_links(text: str, message: GraphMessage) -> str:
+    """daimon's answer without the file links it added below: replayed, the agent copied them.
+
+    They end the answer, with only blank lines and its previews' `[image]` among them.
+    """
+    saved = {
+        line for name, url in linked_files(message) for line in (f"- {name}", file_link(name, url))
+    }
+    lines = text.split("\n")
+    end = len(lines)
+    while end and lines[end - 1].strip() in {*saved, "", "[image]"}:
+        end -= 1
+    if end and lines[end - 1].strip() == _LEGACY_HEADING:
+        saved.add(_LEGACY_HEADING)
+        end -= 1
+    kept = lines[:end] + [line for line in lines[end:] if line.strip() not in saved]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
 def channel_media(
@@ -195,7 +214,7 @@ def _render(
     is_bot = user is None and app is not None
     if is_bot and app is not None and app.id == bot_app_id:
         # Its files are listed as attachments below, not in its words.
-        text = _SAVED_FOOTER.sub("", text).strip()
+        text = _without_saved_links(text, message)
     attrs = (
         f" author_name={quoteattr((author.display_name if author else None) or 'unknown')}"
         f" user_id={quoteattr((author.id if author else None) or '')}"

@@ -354,7 +354,7 @@ def test_a_group_chat_turn_is_one_place_without_files() -> None:
     assert f'<channel platform="teams" id="{chat}" role="group_chat" name="Launch &amp; co"' in (
         message
     )
-    assert 'files="unavailable"' in message and "cannot be shared in a group chat" in message
+    assert 'files="unavailable"' in message and "can't be attached in a group chat" in message
     assert "offer" not in message, "no tool can send a group chat's file to a 1:1 chat"
     assert "shows inline" not in message, "no image output previews there"
     assert "<thread " not in message and "read_thread" not in message
@@ -385,8 +385,8 @@ def test_daimon_answers_replay_with_their_previews_and_saved_files_readable() ->
     deck = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/a%5Db%281%29.pdf"
     markdown = _bot(
         "301",
-        "<p>Here it is.</p><p>Saved to this channel's files:</p>"
-        f'<ul><li><a href="{chart}">chart.png</a></li></ul><p><img src="{hosted("301")}"></p>',
+        f'<p>Here it is.</p><ul><li><a href="{chart}">chart.png</a></li></ul>'
+        f'<p><img src="{hosted("301")}"></p>',
     )
     extended = _bot(
         "302",
@@ -412,7 +412,9 @@ def test_daimon_answers_replay_with_their_previews_and_saved_files_readable() ->
         ),
     )
     text = "\n".join(block.lines)
-    assert "Saved to this channel" not in text, "daimon's footer is not replayed as its words"
+    assert "Saved to this channel" not in text, "an older answer's heading goes too"
+    assert "- chart.png" not in text and "- [" not in text, "daimon's links are not its words"
+    assert "Here it is." in text and "Done." in text, "the answers themselves stay"
     assert 'url="https://dl.example/chart"' in text and 'url="https://dl.example/deck"' in text
     assert text.count('images_attached="1"') == 2, "both previews ride along as images"
 

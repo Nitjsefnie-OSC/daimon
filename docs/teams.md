@@ -272,7 +272,7 @@ newest 4 images in the replay are passed to the agent, and up to 10 shared
 files get a download link where channel files work (below). daimon's own
 answers read back with their previews as images and the files they saved
 as attachments with download links, so the agent can open what it delivered
-earlier; the "Saved to this channel's files" list itself is left out of the
+earlier; the list of file links below an answer is left out of the
 replayed text, so the agent does not copy it into its own reply. The MCP
 Teams read tools resolve those saved-file links too. When Graph cannot
 be read, the agent is told history is unavailable and why, rather than
