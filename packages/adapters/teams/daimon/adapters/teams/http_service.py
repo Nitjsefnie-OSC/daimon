@@ -25,7 +25,8 @@ from daimon.adapters.teams import (
     tool_confirmation,
     wizard,
 )
-from daimon.adapters.teams.app import TeamsApp
+from daimon.adapters.teams.activity_feed import ActivityFeed, ChannelHomes
+from daimon.adapters.teams.app import DRAIN_GRACE_S, TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
 from daimon.adapters.teams.channel_admin_groups import fetch_team_owner_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
@@ -38,26 +39,23 @@ from daimon.adapters.teams.channel_subscriptions import (
     notification_route,
 )
 from daimon.adapters.teams.commands import CommandHandler
+from daimon.adapters.teams.deployment_admins import demoting_owner_reads
 from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
+from daimon.adapters.teams.group_chats import ChatMember, GroupChatRoster
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.here import show_here
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
 from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
+from daimon.adapters.teams.reactions import ReactionTarget
 from daimon.adapters.teams.routine_delivery import make_teams_routine_poster
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import new_command
 from daimon.adapters.teams.setup_panel import SetupPanel
-from daimon.adapters.teams.site_grant import (
-    CALLBACK_PATH,
-    GrantedSite,
-    GrantTarget,
-    callback_route,
-)
 from daimon.adapters.teams.support import VERB as SUPPORT_VERB
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support import enabled as support_enabled
@@ -68,11 +66,9 @@ from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.domain import TeamsChannelSiteRow, TeamsChannelSubscriptionRow
-from daimon.core.stores.teams_channel_sites import (
-    get_teams_channel_site,
-    upsert_teams_channel_site,
-)
+from daimon.core.stores.domain import TeamsChannelSubscriptionRow, TeamsInstallationRow
+from daimon.core.stores.teams_channel_subscriptions import get_teams_channel_subscription
+from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, GraphMessage, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
@@ -206,7 +202,7 @@ def create_teams_http_service(
             yield
         finally:
             ready.clear()
-            await turns.drain(timeout=15.0)
+            await turns.drain(timeout=DRAIN_GRACE_S)
             await teams_app.stop()
 
     async def _healthz() -> dict[str, str]:
@@ -263,14 +259,19 @@ def create_teams_http_service(
         except TEAMS_SEND_ERRORS as err:
             log.warning("teams.channel_lookup.failed", error=type(err).__name__)
             return {}
-        # Private and shared channels keep files in a site of their own: none here.
+        # Standard channels only: the settings picker leaves private and shared ones out.
         standard = (c for c in channels if c.id and c.type in (None, "standard"))
         return {channel.id: channel.name for channel in standard if channel.id}
 
     graph, groups = GraphClient(runtime.http_client, graph_token), TeamGroups(team_group)
-    runtime = dataclasses.replace(
-        runtime, team_owners=functools.partial(fetch_team_owner_ids, graph)
+    owner_reads = demoting_owner_reads(
+        runtime,
+        # A runtime that brings its own owner read (tests) keeps it, still demoting.
+        runtime.team_owners or functools.partial(fetch_team_owner_ids, graph),
+        # `spawn` is bound below, before any read: the drain waits for a demotion.
+        in_background=lambda coro: spawn(coro, name="teams.admin_demotion"),
     )
+    runtime = dataclasses.replace(runtime, team_owners=owner_reads)
 
     async def roster_member(conversation_id: str, aad_object_id: str) -> MemberFacts | None:
         conversations = teams_app.api.from_service_url(SERVICE_URL).conversations
@@ -284,6 +285,13 @@ def create_teams_http_service(
             return None
         guest = None if member.user_role is None else member.user_role.lower() == "guest"
         return MemberFacts(tenant_id=member.tenant_id, is_guest=guest)
+
+    async def chat_members(chat_id: str) -> list[ChatMember]:
+        conversations = teams_app.api.from_service_url(SERVICE_URL).conversations
+        return [
+            ChatMember(m.id, m.aad_object_id, m.tenant_id, m.user_role)
+            for m in await conversations.get_members(chat_id)
+        ]
 
     async def channel_type(team_id: str, channel_id: str) -> str | None:
         api = teams_app.api.from_service_url(SERVICE_URL)
@@ -307,6 +315,12 @@ def create_teams_http_service(
             policy = await load_access_policy(session, tenant_id=teams_tenant)
         return frozenset(policy.member_guest_ids)
 
+    roster = GroupChatRoster(
+        tenant_id=settings.tenant_id,
+        members=chat_members,
+        member_guests=member_guests,
+        restrict_guests=settings.restrict_guests,
+    )
     runtime = dataclasses.replace(
         runtime,
         externals=ExternalParticipants(
@@ -318,6 +332,7 @@ def create_teams_http_service(
             restrict_guests=settings.restrict_guests,
             restrict_external=settings.restrict_external_participants,
         ),
+        group_chats=roster,
     )
     installs = TeamInstalls(
         runtime.sessionmaker,
@@ -327,15 +342,7 @@ def create_teams_http_service(
         alert_url=runtime.settings.ops.alert_webhook_url,
     )
 
-    async def stored_site(channel_id: str) -> TeamsChannelSiteRow | None:
-        async with runtime.sessionmaker() as session:
-            return await get_teams_channel_site(
-                session, tenant_id=teams_tenant, channel_id=channel_id
-            )
-
-    files = ChannelFiles(
-        SharePoint(graph, runtime.http_client), groups, channel_names, stored_site=stored_site
-    )
+    files = ChannelFiles(SharePoint(graph), groups)
     reader = ThreadReader(graph, groups, bot_app_id=settings.client_id, files=files)
     routines = RoutinesPanel(runtime)
 
@@ -381,6 +388,30 @@ def create_teams_http_service(
         )
     if support is not None:
         commands["support"] = support.command
+
+    async def react(target: ReactionTarget, reaction: str, *, add: bool) -> None:
+        # The SDK's own client: the bot token, and only the activity's service URL.
+        api = teams_app.api.from_service_url(target.service_url or SERVICE_URL).conversations
+        change = api.add_reaction if add else api.delete_reaction
+        await change(target.conversation_id, target.activity_id, reaction)
+
+    async def installed_teams() -> list[TeamsInstallationRow]:
+        async with runtime.sessionmaker() as session:
+            return await list_teams_installations(session, tenant_id=teams_tenant)
+
+    async def stored_group(channel_id: str) -> str | None:
+        # A private or shared channel may be missing from the bot's channel list:
+        # its message subscription records the team.
+        async with runtime.sessionmaker() as session:
+            watched = await get_teams_channel_subscription(
+                session, tenant_id=teams_tenant, channel_id=channel_id
+            )
+        return None if watched is None else watched.group_id
+
+    homes = ChannelHomes(
+        installed_teams, billing_panel.sdk_team_channels(teams_app), stored_group=stored_group
+    )
+    feed = ActivityFeed(graph, homes, entra_tenant_id=settings.tenant_id, spawn=spawn)
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
     turns = TeamsApp(
         runtime=runtime,
@@ -393,17 +424,21 @@ def create_teams_http_service(
         direct=direct,
         ask_human=support is not None,
         subscriptions=subscriptions,
+        react=react,
+        feed=feed,
         routine_poster=make_teams_routine_poster(
             runtime.sessionmaker,
             direct,
             tenant_id=installs.tenant_id,
             dm_policies=runtime.settings.direct_message_policies,
+            feed=feed,
         ),
     )
 
     feedback = TeamsFeedback(runtime, direct, spawn=spawn)
     teams_app.on_message(turns.handle_message)
     teams_app.on_install_add(installs.on_install)
+    teams_app.on_conversation_update(roster.on_conversation_update)
     if subscriptions is not None:
         watched = subscriptions
 
@@ -455,23 +490,6 @@ def create_teams_http_service(
     teams_app.on_dialog_submit(FEEDBACK_DIALOG, feedback.on_submit)
     teams_app.on_message_submit_feedback(feedback.on_builtin)
     teams_app.on_file_consent(turns.outputs.handle_consent)
-    if settings.public_url is not None:
-
-        async def files_granted(target: GrantTarget, site: GrantedSite) -> None:
-            async with runtime.sessionmaker.begin() as session:
-                await upsert_teams_channel_site(
-                    session,
-                    tenant_id=teams_tenant,
-                    channel_id=target.channel_id,
-                    group_id=target.group_id,
-                    site_id=site.site_id,
-                    drive_id=site.folder.drive_id,
-                    folder_id=site.folder.item_id,
-                )
-            files.forget(target.group_id)
-
-        grant = callback_route(settings, runtime.http_client, on_granted=files_granted)
-        fastapi_app.add_api_route(CALLBACK_PATH, grant, methods=["GET"])
     return TeamsHttpService(
         app=fastapi_app,
         teams_app=teams_app,

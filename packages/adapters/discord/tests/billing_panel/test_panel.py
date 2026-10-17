@@ -318,17 +318,15 @@ async def test_topup_select_callback_posts_to_mcp_checkout_and_sends_ephemeral_u
     """Select callback POSTs to /billing/checkout via httpx.MockTransport and sends URL ephemerally.
 
     The credit target is the deterministically derived tenant_id — no workspaces-table lookup.
-    POST body must carry derive_tenant_uuid(discord, guild_id).
+    POST body carries only amount; the verifier derives tenant from the account.
     """
     import json
 
     import httpx
     from daimon.adapters.discord.billing_panel.panel import _TopUpSelect
-    from daimon.core.ma_identity import derive_tenant_uuid
     from pydantic import HttpUrl, SecretStr
 
     guild_id = "888000000000000001"
-    expected_tenant_id = str(derive_tenant_uuid(platform="discord", workspace_id=guild_id))
     checkout_url = "https://checkout.stripe.com/pay/test_abc123"
 
     captured_requests: list[httpx.Request] = []
@@ -354,6 +352,10 @@ async def test_topup_select_callback_posts_to_mcp_checkout_and_sends_ephemeral_u
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.settings = mock_settings
     runtime.sessionmaker = db_session_factory
+    from daimon.testing.factories import make_account
+
+    await make_account(db_session, id=_TEST_ACCOUNT_ID)
+    await db_session.commit()
 
     view = BillingPanelView(
         _make_state(is_admin=True),
@@ -389,11 +391,7 @@ async def test_topup_select_callback_posts_to_mcp_checkout_and_sends_ephemeral_u
         "checkout POST must target the app-root /billing/checkout, not the /mcp endpoint path"
     )
     body = json.loads(req.content)
-    assert body["tenant_id"] == expected_tenant_id, (
-        "POST body tenant_id must be derive_tenant_uuid(discord, guild_id)"
-    )
-    assert body["guild_id"] == guild_id
-    assert body["amount"] == 10
+    assert body == {"amount": 10}, "tenant is derived from the registered account"
 
     interaction.response.send_message.assert_awaited_once()
     call_args = interaction.response.send_message.call_args
@@ -445,6 +443,10 @@ async def test_topup_checkout_token_carries_no_admin_or_internal_claim(
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.settings = mock_settings
     runtime.sessionmaker = db_session_factory
+    from daimon.testing.factories import make_account
+
+    await make_account(db_session, id=_TEST_ACCOUNT_ID)
+    await db_session.commit()
 
     view = BillingPanelView(
         _make_state(is_admin=True),
@@ -510,6 +512,10 @@ async def test_topup_select_renders_an_error_when_the_checkout_call_returns_a_no
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.settings = mock_settings
     runtime.sessionmaker = db_session_factory
+    from daimon.testing.factories import make_account
+
+    await make_account(db_session, id=_TEST_ACCOUNT_ID)
+    await db_session.commit()
 
     view = BillingPanelView(
         _make_state(is_admin=True),
@@ -649,6 +655,10 @@ async def test_member_lookup_select_still_renders_spend_for_a_live_admin(
 
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.sessionmaker = db_session_factory
+    from daimon.testing.factories import make_account
+
+    await make_account(db_session, id=_TEST_ACCOUNT_ID)
+    await db_session.commit()
 
     view = BillingPanelView(
         _make_state(is_admin=True),

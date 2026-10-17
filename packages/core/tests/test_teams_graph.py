@@ -13,6 +13,7 @@ from daimon.core.teams_graph import (
     GraphMessage,
     GraphUnavailable,
     TeamGroups,
+    linked_files,
     message_references,
     skiptoken_of,
 )
@@ -90,6 +91,22 @@ async def test_get_message_addresses_a_reply_under_its_root() -> None:
     assert seen[0].url.path.endswith("/messages/100/replies/101"), "a reply lives under its root"
     assert message.sender is not None and message.sender.user is not None
     assert message.sender.user.display_name == "Ada"
+
+
+async def test_a_group_chat_reads_its_newest_messages_and_one_by_id() -> None:
+    seen: list[httpx.Request] = []
+    client = _client(lambda _: httpx.Response(200, json={"value": [_message("2")]}), seen)
+    page = await client.list_chat_messages("19:abc@thread.v2", top=10)
+    assert (
+        seen[0].url.raw_path.decode().split("?")[0] == "/v1.0/chats/19%3Aabc%40thread.v2/messages"
+    )
+    assert seen[0].url.params["$orderby"] == "createdDateTime desc"
+    assert seen[0].url.params["$top"] == "10"
+    assert [m.id for m in page.value] == ["2"]
+
+    client = _client(lambda _: httpx.Response(200, json=_message("7")), seen)
+    assert (await client.get_chat_message("19:abc@thread.v2", "7")).id == "7"
+    assert seen[1].url.path == "/v1.0/chats/19:abc@thread.v2/messages/7"
 
 
 @pytest.mark.parametrize("status", [403, 404, 429, 500])
@@ -206,6 +223,7 @@ async def test_team_owners_follow_pages_and_keep_only_owners() -> None:
                 "value": [
                     {"userId": owner, "roles": ["owner"]},
                     {"userId": "c3", "roles": []},
+                    {"userId": "g4", "roles": ["owner", "guest"]},
                     {"roles": ["owner"]},
                 ],
                 "@odata.nextLink": next_link,
@@ -214,7 +232,7 @@ async def test_team_owners_follow_pages_and_keep_only_owners() -> None:
 
     owners = await _client(handler, seen).list_team_owner_ids(GROUP)
 
-    assert owners == frozenset({owner.lower(), "b2"}), "owners only, Entra ids lower-cased"
+    assert owners == frozenset({owner.lower(), "b2"}), "owners only, no guests, ids lower-cased"
     assert seen[0].url.params["$filter"] == "roles/any(r:r eq 'owner')", "Graph filters owners"
     assert seen[0].url.path == f"/v1.0/teams/{GROUP}/members"
     assert "$filter" not in seen[1].url.params, "a next link carries its own query"
@@ -329,3 +347,25 @@ def test_message_references_read_the_quoted_sender_and_skip_bad_json() -> None:
         "bot-app",
         "the answer",
     ), "the quote names the bot's app id and keeps its preview"
+
+
+def _linking(body: dict[str, str], *, app: bool = True) -> GraphMessage:
+    sender = {"application": {"id": "bot"}} if app else {"user": {"id": "u-1"}}
+    return GraphMessage.model_validate(
+        {"id": "1", "messageType": "message", "from": sender, "body": body}
+    )
+
+
+def test_linked_files_reads_a_bots_sharepoint_links_from_text_or_html() -> None:
+    """daimon's saved-file footer reads back as markdown text or as HTML links."""
+    site = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General"
+    text = f"Saved:\n- [a\\]b.pdf]({site}/a%5Db.pdf)\n- [x](https://example.com/x)"
+    html = f'<p>Saved:</p><ul><li><a href="{site}/c.png">c.png</a></li></ul>'
+    assert linked_files(_linking({"contentType": "text", "content": text})) == [
+        ("a]b.pdf", f"{site}/a%5Db.pdf")
+    ], "the label is unescaped and a non-SharePoint link skipped"
+    assert linked_files(_linking({"contentType": "html", "content": html})) == [
+        ("c.png", f"{site}/c.png")
+    ]
+    person = _linking({"contentType": "html", "content": html}, app=False)
+    assert linked_files(person) == [], "a person's links are theirs to share as attachments"

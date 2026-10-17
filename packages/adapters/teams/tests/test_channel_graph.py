@@ -6,31 +6,19 @@ runtime's HTTP client, Bot Framework the `TeamsApiFake`, and the turn is patched
 
 from __future__ import annotations
 
+import base64
 import copy
 import io
 import json
-import re
-import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 from daimon.adapters.teams.app import _NO_CONTEXT
 from daimon.adapters.teams.identity import TeamsInbound, parse_inbound
-from daimon.adapters.teams.site_grant import GrantTarget, verify_state
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.thread_sessions import get_latest_thread_session
-from daimon.core.teams_sharepoint import ENABLE_FILES_TOOL
-from daimon.core.turn.state import ToolUseBlock
-from daimon.testing import (
-    build_fake_anthropic,
-    combine_handlers,
-    list_response,
-    make_agent_env_echo_handler,
-)
-from daimon.testing.ma import NotHandled
 from microsoft_teams.api import MessageActivity
 from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -94,6 +82,7 @@ def _graph_message(id: str, html: str, **extra: Any) -> dict[str, Any]:
     } | extra
 
 
+Q3_URL = "https://example.sharepoint.com/sites/team/Shared%20Documents/General/q3.xlsx"
 MEDIA_MESSAGE = _graph_message(
     REPLY,
     '<p><at id="0">daimon</at>&nbsp;describe these attachments</p>'
@@ -103,7 +92,7 @@ MEDIA_MESSAGE = _graph_message(
         {
             "id": "6d4bb0c3-0000-4000-8000-00000000f11e",
             "contentType": "reference",
-            "contentUrl": "https://example.sharepoint.com/sites/team/Shared%20Documents/q3.xlsx",
+            "contentUrl": Q3_URL,
             "content": None,
             "name": "q3.xlsx",
             "thumbnailUrl": None,
@@ -112,30 +101,25 @@ MEDIA_MESSAGE = _graph_message(
 )
 
 
-SITE_ID = "example.sharepoint.com,2c1f0a9e-0000-4000-8000-000000000001,7d3b-web"
 DOWNLOAD_URL = (
     "https://example.sharepoint.com/sites/team/_layouts/15/download.aspx?UniqueId=q3&tempauth=x"
 )
-# What Graph answers once an admin granted the app the team's site (`Sites.Selected`).
-GRANTED_SITE = {
+_SHARE = base64.urlsafe_b64encode(Q3_URL.encode()).decode().rstrip("=")
+# What Graph answers once the app has `Files.ReadWrite.All` with admin consent.
+FILES_GRANTED = {
     f"/v1.0/teams/{TEAM_GROUP_ID}/channels/19:channel-1@thread.tacv2/filesFolder": {
         "id": "01FOLDER",
         "name": "General",
         "parentReference": {"driveId": "b!drive-1"},
     },
-    "/v1.0/sites/example.sharepoint.com:/sites/team": {"id": SITE_ID},
-    f"/v1.0/groups/{TEAM_GROUP_ID}/sites/root": {"id": SITE_ID},
-    f"/v1.0/sites/{SITE_ID}/drives": {
-        "value": [
-            {
-                "id": "b!drive-1",
-                "webUrl": "https://example.sharepoint.com/sites/team/Shared%20Documents",
-            }
-        ]
+    f"/v1.0/shares/u!{_SHARE}/driveItem": {
+        "id": "01Q3",
+        "parentReference": {"driveId": "b!drive-1"},
     },
-    "/v1.0/drives/b!drive-1/root:/q3.xlsx": {
+    "/v1.0/drives/b!drive-1/items/01Q3": {
         "id": "01Q3",
         "name": "q3.xlsx",
+        "parentReference": {"driveId": "b!drive-1", "id": "01FOLDER"},
         "@microsoft.graph.downloadUrl": DOWNLOAD_URL,
     },
 }
@@ -149,7 +133,7 @@ def _graph(
 ) -> httpx.AsyncClient:
     """Graph answering the fixtures' thread: a root post, two replies, the media message.
 
-    `site` adds SharePoint answers by path; without it the team's files are refused.
+    `site` adds SharePoint answers by path; without it the channel's files are refused.
     `newer` are replies posted after the media message.
     """
     replies = {
@@ -174,8 +158,8 @@ def _graph(
             return httpx.Response(200, content=_png(), headers={"Content-Type": "image/png"})
         if site and path in site:
             return httpx.Response(200, json=site[path])
-        if path.startswith(("/v1.0/sites/", "/v1.0/groups/")) or path.endswith("/filesFolder"):
-            # As captured without Sites.Selected: Graph denies the team's SharePoint.
+        if path.startswith(("/v1.0/shares/", "/v1.0/drives/")) or path.endswith("/filesFolder"):
+            # Without Files.ReadWrite.All consented, Graph denies the channel's files.
             return httpx.Response(403, json={"error": {"code": "accessDenied"}})
         return httpx.Response(404)
 
@@ -225,8 +209,8 @@ async def test_a_channel_reply_replays_the_thread_inlines_the_image_and_explains
 
     message = turn["user_message"]
     assert 'files="unavailable" files_hint=' in message, "the agent is told files do not work"
-    assert "until the deployment's operator grants" in message, (
-        "with no public URL there is no card to offer, so the hint names the operator"
+    assert "grants daimon's app the Files.ReadWrite.All" in message, (
+        "the hint names the permission an admin must grant"
     )
     assert '<thread_history source="teams" trust="untrusted">' in message
     assert "Q3 release plan" in message and "the numbers are in the sheet" in message
@@ -261,117 +245,35 @@ async def test_a_channel_reply_whose_activity_names_no_media_is_read_from_graph(
 
 
 @pytest.mark.parametrize("admin", [True, False])
-async def test_an_admin_whose_channel_files_are_refused_gets_the_enable_files_sign_in(
+async def test_refused_channel_files_get_the_permission_hint_and_never_a_card(
     db_session_factory: async_sessionmaker[AsyncSession],
     teams_api_fake: TeamsApiFake,
     admin: bool,
 ) -> None:
-    """A card, once: the sign-in that grants the team's site goes to a daimon admin only."""
+    """No sign-in is offered, to an admin or anyone: only the hint naming the permission."""
+    teams = teams_settings(public_url="https://teams.example")
     admins = (AAD_OBJECT_ID,) if admin else ()
-    teams = teams_settings(admins=admins, public_url="https://teams.example")
-    runtime = build_teams_runtime(db_session_factory, teams=teams, http_client=_graph([]))
-    with patched_turns():
+    runtime = build_teams_runtime(
+        db_session_factory, teams=teams, http_client=_graph([]), admins=admins
+    )
+    with patched_turns() as turns:
         async with running_service(runtime, teams_api_fake) as service:
             for _ in range(2):
                 await post_activity(service, _load("channel_attachments_reply"))
                 await finish_turns(service.turns)
 
-    offers = [text for text in _cards(teams_api_fake) if "Enable files" in text]
-    if not admin:
-        assert offers == [], "only a daimon admin is offered the sign-in"
-        return
-    [offer] = offers
-    assert "login.microsoftonline.com" in offer and "Sites.FullControl.All" in offer
-    assert "redirect_uri=https%3A%2F%2Fteams.example%2Foauth%2Fteams%2Ffiles%2Fcallback" in offer
-    assert _signed_target(offer) == GrantTarget(TEAM_GROUP_ID, CHANNEL), "for this channel"
-
-
-@pytest.mark.parametrize(
-    ("admin", "is_error", "posted"),
-    [(True, False, True), (False, False, False), (True, True, False)],
-    ids=["admin", "not-an-admin", "refused-call"],
-)
-async def test_the_agents_enable_files_call_posts_the_card_for_this_channel(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    teams_api_fake: TeamsApiFake,
-    admin: bool,
-    is_error: bool,
-    posted: bool,
-) -> None:
-    """Asked for files, the agent calls `enable_channel_files` (here through the search proxy).
-
-    The card follows the answer though nothing was refused: files already work here.
-    Only for an admin, and only after a call that succeeded.
-    """
-    teams = teams_settings(
-        admins=(AAD_OBJECT_ID,) if admin else (), public_url="https://teams.example"
-    )
-    anthropic = build_fake_anthropic(combine_handlers(_no_outputs, make_agent_env_echo_handler()))
-    graph = _graph([], site=GRANTED_SITE)
-    runtime = build_teams_runtime(
-        db_session_factory, anthropic=anthropic, teams=teams, http_client=graph
-    )
-    asked = ToolUseBlock(
-        kind="tool_use",
-        id="t1",
-        type="agent.mcp_tool_use",
-        name="call_tool",
-        input={"name": ENABLE_FILES_TOOL, "arguments": {}},
-        mcp_server_name="daimon-mcp",
-        status="failed" if is_error else "complete",
-        is_error=is_error,
-    )
-    with patched_turns(tools=(asked,)) as turns:
-        async with running_service(runtime, teams_api_fake) as service:
-            await post_activity(service, _load("channel_attachments_reply"))
-            await finish_turns(service.turns)
-
-    offers = [text for text in _cards(teams_api_fake) if "Enable files" in text]
-    assert len(offers) == posted
-    if posted:
-        assert _signed_target(offers[0]) == GrantTarget(TEAM_GROUP_ID, CHANNEL), "this channel"
-    assert "files_hint" not in turns[0]["user_message"], "files work here: no hint"
-
-
-async def test_where_files_are_refused_the_hint_tells_the_agent_to_call_for_the_card(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
-) -> None:
-    """With a public URL the card can be posted, so the hint names the tool, before any format."""
-    teams = teams_settings(public_url="https://teams.example")
-    runtime = build_teams_runtime(db_session_factory, teams=teams, http_client=_graph([]))
-    with patched_turns() as turns:
-        async with running_service(runtime, teams_api_fake) as service:
-            await post_activity(service, _load("channel_attachments_reply"))
-            await finish_turns(service.turns)
-
     message = turns[0]["user_message"]
-    assert f"call {ENABLE_FILES_TOOL} first" in message, "the agent knows to post the card"
-    assert "Do not swap in an artifact, report or notebook" in message, "not a fallback first"
+    assert "Files.ReadWrite.All" in message, "the agent can say what an admin must grant"
+    assert "do not swap in an artifact, report or notebook" in message, "not a fallback first"
+    cards = [r.body for r in teams_api_fake.activity_requests if r.body.get("attachments")]
+    assert "login.microsoftonline.com" not in json.dumps(cards), "no sign-in card is posted"
 
 
-def _no_outputs(request: httpx.Request) -> httpx.Response:
-    """A tool call sends the output sweep looking for session files: there are none."""
-    if request.method == "GET" and request.url.path == "/v1/files":
-        return list_response([])
-    raise NotHandled
-
-
-def _signed_target(card: str) -> GrantTarget | None:
-    url = re.search(r'"(https://login\.microsoftonline\.com/[^"]+)"', card)
-    assert url is not None, "the card links the sign-in"
-    [state] = parse_qs(urlparse(url.group(1)).query)["state"]
-    return verify_state(state, secret="test-secret", now=time.time())
-
-
-def _cards(fake: TeamsApiFake) -> list[str]:
-    return [json.dumps(r.body) for r in fake.activity_requests if r.body.get("attachments")]
-
-
-async def test_a_channel_file_on_a_granted_site_is_linked_and_the_agent_told_files_work(
+async def test_a_channel_file_in_its_folder_is_linked_and_the_agent_told_files_work(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     seen: list[httpx.Request] = []
-    graph = _graph(seen, site=GRANTED_SITE)
+    graph = _graph(seen, site=FILES_GRANTED)
     [turn] = await _run(db_session_factory, teams_api_fake, _load("channel_media_reply"), graph)
 
     message = turn["user_message"]
@@ -410,7 +312,7 @@ async def test_without_graph_the_turn_runs_and_the_agent_hears_what_was_missed(
     message = turn["user_message"]
     assert "thread_history" not in message, "no history when Graph refuses"
     assert not turn["image_blocks"]
-    unread = "was shared but can't be opened: daimon could not read this channel message."
+    unread = "was shared but can't be opened: daimon could not read this message."
     assert f"an image {unread}" in message and f"a file {unread}" in message, "never silent"
     assert "couldn't read" not in _texts(teams_api_fake), "the answer explains it, not a notice"
 

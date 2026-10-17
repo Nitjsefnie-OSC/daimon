@@ -13,6 +13,7 @@ from daimon.adapters.teams.context import (
     Attached,
     channel_block,
     channel_media,
+    chat_media,
     classifier_window,
     delta_block,
     history_media,
@@ -223,6 +224,42 @@ def test_render_user_message_without_history_has_no_envelope() -> None:
     assert 'is_admin="true">hi &lt;b&gt;</user_query>' in message
 
 
+def test_the_files_hint_promises_no_image_previews_where_files_cannot_be_saved() -> None:
+    """Nothing previews there any more, so neither a mention nor an unprompted turn hears so."""
+    inbound = make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel")
+    for item in (inbound, dataclasses.replace(inbound, unprompted=True)):
+        message = render_user_message(
+            "<controls/>",
+            item,
+            is_admin=False,
+            keys="",
+            prefix="",
+            history=None,
+            channel_files=False,
+        )
+        assert "files_hint=" in message, "the turn still learns files cannot be saved"
+        assert "shows inline" not in message, "and is promised no preview"
+
+
+def test_only_a_direct_chat_turn_hears_about_preview_outputs() -> None:
+    """A 1:1 chat has no Graph thumbnails, so its agent may picture a document itself."""
+    direct = render_user_message(
+        "<controls/>", make_inbound("hi"), is_admin=False, keys="", prefix="", history=None
+    )
+    channel = render_user_message(
+        "<controls/>",
+        make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel"),
+        is_admin=False,
+        keys="",
+        prefix="",
+        history=None,
+        channel_files=True,
+    )
+    assert ".preview.png" in direct, "a 1:1 turn learns the preview output convention"
+    assert "[0].get_pixmap(" in direct, "the recipe renders page one of any document"
+    assert ".preview.png" not in channel, "a channel already gets Graph's thumbnails"
+
+
 def test_a_channel_turn_names_its_thread_and_channel() -> None:
     """The ids `set_thread_participation` keys on, as Discord's `<thread>` and `<channel>`."""
     inbound = make_inbound("hi", conversation="19:c@thread.tacv2;messageid=1", kind="channel")
@@ -299,3 +336,116 @@ def test_unread_history_is_marked_so_the_agent_does_not_guess() -> None:
     )
     assert '<history status="unavailable" reason="http error"' in message
     assert "untrusted" not in message
+
+
+def test_a_group_chat_turn_is_one_place_without_files() -> None:
+    chat = "19:g@thread.v2"
+    inbound = dataclasses.replace(
+        make_inbound("hi", conversation=chat, kind="group"), channel_name="Launch & co"
+    )
+    message = render_user_message(
+        "<controls/>",
+        inbound,
+        is_admin=False,
+        keys="",
+        prefix="",
+        history=unavailable_block("graph 403"),
+    )
+    assert f'<channel platform="teams" id="{chat}" role="group_chat" name="Launch &amp; co"' in (
+        message
+    )
+    assert 'files="unavailable"' in message and "can't be attached in a group chat" in message
+    assert "offer" not in message, "no tool can send a group chat's file to a 1:1 chat"
+    assert "shows inline" not in message, "no image output previews there"
+    assert "<thread " not in message and "read_thread" not in message
+
+
+def test_chat_media_reads_only_this_messages_hosted_images() -> None:
+    own = "https://graph.microsoft.com/v1.0/chats/19:g@thread.v2/messages/7/hostedContents/a/$value"
+    other = (
+        "https://graph.microsoft.com/v1.0/chats/19:x@thread.v2/messages/7/hostedContents/a/$value"
+    )
+    message = _msg("7", f'<img src="{own}"><img src="{other}">')
+    assert chat_media(message, chat_id="19:g@thread.v2").image_urls == (own,)
+    images, _ = history_media([message], chat_id="19:g@thread.v2")
+    assert images == {"7": (own,)}
+
+
+def test_daimon_answers_replay_with_their_previews_and_saved_files_readable() -> None:
+    """An answer's hosted previews, an image-only preview and saved-file links all read back.
+
+    The footer itself is dropped from the text: replayed, the agent copied it.
+    """
+
+    def hosted(message_id: str) -> str:
+        path = f"/v1.0/teams/g/channels/c/messages/{message_id}/hostedContents"
+        return f"https://graph.microsoft.com{path}/aWQ9eA==/$value"
+
+    chart = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/chart.png"
+    deck = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/a%5Db%281%29.pdf"
+    markdown = _bot(
+        "301",
+        f'<p>Here it is.</p><ul><li><a href="{chart}">chart.png</a></li></ul>'
+        f'<p><img src="{hosted("301")}"></p>',
+    )
+    extended = _bot(
+        "302",
+        body={
+            "contentType": "text",
+            "content": f"Done.\n\nSaved to this channel's files:\n- [a\\]b(1).pdf]({deck})",
+        },
+    )
+    image_only = _bot("303", f'<img src="{hosted("303")}">')
+    messages = [markdown, extended, image_only]
+
+    images, files = history_media(messages, group_id="g", channel_id="c")
+    assert sorted(images) == ["301", "303"], "the answer's preview and the preview message"
+    assert [(f.name, f.content_url) for f in files] == [("a]b(1).pdf", deck), ("chart.png", chart)]
+    block = channel_block(
+        GraphPage(value=messages),
+        skip_ids=frozenset(),
+        bot_app_id=BOT,
+        channel_id="c",
+        attached=Attached(
+            images={"301": 1, "303": 1},
+            downloads={chart: "https://dl.example/chart", deck: "https://dl.example/deck"},
+        ),
+    )
+    text = "\n".join(block.lines)
+    assert "Saved to this channel" not in text, "an older answer's heading goes too"
+    assert "- chart.png" not in text and "- [" not in text, "daimon's links are not its words"
+    assert "Here it is." in text and "Done." in text, "the answers themselves stay"
+    assert 'url="https://dl.example/chart"' in text and 'url="https://dl.example/deck"' in text
+    assert text.count('images_attached="1"') == 2, "both previews ride along as images"
+
+
+def test_only_daimons_own_links_leave_its_replayed_answer() -> None:
+    """One line per saved link, from the bottom; the agent's own bullets and an old list stay or go whole."""
+    chart = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/chart.png"
+    listed = _bot(
+        "501",
+        f'<p>Files:</p><ul><li>chart.png</li></ul><ul><li><a href="{chart}">chart.png</a></li></ul>',
+    )
+    legacy = _bot(
+        "502",
+        body={"contentType": "text", "content": "Done.\n\nSaved to this channel's files:\n- r.pdf"},
+    )
+    block = channel_block(
+        GraphPage(value=[listed, legacy]), skip_ids=frozenset(), bot_app_id=BOT, channel_id="c"
+    )
+    text = "\n".join(block.lines)
+    assert "Files:\n\n- chart.png\n<attachments>" in text, "the agent's bullet stays, daimon's goes"
+    assert 'messageid=502">Done.</message>' in text, "an old heading goes with its unlinked lines"
+
+
+def test_another_bots_footer_stays_in_its_text() -> None:
+    """Only daimon's own footer is stripped; another app's words replay as written."""
+    link = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/x.csv"
+    other = _bot(
+        "401", f'<p>Saved to this channel\'s files:</p><a href="{link}">x.csv</a>', app_id="other"
+    )
+    block = channel_block(
+        GraphPage(value=[other]), skip_ids=frozenset(), bot_app_id=BOT, channel_id="c"
+    )
+    assert "Saved to this channel" in "\n".join(block.lines), "not daimon's: kept"
+    assert '<attachment name="x.csv" fetchable="false"/>' in block.lines, "its link is listed"

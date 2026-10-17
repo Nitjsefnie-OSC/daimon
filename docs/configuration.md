@@ -272,6 +272,24 @@ Both fields are optional so deployments that don't run the MCP adapter keep work
 
 Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter.
 
+### `DAIMON_MCP__LEGACY_TOKEN_CUTOFF`
+
+`AwareDatetime | None` · optional · default unset
+
+UTC deadline for a temporary legacy-token deployment window. Dates before 2026-10-16 or
+over six hours in the future are refused. At/after the deadline all unregistered tokens
+are rejected, regardless of issuance time. Internal tokens are always rejected without a
+registry row.
+
+### `DAIMON_MCP__ALLOW_LEGACY_TOKENS`
+
+`bool` · optional · default `False`
+
+Temporary minters-first deployment compatibility only. Requires a bounded
+legacy_token_cutoff; only non-internal legacy tokens qualify and stop working at that
+deadline even if the deployment is interrupted. Default false requires registered tokens
+immediately.
+
 ### `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION`
 
 `bool` · optional · default `False`
@@ -760,18 +778,19 @@ keeps running so ingress can be re-enabled without a redeploy.
 `HttpUrl | None` · optional · default unset
 
 Externally reachable base URL of the Teams service (the Bot Framework messaging endpoint
-without /api/messages). Enables the admin sign-in that grants Daimon a team's SharePoint
-site; its callback is &lt;public_url&gt;/oauth/teams/files/callback, which must be a Web
-redirect URI on the app registration.
+without /api/messages). Graph's change notifications for private and shared channels
+post to it.
 
-### `DAIMON_TEAMS__ADMIN_USER_IDS`
+### `DAIMON_TEAMS__ADMIN_TEAM_ID`
 
-`tuple[str, ...]` · optional · default unset
+`str | None` · optional · default unset
 
-Entra object IDs of the people who administer this deployment from Teams. Teams exposes
-no admin role to bots, so this list is the admin check: admins get the admin role in
-turns, create routines, replace shared keys, top up and see everyone's usage. Everyone
-else is a regular user.
+Entra group ID of the team whose owners administer this deployment from Teams: admins
+get the admin role in turns, create routines, replace shared keys, top up and see
+everyone's usage. Adding an admin means making them an owner of that team; no redeploy.
+The app must be installed in that team. To find the ID, open the team's ⋯ menu in Teams,
+choose Get link to team and copy the groupId parameter. Guests and people from another
+organisation are never admins. Unset: nobody is an admin.
 
 ### `DAIMON_TEAMS__RESTRICT_GUESTS`
 

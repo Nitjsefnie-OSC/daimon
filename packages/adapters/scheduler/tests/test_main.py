@@ -3010,3 +3010,36 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
 
     assert [call["personal_memory"] for call in calls] == [True, False]
     assert calls[0]["account_id"] is not None, "the owner's account selects the store"
+
+
+async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.scheduler.main import (
+        _sweep_mcp_tokens,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.mcp_auth import mint_chat_mcp_token
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+
+    account = await make_account(db_session)
+    old = datetime.now(UTC) - timedelta(days=2)
+    _, expired_jti, _ = await mint_chat_mcp_token(
+        db_session,
+        account_id=account.id,
+        agent_id=uuid.uuid4(),
+        secret=b"a" * 32,
+        now=old,
+    )
+    _, recent_jti, _ = await mint_chat_mcp_token(
+        db_session,
+        account_id=account.id,
+        agent_id=uuid.uuid4(),
+        secret=b"a" * 32,
+        now=datetime.now(UTC) - timedelta(hours=2),
+    )
+    await db_session.commit()
+    await _sweep_mcp_tokens(db_session_factory)
+    async with db_session_factory() as session:
+        assert await get_mcp_token(session, jti=expired_jti) is None
+        assert await get_mcp_token(session, jti=recent_jti) is not None

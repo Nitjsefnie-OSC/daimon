@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import uuid
 from collections.abc import Awaitable, Callable
@@ -26,7 +25,6 @@ from daimon.core.config import (
     Settings,
     TeamsSettings,
 )
-from daimon.core.mcp_auth import mint_jwt
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
@@ -36,6 +34,8 @@ from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import registered_account_token
 
 _ENTRA = "99999999-8888-7777-6666-555555555555"
 _CALLER = "11111111-2222-3333-4444-555555555555"
@@ -121,14 +121,18 @@ async def test_token_is_cached_then_refreshed_before_expiry() -> None:
     assert b"scope=https%3A%2F%2Fapi.botframework.com%2F.default" in token_calls[0].content
 
 
-async def test_send_posts_markdown_with_ai_label() -> None:
+async def test_send_posts_extended_markdown_with_ai_label() -> None:
+    """Agent text goes out as Extended Markdown, a price's `$` escaped, math kept."""
     fake = _Fake()
-    assert await _client(fake).send(_THREAD, "**hi**") == "act-1"
+    assert await _client(fake).send(_THREAD, "**hi** $5 and $x$") == "act-1"
     (post,) = fake.posts()
     assert str(post.url) == f"{_BASE}/{_THREAD}/activities"
     assert post.headers["Authorization"] == "Bearer tok"
     body = json.loads(post.content)
-    assert (body["text"], body["textFormat"]) == ("**hi**", "markdown")
+    assert (body["text"], body["textFormat"]) == (
+        "**hi** \\$5 and $x$",
+        "extendedmarkdown",
+    ), "currency escaped, math left for KaTeX"
     assert body["entities"][0]["additionalType"] == ["AIGeneratedContent"]
 
 
@@ -218,6 +222,16 @@ async def test_send_message_refuses_unless_membership_is_confirmed(fake: _Fake, 
             _runtime(_client(fake)), _auth(), channel_id=_THREAD, content="hi"
         )
     assert fake.posts() == [], "nothing may be posted without a confirmed membership"
+
+
+@pytest.mark.parametrize("target", ["19:group@thread.v2", "19:meeting_x@thread.v2"])
+async def test_send_message_refuses_a_group_chat_before_any_call(target: str) -> None:
+    fake = _Fake()
+    with pytest.raises(ToolError, match="group chats"):
+        await _teams_send_message_impl(
+            _runtime(_client(fake)), _auth(), channel_id=target, content="hi"
+        )
+    assert fake.requests == []
 
 
 async def test_send_message_fails_closed_on_transport_error() -> None:
@@ -325,7 +339,9 @@ async def test_teams_caller_reaches_only_teams_tagged_channel_tools(
         ),
         sessionmaker=sessionmaker,
     )
-    token = mint_jwt(account_id=account.id, secret=secret.encode(), now=dt.datetime.now(dt.UTC))
+    token = await registered_account_token(
+        sessionmaker, account_id=account.id, secret=secret.encode()
+    )
 
     async def call(name: str, arguments: dict[str, object]) -> str:
         result = (await call_mcp_tool(app, token=token, name=name, arguments=arguments))["result"]

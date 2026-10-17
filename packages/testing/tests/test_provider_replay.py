@@ -50,6 +50,8 @@ from mux.errors import ProviderError, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
 from pydantic import JsonValue, ValidationError
 
+pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
+
 ROOT = Path(__file__).resolve().parents[3]
 DATA = ROOT / "packages/testing/fixtures/target53"
 PACK = load_provider_fixtures(DATA / "index.json", catalog_root=DATA / "catalog")

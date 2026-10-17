@@ -1461,6 +1461,10 @@ def resolve_worker_spec(
         if overrides is not None:
             raise WorkerSpecRefused("overrides", "unsupported")
         source = spec
+        if "metadata" not in source.model_fields_set:
+            # Fresh workers inherit host-owned stamps; supplied metadata must
+            # still pass the exact parent comparison below.
+            source = source.model_copy(update={"metadata": parent.spec.metadata})
     try:
         normalized_source, _ = worker_spec_ceiling(source)
     except ValueError:

@@ -21,6 +21,7 @@ from daimon.core.agent_mcp_credentials import (
     sync_agent_mcp_credentials,
 )
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.mcp_vault import chat_mcp_credential
 from daimon.core.stores import agent_mcp_credentials as cred_store
 from daimon.core.stores.domain import AgentMcpCredentialRow
 from daimon.testing.factories import make_account, make_tenant
@@ -472,6 +473,16 @@ async def test_reused_session_refresh_succeeds_when_the_caller_holds_an_oauth_gr
         plaintext_token="ntn_rejected_long_ago",
     )
 
+    async with db_session_factory() as db, db.begin():
+        payload = await chat_mcp_credential(
+            db,
+            account_id=account.id,
+            agent_id=agent_id,
+            jwt_secret=b"x" * 32,
+            public_url=public_url,
+            now=dt.datetime(2026, 9, 15, 14, 5, tzinfo=dt.UTC),
+        )
+
     writes: list[str] = []
     router = MARouter()
     router.add(
@@ -498,7 +509,7 @@ async def test_reused_session_refresh_succeeds_when_the_caller_holds_an_oauth_gr
             [
                 {
                     "id": "vcrd_jwt",
-                    "metadata": {"daimon_chat_identity": str(agent_id)},
+                    "metadata": payload["metadata"],
                     "type": "vault_credential",
                     "vault_id": "vlt_me",
                     "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -580,7 +591,12 @@ _VaultKey = tuple[uuid.UUID, uuid.UUID, str]
 
 
 def _vault_cache_router(
-    *, display: str, agent_id: uuid.UUID, public_url: str, gone: set[str], calls: list[str]
+    *,
+    display: str,
+    chat_metadata: dict[str, Any],
+    public_url: str,
+    gone: set[str],
+    calls: list[str],
 ) -> MARouter:
     """One live vault `vlt_me` holding the daimon credential; `gone` ids answer 404,
     and any other id is an archived vault."""
@@ -612,7 +628,7 @@ def _vault_cache_router(
             return not_found_response("vault not found")
         jwt_credential = {
             "id": "vcrd_jwt",
-            "metadata": {"daimon_chat_identity": str(agent_id)},
+            "metadata": chat_metadata,
             "type": "credential",
             "vault_id": match["vault"],
             "auth": {"type": "static_bearer", "mcp_server_url": public_url},
@@ -663,9 +679,18 @@ async def _sync_twice_with_vault_cache(
     key = (account.id, agent_id, public_url)
     vault_ids: dict[_VaultKey, str] = {} if cached_vault_id is None else {key: cached_vault_id}
     calls: list[str] = []
+    async with db_session_factory() as db, db.begin():
+        payload = await chat_mcp_credential(
+            db,
+            account_id=account.id,
+            agent_id=agent_id,
+            jwt_secret=b"x" * 32,
+            public_url=public_url,
+            now=dt.datetime(2026, 9, 15, tzinfo=dt.UTC),
+        )
     router = _vault_cache_router(
         display=f"daimon-mcp:{account.id}:{agent_id}",
-        agent_id=agent_id,
+        chat_metadata=payload["metadata"],
         public_url=public_url,
         gone=gone,
         calls=calls,

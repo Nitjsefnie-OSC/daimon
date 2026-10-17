@@ -594,3 +594,69 @@ def test_private_session_stamp_is_not_account_or_admin_authority(private_stamp, 
     assert not _session_belongs_to_caller(session, auth)
     assert not _owned_by_caller(session, auth)
     assert not _owned_by(session, auth)
+
+
+@pytest.mark.parametrize("role", [Role.USER, Role.ADMIN])
+@pytest.mark.parametrize("claim", ["chat_agent_id", "agent_id"])
+@pytest.mark.parametrize("agent_name", [None, "owned", "other"])
+async def test_session_reads_do_not_cross_executing_agent(role, claim, agent_name):
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    account, tenant = uuid.uuid4(), uuid.uuid4()
+    own = ma_agent(
+        id="agent_owned", metadata={"daimon_tenant": str(tenant), "daimon_name": "owned"}
+    )
+    other = ma_agent(
+        id="agent_other", metadata={"daimon_tenant": str(tenant), "daimon_name": "other"}
+    )
+    mine = _make_session_payload(session_id="sess_mine", agent_id=own.id, account_id=str(account))
+    foreign = _make_session_payload(
+        session_id="sess_other", agent_id=other.id, account_id=str(account)
+    )
+    events = []
+
+    def handler(req):
+        if req.method == "GET" and req.url.path == "/v1/agents":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [own.model_dump(mode="json"), other.model_dump(mode="json")],
+                    "has_more": False,
+                },
+            )
+        if req.method == "GET" and req.url.path == "/v1/sessions":
+            selected = mine if req.url.params.get("agent_id") == own.id else foreign
+            return httpx.Response(200, json={"data": [selected], "has_more": False})
+        if req.method == "GET" and req.url.path in (
+            "/v1/sessions/sess_mine",
+            "/v1/sessions/sess_other",
+        ):
+            return httpx.Response(200, json=mine if req.url.path.endswith("sess_mine") else foreign)
+        if req.url.path.endswith("/events"):
+            events.append(req.url.path)
+            return httpx.Response(200, json={"data": [], "has_more": False})
+        raise AssertionError(f"unexpected:{req.method}:{req.url.path}")
+
+    client = AsyncAnthropic(
+        api_key="offline", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    try:
+        auth = AuthIdentity(
+            account_id=account,
+            tenant_id=tenant,
+            role=role,
+            **{claim: derive_agent_uuid(tenant_id=tenant, ma_agent_id=own.id)},
+        )
+        runtime = _runtime(client)
+        listed = await _list_sessions_impl(runtime, auth, None, agent_name)
+        assert [s.id for s in listed] == ([] if agent_name == "other" else ["sess_mine"])
+        assert (await _get_session_impl(runtime, auth, "sess_mine")).id == "sess_mine"
+        for read in (
+            lambda: _get_session_impl(runtime, auth, "sess_other"),
+            lambda: _list_session_events_impl(runtime, auth, "sess_other", None, None, None),
+        ):
+            with pytest.raises(ToolError, match="session not found"):
+                await read()
+        assert events == []
+    finally:
+        await client.close()

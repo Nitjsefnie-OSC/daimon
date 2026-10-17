@@ -529,8 +529,8 @@ async def create_session(
     """Create an MA session. Returns the SDK session object directly.
 
     When ``mcp_settings`` has both ``public_url`` and ``jwt_secret``,
-    ``ensure_agent_mcp_vault()`` runs first (idempotent — warm path is a single
-    ``vaults.list()`` call) and the per-agent vault id is attached to the session.
+    ``ensure_agent_mcp_vault()`` runs first (refreshing its registered credential
+    when needed) and the per-agent vault id is attached to the session.
     Both ``account_id``, ``agent_uuid``, and ``session_factory`` are required in
     that case — no fallback to an account-scoped vault. The vault get-or-create
     is serialized per (account_id, agent_id) via a blocking Postgres advisory
@@ -727,6 +727,7 @@ async def create_session(
                 vault_id = await create_session_vault(
                     anthropic,
                     tenant_id=tenant_id,
+                    sessionmaker=session_factory,
                     agent_id=agent_uuid,
                     account_id=account_id,
                     public_url=(

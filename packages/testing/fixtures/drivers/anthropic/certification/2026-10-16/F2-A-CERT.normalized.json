@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "cell": "F2-A",
+  "result": "PAID_PASS_UNGATED",
+  "classification": "UNGATED Carlos-directed paid run; no completed preflight gate/readiness/paid approval column claimed",
+  "observed_date": "2026-10-16",
+  "source_head": "1929c97f65456aac391388ec59e99ec38f14fd50",
+  "image_digest": "sha256:8760151927a9f522ef96f8336167a0caa050954328ea0c0a1dda792991236836",
+  "backend": "anthropic.agent",
+  "model": "claude-haiku-5-5",
+  "source_configuration_sha256": "7da78e5d03f042642885f4dea8a4aae62cc8f1b3a4c2a05e19706b431a8c8a81",
+  "source_skill_seal_sha256": "cdebb6aab89dff2cd6c61079a83753303ff30a7f422de0e1910716e0ae9b06ef",
+  "canonical_body_sha256": "14b0299e67a927fafd6d572d1c58d50a87d78c2d56bd9611e65f9330b61e60a9",
+  "subject": "retained full-default subject, immutable native version 1",
+  "observed": {
+    "qa_sends": 1,
+    "retries": 0,
+    "native_sessions": 1,
+    "completed_model_requests": 6,
+    "final_sentinel": "f1-default-capability-ok",
+    "discord_reply_and_footer_captured": true,
+    "immutable_source_skills": 11,
+    "source_skill_files": 43,
+    "builtin_success_counts": {
+      "bash": 1,
+      "edit": 1,
+      "glob": 1,
+      "grep": 1,
+      "read": 2,
+      "write": 1
+    },
+    "remote_mcp_success_counts": {
+      "search_tools": 2,
+      "call_tool": 2
+    },
+    "remote_mcp_targets": [
+      "get_agent",
+      "list_sessions"
+    ],
+    "tool_result_errors": 0
+  },
+  "declared_losses": {
+    "skills": [],
+    "tools": [],
+    "remote_mcp": [],
+    "memory": "No blanket memory drop; two cold-created owned stores used under accepted per-cell policy and deleted after run. Cross-session memory continuity not established by this run."
+  },
+  "privacy_note": "Ordinary serving-chat MCP get_agent/list_sessions was used, not the private describe_agent/list_my_sessions surface. list_sessions requested this subject via agent_name; filter success is not an authorization-isolation proof. Source owner account/sealed-channel checks and any cross-agent/account scope require their separate security evidence. No foreign-account access or tenant-wide safety claim is inferred. No session-list payloads/transcripts/tokens are included in this normalized receipt.",
+  "cleanup": {
+    "native_terminated_and_archived": true,
+    "owned_memory_stores_delete_ack_and_scoped_top_get404": 2,
+    "owned_vaults_delete_ack_and_scoped_top_get404": 1,
+    "source_agent_and_11_skills_retained": true,
+    "parent_unpin": "requested by N4; final QA readback not yet joined",
+    "window_restore": "N4/LEAD owned; not asserted complete"
+  },
+  "accounting": {
+    "model_requests": 6,
+    "tokens": {
+      "input_tokens": 172922,
+      "output_tokens": 2054,
+      "input_cached_tokens": 142248,
+      "input_cache_write_tokens": 30660,
+      "input_cache_write_5m_tokens": 30660,
+      "input_cache_write_1h_tokens": 0
+    },
+    "active_seconds": "19.758",
+    "token_usd": "0.006283380",
+    "runtime_usd": "0.000439066666666667",
+    "owner_priced_actual_usd": "0.006722446666666667",
+    "price_owner_sha256": "53de79521ee960929d9b42e0fb0efff872ecd3d62de9f7b6b6e167cf96211e04",
+    "invoice": false,
+    "paid_reservation_existed": false,
+    "shared_ledger_paid_settlement": "not claimed; separate actual evidence retained under explicit override"
+  },
+  "limitations": [
+    "One successful paid scenario, not exhaustive provider/default capability certification.",
+    "Prior full-default source byte verification is supporting evidence, not a falsely claimed completed paid-send gate.",
+    "No gate, readiness boolean, approval, ledger settlement, or historical failed-run success fabricated."
+  ],
+  "evidence": [
+    {
+      "path": "inbox/20261016T151933Z-LEAD-CARLOS-PAID-F2A-NOW.md",
+      "sha256": "509277e1e88dde557b6a33fe760f0d2578c31d0f6a3215d4fc621f39f41d0123"
+    },
+    {
+      "path": "inbox/20261016T152335Z-N4-W11-F2A-PAID-RESULT-CLEANED.md",
+      "sha256": "5f2338a51f90ff5b1027c3f1ef616cbff6c64f7c1cc142de9ff5e6bdf07b47f1"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/01-source-reverify/F2-anthropic-source-skill-seal.json",
+      "sha256": "cdebb6aab89dff2cd6c61079a83753303ff30a7f422de0e1910716e0ae9b06ef"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/01-source-reverify/RESULTS.json",
+      "sha256": "1e9ab600a86467fee6188a731b37dda2664fe3dfa9198b90b0d4b23b8caa6049"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/08-carlos-paid/START.json",
+      "sha256": "e4a28c14e75b6b7afd59cb89fadad37a1cd6daf0837697e973d3c722610b33ea"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/08-carlos-paid/EVENTS.json",
+      "sha256": "36f60d585be72989406499ec66e0404c5b24132be318a9521bf3601769736503"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/08-carlos-paid/QA-TURN-FINISHED.json",
+      "sha256": "a08c9e13b744cdda4b7213dc6e060e087863647d540fd30fa578ab086cb66f3a"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/08-carlos-paid/NATIVE-AFTER-STOP.json",
+      "sha256": "04054e44129d31de711c29fa6f5bbcb209aaae20eb2bade4cb2e0984166bf6a0"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/08-carlos-paid/NATIVE-ARCHIVE-ACK.json",
+      "sha256": "b2b722f91ac0ecedb70a94101fe8114be85d56a8e7749ff638e26270e0789aef"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/08-carlos-paid/OWNED-PROVIDER-CLEANUP.json",
+      "sha256": "8582fc9f317854234438934e2dc455aaf7e0fbc462e8a8113b0e836db732672b"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/08-carlos-paid/ACTUAL-ACCOUNTING.json",
+      "sha256": "3c382f468c9f9fb32daf992222cc1fb46110d6e21c1f43e4153814560708dbec"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/08-carlos-paid/ACTUAL-SPEND.json",
+      "sha256": "dfb39ba63635889bfb42d5b5c1780feac289313edf8c36ec92b4c6a1d090157d"
+    },
+    {
+      "path": "lanes/N9-qa/overnight-20261016-r12/05-f2a/08-carlos-paid/USAGE-JOIN.json",
+      "sha256": "f26e18573f87777bd65c96fc917ab579fb6930612aa0e5f94320712f1c5fadc7"
+    }
+  ]
+}

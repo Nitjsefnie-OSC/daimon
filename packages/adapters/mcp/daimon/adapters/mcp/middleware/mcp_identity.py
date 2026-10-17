@@ -99,7 +99,7 @@ async def production_is_admin_resolver(context: MiddlewareContext) -> str | None
 async def production_internal_resolver(context: MiddlewareContext) -> str | None:
     """Return "true" iff the token carries internal=True (the trusted-token discriminator).
 
-    ``internal=True`` is emitted ONLY by ``mint_internal_mcp_token`` (CLI/scheduler/headless).
+    Historical jti-less internal tokens are refused before this middleware.
     A Discord vault token minted by ``mint_jwt`` never carries this claim. The admin gate
     keys on ``(role == ADMIN) OR (is_admin_claim AND internal_claim)`` so a stale pre-sweep
     Discord vault credential with ``is_admin=True`` and ``role=user`` is denied admin
@@ -320,7 +320,7 @@ class IdentityMiddleware(Middleware):
         internal_claim = (await self._internal_resolver(context)) == "true"
         # Admin gate: a Discord vault token's baked is_admin claim alone
         # MUST NOT elevate a non-admin caller. The internal discriminator distinguishes
-        # trusted internal tokens (CLI/scheduler/headless, minted by mint_internal_mcp_token)
+        # historical internal claims (jti-less tokens are refused by the verifier)
         # from Discord vault tokens (minted by mint_jwt, which never emits internal=True).
         # Gate: DB role == ADMIN  OR  (is_admin claim AND internal claim).
         # An account from another organisation is never an admin, by any claim.

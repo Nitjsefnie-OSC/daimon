@@ -18,7 +18,14 @@ import structlog
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.ids import PROVIDERS, Provider, Scope
 from mux.contracts.profile import Capability
-from mux.contracts.resources import Agent, AgentSpec, Environment, ResourceBinding, WorkspaceSource
+from mux.contracts.resources import (
+    Agent,
+    AgentSpec,
+    Environment,
+    EnvironmentSpec,
+    ResourceBinding,
+    WorkspaceSource,
+)
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -423,17 +430,6 @@ class TeamsInstallationRow(BaseModel):
     team_id: str
     group_id: str
     name: str | None = None
-
-
-class TeamsChannelSiteRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    channel_id: str
-    group_id: str
-    site_id: str
-    drive_id: str
-    folder_id: str
 
 
 class TeamsChannelSubscriptionRow(BaseModel):
@@ -1129,6 +1125,15 @@ class CompatibilityItem(_Facts):
     providers: tuple[Provider, ...] = PROVIDERS
 
 
+class SourceRepresentation(_Facts):
+    """Owner-verified translation of immutable source capabilities, never request intent."""
+
+    source_pin: str = Field(pattern=r"^[0-9a-f]{64}$")
+    target: AgentSpec
+    credential_refs: tuple[str, ...] = ()
+    environment: EnvironmentSpec | None = None
+
+
 class BackendAgent(_Facts):
     """Host-resolved scoped agent; never populate this from request ownership claims."""
 
@@ -1156,6 +1161,7 @@ class BackendAgent(_Facts):
     memory_store_id: str | None = Field(default=None, exclude=True, repr=False)
     memory_read_only: bool | None = Field(default=None, strict=True, exclude=True, repr=False)
     memory_instructions: str | None = Field(default=None, exclude=True, repr=False)
+    representations: tuple[SourceRepresentation, ...] = Field(default=(), exclude=True, repr=False)
 
 
 class TenantBackendPolicy(_Facts):

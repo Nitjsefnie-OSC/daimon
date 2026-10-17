@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.types import ASGIApp
 
-from .harness import make_jwt
+from .harness import registered_account_token
 
 _LIST: dict[str, object] = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
 _SEARCH: dict[str, object] = {
@@ -59,7 +59,9 @@ async def _tokens(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[str, 
         admin = await make_account(s, tenant=tenant)
         await accounts.set_role(s, admin.id, Role.ADMIN)
         member = await make_account(s, tenant=tenant)
-    return make_jwt(account_id=admin.id), make_jwt(account_id=member.id)
+    return await registered_account_token(
+        sessionmaker, account_id=admin.id
+    ), await registered_account_token(sessionmaker, account_id=member.id)
 
 
 async def test_a_call_on_another_instance_with_its_session_id_succeeds(

@@ -24,6 +24,7 @@ from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.runtime_manifest import read_frozen_root
 from daimon.core.turn.runtimes import build_channel_runtime
 from daimon.testing.isolated_sdk import build_async_openai
+from mux.contracts.resources import AgentSpec
 from mux.drivers.openai import deployment
 from mux.drivers.openai.transport import SDKTransport
 
@@ -175,6 +176,14 @@ async def conversation_root(
                 "declared_drops": DROPS,
             }
         )
+        if getattr(request, "param", None) == "fresh_spec":
+            # Fresh tool arguments omit optional workspace fields and ownership stamps.
+            spec = AgentSpec(
+                name="W2",
+                model=model,
+                system="Reject B: clones only narrow.",
+                declared_drops=("mcp", "memory", "model_controls", "sandbox", "skills", "tools"),
+            )
         wire = ConversationWire()
         manifest = tmp_path / "runtime.json"
         authorized = OpenAIDeployment(
@@ -261,6 +270,7 @@ def terms(parent, resolved):
     )
 
 
+@pytest.mark.parametrize("conversation_root", [None, "fresh_spec"], indirect=True)
 async def test_recorded_root_freeze_retained_reader_dispatch_create_events_usage(conversation_root):
     deps, parent, policy, resolved, wire, ports, _, transport = conversation_root
     owner = FleetOrchestrator(ports)
@@ -307,6 +317,60 @@ async def test_recorded_root_freeze_retained_reader_dispatch_create_events_usage
     again = await owner.spawn(parent, policy, **kwargs)
     assert again["worker_id"] == first["worker_id"] and again["status"] == "succeeded"
     assert len(wire.posts) == 2
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+async def test_worker_task_logs_original_failure_without_exception_payload(
+    conversation_root, monkeypatch, failure
+):
+    from structlog.testing import capture_logs
+
+    _, parent, policy, resolved, wire, ports, _, _ = conversation_root
+    secret = "sentinel-private-provider-payload"
+
+    async def refuse(*args, **kwargs):
+        raise failure(secret)
+
+    monkeypatch.setattr("daimon.core.headless_runner.run_worker", refuse)
+    with capture_logs() as logs:
+        first = await FleetOrchestrator(ports).spawn(parent, policy, **terms(parent, resolved))
+        task = ports._tasks.get(UUID(first["worker_id"]))
+        assert task is not None
+        with pytest.raises(failure):
+            await task
+        await asyncio.sleep(0)
+    failures = [row for row in logs if row["event"] == "fleet.worker_task_failed"]
+    assert failures == [
+        {
+            "event": "fleet.worker_task_failed",
+            "run_id": str(parent.fleet.run_id),
+            "worker_id": first["worker_id"],
+            "error_class": failure.__name__,
+            "log_level": "warning",
+        }
+    ]
+    assert secret not in json.dumps(logs)
+    assert wire.posts == []
+
+
+async def test_missing_dispatch_host_runtime_refuses_before_native_allocation(
+    conversation_root, monkeypatch
+):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    _, parent, policy, resolved, wire, ports, _, _ = conversation_root
+    monkeypatch.delenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    first = await FleetOrchestrator(ports).spawn(parent, policy, **terms(parent, resolved))
+    task = ports._tasks.get(UUID(first["worker_id"]))
+    assert task is not None
+    with pytest.raises(AdmissionDenied) as refused:
+        await task
+    assert refused.value.reason == "backend_unsupported"
+    _, workers = await ports.read_run(parent.fleet.scope, parent.fleet.run_id)
+    actual = next(row for row in workers if str(row.id) == first["worker_id"])
+    assert actual.binding_id is None and actual.turns_used == actual.attempts == 0
+    assert actual.reserved_usd > 0
+    assert wire.posts == []
 
 
 @pytest.mark.parametrize("conversation_root", ["recorded_caps"], indirect=True)

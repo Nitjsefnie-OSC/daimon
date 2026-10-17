@@ -29,8 +29,11 @@ from daimon.core.github_app_auth import (
     mint_installation_token,
 )
 from daimon.core.github_requester_access import PermissionCache
-from daimon.core.mcp_auth import mint_jwt
-from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, add_github_copilot_credential
+from daimon.core.mcp_vault import (
+    GITHUB_COPILOT_MCP_URL,
+    add_github_copilot_credential,
+    chat_mcp_credential,
+)
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import (
     archive_session,
@@ -243,6 +246,7 @@ async def create_session_vault(
     account_id: uuid.UUID | None,
     public_url: str | None,
     jwt_secret: bytes | None,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> str:
     scope = resource_scope(
         tenant_id=str(tenant_id),
@@ -251,23 +255,16 @@ async def create_session_vault(
     vault = await create_vault(anthropic, f"github-session:{uuid.uuid4()}", scope=scope)
     try:
         if public_url is not None and jwt_secret is not None and account_id is not None:
-            await store_credential(
-                anthropic,
-                vault.id,
-                {
-                    "auth": {
-                        "type": "static_bearer",
-                        "mcp_server_url": public_url,
-                        "token": mint_jwt(
-                            account_id=account_id,
-                            chat_agent_id=agent_id,
-                            secret=jwt_secret,
-                            now=datetime.now(UTC),
-                        ),
-                    }
-                },
-                scope=scope,
-            )
+            async with sessionmaker() as session, session.begin():
+                payload = await chat_mcp_credential(
+                    session,
+                    account_id=account_id,
+                    agent_id=agent_id,
+                    jwt_secret=jwt_secret,
+                    public_url=public_url,
+                    now=datetime.now(UTC),
+                )
+                await store_credential(anthropic, vault.id, payload, scope=scope)
     except BaseException:
         await archive_vault(anthropic, vault.id, scope=scope)
         raise

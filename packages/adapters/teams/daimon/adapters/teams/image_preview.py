@@ -1,7 +1,8 @@
-"""Inline image previews for session outputs: a small data-URI attachment Teams renders.
+"""Inline image previews for session outputs: a small data-URI image Teams renders.
 
-Teams shows a bot attachment whose `content_url` is a `data:` URI inline, but
-only up to 1024x1024 px and 1 MB, PNG, JPEG or a still GIF. The SDK does not
+Teams shows a `data:` URI inline, as a markdown image in an answer's text
+(`card.inline_image`) or as the `content_url` of an image-only message's
+attachment, but only up to 1024x1024 px and 1 MB, PNG, JPEG or a still GIF. The SDK does not
 check, and an oversize one is sent but never rendered, so everything here
 re-encodes to fit or returns None.
 """

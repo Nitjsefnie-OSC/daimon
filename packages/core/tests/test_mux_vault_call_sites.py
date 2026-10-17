@@ -16,7 +16,7 @@ from daimon.core.agent_mcp_credentials import (
     mirror_credentials_into_vault,
 )
 from daimon.core.github_app_session import AppSessionAccess, AppToken, add_app_credentials
-from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_auth import CHAT_TOKEN_TTL, mint_chat_mcp_token, mint_jwt
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse
 from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
 from daimon.core.mcp_vault import (
@@ -25,6 +25,7 @@ from daimon.core.mcp_vault import (
     add_github_copilot_credential,
 )
 from daimon.core.mux_backend import resource_scope
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 
 NOW = dt.datetime(2026, 9, 15, 12, tzinfo=dt.UTC)
@@ -88,9 +89,33 @@ def equal_requests(old, new):
 
 
 @pytest.mark.parametrize("case", ["cold", "upgrade", "heal", "unchanged"])
-async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(case, monkeypatch):
+async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(
+    case, monkeypatch, db_session_factory
+):
     import daimon.core.mcp_vault as host
 
+    async with db_session_factory() as db, db.begin():
+        tenant = await make_tenant(db)
+        await make_account(db, tenant=tenant, id=ACCOUNT)
+        _, current_jti, current_exp = await mint_chat_mcp_token(
+            db,
+            account_id=ACCOUNT,
+            agent_id=AGENT,
+            secret=SECRET,
+            now=NOW,
+        )
+    fresh = {
+        "daimon_chat_identity": str(AGENT),
+        "daimon_chat_jti": str(current_jti),
+        "daimon_chat_expires_at": current_exp.isoformat(),
+    }
+    fixed_jti = uuid.UUID(int=3)
+    monkeypatch.setattr(uuid, "uuid4", lambda: fixed_jti)
+    new_metadata = {
+        "daimon_chat_identity": str(AGENT),
+        "daimon_chat_jti": str(fixed_jti),
+        "daimon_chat_expires_at": (NOW + CHAT_TOKEN_TTL).isoformat(),
+    }
     name = f"daimon-mcp:{ACCOUNT}:{AGENT}"
     vault = {
         "id": "vault",
@@ -100,12 +125,14 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(case, monkeypa
         "metadata": {},
     }
     foreign = {**vault, "id": "foreign", "display_name": "another-account"}
-    metadata = {"daimon_chat_identity": str(AGENT)} if case == "unchanged" else {"kept": "yes"}
+    metadata = fresh if case == "unchanged" else {"kept": "yes"}
     current = static("existing", PUBLIC if case != "heal" else SERVER, metadata)
     replies = [("GET", "/v1/vaults", 200, page([foreign] if case == "cold" else [foreign, vault]))]
     if case == "cold":
         replies.append(("POST", "/v1/vaults", 200, vault))
     else:
+        replies.append(("GET", "/v1/vaults/vault/credentials", 200, page([current])))
+    if case in ("upgrade", "heal"):
         replies.append(("GET", "/v1/vaults/vault/credentials", 200, page([current])))
     if case in ("cold", "heal"):
         replies.append(("POST", "/v1/vaults/vault/credentials", 200, static("created", PUBLIC)))
@@ -127,7 +154,14 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(case, monkeypa
             return _original(*args, **kwargs)
 
         monkeypatch.setattr(host, operation, spy)
-    token = mint_jwt(account_id=ACCOUNT, chat_agent_id=AGENT, secret=SECRET, now=NOW)
+    token = mint_jwt(
+        account_id=ACCOUNT,
+        chat_agent_id=AGENT,
+        secret=SECRET,
+        now=NOW,
+        jti=fixed_jti,
+        expires_at=NOW + CHAT_TOKEN_TTL,
+    )
     async with old.client() as before, new.client() as after:
         # Original host leaf calls and literal payloads, independently pinned.
         _ = [row async for row in before.beta.vaults.list(limit=100)]
@@ -135,10 +169,13 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(case, monkeypa
             await before.beta.vaults.create(display_name=name)
         else:
             _ = [row async for row in before.beta.vaults.credentials.list(vault_id="vault")]
+        if case in ("upgrade", "heal"):
+            # A replacement rechecks the slot after committing its registry row.
+            _ = [row async for row in before.beta.vaults.credentials.list(vault_id="vault")]
         if case in ("cold", "heal"):
             await before.beta.vaults.credentials.create(
                 vault_id="vault",
-                metadata={"daimon_chat_identity": str(AGENT)},
+                metadata=new_metadata,
                 auth={"type": "static_bearer", "mcp_server_url": PUBLIC, "token": token},
             )
         elif case == "upgrade":
@@ -146,20 +183,24 @@ async def test_vault_bootstrap_keeps_discovery_then_tenant_writes(case, monkeypa
                 "existing",
                 vault_id="vault",
                 auth={"type": "static_bearer", "token": token},
-                metadata={"kept": "yes", "daimon_chat_identity": str(AGENT)},
+                metadata={"kept": "yes", **new_metadata},
             )
-        assert (
-            await _ensure_agent_mcp_vault_locked(
-                after,
-                account_id=ACCOUNT,
-                agent_id=AGENT,
-                jwt_secret=SECRET,
-                public_url=PUBLIC,
-                now=NOW,
-                scope=SCOPE,
+        async with db_session_factory() as db:
+            await host._lock_vault_namespace(db, account_id=ACCOUNT, agent_id=AGENT)
+            assert (
+                await _ensure_agent_mcp_vault_locked(
+                    after,
+                    session=db,
+                    account_id=ACCOUNT,
+                    agent_id=AGENT,
+                    jwt_secret=SECRET,
+                    public_url=PUBLIC,
+                    now=NOW,
+                    scope=SCOPE,
+                )
+                == "vault"
             )
-            == "vault"
-        )
+            await db.commit()
     equal_requests(old, new)
     assert seen[0][0] == "list_vaults"
     assert seen[0][1].is_legacy_host_authorized  # Name discovery precedes knowing the ID.

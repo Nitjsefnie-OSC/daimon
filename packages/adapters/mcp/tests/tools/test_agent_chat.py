@@ -3891,3 +3891,145 @@ async def test_start_turn_charges_an_isolated_channels_own_agent_to_that_channel
     assert create.await_args is not None
     kwargs = create.await_args.kwargs
     assert (kwargs["budget_channel_id"], kwargs["origin_channel_id"]) == (charged, None)
+
+
+async def test_start_then_continue_rotates_the_mounted_chat_token_inside_the_real_fence(
+    db_nullpool_engine,
+    db_clean,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daimon.core.sessions as session_owner
+    from anthropic.types.beta.vaults.beta_managed_agents_credential import (
+        BetaManagedAgentsCredential,
+    )
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+    from daimon.core.config import GithubAppSettings, McpSettings
+    from daimon.core.mcp_auth import token_jti
+    from daimon.testing.ma import make_fake_memory_store_handler
+
+    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    async with factory.begin() as db:
+        tenant = await make_tenant(db, id=_TENANT_ID)
+        await make_account(db, tenant=tenant, id=_ACCOUNT_ID)
+    clock = [dt.datetime.now(dt.UTC).replace(microsecond=0) - dt.timedelta(minutes=30)]
+    original_datetime = dt.datetime
+
+    class Clock(original_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    # Inject the edge clock, never mock a mint, refresh, fence or SDK method.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(session_owner, "dt", SimpleNamespace(datetime=Clock, UTC=dt.UTC))
+    router = _agent_and_env_router()
+    memory = make_fake_memory_store_handler()
+    router.add("POST", r"/v1/memory_stores$", lambda request, _m: memory(request))
+    slots = []
+    issued = []
+    live = {}
+    sends = []
+    secret = b"s" * 32
+    verifier = DaimonJWTVerifier(secret=secret, sessionmaker=factory)
+    router.add("GET", r"/v1/vaults$", lambda _r, _m: list_response([]))
+    router.add(
+        "POST",
+        r"/v1/vaults$",
+        lambda request, _m: httpx.Response(
+            200,
+            json={
+                "id": "vlt_continue",
+                "type": "vault",
+                "display_name": json_body(request)["display_name"],
+                "metadata": {},
+                "created_at": clock[0].isoformat(),
+                "updated_at": clock[0].isoformat(),
+                "archived_at": None,
+            },
+        ),
+    )
+    router.add("GET", r"/v1/vaults/vlt_continue/credentials$", lambda _r, _m: list_response(slots))
+
+    async def write_credential(request, _match):
+        body = json_body(request)
+        token = body["auth"]["token"]
+        issued.append(token)
+        if len(issued) > 1:
+            # The API can expose its write before responding: registry must be committed.
+            assert await verifier.verify_token(token) is not None
+            async with factory.begin() as db:
+                locked = await db.scalar(
+                    text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": "session_mutation:ses_test001"},
+                )
+                assert locked is False, "renewal must stay inside the real mutation fence"
+        wire = BetaManagedAgentsCredential.model_validate(
+            {
+                "id": "cred_continue",
+                "type": "vault_credential",
+                "vault_id": "vlt_continue",
+                "auth": {"type": "static_bearer", "mcp_server_url": "https://mcp.example/mcp"},
+                "metadata": body["metadata"],
+                "created_at": clock[0].isoformat(),
+                "updated_at": clock[0].isoformat(),
+            }
+        ).model_dump(mode="json")
+        slots[:] = [wire]
+        return httpx.Response(200, json=wire)
+
+    router.add("POST", r"/v1/vaults/vlt_continue/credentials(?:/cred_continue)?$", write_credential)
+
+    def create(request, _match):
+        body = json_body(request)
+        live.update(
+            ma_session(
+                id="ses_test001",
+                agent_id=_MA_AGENT_ID,
+                environment_id=_ENV_ID,
+                vault_ids=body["vault_ids"],
+                metadata=body["metadata"],
+            ).model_dump(mode="json")
+        )
+        assert live["vault_ids"] == ["vlt_continue"]
+        return httpx.Response(200, json=live)
+
+    router.add("POST", r"/v1/sessions$", create)
+    router.add("GET", r"/v1/sessions/ses_test001$", lambda _r, _m: httpx.Response(200, json=live))
+
+    def send(request, _match):
+        sends.append(json_body(request))
+        return send_events_response(
+            data=[
+                BetaManagedAgentsUserMessageEvent(
+                    id=f"sevt_{len(sends)}",
+                    type="user.message",
+                    processed_at=None,
+                    content=[BetaManagedAgentsTextBlock(type="text", text="hello")],
+                ).model_dump(mode="json")
+            ]
+        )
+
+    router.add("POST", r"/v1/sessions/ses_test001/events$", send)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, session_factory=factory, environment_name=_ENV_NAME)
+    runtime.settings.mcp = McpSettings(
+        public_url="https://mcp.example/mcp", jwt_secret=SecretStr(secret.decode())
+    )
+    runtime.settings.github_app = GithubAppSettings()
+    try:
+        started = await _start_turn_impl(runtime, _auth(), "first", now=lambda: clock[0])
+        assert len(issued) == 1
+        first_jti = token_jti(issued[0])
+        clock[0] += dt.timedelta(minutes=11)
+        await _continue_turn_impl(runtime, _auth(), started["handle"], "next", now=lambda: clock[0])
+        assert len(sends) == 2 and len(issued) == 2
+        assert token_jti(issued[1]) != first_jti
+        assert await verifier.verify_token(issued[1]) is not None
+        clock[0] += dt.timedelta(minutes=1)
+        await _continue_turn_impl(
+            runtime, _auth(), started["handle"], "healthy reuse", now=lambda: clock[0]
+        )
+        assert len(sends) == 3 and len(issued) == 2
+    finally:
+        await client.close()

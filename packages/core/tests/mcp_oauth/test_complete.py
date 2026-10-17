@@ -10,6 +10,7 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
+from anthropic.types.beta.vaults import BetaManagedAgentsCredential
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.complete import (
@@ -142,25 +143,31 @@ def _fake_ma(
             ]
         ),
     )
+    chat_credential = {
+        "id": "vcrd_jwt",
+        "type": "vault_credential",
+        "vault_id": vault_id,
+        "auth": {"type": "static_bearer", "mcp_server_url": _PUBLIC_URL},
+        "created_at": "2026-09-01T00:00:00Z",
+        "updated_at": "2026-09-01T00:00:00Z",
+        "archived_at": None,
+        "display_name": None,
+        "metadata": {"daimon_chat_identity": str(agent_id)},
+    }
     router.add(
         "GET",
         rf"/v1/vaults/{vault_id}/credentials",
-        lambda _r, _m: list_response(
-            [
-                {
-                    "id": "vcrd_jwt",
-                    "type": "vault_credential",
-                    "vault_id": vault_id,
-                    "auth": {"type": "static_bearer", "mcp_server_url": _PUBLIC_URL},
-                    "created_at": "2026-09-01T00:00:00Z",
-                    "updated_at": "2026-09-01T00:00:00Z",
-                    "archived_at": None,
-                    "display_name": None,
-                    "metadata": {"daimon_chat_identity": str(agent_id)},
-                }
-            ]
-        ),
+        lambda _r, _m: list_response([chat_credential]),
     )
+
+    def on_refresh(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        # Renewal precedes the OAuth grant write and does not attach a server.
+        chat_credential["metadata"] = json_body(req)["metadata"]
+        chat_credential["updated_at"] = _NOW.isoformat()
+        response = BetaManagedAgentsCredential.model_validate(chat_credential)
+        return httpx.Response(200, json=response.model_dump(mode="json"))
+
+    router.add("POST", rf"/v1/vaults/{vault_id}/credentials/vcrd_jwt", on_refresh)
 
     def on_create_credential(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         body = json_body(req)

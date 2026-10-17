@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from stripe._http_client import HTTPClient as StripeHTTPClient
 
-from .harness import make_jwt, seed_server_admin
+from .harness import registered_account_token, seed_server_admin
 
 _VALID_TOKEN = "bearer-test-token"
 _TENANT_ID: uuid.UUID = uuid.uuid4()
@@ -356,7 +356,9 @@ async def test_checkout_refuses_an_operator_token(
         admin = await ac.post(
             "/billing/checkout",
             json={"amount": 10},
-            headers={"Authorization": f"Bearer {make_jwt(account_id=account_id)}"},
+            headers={
+                "Authorization": f"Bearer {await registered_account_token(sessionmaker, account_id=account_id)}"
+            },
         )
 
     assert refused.status_code == 403, f"an operator token cannot buy credit: {refused.text}"
