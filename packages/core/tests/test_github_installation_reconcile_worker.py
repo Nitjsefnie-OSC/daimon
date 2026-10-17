@@ -1,9 +1,166 @@
-"""Worker retry bounds for durable GitHub installation refreshes."""
+"""Worker retry bounds and the never-refreshed backfill for installation refreshes."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
-from daimon.core.github_installation_reconcile import _retry_delay
+import httpx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from daimon.core._models import GitHubAppInstallation, GitHubInstallationReconciliation
+from daimon.core.config import GithubAppSettings
+from daimon.core.github_installation_reconcile import (
+    _retry_delay,
+    drain_github_installation_reconciliations,
+)
+from daimon.core.stores import github_app_installations as installation_store
+from pydantic import SecretStr
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def test_retry_delay_stays_capped_after_many_failures() -> None:
     assert _retry_delay(10**6) == timedelta(minutes=5)
+
+
+def _settings() -> GithubAppSettings:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return GithubAppSettings(app_id="123456", private_key=SecretStr(pem.decode()))
+
+
+def _github(
+    installation_id: int, repositories: list[str], *, fail: bool = False
+) -> httpx.AsyncClient:
+    """Fake GitHub: the installation lookup, listing token and repository page."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if fail:
+            return httpx.Response(503, json={"message": "try again"})
+        if request.url.path == f"/app/installations/{installation_id}":
+            return httpx.Response(200, json={"account": {"login": "owner"}, "suspended_at": None})
+        if request.url.path == f"/app/installations/{installation_id}/access_tokens":
+            return httpx.Response(201, json={"token": "metadata-only-token"})
+        if request.url.path == "/installation/repositories":
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": len(repositories),
+                    "repositories": [{"full_name": name} for name in repositories],
+                },
+            )
+        raise AssertionError(f"unexpected GitHub API request: {request.method} {request.url}")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def _add_installation(
+    sessionmaker: async_sessionmaker[AsyncSession], installation_id: int
+) -> None:
+    async with sessionmaker.begin() as session:
+        await installation_store.upsert_github_app(
+            session,
+            installation_id=installation_id,
+            account_id=installation_id,
+            account_login="owner",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+        )
+
+
+async def _queue_state(
+    sessionmaker: async_sessionmaker[AsyncSession], installation_id: int
+) -> GitHubInstallationReconciliation | None:
+    async with sessionmaker() as session:
+        return await session.get(
+            GitHubInstallationReconciliation,
+            installation_id,
+            populate_existing=True,
+        )
+
+
+async def test_drain_backfills_snapshot_after_old_scheduler_consumed_migration_job(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Staging 2026-10-17: the previous image marked the migration's job done unwritten."""
+    installation_id = 9301
+    await _add_installation(db_session_factory, installation_id)
+    # Migration 0108 queued the refresh; the old drainer then finished it
+    # without knowing the new columns, so the row is done and nothing was written.
+    async with db_session_factory.begin() as session:
+        session.add(
+            GitHubInstallationReconciliation(
+                installation_id=installation_id, generation=1, state="done", attempts=1
+            )
+        )
+    async with db_session_factory() as session:
+        row = await installation_store.get(session, installation_id=installation_id)
+    assert row is not None and row.github_refreshed_at is None
+
+    async with _github(installation_id, ["owner/one", "owner/two"]) as client:
+        processed = await drain_github_installation_reconciliations(
+            sessionmaker=db_session_factory, http_client=client, github_app=_settings()
+        )
+
+    assert processed == 1, "the never-refreshed installation must be enqueued and drained"
+    async with db_session_factory() as session:
+        row = await installation_store.get(session, installation_id=installation_id)
+    assert row is not None
+    assert row.github_refreshed_at is not None
+    assert row.github_repo_full_names == ("owner/one", "owner/two")
+    job = await _queue_state(db_session_factory, installation_id)
+    assert job is not None and job.state == "done" and job.generation == 2
+
+
+async def test_failing_github_keeps_one_backing_off_job_without_reenqueue(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    installation_id = 9302
+    await _add_installation(db_session_factory, installation_id)
+    now = datetime.now(UTC)
+    async with _github(installation_id, [], fail=True) as client:
+        for tick in range(3):
+            await drain_github_installation_reconciliations(
+                sessionmaker=db_session_factory,
+                http_client=client,
+                github_app=_settings(),
+                now=now + timedelta(seconds=tick),
+            )
+
+    job = await _queue_state(db_session_factory, installation_id)
+    assert job is not None and job.state == "pending"
+    assert job.generation == 1, "a retrying job already counts as queued"
+    assert job.attempts == 1, "later ticks inside the backoff must not claim or reset it"
+    assert job.available_at > now + timedelta(seconds=3)
+
+
+async def test_drain_leaves_refreshed_and_removed_installations_alone(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    refreshed_id, removed_id = 9303, 9304
+    for installation_id in (refreshed_id, removed_id):
+        await _add_installation(db_session_factory, installation_id)
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as session:
+        await session.execute(
+            update(GitHubAppInstallation)
+            .where(GitHubAppInstallation.installation_id == refreshed_id)
+            .values(github_refreshed_at=now, github_repo_full_names=[])
+        )
+        await session.execute(
+            update(GitHubAppInstallation)
+            .where(GitHubAppInstallation.installation_id == removed_id)
+            .values(github_removed_at=now)
+        )
+
+    async with _github(refreshed_id, []) as client:
+        processed = await drain_github_installation_reconciliations(
+            sessionmaker=db_session_factory, http_client=client, github_app=_settings()
+        )
+
+    assert processed == 0
+    assert await _queue_state(db_session_factory, refreshed_id) is None
+    assert await _queue_state(db_session_factory, removed_id) is None
