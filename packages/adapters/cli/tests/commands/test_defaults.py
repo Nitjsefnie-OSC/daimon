@@ -11,7 +11,11 @@ from typing import Any, cast
 import pytest
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.commands import defaults as cmd_mod
-from daimon.adapters.cli.commands.defaults import _format_report_json, _format_report_table
+from daimon.adapters.cli.commands.defaults import (
+    _format_report_json,
+    _format_report_table,
+    defaults_apply,
+)
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import archive_tenant
@@ -80,6 +84,30 @@ def test_format_report_table_renders_system_config_rows() -> None:
     assert "system_config" in out
     assert "system" in out
     assert "updated" in out
+
+
+class _NoAnthropicSettings:
+    """Just enough shape for `defaults_apply`'s OpenAI-only skip branch."""
+
+    class anthropic:  # mirrors the real nested-settings shape
+        api_key = None
+
+
+def test_defaults_apply_skips_anthropic_reconciliation_with_no_key_configured() -> None:
+    rt = object.__new__(CliRuntime)
+    object.__setattr__(rt, "settings", cast(Settings, _NoAnthropicSettings()))
+    buf = StringIO()
+    console = Console(file=buf, force_terminal=False, highlight=False, width=120)
+
+    asyncio.run(
+        defaults_apply(
+            rt=rt, console=console, dry_run=False, as_json=False, defaults_root=Path("unused")
+        )
+    )
+
+    out = buf.getvalue()
+    assert "no DAIMON_ANTHROPIC__API_KEY configured" in out
+    assert "daimon openai init" in out
 
 
 # ---------------------------------------------------------------------------

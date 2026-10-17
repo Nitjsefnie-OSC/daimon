@@ -194,9 +194,11 @@ Read from `daimon.core.config.AnthropicSettings`. Prefix `DAIMON_ANTHROPIC__`.
 
 ### `DAIMON_ANTHROPIC__API_KEY`
 
-`SecretStr` · **required** · secret
+`SecretStr | None` · optional · default unset · secret
 
-Anthropic API key used to authenticate all Managed Agents SDK calls. Required.
+Anthropic API key used to authenticate all Managed Agents SDK calls. Required unless
+this deployment is OpenAI-only (see docs/self-hosting.md's 'Self-host on OpenAI'), in
+which case leave it unset.
 
 ### `DAIMON_ANTHROPIC__BASE_URL`
 

@@ -113,6 +113,35 @@ def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text(json.dumps(rows, indent=2) + "\n")
 
 
+def _skill_bundle(skill_dir: Path) -> SkillUpload:
+    files = tuple(
+        SkillUploadFile(path=file.relative_to(skill_dir).as_posix(), content=file.read_bytes())
+        for file in sorted(skill_dir.rglob("*"))
+        if file.is_file()
+    )
+    return SkillUpload(files=files)
+
+
+async def _seed_default_skills(
+    skills: OpenAISkills, scope: Scope, defaults_root: Path, *, key_prefix: str
+) -> tuple[SkillRef, ...]:
+    """Upload every `defaults/skills/*` directory as a native OpenAI skill,
+    matching what `daimon defaults apply` seeds on the Anthropic path."""
+    from daimon.core.defaults.loader import load_skill_paths
+
+    refs: list[SkillRef] = []
+    for skill_dir in load_skill_paths(defaults_root / "skills"):
+        bundle = _skill_bundle(skill_dir)
+        skill = await skills.create(scope, bundle, key=f"{key_prefix}:{skill_dir.name}")
+        assert skill.latest_version is not None
+        refs.append(
+            SkillRef(
+                id=skill.id, version=skill.latest_version.version, digest=bundle_digest(bundle)
+            )
+        )
+    return tuple(refs)
+
+
 @openai_app.command("init")
 def openai_init_command(
     tenant_id: Annotated[
@@ -154,12 +183,25 @@ def openai_init_command(
         str,
         typer.Option("--profile", help=f"{_PERSISTENT_WORKSPACE} or {_CONVERSATION_ONLY}."),
     ] = _PERSISTENT_WORKSPACE,
+    defaults_root: Annotated[
+        Path,
+        typer.Option("--defaults-root", help="Defaults tree to seed the new agent's skills from."),
+    ] = Path("defaults"),
+    skip_default_skills: Annotated[
+        bool,
+        typer.Option("--skip-default-skills", help="Create the agent with no skills attached."),
+    ] = False,
 ) -> None:
     """Create (or reuse) a project-scoped OpenAI agent, plus a hosted
     environment for `openai.persistent_workspace`, and record them as one row
     in the provider runtime file. Idempotent: an existing row with the same
     profile/tenant/platform/channel/account is reused unchanged. Prints only
     IDs — never the API key.
+
+    A fresh `openai.persistent_workspace` agent is seeded with every skill
+    under `--defaults-root/skills` (the same ones `daimon defaults apply`
+    seeds on the Anthropic path), unless `--skip-default-skills` is given.
+    Reusing an existing row does not re-sync skills.
     """
     console = _console()
     if profile not in (_PERSISTENT_WORKSPACE, _CONVERSATION_ONLY):
@@ -197,11 +239,24 @@ def openai_init_command(
             authorization_id="openai-init",
             platform_reason="daimon openai init: operator-authorized bootstrap",
         )
+        default_skills: tuple[SkillRef, ...] = ()
+        if profile == _PERSISTENT_WORKSPACE and not skip_default_skills:
+            skill_key_prefix = (
+                f"daimon-openai-init-skill:{tenant_id}:{platform}:{channel_id}:{account_id}"
+            )
+            default_skills = await _seed_default_skills(
+                OpenAISkills(context), scope, defaults_root, key_prefix=skill_key_prefix
+            )
+
         agents = OpenAIAgents(context)
         agent_key = f"daimon-openai-init-agent:{tenant_id}:{platform}:{channel_id}:{account_id}"
         agent = await agents.create(
             scope,
-            AgentSpec(name=name, model=ModelRef(provider=PROVIDER_NAME, id=model)),
+            AgentSpec(
+                name=name,
+                model=ModelRef(provider=PROVIDER_NAME, id=model),
+                skills=default_skills or None,
+            ),
             key=agent_key,
         )
 
@@ -234,13 +289,14 @@ def openai_init_command(
                 "agent_id": agent.ref.id,
                 "environment_id": environment_id,
                 "api_key_env": api_key_env,
+                "skill_ids": [ref.id for ref in default_skills],
             }
         )
         rows.append(row.model_dump(mode="json", exclude_none=True))
         _write_rows(path, rows)
         console.print(
             f"openai init: OK project={project} agent_id={agent.ref.id} "
-            f"environment_id={environment_id}"
+            f"environment_id={environment_id} skills={len(default_skills)}"
         )
 
     _run(_do_init(), console=console)

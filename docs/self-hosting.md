@@ -74,10 +74,8 @@ original HTTP error; the original ten-minute expiry remains its upper bound.
   needs BuildKit) with Compose.
 - An Anthropic API key **in a workspace dedicated to this deployment**.
   Daimon manages the workspace's Managed Agents resources as its own, so
-  sharing the workspace with anything else causes collisions. This is
-  required even for an OpenAI-only deployment: `init` seeds the stack's
-  default agents, environments and skills through Anthropic once at startup
-  regardless of which provider later serves real chat turns. See
+  sharing the workspace with anything else causes collisions. Skip this if
+  you're self-hosting on OpenAI only — see
   [Self-host on OpenAI](#self-host-on-openai).
 
 ## 1. Configure the environment
@@ -234,30 +232,31 @@ counts its own.
 
 ## Self-host on OpenAI
 
-Daimon can route some or all channels to OpenAI's Agents API instead of
-Anthropic's, on just your own OpenAI key. The OpenAI driver
-(`daimon-mux[openai]`) ships in the default install already — there is no
-separate install step. What's required is still the one-time Anthropic setup
-above: `init` seeds the deployment's default agents, environments and skills
-through Anthropic at startup regardless of which provider later serves real
-chat turns (see [Prerequisites](#prerequisites)). This section covers what
-changes after that: provisioning OpenAI resources and pointing some or all
-channels at them.
+Daimon can run on just your own OpenAI key — no Anthropic account needed at
+all. The OpenAI driver (`daimon-mux[openai]`) ships in the default install
+already, so there is no separate install step. Leave
+`DAIMON_ANTHROPIC__API_KEY` unset in `.env`: `init` detects there's no
+Anthropic key and skips the Anthropic default-agent/skill reconciliation
+step instead of failing, and every service starts without one. This section
+covers the OpenAI-only setup: provisioning resources and routing channels to
+them.
 
-### What you lose on an OpenAI-routed channel
+### What's different on OpenAI
 
-- **Memory** has no OpenAI equivalent in this release. A channel routed to
-  OpenAI keeps no cross-turn memory. This is an explicit, permanent loss for
-  that channel, not a bug to report.
-- **Model knobs** — Daimon's own model-selection and tuning options — don't
-  apply. The OpenAI driver fixes its own model and container defaults
-  instead (see `docs/mux.md`'s "OpenAI deployment runtime" and "Preserving
-  source capabilities in an OpenAI hosted workspace" sections).
-- **Repository attachments** (a GitHub-connected working copy) aren't
-  carried into an OpenAI session.
+- **No multi-agent delegation.** OpenAI's hosted-workspace profile doesn't
+  support it at all — not a config gap, a capability the driver doesn't have.
+- **No mid-session resource changes.** A session's initial file mounts (the
+  main case: a GitHub-connected working copy) work; swapping them after the
+  session starts doesn't.
+- **No workspace export/import** — there's no way to export a live OpenAI
+  session's workspace or restore one from a saved export.
+- **No memory across turns.** Every OpenAI-routed turn starts fresh.
+- **No Daimon model knobs.** The OpenAI driver fixes its own model and
+  container defaults (see `docs/mux.md`'s "OpenAI deployment runtime" and
+  "Preserving source capabilities in an OpenAI hosted workspace" sections).
 
-Everything else — the chat platforms, skills, scheduled routines — works the
-same no matter which provider actually answers.
+Everything else — the chat platforms, the default skill set, scheduled
+routines — works the same regardless of provider.
 
 ### 1. Get an OpenAI API key and project
 
@@ -274,17 +273,20 @@ the runtime file expect; pass `--api-key-env` to `init` if you'd rather name
 it something else. The name is all the runtime file ever records — never the
 key itself.
 
-### 2. Provision the agent and environment
+### 2. Provision the agent, environment and default skills
 
 ```bash
 docker compose run --rm init "daimon openai init --tenant-id <your-tenant-uuid> --project <openai-project-id> --model <openai-model-id>"
 ```
 
-This creates (or reuses, if you run it again) one OpenAI agent and one
-hosted environment, and writes one row for them into the provider runtime
-file. It's idempotent: an identical tenant/platform/channel/account
-selector prints the existing IDs instead of provisioning twice. It prints
-only the created IDs — never the API key.
+This creates (or reuses, if you run it again) one OpenAI agent, one hosted
+environment, and uploads every skill under `defaults/skills/` onto that
+agent — the same default skill set an Anthropic deployment gets from `daimon
+defaults apply` — then writes one row for them into the provider runtime
+file. It's idempotent: an identical tenant/platform/channel/account selector
+prints the existing IDs instead of provisioning (or re-seeding skills)
+twice. Pass `--skip-default-skills` for a bare agent instead. It prints only
+the created IDs — never the API key.
 
 Find your tenant UUID with `daimon tenants list` once the stack has
 auto-discovered it from a first message on another channel, or pick any
@@ -292,12 +294,23 @@ UUID you control if this is a fresh, OpenAI-only deployment from the start.
 
 ### 3. Point channels at it
 
-By default `daimon openai init` writes a row that authorizes **every**
-platform, channel and account under your tenant — the single-entry default
-most self-hosters want, so the runtime file never needs one entry per
-channel. Pass `--platform`, `--channel-id` and/or `--account-id` instead of
-the default `*` if you want only specific channels on OpenAI and the rest to
-stay on Anthropic.
+The one-command way: route your existing default agent's new threads to
+OpenAI entirely —
+
+```bash
+docker compose run --rm init "daimon agents backend set <agent-name-or-id> openai"
+```
+
+— after which every channel using that agent goes to OpenAI, with no
+per-channel setup. This is the same command any backend switch uses; nothing
+OpenAI-specific about it.
+
+If you'd rather route only specific channels and leave the rest on
+Anthropic, use `daimon channels rule set` per channel instead, scoped with
+`--platform`/`--channel-id`/`--account-id` on `daimon openai init` (its
+default is `*` — every platform, channel and account under your tenant, the
+single-entry default most self-hosters want, so the runtime file never needs
+one entry per channel).
 
 The wildcard is scoped to your tenant and nothing wider: `tenant_id` is
 never wildcardable, by construction — the loader refuses a manifest row that
@@ -306,8 +319,8 @@ OpenAI resources can never serve a different tenant through this entry, even
 with every other field left as `*`; an exact, narrower row always wins over
 a coexisting wildcard default for the same tenant.
 
-Add to `.env` (the `init`/`mcp`/`discord`/`slack`/`teams`/`scheduler`
-services already share `./runtime` as `/app/runtime`, see
+Either way, add to `.env` (the `init`/`mcp`/`discord`/`slack`/`teams`/
+`scheduler` services already share `./runtime` as `/app/runtime`, see
 `docker-compose.yml`):
 
 ```bash
