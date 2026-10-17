@@ -19,6 +19,8 @@ from mux.drivers.gemini import GeminiManagedAgents, resources
 from mux.errors import ProviderError, ScopeViolation
 from mux.state.memory import MemoryStateStore
 
+pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
+
 MIB = 1024 * 1024
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="allowed")
 

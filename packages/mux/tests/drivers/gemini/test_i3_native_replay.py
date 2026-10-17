@@ -72,6 +72,8 @@ from mux.state.operations import OperationRecord, request_digest
 from mux.state.store import binding_slot
 from pydantic import JsonValue, TypeAdapter
 
+pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
+
 Object = dict[str, JsonValue]
 _OBJECT = TypeAdapter(Object)
 Backend = Literal["anthropic", "openai", "gemini"]
