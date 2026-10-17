@@ -3113,7 +3113,15 @@ class AgentGitHubOwnerExclusion(Base):
 
 class GitHubIssuedToken(Base):
     __tablename__ = "github_issued_tokens"
-    __table_args__ = (CheckConstraint("status IN ('pending', 'stored', 'delivered', 'revoked')"),)
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'stored', 'delivered', 'revoked')"),
+        # Revoked rows are most of the table and no query reads them.
+        Index(
+            "ix_github_issued_tokens_live_session",
+            "session_id",
+            postgresql_where=text("status IN ('stored', 'delivered')"),
+        ),
+    )
     token_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )

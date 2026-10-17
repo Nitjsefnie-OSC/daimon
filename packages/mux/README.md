@@ -331,7 +331,8 @@ request and best-effort orphan interrupt without additional provider reads.
 Tenant operations check the host's authorized agent/session IDs before I/O.
 Its workspace-wide snapshot walks require explicit platform Scope and preserve
 `limit=100` with omitted archive filters. Destructive test cleanup keeps both the
-host opt-in and disposable-sentinel gate, its early exit and archive fallbacks.
+host opt-in and disposable-sentinel gate, its early exit and archive fallbacks. The dev-lane ownership check also uses platform-scope walks with
+`include_archived`, a has-any-environment/vault/memory-store probe, and a bare marker-agent create.
 Native snapshots retain SDK partial-response fields without requiring unused
 agent/session properties. DM archive retains the selected TurnIO/backend
 dispatch. Responder identity keeps its SDK read and untouched response for

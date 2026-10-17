@@ -308,6 +308,7 @@ class EffortConfig(NativeConfig):
 class ModelConfig(NativeConfig):
     id: str
     speed: Literal["standard", "fast"] | None = None
+    inference_geo: Literal["us", "global"] | None = None
     effort: EffortLevel | EffortConfig | None = None
 
 

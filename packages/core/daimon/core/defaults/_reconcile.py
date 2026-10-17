@@ -36,6 +36,7 @@ from daimon.core.defaults.sweep import (
     sweep_removed_skills,
 )
 from daimon.core.errors import DaimonError, DefaultsError
+from daimon.core.model_presets import model_choice_id
 from daimon.core.stores.channel_skills import list_channel_skill_ids
 from daimon.core.stores.seeded_skills import prune_seeded_skills
 from sqlalchemy import text
@@ -181,7 +182,7 @@ async def _reconcile_core(
     # Pre-flight: verify MA accepts every unique agent model before any writes.
     # Catches MA whitelist drift. Skip in dry-run — dry-run must be 100% read-only.
     if run_preflight and not dry_run and agent_specs:
-        unique_models = {spec.model for spec in agent_specs}
+        unique_models = {model_choice_id(spec.model) for spec in agent_specs}
         rejections = await check_models_accepted(client, unique_models)
         failed = {m: err for m, err in rejections.items() if err is not None}
         if failed:

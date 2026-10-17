@@ -47,6 +47,12 @@ _INSTALLATION_WRITE = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _existing_live_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing route scenarios exercise GitHub; live platform cases override this stub."""
+    monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=True))
+
+
 def _settings(key: str, *, configured: bool = True) -> Settings:
     return Settings(
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
@@ -410,14 +416,21 @@ async def test_cancel_after_oauth_revokes_user_token(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["discord", "slack"])
 async def test_requested_repo_picker_posts_only_selected_repo(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    platform: str,
 ) -> None:
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     async with committing_sessionmaker.begin() as session:
-        tenant = await make_tenant(session, id=tenant_id, workspace_id="workspace")
-        await make_account(session, tenant=tenant, id=account_id)
+        tenant = await make_tenant(
+            session, id=tenant_id, workspace_id="workspace", platform=platform
+        )
+        account = await make_account(session, tenant=tenant, id=account_id)
+        await make_platform_principal(
+            session, platform=platform, external_id="123", tenant=tenant, account=account
+        )
         await set_role(session, account_id, Role.ADMIN)
         invitation_token = await github_connect.mint_invitation(
             session,
@@ -425,6 +438,7 @@ async def test_requested_repo_picker_posts_only_selected_repo(
             requester_account_id=account_id,
             requester_platform_user_id="123",
             requested_repo="EXAMPLE/TWO",
+            origin_platform=platform,
         )
 
     def github_handler(request: httpx.Request) -> httpx.Response:
@@ -511,10 +525,22 @@ async def test_requested_repo_picker_posts_only_selected_repo(
         assert 'name="access" value="write" checked' in picker.text
         async with committing_sessionmaker() as session:
             assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
+        live = AsyncMock(
+            side_effect=[False, oauth_github.AdminAttestationUnavailable("lookup failed"), True]
+        )
+        monkeypatch.setattr(oauth_github, "_attest_native_admin", live)
+        for expected_status in (403, 503):
+            refused = await browser.post(
+                "/oauth/github/confirm", data={"state": state, "repo": "102", "access": "read"}
+            )
+            assert refused.status_code == expected_status
+            async with committing_sessionmaker() as session:
+                assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         submitted = await browser.post(
             "/oauth/github/confirm", data={"state": state, "repo": "102", "access": "read"}
         )
         assert submitted.status_code == 200
+        assert live.await_count == 3
         async with committing_sessionmaker() as session:
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
             assert [(repo.repo_id, repo.max_access) for repo in repos] == [(102, "write")]
@@ -529,7 +555,10 @@ async def test_connection_happy_path_and_rechecks(
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session, id=tenant_id, workspace_id="workspace")
-        await make_account(session, tenant=tenant, id=account_id)
+        account = await make_account(session, tenant=tenant, id=account_id)
+        await make_platform_principal(
+            session, platform="discord", external_id="123", tenant=tenant, account=account
+        )
         await set_role(session, account_id, Role.ADMIN)
         invitation_token = await github_connect.mint_invitation(
             session,
@@ -1461,7 +1490,12 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         # current tenant admin and still open this editor.
         _state, hidden, rendered = await page(operator=True)
         assert "Editor&#x27;s GitHub repos" in rendered
+        operator_live = AsyncMock(
+            side_effect=AssertionError("operator invitation requested live admin lookup")
+        )
+        monkeypatch.setattr(oauth_github, "_attest_native_admin", operator_live)
         assert (await save(hidden, repo="101")).status_code == 200
+        operator_live.assert_not_awaited()
 
         async with sessionmaker.begin() as session:
             operator_token = await github_connect.mint_invitation(

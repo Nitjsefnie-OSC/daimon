@@ -25,6 +25,7 @@ from anthropic.types.beta.memory_stores.beta_managed_agents_memory_list_item imp
     BetaManagedAgentsMemoryListItem,
 )
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
+from daimon.core.model_presets import ModelSelection, resolve_model
 from daimon.core.mux_backend import managed_agents, resource_ref
 from mux.contracts.ids import Revision, Scope, SkillRef
 from mux.contracts.ports import SkillVersions
@@ -106,7 +107,7 @@ def _agent_values(payload: Mapping[str, object]) -> dict[str, object]:
     result = dict(payload)
     extensions: dict[str, object] = {}
     if "model" in result and result["model"] is not None:
-        model = result["model"]
+        model = resolve_model(cast("ModelSelection", result["model"]))
         result["model"] = {
             "provider": "anthropic",
             "id": model if isinstance(model, str) else _mapping(model)["id"],

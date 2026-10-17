@@ -160,7 +160,10 @@ def identity_change_reasons(
     excluded = () if now is None else valid_unavailable_repo_urls(recorded, now=now)
     checks: tuple[tuple[bool, ChangeReason], ...] = (
         (recorded.ma_agent_id != desired.ma_agent_id, "agent_identity"),
-        (recorded.model_id != desired.model_id, "model"),
+        (
+            recorded.model_id != desired.model_id or recorded.model_speed != desired.model_speed,
+            "model",
+        ),
         (recorded.system_sha256 != desired.system_sha256, "system_prompt"),
         (recorded.skills_sha256 != desired.skills_sha256, "skills"),
         (recorded.environment_id != desired.environment_id, "environment"),

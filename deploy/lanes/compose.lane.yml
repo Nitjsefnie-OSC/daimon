@@ -1,0 +1,111 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-daimon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-daimon}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-daimon}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  init:
+    image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
+    labels:
+      org.opencontainers.image.revision: ${DAIMON_LANE_SHA:?DAIMON_LANE_SHA is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
+    entrypoint: ["sh", "-c"]
+    command: ["alembic upgrade head && daimon defaults apply"]
+    restart: "no"
+
+  mcp:
+    image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
+    labels:
+      org.opencontainers.image.revision: ${DAIMON_LANE_SHA:?DAIMON_LANE_SHA is required}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_MCP__JWT_SECRET: ${DAIMON_MCP__JWT_SECRET:?DAIMON_MCP__JWT_SECRET is required}
+      DAIMON_MCP__PUBLIC_URL: ${DAIMON_MCP__PUBLIC_URL:?DAIMON_MCP__PUBLIC_URL is required}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
+    entrypoint: ["uvicorn"]
+    command: ["daimon.adapters.mcp.server:create_mcp_app", "--factory", "--host", "0.0.0.0", "--port", "8765"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8765/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  discord:
+    image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
+    labels:
+      org.opencontainers.image.revision: ${DAIMON_LANE_SHA:?DAIMON_LANE_SHA is required}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
+    entrypoint: ["python", "-m", "daimon.adapters.discord"]
+    restart: unless-stopped
+
+  scheduler:
+    image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
+    labels:
+      org.opencontainers.image.revision: ${DAIMON_LANE_SHA:?DAIMON_LANE_SHA is required}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
+      DAIMON_MCP__JWT_SECRET: ${DAIMON_MCP__JWT_SECRET:?DAIMON_MCP__JWT_SECRET is required}
+      DAIMON_MCP__PUBLIC_URL: ${DAIMON_MCP__PUBLIC_URL:?DAIMON_MCP__PUBLIC_URL is required}
+    entrypoint: ["daimon-scheduler"]
+    restart: unless-stopped
+
+  slack:
+    image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
+    profiles: ["slack"]
+    labels:
+      org.opencontainers.image.revision: ${DAIMON_LANE_SHA:?DAIMON_LANE_SHA is required}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_ANTHROPIC__API_KEY: ${DAIMON_ANTHROPIC__API_KEY:?DAIMON_ANTHROPIC__API_KEY is required}
+      DAIMON_MCP__PUBLIC_URL: ${DAIMON_MCP__PUBLIC_URL:?DAIMON_MCP__PUBLIC_URL is required}
+    entrypoint: ["python", "-m", "daimon.adapters.slack"]
+    restart: unless-stopped
+
+  wipe:
+    image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
+    profiles: ["ops"]
+    labels:
+      org.opencontainers.image.revision: ${DAIMON_LANE_SHA:?DAIMON_LANE_SHA is required}
+    env_file: .env
+    entrypoint: ["python", "-m", "daimon.adapters.cli.lane_wipe"]
+    command: ["wipe"]
+    restart: "no"
+
+volumes:
+  pgdata:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -20,8 +21,9 @@ from urllib.parse import parse_qs, urlencode
 import httpx
 from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from cryptography.fernet import MultiFernet
+from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
+from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.web_icons import icon, platform_mark
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.config import Settings
@@ -40,6 +42,7 @@ from daimon.core.github_connect_cards import (
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.github_requester_access import list_github_pages
+from daimon.core.native_admins import AdminAttestationUnavailable, attest_discord_admin
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import get_account_with_tenant, has_external_accounts
@@ -48,9 +51,12 @@ from daimon.core.stores.github_access import list_agent_repos
 from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
 from daimon.core.stores.github_request_actions import finish_confirmed_requests
 from daimon.core.stores.security_audit import append_event
+from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
+from daimon.core.teams_graph import GraphClient, GraphUnavailable
+from mux.drivers import isolated_ssl_context
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sql_text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
@@ -59,6 +65,108 @@ RouteHandler = Callable[[Request], Awaitable[Response]]
 ClientFactory = Callable[[], httpx.AsyncClient]
 _COOKIE = "daimon_gh_connect"
 _log = logging.getLogger(__name__)
+_ADMIN_RETRY = "Couldn't confirm you're still a server or workspace admin. Try again in a minute."
+
+
+async def _attest_native_admin(
+    *,
+    requester: AccountIdentityRow,
+    settings: Settings,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+    http_client: httpx.AsyncClient | None = None,
+) -> bool:
+    """Read native authority for the invitation's bound principal, outside a write transaction."""
+    user_id = requester.platform_user_id
+    if user_id is None:
+        raise AdminAttestationUnavailable("platform principal unavailable")
+    if requester.platform == "discord":
+        return await attest_discord_admin(
+            guild_id=requester.external_id,
+            platform_user_id=user_id,
+            settings=settings,
+            http_client=http_client,
+        )
+    if requester.platform == "slack":
+        try:
+            async with sessionmaker() as session:
+                row = await get_slack_bot_token(session, team_id=requester.external_id)
+        except SQLAlchemyError as exc:
+            raise AdminAttestationUnavailable("workspace bot token lookup failed") from exc
+        if row is None:
+            raise AdminAttestationUnavailable("workspace bot token unavailable")
+        try:
+            token = decrypt_token(fernet, row.encrypted_token)
+        except InvalidToken as exc:
+            raise AdminAttestationUnavailable("workspace bot token unavailable") from exc
+
+        async def slack_lookup(client: httpx.AsyncClient) -> object:
+            response = await client.get(
+                "https://slack.com/api/users.info",
+                params={"user": user_id},
+                headers={"Authorization": f"Bearer {token}"},
+                follow_redirects=False,
+                timeout=5,
+            )
+            response.raise_for_status()
+            return cast(object, response.json())
+
+        try:
+            async with asyncio.timeout(10):
+                if http_client is None:
+                    async with httpx.AsyncClient(
+                        trust_env=False, verify=isolated_ssl_context()
+                    ) as client:
+                        payload = await slack_lookup(client)
+                else:
+                    payload = await slack_lookup(http_client)
+            if (
+                not isinstance(payload, dict)
+                or cast(dict[str, object], payload).get("ok") is not True
+            ):
+                raise ValueError("Slack lookup did not succeed")
+            user = cast(dict[str, object], payload).get("user")
+            if not isinstance(user, dict) or cast(dict[str, object], user).get("id") != user_id:
+                raise ValueError("Unbound Slack user")
+            user = cast(dict[str, object], user)
+            if user.get("deleted"):
+                return False
+            flags = ("is_admin", "is_owner", "is_primary_owner")
+            if any(type(user.get(flag)) is not bool for flag in flags):
+                raise ValueError("Missing Slack admin facts")
+            return any(user[flag] for flag in flags)
+        except (httpx.HTTPError, TimeoutError, ValueError) as exc:
+            raise AdminAttestationUnavailable("Slack lookup failed") from exc
+    if requester.platform == "teams":
+        teams = settings.teams
+        if teams is None or teams.admin_team_id is None:
+            raise AdminAttestationUnavailable("Teams admin team unavailable")
+        if requester.external_id.lower() != teams.tenant_id.lower():
+            return False
+        admin_team_id = teams.admin_team_id
+
+        async def teams_lookup(client: httpx.AsyncClient) -> frozenset[str]:
+            bot = TeamsBotClient(
+                client,
+                client_id=teams.client_id,
+                client_secret=teams.client_secret.get_secret_value(),
+                tenant_id=teams.tenant_id,
+            )
+            return await GraphClient(client, bot.graph_token).list_team_owner_ids(admin_team_id)
+
+        try:
+            async with asyncio.timeout(15):
+                if http_client is None:
+                    async with httpx.AsyncClient(
+                        trust_env=False, verify=isolated_ssl_context()
+                    ) as client:
+                        owners = await teams_lookup(client)
+                else:
+                    owners = await teams_lookup(http_client)
+            return user_id.lower() in owners
+        except (GraphUnavailable, httpx.HTTPError, TimeoutError, ValueError) as exc:
+            raise AdminAttestationUnavailable("Teams lookup failed") from exc
+    raise AdminAttestationUnavailable("unsupported platform")
 
 
 @dataclass(frozen=True)
@@ -1890,6 +1998,23 @@ def build_oauth_github_routes(
                 )
                 for repo_id in selected_ids
             ]
+            if not invitation.operator_issued:
+                if (
+                    invitation.requester_platform_user_id is not None
+                    and invitation.requester_platform_user_id != requester.platform_user_id
+                ):
+                    return _error("You can no longer manage this agent.", 403, retry_confirm_url)
+                try:
+                    still_admin = await _attest_native_admin(
+                        requester=requester,
+                        settings=settings,
+                        sessionmaker=sessionmaker,
+                        fernet=fernet,
+                    )
+                except AdminAttestationUnavailable:
+                    return _error(_ADMIN_RETRY, 503, retry_confirm_url)
+                if not still_admin:
+                    return _error("You can no longer manage this agent.", 403, retry_confirm_url)
             try:
                 async with sessionmaker.begin() as session:
                     await session.execute(sql_text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
@@ -2100,6 +2225,23 @@ def build_oauth_github_routes(
             is_daimon_managed = (
                 None if live is None else live.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
             )
+            if not invitation.operator_issued:
+                if (
+                    invitation.requester_platform_user_id is not None
+                    and invitation.requester_platform_user_id != requester.platform_user_id
+                ):
+                    return _error("You can no longer manage this agent.", 403, retry_confirm_url)
+                try:
+                    still_admin = await _attest_native_admin(
+                        requester=requester,
+                        settings=settings,
+                        sessionmaker=sessionmaker,
+                        fernet=fernet,
+                    )
+                except AdminAttestationUnavailable:
+                    return _error(_ADMIN_RETRY, 503, retry_confirm_url)
+                if not still_admin:
+                    return _error("You can no longer manage this agent.", 403, retry_confirm_url)
             try:
                 async with sessionmaker.begin() as session:
                     saved = await github_connect.confirm(
