@@ -28,9 +28,16 @@ async def test_live_index_upgrade_downgrade_upgrade_matches_the_model(
     connection = await db_session.connection()
 
     def present(sync: Connection) -> bool:
+        # Only this test's schema: `public`, also on the search_path, may hold
+        # its own copy of the index.
         return bool(
             sync.scalar(
-                text("SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(:name)"),
+                text(
+                    "SELECT i.indisvalid FROM pg_index i"
+                    " JOIN pg_class c ON c.oid = i.indexrelid"
+                    " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE c.relname = :name AND n.nspname = current_schema()"
+                ),
                 {"name": INDEX},
             )
         )
