@@ -98,14 +98,16 @@ class _Editor:
     account_id: uuid.UUID
     platform: Literal["discord", "slack"]
 
-    async def page(self) -> tuple[dict[str, str], str]:
+    async def page(
+        self, *, requester_platform_user_id: str = "editor"
+    ) -> tuple[dict[str, str], str]:
         async with self.sessionmaker.begin() as session:
             invitation = await github_connect.mint_invitation(
                 session,
                 tenant_id=self.tenant_id,
                 requester_account_id=self.account_id,
                 requester_label="Admin",
-                requester_platform_user_id="editor",
+                requester_platform_user_id=requester_platform_user_id,
                 agent_id=self.agent_id,
                 agent_name="Editor",
                 agent_ma_id="ag_editor",
@@ -259,10 +261,18 @@ async def test_agent_save_requires_live_admin(
         assert denied.status_code == 403
         assert "You can no longer manage this agent." in denied.text
         assert await editor.grants() == {}
+        async with editor.sessionmaker() as session:
+            assert (await github_connect.invitation_status(session, hidden["invitation"]))[
+                0
+            ] == "active"
         retry = await editor.save(hidden, repo="101")
         assert retry.status_code == 503
         assert "Try again in a minute." in retry.text
         assert await editor.grants() == {}
+        async with editor.sessionmaker() as session:
+            assert (await github_connect.invitation_status(session, hidden["invitation"]))[
+                0
+            ] == "active"
         saved = await editor.save(hidden, repo="101")
         assert saved.status_code == 200
         assert await editor.grants() == {101: "write"}
@@ -270,19 +280,40 @@ async def test_agent_save_requires_live_admin(
 
 
 @pytest.mark.asyncio
+async def test_agent_save_rejects_mismatched_requester_platform_user_id(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
+        hidden, _ = await editor.page(requester_platform_user_id="someone-else")
+        live = AsyncMock(return_value=True)
+        monkeypatch.setattr(oauth_github, "_attest_native_admin", live)
+        denied = await editor.save(hidden, repo="101")
+        assert denied.status_code == 403
+        assert await editor.grants() == {}
+        async with editor.sessionmaker() as session:
+            assert (await github_connect.invitation_status(session, hidden["invitation"]))[
+                0
+            ] == "active"
+        live.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("flags", "expected"),
+    ("flags", "deleted", "expected"),
     [
-        ((True, False, False), True),
-        ((False, True, False), True),
-        ((False, False, True), True),
-        ((False, False, False), False),
+        ((True, False, False), False, True),
+        ((False, True, False), False, True),
+        ((False, False, True), False, True),
+        ((False, False, False), False, False),
+        ((True, False, False), True, False),
     ],
 )
 async def test_slack_uses_live_workspace_role(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     flags: tuple[bool, bool, bool],
+    deleted: bool,
     expected: bool,
 ) -> None:
     live_attestation = oauth_github._attest_native_admin
@@ -309,6 +340,7 @@ async def test_slack_uses_live_workspace_role(
                     "ok": True,
                     "user": {
                         "id": "editor",
+                        "deleted": deleted,
                         "is_admin": flags[0],
                         "is_owner": flags[1],
                         "is_primary_owner": flags[2],
@@ -330,9 +362,123 @@ async def test_slack_uses_live_workspace_role(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user",
+    [
+        {"id": "editor", "is_admin": True, "is_owner": False},
+        {"id": "editor", "is_admin": "true", "is_owner": False, "is_primary_owner": False},
+        {"id": "other", "is_admin": True, "is_owner": False, "is_primary_owner": False},
+    ],
+)
+async def test_slack_rejects_unbound_or_malformed_admin_facts(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    user: dict[str, object],
+) -> None:
+    live_attestation = oauth_github._attest_native_admin
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org], platform="slack") as editor:
+        key = Fernet.generate_key().decode()
+        fernet = build_multifernet((key,))
+        async with committing_sessionmaker.begin() as session:
+            await upsert_slack_bot_token(
+                session,
+                team_id="perm-workspace",
+                encrypted_token=encrypt_token(fernet, "xoxb-test"),
+            )
+            requester = await get_account_with_tenant(session, account_id=editor.account_id)
+        assert requester is not None
+
+        def respond(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "user": user})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with pytest.raises(AdminAttestationUnavailable):
+                await live_attestation(
+                    requester=requester,
+                    settings=_settings(key),
+                    sessionmaker=committing_sessionmaker,
+                    fernet=fernet,
+                    http_client=client,
+                )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token_state", ["missing", "invalid"])
+async def test_slack_requires_valid_workspace_bot_token(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    token_state: str,
+) -> None:
+    live_attestation = oauth_github._attest_native_admin
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org], platform="slack") as editor:
+        key = Fernet.generate_key().decode()
+        fernet = build_multifernet((key,))
+        async with committing_sessionmaker.begin() as session:
+            if token_state == "invalid":
+                await upsert_slack_bot_token(
+                    session, team_id="perm-workspace", encrypted_token=b"invalid"
+                )
+            requester = await get_account_with_tenant(session, account_id=editor.account_id)
+        assert requester is not None
+        with pytest.raises(AdminAttestationUnavailable):
+            await live_attestation(
+                requester=requester,
+                settings=_settings(key),
+                sessionmaker=committing_sessionmaker,
+                fernet=fernet,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["http", "timeout"])
+async def test_slack_lookup_failure_is_unavailable(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    live_attestation = oauth_github._attest_native_admin
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org], platform="slack") as editor:
+        key = Fernet.generate_key().decode()
+        fernet = build_multifernet((key,))
+        async with committing_sessionmaker.begin() as session:
+            await upsert_slack_bot_token(
+                session,
+                team_id="perm-workspace",
+                encrypted_token=encrypt_token(fernet, "xoxb-test"),
+            )
+            requester = await get_account_with_tenant(session, account_id=editor.account_id)
+        assert requester is not None
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            if failure == "timeout":
+                raise httpx.ReadTimeout("timed out", request=request)
+            return httpx.Response(500)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with pytest.raises(AdminAttestationUnavailable):
+                await live_attestation(
+                    requester=requester,
+                    settings=_settings(key),
+                    sessionmaker=committing_sessionmaker,
+                    fernet=fernet,
+                    http_client=client,
+                )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("owner", "expected"), [(True, True), (False, False)])
+@pytest.mark.parametrize(
+    "tenant_external_id",
+    ["00000000-0000-0000-0000-00000000000a", "00000000-0000-0000-0000-00000000000A"],
+)
 async def test_teams_uses_live_admin_team_owners(
-    committing_sessionmaker: async_sessionmaker[AsyncSession], owner: bool, expected: bool
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    owner: bool,
+    expected: bool,
+    tenant_external_id: str,
 ) -> None:
     key = Fernet.generate_key().decode()
     settings = _settings(key).model_copy(
@@ -340,7 +486,7 @@ async def test_teams_uses_live_admin_team_owners(
             "teams": TeamsSettings(
                 client_id="app-id",
                 client_secret=SecretStr("app-secret"),
-                tenant_id="00000000-0000-0000-0000-000000000001",
+                tenant_id="00000000-0000-0000-0000-00000000000a",
                 admin_team_id="00000000-0000-0000-0000-000000000002",
             )
         }
@@ -351,7 +497,7 @@ async def test_teams_uses_live_admin_team_owners(
         tenant_id=uuid.uuid4(),
         role=Role.ADMIN,
         platform="teams",
-        external_id="team-1",
+        external_id=tenant_external_id,
         platform_user_id=user_id,
     )
 
@@ -377,6 +523,43 @@ async def test_teams_uses_live_admin_team_owners(
                 http_client=client,
             )
             is expected
+        )
+
+
+@pytest.mark.asyncio
+async def test_teams_rejects_different_tenant_without_graph_lookup(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    key = Fernet.generate_key().decode()
+    settings = _settings(key).model_copy(
+        update={
+            "teams": TeamsSettings(
+                client_id="app-id",
+                client_secret=SecretStr("app-secret"),
+                tenant_id="00000000-0000-0000-0000-000000000001",
+                admin_team_id="00000000-0000-0000-0000-000000000002",
+            )
+        }
+    )
+    requester = AccountIdentityRow(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.ADMIN,
+        platform="teams",
+        external_id="00000000-0000-0000-0000-000000000004",
+        platform_user_id="00000000-0000-0000-0000-000000000003",
+    )
+
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"Unexpected Graph request: {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected_request)) as client:
+        assert not await oauth_github._attest_native_admin(
+            requester=requester,
+            settings=settings,
+            sessionmaker=committing_sessionmaker,
+            fernet=build_multifernet((key,)),
+            http_client=client,
         )
 
 

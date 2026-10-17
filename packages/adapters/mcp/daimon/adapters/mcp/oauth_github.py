@@ -129,6 +129,8 @@ async def _attest_native_admin(
             if not isinstance(user, dict) or cast(dict[str, object], user).get("id") != user_id:
                 raise ValueError("Unbound Slack user")
             user = cast(dict[str, object], user)
+            if user.get("deleted"):
+                return False
             flags = ("is_admin", "is_owner", "is_primary_owner")
             if any(type(user.get(flag)) is not bool for flag in flags):
                 raise ValueError("Missing Slack admin facts")
@@ -139,6 +141,8 @@ async def _attest_native_admin(
         teams = settings.teams
         if teams is None or teams.admin_team_id is None:
             raise AdminAttestationUnavailable("Teams admin team unavailable")
+        if requester.external_id.lower() != teams.tenant_id.lower():
+            return False
         admin_team_id = teams.admin_team_id
 
         async def teams_lookup(client: httpx.AsyncClient) -> frozenset[str]:
