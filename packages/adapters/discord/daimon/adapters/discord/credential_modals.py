@@ -96,7 +96,7 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import admin_caller, is_guild_admin
 from daimon.adapters.discord.credential_origin import (
     is_credential_interaction_valid,
     resolve_credential_target,
@@ -401,7 +401,7 @@ async def _decide_key_replacement(
             agent_names=agent_pin_names(agent.name, agent.metadata),
             ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
-            caller=channel_admin_caller(interaction.user),
+            caller=admin_caller(interaction.user),
             is_daimon_managed=is_daimon_managed,
             caller_account_id=row.account_id,
             caller_platform_user_id=row.requester_platform_user_id,
@@ -438,7 +438,7 @@ async def _decide_mcp_connect_at_submit(
         server_name=row.target,
         url=row.mcp_server_url,
         platform="discord",
-        caller=channel_admin_caller(interaction.user).model_copy(
+        caller=admin_caller(interaction.user).model_copy(
             update={"is_server_admin": is_guild_admin(interaction)}  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
         ),
         default=runtime.deployment_default,

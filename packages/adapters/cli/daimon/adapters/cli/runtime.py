@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
-from daimon.core.config import Settings, prime_channel_admins_enabled
+from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
@@ -201,7 +201,6 @@ class CliRuntime:
 
 @asynccontextmanager
 async def build_runtime(settings: Settings) -> AsyncIterator[CliRuntime]:
-    prime_channel_admins_enabled(settings)
     engine = build_engine(
         str(settings.database.url),
         pool_size=settings.database.pool_size,

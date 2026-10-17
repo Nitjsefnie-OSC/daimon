@@ -20,11 +20,62 @@ from daimon.adapters.discord.agent_setup.github_waiting import GitHubWaitingView
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.commands.github import GitHubCog
 from daimon.core.github_panel import GrantsPanel, RepoChoice
-from daimon.core.operation_policy import TargetFacts
 from daimon.core.roster import RosterAgent
 from daimon.core.stores.github_access import AuthorizedRepo
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_new_repo_notices import NewRepoNotice, NewRepoNoticeGroup
+
+
+async def test_discord_repo_read_rechecks_external_and_admin_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = RosterAgent(name="helper", ma_agent_id="ag_helper", model_id="model", is_built_in=False)
+    account_id = uuid.uuid4()
+    state = PanelState(
+        roster=[],
+        selected=None,
+        account_id=account_id,
+        guild_id=123,
+        channel_id=456,
+        selected_agent=agent,
+    )
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=object())
+    context.__aexit__ = AsyncMock(return_value=None)
+    runtime = SimpleNamespace(
+        anthropic=object(), sessionmaker=lambda: context, deployment_default=MagicMock()
+    )
+    view = GitHubReposView(state, runtime=runtime, allowed_user_id=7, agent=agent, panel=_panel())
+    interaction = MagicMock()
+    interaction.guild_id = 123
+    interaction.response.defer = AsyncMock()
+    interaction.user.id = 7
+    monkeypatch.setattr(
+        repos_module,
+        "find_agent_by_derived_uuid",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id="ag_helper", name="helper", metadata={"managed": "true"}
+            )
+        ),
+    )
+    monkeypatch.setattr(repos_module, "is_guild_admin", lambda _: True)
+    monkeypatch.setattr(
+        repos_module,
+        "get_account",
+        AsyncMock(
+            return_value=SimpleNamespace(id=account_id, tenant_id=view._ids()[0], is_external=True)
+        ),
+    )
+    assert not await view.allowed(interaction), "an external account cannot manage repos"
+    monkeypatch.setattr(
+        repos_module,
+        "get_account",
+        AsyncMock(
+            return_value=SimpleNamespace(id=account_id, tenant_id=view._ids()[0], is_external=False)
+        ),
+    )
+    assert await view.allowed(interaction), "a live server admin may manage the agent"
 
 
 @pytest.mark.asyncio
@@ -321,65 +372,6 @@ def test_discord_github_panels_are_read_only() -> None:
 @asynccontextmanager
 async def _fake_begin():  # type: ignore[no-untyped-def]
     yield MagicMock()
-
-
-@pytest.mark.asyncio
-async def test_discord_repo_read_rechecks_external_and_managed_actor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    agent = RosterAgent(name="helper", ma_agent_id="ag_helper", model_id="model", is_built_in=False)
-    account_id = uuid.uuid4()
-    state = PanelState(
-        roster=[],
-        selected=None,
-        account_id=account_id,
-        guild_id=123,
-        channel_id=456,
-        selected_agent=agent,
-    )
-    context = MagicMock()
-    context.__aenter__ = AsyncMock(return_value=object())
-    context.__aexit__ = AsyncMock(return_value=None)
-    runtime = SimpleNamespace(
-        anthropic=object(), sessionmaker=lambda: context, deployment_default=MagicMock()
-    )
-    view = GitHubReposView(state, runtime=runtime, allowed_user_id=7, agent=agent, panel=_panel())
-    interaction = MagicMock()
-    interaction.guild_id = 123
-    interaction.response.defer = AsyncMock()
-    interaction.user.id = 7
-    monkeypatch.setattr(
-        repos_module,
-        "find_agent_by_derived_uuid",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                id="ag_helper", name="helper", metadata={"managed": "true"}
-            )
-        ),
-    )
-    monkeypatch.setattr(repos_module, "is_guild_admin", lambda _: False)
-    monkeypatch.setattr(
-        repos_module,
-        "get_account",
-        AsyncMock(
-            return_value=SimpleNamespace(id=account_id, tenant_id=view._ids()[0], is_external=True)
-        ),
-    )
-    assert not await view.allowed(interaction)
-    monkeypatch.setattr(
-        repos_module,
-        "get_account",
-        AsyncMock(
-            return_value=SimpleNamespace(id=account_id, tenant_id=view._ids()[0], is_external=False)
-        ),
-    )
-    monkeypatch.setattr(repos_module, "channel_admin_caller", lambda _: MagicMock())
-    monkeypatch.setattr(
-        repos_module,
-        "load_target_facts",
-        AsyncMock(return_value=TargetFacts(is_daimon_managed=True, is_reachable_in_tenant=True)),
-    )
-    assert not await view.allowed(interaction)
 
 
 @pytest.mark.asyncio

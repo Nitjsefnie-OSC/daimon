@@ -37,7 +37,6 @@ from daimon.core.roster import RosterAgent
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
 from daimon.testing import FIXED_TS, ma_agent
@@ -778,104 +777,6 @@ async def test_on_coding_tools_binds_a_token_minted_in_a_sealed_channel(
     assert row.channel_id == bound, "a thread binds its parent; an open channel binds nothing"
     assert row.platform == ("discord" if bound else None)
     assert ("It runs in <#555>" in content) is (bound is not None)
-
-
-_CHANNEL_ADMIN_ROLE = 123456789012345678
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("policy", "pressed_in", "in_thread", "bound"),
-    [
-        (TenantAccessPolicy(agent_channel_pins={"expert-bot": ("555",)}), 555, False, "555"),
-        (TenantAccessPolicy(agent_channel_pins={"expert-bot": ("555",)}), 555, True, "555"),
-        (TenantAccessPolicy(agent_channel_pins={"expert-bot": ("666",)}), 555, False, None),
-        (TenantAccessPolicy(sealed_channel_ids=("555",)), 555, False, None),
-        (TenantAccessPolicy(agent_channel_pins={"expert-bot": ("555",)}), 777, False, None),
-        (TenantAccessPolicy(), 555, False, None),
-    ],
-    ids=[
-        "own-agent",
-        "own-agent-from-a-thread",
-        "pinned-elsewhere",
-        "unpinned-in-sealed-channel",
-        "another-channel",
-        "unbound",
-    ],
-)
-async def test_on_coding_tools_lets_a_channel_admin_mint_only_bound_for_their_agent(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-    account_id: uuid.UUID,
-    tenant_id: uuid.UUID,
-    policy: TenantAccessPolicy,
-    pressed_in: int,
-    in_thread: bool,
-    bound: str | None,
-) -> None:
-    """A channel admin of 555 (by role) mints for an agent pinned there, bound to 555; nothing else."""
-    await _setup_tenant_and_account(
-        db_session, tenant_id=tenant_id, account_id=account_id, external_id="guild-ca"
-    )
-    await set_access_policy(db_session, tenant_id=tenant_id, policy=policy)
-    await set_channel_admins(
-        db_session,
-        tenant_id=tenant_id,
-        platform="discord",
-        channel_id="555",
-        role_ids=(str(_CHANNEL_ADMIN_ROLE),),
-        user_ids=(),
-        actor_account_id=None,
-    )
-    await db_session.commit()
-    agent = ma_agent(id="agent_ca", name="expert-bot", tenant_id=tenant_id)
-    monkeypatch.setattr(mcp_access_mod, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
-    monkeypatch.setattr(
-        mcp_access_mod, "resolve_tenant_for_panel", AsyncMock(return_value=tenant_id)
-    )
-    runtime = DiscordRuntime(
-        settings=_make_settings(),
-        anthropic=build_stub_anthropic(),
-        sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
-    )
-    entry = _entry("expert-bot")
-    interaction = _make_interaction(is_admin=False, role_ids=(_CHANNEL_ADMIN_ROLE,))
-    if in_thread:
-        interaction.channel = MagicMock(spec=discord.Thread, parent_id=pressed_in)
-        interaction.channel_id = 999
-    else:
-        interaction.channel_id = pressed_in
-
-    await send_coding_tools_access(
-        interaction,
-        runtime=runtime,
-        state=PanelState(roster=[entry], selected=entry, account_id=account_id),
-        allowed_user_id=42,
-    )
-
-    call = interaction.response.send_message.call_args
-    if bound is None:
-        assert call.args[0] == mcp_access_mod.CODING_TOOLS_REFUSAL, (
-            "a refused channel admin gets the explanatory refusal"
-        )
-        assert await count_tokens_for_account(db_session, account_id=account_id) == 0, (
-            "a refused channel admin mints nothing"
-        )
-        return
-    content: str = call.kwargs["content"]
-    jwt_token = content[content.index("Bearer ") + len("Bearer ") :].split()[0].strip("`\"'")
-    claims = pyjwt.decode(jwt_token, _JWT_SECRET_BYTES, algorithms=["HS256"])
-    row = await get_mcp_token(db_session, jti=uuid.UUID(claims["jti"]))
-    assert row is not None, "a channel admin's mint writes a real token row"
-    assert (row.platform, row.channel_id) == ("discord", bound), (
-        "a channel admin's token is always bound to their channel"
-    )
 
 
 @pytest.mark.parametrize("channel_id", [None, "555"])

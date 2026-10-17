@@ -289,22 +289,22 @@ def test_only_human_admin_may_edit() -> None:
         subject=Subject(is_admin=True, via_agent_key=True),
         action=Action.SET_AGENT_TOOL_RULE,
     )
-    channel_admin = Subject(administered_channel_ids=frozenset({"home"}))
-    assert authorize(
+    member = Subject(platform_user_id="member")
+    assert not authorize(
         policy,
-        subject=channel_admin,
+        subject=member,
         action=Action.SET_CHANNEL_AGENT_TOOL_RULE,
         place=Place(channel_id="home"),
     )
     assert not authorize(
         policy,
-        subject=channel_admin,
+        subject=member,
         action=Action.SET_CHANNEL_AGENT_TOOL_RULE,
         place=Place(channel_id="other"),
     )
     assert not authorize(
         policy,
-        subject=channel_admin,
+        subject=member,
         action=Action.SET_AGENT_TOOL_RULE,
     )
     assert not authorize(
@@ -339,8 +339,8 @@ async def test_store_refuses_agent_key_before_touching_database() -> None:
             channel_id="other",
             server_url="https://one.example/mcp",
             rule="allow",
-            set_by="channel-admin",
-            actor=Subject(administered_channel_ids=frozenset({"home"})),
+            set_by="member",
+            actor=Subject(platform_user_id="member"),
         )
     with pytest.raises(PermissionError):
         await store.set_rule(
@@ -351,8 +351,8 @@ async def test_store_refuses_agent_key_before_touching_database() -> None:
             tool_key="remote/append_note",
             server_url="https://one.example/mcp",
             rule="allow",
-            set_by="channel-admin",
-            actor=Subject(administered_channel_ids=frozenset({"home"})),
+            set_by="member",
+            actor=Subject(platform_user_id="member"),
         )
 
 
@@ -394,8 +394,8 @@ async def test_store_binding_history_and_clear_cas(db_session: AsyncSession) -> 
         channel_id="home",
         server_url="https://one.example/mcp",
         rule="deny",
-        set_by="channel-admin",
-        actor=Subject(administered_channel_ids=frozenset({"home"})),
+        set_by="admin",
+        actor=Subject(is_admin=True),
         expected_revision=0,
     )
     assert scoped.revision == 1 and scoped.channel_id == "home"

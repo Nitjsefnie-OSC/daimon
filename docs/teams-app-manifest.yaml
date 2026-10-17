@@ -178,7 +178,6 @@ authorization:
       # Read the channel threads the bot is mentioned in, and their images.
       - name: ChannelMessage.Read.Group
         type: Application
-      # List the team's owners, for channel admin grants that name the team.
       - name: TeamMember.Read.Group
         type: Application
       # List a channel's members and their home tenants, to tell people from

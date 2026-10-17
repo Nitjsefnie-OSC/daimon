@@ -8,13 +8,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.agent_policy import gather_target_facts
 from daimon.adapters.slack.agent_setup import panel_views
 from daimon.adapters.slack.agent_setup.github_link import send_link
 from daimon.adapters.slack.agent_setup.github_requests import update_requester_card
 from daimon.adapters.slack.agent_setup.read import load_panel_roster
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
-from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.modal_limits import finish_modal
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
@@ -89,7 +89,7 @@ async def _may_manage_request(
     )
     if live_agent is None or live_agent.id != request.ma_agent_id:
         return False
-    caller = await channel_admin_caller(
+    caller = await admin_caller(
         runtime, client, tenant_id=request.tenant_id, user_id=user_id, is_admin=False
     )
     facts = await gather_target_facts(

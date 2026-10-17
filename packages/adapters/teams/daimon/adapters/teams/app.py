@@ -41,7 +41,6 @@ from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
 from daimon.adapters.teams.card import CANCELLED_NOTICE
 from daimon.adapters.teams.card_actions import stored_external, toast
-from daimon.adapters.teams.channel_admin_groups import owned_team_ids
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.channel_subscriptions import ChannelSubscriptions, SeenChannel
 from daimon.adapters.teams.commands import CommandHandler
@@ -1327,12 +1326,6 @@ class TeamsApp:
                 channel_id=inbound.channel_id,
                 thread_id=inbound.thread_id,
                 role=role,
-                platform_role_ids=sorted(
-                    await owned_team_ids(self.runtime, tenant_id=tenant_id, user_id=inbound.user_id)
-                )
-                # An admin needs no grant; someone from another organisation gets none.
-                if role is not Role.ADMIN and not inbound.is_external
-                else (),
                 now=datetime.now(UTC),
                 is_dm=inbound.kind == "dm",
                 external=ExternalFinding(inbound.is_external, inbound.is_external_known),

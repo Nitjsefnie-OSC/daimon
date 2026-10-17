@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Final
 
 import structlog
+from daimon.adapters.teams.admin_caller import admin_caller
 from daimon.adapters.teams.card_actions import (
     FAILED,
     button,
@@ -24,7 +25,6 @@ from daimon.adapters.teams.card_actions import (
     text_lines,
     toast,
 )
-from daimon.adapters.teams.channel_admin_groups import channel_admin_caller
 from daimon.adapters.teams.identity import DENIED, channel_thread_id
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.thread_handoff import switch_thread_on_request
@@ -83,7 +83,7 @@ class TeamsThreadHandoff:
             parent_channel_id=conversation if personal else conversation.split(";", 1)[0],
             thread_id=thread_id,
             ma_agent_id=agent_id,
-            caller=await channel_admin_caller(
+            caller=await admin_caller(
                 runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
             ),
             default=runtime.deployment_default,

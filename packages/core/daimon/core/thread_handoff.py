@@ -52,7 +52,6 @@ from typing import TYPE_CHECKING
 import anthropic as anthropic_pkg
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.agent_reach import load_binding_reach
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -64,7 +63,6 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
 )
-from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.continuity.handoff import (
     HandoffRefused,
     HandoffRefusedInSetupThread,
@@ -72,6 +70,7 @@ from daimon.core.continuity.handoff import (
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
+from daimon.core.native_admins import AdminCaller
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
@@ -124,14 +123,11 @@ class HandoffDestination:
 class HandoffCaller:
     """Who asks for the switch.
 
-    `channel_admin.is_server_admin` is the caller's trusted admin signal (the
-    live platform role for a click, the turn's role for the tool). Channel
-    admin grants are read inside the lock from `platform_user_id` and
-    `role_ids`.
+    `admin.is_server_admin` is the caller's trusted native admin signal.
     """
 
     account_id: uuid.UUID | None
-    channel_admin: ChannelAdminCaller
+    admin: AdminCaller
     via_agent_key: bool = False
 
 
@@ -268,18 +264,11 @@ class ThreadHandoffRefused(DaimonError):
 async def _subject(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: HandoffCaller
 ) -> Subject:
-    who = caller.channel_admin
-    if who.is_server_admin:
-        return build_subject(
-            is_admin=True, platform_user_id=who.platform_user_id, via_agent_key=caller.via_agent_key
-        )
+    who = caller.admin
     return build_subject(
-        is_admin=False,
+        is_admin=who.is_server_admin,
         platform_user_id=who.platform_user_id,
         via_agent_key=caller.via_agent_key,
-        administered_channel_ids=await load_administered_channel_ids(
-            session, tenant_id=tenant_id, platform=platform, caller=who
-        ),
     )
 
 
@@ -341,27 +330,6 @@ async def hand_over_thread(
         default=default,
     )
     answers_here = channel_config.agent_name == destination.name
-    # A channel admin's standing over the destination, read only when it decides.
-    reach = (
-        await load_binding_reach(
-            session,
-            tenant_id=tenant_id,
-            platform=platform,
-            policy=policy,
-            agent=destination.agent,
-            ma_agent_id=destination.ma_agent_id,
-            default=default,
-            caller=caller.channel_admin,
-            administered=subject.administered_channel_ids,
-            channel_id=parent_channel_id,
-            is_daimon_managed=destination.is_daimon_managed,
-            caller_account_id=caller.account_id,
-        )
-        if not subject.is_admin
-        and not answers_here
-        and parent_channel_id in subject.administered_channel_ids
-        else None
-    )
     access = authorize(
         policy,
         subject=subject,
@@ -371,7 +339,6 @@ async def hand_over_thread(
         # A DM scope runs in no channel, so it is outside every pin.
         place=Place.from_origin(parent_channel_id=parent_channel_id, thread_id=thread_id),
         answers_here=answers_here,
-        reach=reach,
         recorded_seal_ids=snapshot_seals
         | frozenset(seal for item in recorded for seal in item.facts.seal_ids),
     )
@@ -441,9 +408,9 @@ def render_handoff_refused(refusal: HandoffRefused, *, channel: str) -> str:
         "own_agents_only": f"{channel} only runs its own agents, and {name} isn't one of them.",
         "unreachable": f"{name} doesn't answer anywhere in this workspace any more.",
         "same_agent": f"{name} already answers in this conversation.",
-        "admin_required": f"{name} isn't an agent of {channel}. A server admin can hand this "
-        f"conversation to it, or a channel admin of {channel} when {name} is one of their own "
-        "agents.",
+        "admin_required": (
+            f"{name} isn't an agent of {channel}. A server admin can hand this conversation to it."
+        ),
         "not_a_reader": f"Only turns inside {channel} read it and {name} isn't one of its "
         "agents, so only a server admin can hand this conversation to it.",
     }
@@ -476,7 +443,7 @@ async def switch_thread_on_request(
     parent_channel_id: str,
     thread_id: str,
     ma_agent_id: str,
-    caller: ChannelAdminCaller,
+    caller: AdminCaller,
     default: DeploymentDefault,
     channel: str,
     now: datetime,
@@ -486,8 +453,7 @@ async def switch_thread_on_request(
     The agent id comes from the button, so it is only a request: the agent is
     retrieved by that exact id and must still be a live agent of this tenant,
     and `hand_over_thread` decides it under the lock for the clicker, with
-    their live admin role (`caller.is_server_admin`) and their stored channel
-    admin grants. `channel` is how the copy names the parent channel.
+    their live admin role (`caller.is_server_admin`). `channel` names the parent channel.
     """
     try:
         agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
@@ -505,25 +471,7 @@ async def switch_thread_on_request(
             text="That agent has no configuration name, so nobody can reach it by name. "
             "Nothing was changed.",
         )
-    # Only a channel admin's switch reads the sessions' seals; anyone else's
-    # is decided without them. Grants are read again under the lock, and a
-    # channel admin whose seals weren't read is refused there as sealed.
     recorded: tuple[RecordedSession, ...] | None = None
-    channel_admin = False
-    if not caller.is_server_admin:
-        async with sessionmaker() as session:
-            administered = await load_administered_channel_ids(
-                session, tenant_id=tenant_id, platform=platform, caller=caller
-            )
-        channel_admin = parent_channel_id in administered
-        if channel_admin:
-            recorded = await recorded_thread_sessions(
-                anthropic,
-                sessionmaker,
-                tenant_id=tenant_id,
-                platform=platform,
-                thread_id=thread_id,
-            )
     try:
         async with sessionmaker.begin() as session:
             principal = (
@@ -544,7 +492,7 @@ async def switch_thread_on_request(
                 thread_id=thread_id,
                 caller=HandoffCaller(
                     account_id=principal.account_id if principal is not None else None,
-                    channel_admin=caller,
+                    admin=caller,
                 ),
                 destination=HandoffDestination(
                     ma_agent_id=agent.id,
@@ -580,7 +528,7 @@ async def switch_thread_on_request(
         )
     except AccessPolicyUnreadable as error:
         return SwitchOutcome(switched=False, text=str(error))
-    if caller.is_server_admin or channel_admin:
+    if caller.is_server_admin:
         # As `hand_off_task`'s trail: an admin's click may rest on admin standing.
         await _audit_click(
             sessionmaker,
@@ -598,7 +546,7 @@ async def _audit_click(
     *,
     tenant_id: uuid.UUID,
     platform: str,
-    caller: ChannelAdminCaller,
+    caller: AdminCaller,
     outcome: PanelOutcome,
     reason: str,
 ) -> None:

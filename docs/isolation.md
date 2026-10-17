@@ -72,8 +72,7 @@ Each session is stamped with its tenant and owning account
 (`packages/core/daimon/core/sessions.py:96-120`). The transcript tools open
 only sessions stamped with the caller's own account
 (`packages/adapters/mcp/daimon/adapters/mcp/tools/_session_access.py:190-216`).
-The one exception is a hub read by an admin or channel admin of a channel
-conversation, never a private DM and never to continue it.
+The one exception is a hub read by a server admin of a channel conversation, never a private DM and never to continue it.
 
 When a session is replaced (configuration change, recovery), the carried
 work comes only from the caller's own previous row: the replacement looks up

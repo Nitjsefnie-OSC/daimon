@@ -187,22 +187,6 @@ async def test_stale_preview_rejects_policy_agent_and_price_replacements(owned) 
         await priced.set_backend(agent, "openai", 0, actor, expected_preview_digest=quote.digest)
 
 
-@pytest.mark.parametrize(
-    "subject",
-    [
-        Subject(),
-        Subject(is_admin=True, via_agent_key=True),
-        Subject(administered_channel_ids=frozenset({"chan"})),
-    ],
-)
-async def test_non_admin_and_agent_key_refused_without_revision_or_audit(owned, subject) -> None:
-    service, agent, actor, _ = owned
-    with pytest.raises(AgentBackendRefused, match="admin required"):
-        await service.set_backend(agent, "anthropic", 0, replace(actor, subject=subject))
-    assert await service.current(agent) is None
-    assert await service.audit(agent.tenant_id) == ()
-
-
 async def test_foreign_tenant_and_account_refused(owned) -> None:
     service, agent, actor, sessions = owned
     async with sessions.begin() as session:
@@ -869,3 +853,19 @@ async def test_source_projection_missing_unused_sdk_date_keeps_existing_preview(
     assert loaded.configuration_digest and loaded.model == actual.model.id
     assert loaded.source is None, "partial preview cannot stand for a complete execution source"
     assert len(transport.requests) == 1 and not transport.violations
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        Subject(),
+        Subject(is_admin=True, via_agent_key=True),
+        Subject(platform_user_id="former-holder"),
+    ],
+)
+async def test_non_admin_and_agent_key_refused_without_revision_or_audit(owned, subject) -> None:
+    service, agent, actor, _ = owned
+    with pytest.raises(AgentBackendRefused, match="admin required"):
+        await service.set_backend(agent, "anthropic", 0, replace(actor, subject=subject))
+    assert await service.current(agent) is None
+    assert await service.audit(agent.tenant_id) == ()

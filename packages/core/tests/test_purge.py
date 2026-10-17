@@ -21,6 +21,7 @@ import pytest
 from daimon.core import purge as purge_module
 from daimon.core._models import (
     Account,
+    ChannelAdmin,
     ChannelConfig,
     CliPrincipal,
     MessageFeedback,
@@ -1540,7 +1541,6 @@ async def test_purge_account_removes_the_person_from_channel_admins(
 ) -> None:
     """Erasure takes the person's id out of every grant and previews the same count."""
     from daimon.core.privacy import collect_purge_preview
-    from daimon.core.stores import channel_admins as channel_admins_store
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -1548,14 +1548,15 @@ async def test_purge_account_removes_the_person_from_channel_admins(
         db_session, platform="discord", external_id="u-admin", tenant=tenant, account=account
     )
     for channel in ("c1", "c2"):
-        await channel_admins_store.set_channel_admins(
-            db_session,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id=channel,
-            role_ids=["r1"] if channel == "c2" else [],
-            user_ids=["u-admin"],
-            actor_account_id=account.id,
+        db_session.add(
+            ChannelAdmin(
+                tenant_id=tenant.id,
+                platform="discord",
+                channel_id=channel,
+                role_ids=["r1"] if channel == "c2" else [],
+                user_ids=["u-admin"],
+                updated_by_account_id=account.id,
+            )
         )
     await db_session.commit()
 
@@ -1565,11 +1566,15 @@ async def test_purge_account_removes_the_person_from_channel_admins(
 
     assert report.db.channel_admins == 2, "purge removes both"
     async with db_session_factory() as session:
-        rows = await channel_admins_store.list_channel_admins(
-            session, tenant_id=tenant.id, platform="discord"
-        )
+        rows = (
+            await session.scalars(
+                select(ChannelAdmin).where(
+                    ChannelAdmin.tenant_id == tenant.id, ChannelAdmin.platform == "discord"
+                )
+            )
+        ).all()
     assert [(row.channel_id, row.user_ids, row.updated_by_account_id) for row in rows] == [
-        ("c2", (), None)
+        ("c2", [], None)
     ], "an emptied grant is dropped; a role grant stays without the person"
 
 

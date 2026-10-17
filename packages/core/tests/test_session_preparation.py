@@ -35,11 +35,8 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools._ctx import _admission_recheck
 from daimon.adapters.mcp.tools.agent_chat import _continue_turn_impl
-from daimon.core import thread_handoff as switch
 from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
-from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.config import McpSettings
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.ma_identity import derive_agent_uuid
@@ -62,7 +59,6 @@ from daimon.core.stores.agent_memory_stores import (
     get_memory_store_id,
     get_personal_memory_store_id,
 )
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.channel_skills import add_channel_skill
 from daimon.core.stores.domain import AccountRow, Role, TenantRow, ThreadSessionRow
 from daimon.core.stores.scoped_config_write import set_fields
@@ -2273,7 +2269,6 @@ async def test_admission_origin_controls_the_actual_memory_mount(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.turn.admission import admit
     from daimon.testing.factories import make_ledger_entry, make_tenant_config
     from daimon.testing.ma import resolved_agent_env_router
@@ -2621,9 +2616,6 @@ async def _changed_channel_agent(
     Returns the tenant, the sessions transport, the prepare deps, the admission
     deps (whose MA serves both agents) and the first prepared turn.
     """
-    from daimon.core.access_policy import TenantAccessPolicy
-    from daimon.core.scope import ChannelScopeRef
-    from daimon.core.stores.scoped_config_write import set_fields
     from daimon.core.turn.admission import admit
     from daimon.testing.factories import make_ledger_entry, make_tenant_config
     from daimon.testing.ma import MARouter, resolved_agent_env_router
@@ -2699,105 +2691,6 @@ async def _admit_next(admission_deps: TurnDeps, tenant: TenantRow) -> Admission:
     )
 
 
-async def _click_hand_over(admission_deps: TurnDeps, tenant: TenantRow) -> Any:
-    from daimon.core.channel_admins import ChannelAdminCaller
-    from daimon.core.thread_handoff import switch_thread_on_request
-
-    return await switch_thread_on_request(
-        admission_deps.anthropic,
-        admission_deps.sessionmaker,
-        tenant_id=tenant.id,
-        platform="discord",
-        parent_channel_id="channel-1",
-        thread_id="thread-1",
-        ma_agent_id="ag_research",
-        caller=ChannelAdminCaller(platform_user_id="user-1"),
-        default=admission_deps.deployment_default,
-        channel="#channel-1",
-        now=_NOW,
-    )
-
-
-async def test_a_member_hands_the_thread_to_the_channels_new_agent_in_place(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """The channel now answers with research-bot. Before the switch every turn in
-    the old thread is refused; after it the next turn runs as research-bot in the
-    same thread, with the old work handed over, and the old session is closed."""
-    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
-        db_session, db_session_factory
-    )
-    account = await _account_of(db_session_factory, first.admission.account_id)
-
-    stuck = await _admit_next(admission_deps, tenant)
-    assert stuck.agent.id == "ag_research"
-    with pytest.raises(SessionAgentMismatch):
-        await _prepare(deps, stuck, tenant=tenant, account=account)
-
-    outcome = await _click_hand_over(admission_deps, tenant)
-    assert outcome.switched, outcome.text
-
-    carried: list[str] = []
-
-    async def _transfer(**kwargs: Any) -> PreparedReplacement:
-        carried.append(kwargs["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="<previous_session>...</previous_session>",
-        )
-
-    handed = await _prepare(
-        deps,
-        await _admit_next(admission_deps, tenant),
-        tenant=tenant,
-        account=account,
-        transfer=_transfer,
-    )
-    assert isinstance(handed, PreparedTurn)
-    assert handed.admission.agent.id == "ag_research", "the thread now answers as research-bot"
-    assert transport.state.sessions[handed.ma_session_id].agent.id == "ag_research"
-    assert handed.continuity.state == "replaced"
-    assert carried == [first.ma_session_id], "the old conversation was handed over"
-    assert first.mapping_id is not None
-    old = await get_thread_session_by_id(db_session, id=first.mapping_id)
-    assert old is not None and old.status == "superseded", "the old session is closed"
-    assert await _count_live_rows(db_session_factory, tenant=tenant, account=account) == 1
-
-    again = await _prepare(
-        deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
-    )
-    assert isinstance(again, PreparedTurn)
-    assert again.ma_session_id == handed.ma_session_id, "later messages stay with research-bot"
-
-
-async def test_a_sealed_thread_handed_over_keeps_its_seal_and_read_only_memory(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
-        db_session, db_session_factory, sealed=True
-    )
-    account = await _account_of(db_session_factory, first.admission.account_id)
-    assert _sealed_stamp(transport, first.ma_session_id) == "channel-1"
-
-    assert (await _click_hand_over(admission_deps, tenant)).switched
-
-    handed = await _prepare(
-        deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
-    )
-    assert isinstance(handed, PreparedTurn)
-    assert handed.admission.agent.id == "ag_research"
-    assert _sealed_stamp(transport, handed.ma_session_id) == "channel-1", (
-        "the new session carries the thread's seal ids"
-    )
-    observed = await deps.anthropic.beta.sessions.retrieve(handed.ma_session_id)
-    memory = next(r for r in observed.resources if r.type == "memory_store")
-    assert memory.access == "read_only", "research-bot's memory is read-only in a sealed thread"
-
-
 @pytest.mark.parametrize(
     ("old_seal", "carried"),
     [("vault", True), ("vault-elsewhere", False)],
@@ -2871,494 +2764,6 @@ async def _handoff_policy(factory, tenant_id, value):
     async with factory.begin() as db:
         await lock_access_policy(db, tenant_id=tenant_id)
         await set_access_policy(db, tenant_id=tenant_id, policy=value)
-
-
-async def _review_replacement(db, factory, *, sealed=False, lift=False):
-    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
-        db, factory, sealed=sealed
-    )
-    account = await _account_of(factory, first.admission.account_id)
-    if lift:
-        await _handoff_policy(factory, tenant.id, TenantAccessPolicy())
-    assert (await _click_hand_over(admission_deps, tenant)).switched
-    transfers = []
-
-    async def carry(**kw):
-        transfers.append(kw["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="SEALED_WORK",
-        )
-
-    handed = await _prepare(
-        deps,
-        await _admit_next(admission_deps, tenant),
-        tenant=tenant,
-        account=account,
-        transfer=carry,
-    )
-    assert isinstance(handed, PreparedTurn)
-    return tenant, transport, deps, admission_deps, first, handed, transfers
-
-
-async def test_old_session_cannot_be_written_after_successor_exists(db_session, db_session_factory):
-    tenant, transport, deps, admission_deps, first, handed, transfers = await _review_replacement(
-        db_session, db_session_factory
-    )
-    async with db_session_factory() as db:
-        old = await get_thread_session_by_id(db, id=first.mapping_id)
-    observed = await deps.anthropic.beta.sessions.retrieve(first.ma_session_id)
-    router = MARouter()
-    router.add_agent_list(first.admission.agent, handed.admission.agent)
-    client = build_fake_anthropic(
-        combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
-    )
-    runtime = SimpleNamespace(
-        client=client, session_factory=db_session_factory, settings=SimpleNamespace(mcp=deps.mcp)
-    )
-    auth = AuthIdentity(
-        account_id=first.admission.account_id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="discord",
-        platform_user_id="user-1",
-        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
-    )
-    recheck = _admission_recheck(
-        auth, sessionmaker=db_session_factory, tool_name="continue_turn", agent_names=None
-    )
-    before = len(transport.state.events.get(first.ma_session_id, []))
-    from daimon.core.session_mutation import SessionRetired
-    from fastmcp.exceptions import ToolError
-
-    with pytest.raises((SessionRetired, ToolError)):
-        await _continue_turn_impl(
-            runtime, auth, first.ma_session_id, "write after handoff", recheck=recheck
-        )
-    after = len(transport.state.events.get(first.ma_session_id, []))
-    assert before == after, "superseded old session still accepts a real continue_turn"
-    assert observed.archived_at is not None
-    assert old.status == "superseded"
-    history = [
-        event async for event in deps.anthropic.beta.sessions.events.list(first.ma_session_id)
-    ]
-    assert len(history) == before
-
-
-async def test_inherited_sealed_transcript_keeps_read_only_memory_after_unseal(
-    db_session, db_session_factory
-):
-    tenant, transport, deps, admission_deps, first, handed, transfers = await _review_replacement(
-        db_session, db_session_factory, sealed=True, lift=True
-    )
-    new = await deps.anthropic.beta.sessions.retrieve(handed.ma_session_id)
-    old = await deps.anthropic.beta.sessions.retrieve(first.ma_session_id)
-    # Shared and personal mounts alike: a sealed origin keeps both read-only.
-    assert [r.access for r in old.resources if r.type == "memory_store"] == [
-        "read_only",
-        "read_only",
-    ]
-    assert _sealed_stamp(transport, handed.ma_session_id) == "channel-1"
-    assert handed.admission.memory_read_only
-    new_memory = [r.access for r in new.resources if r.type == "memory_store"]
-    assert new_memory == ["read_only", "read_only"], (
-        "sealed content is carried into the new agent with writable shared memory"
-    )
-
-
-@pytest.mark.parametrize("entry", ["button", "tool"])
-async def test_channel_admin_switch_rechecks_sessions_created_after_snapshot(
-    db_session, db_nullpool_engine, monkeypatch, entry
-):
-    db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
-    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
-        db_session, db_session_factory
-    )
-    account = await _account_of(db_session_factory, first.admission.account_id)
-    async with db_session_factory.begin() as db:
-        await set_fields(
-            db,
-            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="channel-1"),
-            tenant_id=tenant.id,
-            agent_name="daimon",
-        )
-        await set_fields(
-            db,
-            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="channel-2"),
-            tenant_id=tenant.id,
-            agent_name="research-bot",
-        )
-        await set_channel_admins(
-            db,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id="channel-1",
-            role_ids=(),
-            user_ids=("user-1",),
-            actor_account_id=None,
-        )
-    router = MARouter()
-    from daimon.testing import ma_agent
-
-    research = ma_agent(id="ag_research", name="research-bot", tenant_id=tenant.id)
-    router.add_agent_list(first.admission.agent, research)
-    router.add_agent(research)
-    client = build_fake_anthropic(
-        combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
-    )
-    captured = asyncio.Event()
-    release = asyncio.Event()
-    snapshots = []
-    original = switch.recorded_thread_sessions
-
-    async def paused(*args, **kwargs):
-        value = await original(*args, **kwargs)
-        snapshots.extend(value)
-        captured.set()
-        await release.wait()
-        return value
-
-    monkeypatch.setattr(switch, "recorded_thread_sessions", paused)
-
-    async def switching():
-        if entry == "button":
-            outcome = await switch.switch_thread_on_request(
-                client,
-                db_session_factory,
-                tenant_id=tenant.id,
-                platform="discord",
-                parent_channel_id="channel-1",
-                thread_id="thread-1",
-                ma_agent_id="ag_research",
-                caller=ChannelAdminCaller(platform_user_id="user-1"),
-                default=deps.deployment_default,
-                channel="#channel-1",
-                now=_NOW,
-            )
-            return outcome.switched
-        from daimon.adapters.mcp.tools import task_continuity
-        from daimon.core.turn_origin import turn_origin
-        from fastmcp.exceptions import ToolError
-
-        monkeypatch.setattr(task_continuity, "recorded_thread_sessions", paused)
-        runtime = SimpleNamespace(
-            client=client,
-            session_factory=db_session_factory,
-            deployment_default=deps.deployment_default,
-            settings=SimpleNamespace(mcp=deps.mcp),
-        )
-        auth = AuthIdentity(
-            account_id=account.id,
-            tenant_id=tenant.id,
-            role=Role.USER,
-            platform="discord",
-            platform_user_id="user-1",
-        )
-        async with turn_origin(
-            db_session_factory,
-            tenant_id=tenant.id,
-            account_id=account.id,
-            platform="discord",
-            parent_channel_id="channel-1",
-            thread_id="thread-1",
-            responder_ma_agent_id=first.admission.agent.id,
-            responder_name="daimon",
-            role=Role.USER,
-        ) as origin:
-            try:
-                await task_continuity._hand_off_task_impl(
-                    runtime, auth, origin_context_id=str(origin.id), agent_id="ag_research"
-                )
-            except ToolError as error:
-                assert "Only turns inside" in str(error)
-                return False
-            return True
-
-    task = asyncio.create_task(switching())
-    try:
-        await asyncio.wait_for(captured.wait(), 5)
-        await _handoff_policy(
-            db_session_factory, tenant.id, TenantAccessPolicy(sealed_channel_ids=("channel-1",))
-        )
-        sealed = await _prepare(
-            deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
-        )
-        assert isinstance(sealed, PreparedTurn)
-        assert _sealed_stamp(transport, sealed.ma_session_id) == "channel-1"
-        await _handoff_policy(db_session_factory, tenant.id, TenantAccessPolicy())
-    finally:
-        release.set()
-    outcome = await asyncio.wait_for(task, 5)
-    fresh = await original(
-        client, db_session_factory, tenant_id=tenant.id, platform="discord", thread_id="thread-1"
-    )
-    decision = authorize(
-        TenantAccessPolicy(),
-        subject=Subject(
-            platform_user_id="user-1", administered_channel_ids=frozenset({"channel-1"})
-        ),
-        action=Action.HAND_OFF,
-        surface=Surface.HANDOFF,
-        agent=AgentRef.of("research-bot"),
-        place=Place.from_origin(parent_channel_id="channel-1", thread_id="thread-1"),
-        recorded_seal_ids=frozenset(s for row in fresh for s in row.facts.seal_ids),
-    )
-    assert decision.reason == "not_a_reader"
-    assert not outcome, (
-        "channel admin uses stale open-session snapshot despite a new recorded sealed session"
-    )
-
-
-async def test_unseal_during_preparation_retains_inherited_memory_restriction(
-    db_session, db_nullpool_engine, monkeypatch
-):
-    from daimon.core import session_preparation
-
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
-    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
-        db_session, factory, sealed=True
-    )
-    account = await _account_of(factory, first.admission.account_id)
-    await _handoff_policy(factory, tenant.id, TenantAccessPolicy())
-    assert (await _click_hand_over(admission_deps, tenant)).switched
-    queued = await _admit_next(admission_deps, tenant)
-    assert not queued.memory_read_only
-    await _handoff_policy(factory, tenant.id, TenantAccessPolicy(sealed_channel_ids=("channel-1",)))
-    entered, release = asyncio.Event(), asyncio.Event()
-    original = session_preparation.reauthorize
-
-    async def pause(*args):
-        entered.set()
-        await release.wait()
-        return await original(*args)
-
-    monkeypatch.setattr(session_preparation, "reauthorize", pause)
-
-    async def carry(**_kwargs):
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="sealed history",
-        )
-
-    task = asyncio.create_task(
-        _prepare(deps, queued, tenant=tenant, account=account, transfer=carry)
-    )
-    try:
-        await asyncio.wait_for(entered.wait(), 5)
-        await _handoff_policy(factory, tenant.id, TenantAccessPolicy())
-    finally:
-        release.set()
-    successor = await asyncio.wait_for(task, 5)
-    assert isinstance(successor, PreparedTurn)
-    assert _sealed_stamp(transport, successor.ma_session_id) == "channel-1"
-    assert successor.admission.memory_read_only
-    assert [
-        r.access
-        for r in transport.state.sessions[successor.ma_session_id].resources
-        if r.type == "memory_store"
-    ] == ["read_only", "read_only"]
-
-
-async def test_prepared_turn_cannot_resume_retired_session(db_session, db_nullpool_engine):
-    from daimon.core.turn.run import run_prepared_turn
-    from daimon.testing.turn_fakes import RecordingLifecycle
-
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
-    tenant, transport, deps, _, first, successor, _ = await _review_replacement(db_session, factory)
-    # Prove the DB fence itself rejects the stale prepared capability even if
-    # an MA transport ignores archive state.
-    transport.state.sessions[first.ma_session_id] = transport.state.sessions[
-        first.ma_session_id
-    ].model_copy(update={"archived_at": None})
-    before = len(transport.state.events.get(first.ma_session_id, []))
-
-    async def reseed():
-        return "stale prepared turn"
-
-    from daimon.core.session_mutation import SessionRetired
-
-    with pytest.raises(SessionRetired):
-        await run_prepared_turn(
-            deps,
-            first,
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id="thread-1",
-            external_user_id="user-1",
-            user_message="stale prepared turn",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            reseed_user_message=reseed,
-            recovery_lifecycle=lambda _: RecordingLifecycle(),
-            render_interval_s=0.001,
-        )
-    assert len(transport.state.events.get(first.ma_session_id, [])) == before
-    async with factory() as db:
-        live = await get_live_thread_session(
-            db,
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id="thread-1",
-            account_id=first.session_account_id,
-        )
-    assert live.id == successor.mapping_id
-
-
-async def test_failed_handoff_create_keeps_predecessor_writable(db_session, db_nullpool_engine):
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
-    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
-        db_session, factory
-    )
-    account = await _account_of(factory, first.admission.account_id)
-    assert (await _click_hand_over(admission_deps, tenant)).switched
-    transport.fail_session_create = True
-    result = await _prepare(
-        deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
-    )
-    assert isinstance(result, PreparationFailure)
-    assert transport.state.sessions[first.ma_session_id].archived_at is None
-    async with factory() as db:
-        old = await get_thread_session_by_id(db, id=first.mapping_id)
-    assert old.status == "live"
-
-
-async def test_create_fence_rechecks_inherited_seals(db_session, db_nullpool_engine, monkeypatch):
-    from daimon.core.turn import prepare as prepare_module
-
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
-    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
-        db_session, factory, sealed=True
-    )
-    account = await _account_of(factory, first.admission.account_id)
-    await _handoff_policy(factory, tenant.id, TenantAccessPolicy())
-    assert (await _click_hand_over(admission_deps, tenant)).switched
-    original = prepare_module._env_bytes_sha256
-    stamped = False
-
-    async def stamp_during_build(*args, **kwargs):
-        nonlocal stamped
-        value = await original(*args, **kwargs)
-        if not stamped:
-            stamped = True
-            await prepare_module.stamp_session_seal(
-                deps,
-                first.ma_session_id,
-                replace(first.admission, origin_seal_ids=frozenset({"channel-1", "thread-1"})),
-                tenant_id=tenant.id,
-                now=lambda: _NOW,
-            )
-        return value
-
-    monkeypatch.setattr(prepare_module, "_env_bytes_sha256", stamp_during_build)
-    creates = transport.creates
-    with pytest.raises(SessionBusyError):
-        await _prepare(
-            deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
-        )
-    assert transport.creates == creates
-    assert transport.state.sessions[first.ma_session_id].archived_at is None
-    successor = await _prepare(
-        deps,
-        await _admit_next(admission_deps, tenant),
-        tenant=tenant,
-        account=account,
-        now=_NOW + timedelta(minutes=2),
-    )
-    assert isinstance(successor, PreparedTurn)
-    from daimon.core.session_seal import seal_ids
-
-    assert seal_ids(transport.state.sessions[successor.ma_session_id].metadata) == frozenset(
-        {"channel-1", "thread-1"}
-    )
-    assert successor.admission.memory_read_only
-    assert [
-        r.access
-        for r in transport.state.sessions[successor.ma_session_id].resources
-        if r.type == "memory_store"
-    ] == ["read_only", "read_only"]
-
-
-async def test_handoff_waits_for_an_inflight_handle_send(
-    db_session, db_nullpool_engine, monkeypatch
-):
-    from daimon.core import session_preparation
-    from daimon.core.session_fence_retry import FenceUnavailable
-
-    contended = asyncio.Event()
-    original_lock = session_preparation.lock_session_mutation
-
-    async def observed_lock(*args, **kwargs):
-        try:
-            return await original_lock(*args, **kwargs)
-        except FenceUnavailable:
-            contended.set()
-            raise
-
-    monkeypatch.setattr(session_preparation, "lock_session_mutation", observed_lock)
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
-    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
-        db_session, factory
-    )
-    account = await _account_of(factory, first.admission.account_id)
-    assert (await _click_hand_over(admission_deps, tenant)).switched
-    router = MARouter()
-    router.add_agent_list(first.admission.agent)
-    client = build_fake_anthropic(
-        combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
-    )
-    runtime = SimpleNamespace(
-        client=client, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
-    )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="discord",
-        platform_user_id="user-1",
-        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
-    )
-    entered, release = asyncio.Event(), asyncio.Event()
-    real_send = client.beta.sessions.events.send
-
-    async def paused_send(*args, **kwargs):
-        entered.set()
-        await release.wait()
-        result = await real_send(*args, **kwargs)
-        transport.state.sessions[first.ma_session_id] = transport.state.sessions[
-            first.ma_session_id
-        ].model_copy(update={"status": "running"})
-        return result
-
-    monkeypatch.setattr(client.beta.sessions.events, "send", paused_send)
-    sending = asyncio.create_task(
-        _continue_turn_impl(runtime, auth, first.ma_session_id, "in flight")
-    )
-    replacing = None
-    try:
-        await asyncio.wait_for(entered.wait(), 5)
-        replacing = asyncio.create_task(
-            _prepare(
-                deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
-            )
-        )
-        # Observe an actual failed PostgreSQL try-lock, not an assumed delay.
-        await asyncio.wait_for(contended.wait(), 3)
-        assert transport.state.sessions[first.ma_session_id].archived_at is None
-        release.set()
-        await asyncio.wait_for(sending, 5)
-        with pytest.raises(SessionBusyError):
-            await asyncio.wait_for(replacing, 5)
-        assert transport.state.sessions[first.ma_session_id].archived_at is None
-        assert await _count_live_rows(factory, tenant=tenant, account=account) == 1
-    finally:
-        release.set()
-        await asyncio.gather(
-            sending, *([replacing] if replacing is not None else []), return_exceptions=True
-        )
 
 
 @pytest.mark.parametrize("status", [400, 429, 500])
@@ -4291,3 +3696,447 @@ async def test_a_writable_personal_only_mount_is_not_reused_for_a_read_only_turn
         assert isinstance(second, PreparedTurn) and second.ma_session_id != first.ma_session_id
         fresh = transport.state.sessions[second.ma_session_id].resources
         assert [r.access for r in fresh if r.type == "memory_store"] == ["read_only"]
+
+
+async def test_a_member_hands_the_thread_to_the_channels_new_agent_in_place(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The channel now answers with research-bot. Before the switch every turn in
+    the old thread is refused; after it the next turn runs as research-bot in the
+    same thread, with the old work handed over, and the old session is closed."""
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, db_session_factory
+    )
+    account = await _account_of(db_session_factory, first.admission.account_id)
+
+    stuck = await _admit_next(admission_deps, tenant)
+    assert stuck.agent.id == "ag_research"
+    with pytest.raises(SessionAgentMismatch):
+        await _prepare(deps, stuck, tenant=tenant, account=account)
+
+    outcome = await _click_hand_over(admission_deps, tenant)
+    assert outcome.switched, outcome.text
+
+    carried: list[str] = []
+
+    async def _transfer(**kwargs: Any) -> PreparedReplacement:
+        carried.append(kwargs["old_session_id"])
+        return PreparedReplacement(
+            extra_resources=(),
+            transfer_file_id=None,
+            transfer_kind="transcript",
+            user_prefix="<previous_session>...</previous_session>",
+        )
+
+    handed = await _prepare(
+        deps,
+        await _admit_next(admission_deps, tenant),
+        tenant=tenant,
+        account=account,
+        transfer=_transfer,
+    )
+    assert isinstance(handed, PreparedTurn)
+    assert handed.admission.agent.id == "ag_research", "the thread now answers as research-bot"
+    assert transport.state.sessions[handed.ma_session_id].agent.id == "ag_research"
+    assert handed.continuity.state == "replaced"
+    assert carried == [first.ma_session_id], "the old conversation was handed over"
+    assert first.mapping_id is not None
+    old = await get_thread_session_by_id(db_session, id=first.mapping_id)
+    assert old is not None and old.status == "superseded", "the old session is closed"
+    assert await _count_live_rows(db_session_factory, tenant=tenant, account=account) == 1
+
+    again = await _prepare(
+        deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
+    )
+    assert isinstance(again, PreparedTurn)
+    assert again.ma_session_id == handed.ma_session_id, "later messages stay with research-bot"
+
+
+async def test_a_sealed_thread_handed_over_keeps_its_seal_and_read_only_memory(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, db_session_factory, sealed=True
+    )
+    account = await _account_of(db_session_factory, first.admission.account_id)
+    assert _sealed_stamp(transport, first.ma_session_id) == "channel-1"
+
+    assert (await _click_hand_over(admission_deps, tenant)).switched
+
+    handed = await _prepare(
+        deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
+    )
+    assert isinstance(handed, PreparedTurn)
+    assert handed.admission.agent.id == "ag_research"
+    assert _sealed_stamp(transport, handed.ma_session_id) == "channel-1", (
+        "the new session carries the thread's seal ids"
+    )
+    observed = await deps.anthropic.beta.sessions.retrieve(handed.ma_session_id)
+    memory = next(r for r in observed.resources if r.type == "memory_store")
+    assert memory.access == "read_only", "research-bot's memory is read-only in a sealed thread"
+
+
+async def test_old_session_cannot_be_written_after_successor_exists(db_session, db_session_factory):
+    tenant, transport, deps, admission_deps, first, handed, transfers = await _review_replacement(
+        db_session, db_session_factory
+    )
+    async with db_session_factory() as db:
+        old = await get_thread_session_by_id(db, id=first.mapping_id)
+    observed = await deps.anthropic.beta.sessions.retrieve(first.ma_session_id)
+    router = MARouter()
+    router.add_agent_list(first.admission.agent, handed.admission.agent)
+    client = build_fake_anthropic(
+        combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
+    )
+    runtime = SimpleNamespace(
+        client=client, session_factory=db_session_factory, settings=SimpleNamespace(mcp=deps.mcp)
+    )
+    auth = AuthIdentity(
+        account_id=first.admission.account_id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="user-1",
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
+    )
+    recheck = _admission_recheck(
+        auth, sessionmaker=db_session_factory, tool_name="continue_turn", agent_names=None
+    )
+    before = len(transport.state.events.get(first.ma_session_id, []))
+    from daimon.core.session_mutation import SessionRetired
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises((SessionRetired, ToolError)):
+        await _continue_turn_impl(
+            runtime, auth, first.ma_session_id, "write after handoff", recheck=recheck
+        )
+    after = len(transport.state.events.get(first.ma_session_id, []))
+    assert before == after, "superseded old session still accepts a real continue_turn"
+    assert observed.archived_at is not None
+    assert old.status == "superseded"
+    history = [
+        event async for event in deps.anthropic.beta.sessions.events.list(first.ma_session_id)
+    ]
+    assert len(history) == before
+
+
+async def test_inherited_sealed_transcript_keeps_read_only_memory_after_unseal(
+    db_session, db_session_factory
+):
+    tenant, transport, deps, admission_deps, first, handed, transfers = await _review_replacement(
+        db_session, db_session_factory, sealed=True, lift=True
+    )
+    new = await deps.anthropic.beta.sessions.retrieve(handed.ma_session_id)
+    old = await deps.anthropic.beta.sessions.retrieve(first.ma_session_id)
+    # Shared and personal mounts alike: a sealed origin keeps both read-only.
+    assert [r.access for r in old.resources if r.type == "memory_store"] == [
+        "read_only",
+        "read_only",
+    ]
+    assert _sealed_stamp(transport, handed.ma_session_id) == "channel-1"
+    assert handed.admission.memory_read_only
+    new_memory = [r.access for r in new.resources if r.type == "memory_store"]
+    assert new_memory == ["read_only", "read_only"], (
+        "sealed content is carried into the new agent with writable shared memory"
+    )
+
+
+async def test_unseal_during_preparation_retains_inherited_memory_restriction(
+    db_session, db_nullpool_engine, monkeypatch
+):
+    from daimon.core import session_preparation
+
+    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, factory, sealed=True
+    )
+    account = await _account_of(factory, first.admission.account_id)
+    await _handoff_policy(factory, tenant.id, TenantAccessPolicy())
+    assert (await _click_hand_over(admission_deps, tenant)).switched
+    queued = await _admit_next(admission_deps, tenant)
+    assert not queued.memory_read_only
+    await _handoff_policy(factory, tenant.id, TenantAccessPolicy(sealed_channel_ids=("channel-1",)))
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = session_preparation.reauthorize
+
+    async def pause(*args):
+        entered.set()
+        await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(session_preparation, "reauthorize", pause)
+
+    async def carry(**_kwargs):
+        return PreparedReplacement(
+            extra_resources=(),
+            transfer_file_id=None,
+            transfer_kind="transcript",
+            user_prefix="sealed history",
+        )
+
+    task = asyncio.create_task(
+        _prepare(deps, queued, tenant=tenant, account=account, transfer=carry)
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await _handoff_policy(factory, tenant.id, TenantAccessPolicy())
+    finally:
+        release.set()
+    successor = await asyncio.wait_for(task, 5)
+    assert isinstance(successor, PreparedTurn)
+    assert _sealed_stamp(transport, successor.ma_session_id) == "channel-1"
+    assert successor.admission.memory_read_only
+    assert [
+        r.access
+        for r in transport.state.sessions[successor.ma_session_id].resources
+        if r.type == "memory_store"
+    ] == ["read_only", "read_only"]
+
+
+async def test_prepared_turn_cannot_resume_retired_session(db_session, db_nullpool_engine):
+    from daimon.core.turn.run import run_prepared_turn
+    from daimon.testing.turn_fakes import RecordingLifecycle
+
+    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant, transport, deps, _, first, successor, _ = await _review_replacement(db_session, factory)
+    # Prove the DB fence itself rejects the stale prepared capability even if
+    # an MA transport ignores archive state.
+    transport.state.sessions[first.ma_session_id] = transport.state.sessions[
+        first.ma_session_id
+    ].model_copy(update={"archived_at": None})
+    before = len(transport.state.events.get(first.ma_session_id, []))
+
+    async def reseed():
+        return "stale prepared turn"
+
+    from daimon.core.session_mutation import SessionRetired
+
+    with pytest.raises(SessionRetired):
+        await run_prepared_turn(
+            deps,
+            first,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            external_user_id="user-1",
+            user_message="stale prepared turn",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda _: RecordingLifecycle(),
+            render_interval_s=0.001,
+        )
+    assert len(transport.state.events.get(first.ma_session_id, [])) == before
+    async with factory() as db:
+        live = await get_live_thread_session(
+            db,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            account_id=first.session_account_id,
+        )
+    assert live.id == successor.mapping_id
+
+
+async def test_failed_handoff_create_keeps_predecessor_writable(db_session, db_nullpool_engine):
+    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, factory
+    )
+    account = await _account_of(factory, first.admission.account_id)
+    assert (await _click_hand_over(admission_deps, tenant)).switched
+    transport.fail_session_create = True
+    result = await _prepare(
+        deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
+    )
+    assert isinstance(result, PreparationFailure)
+    assert transport.state.sessions[first.ma_session_id].archived_at is None
+    async with factory() as db:
+        old = await get_thread_session_by_id(db, id=first.mapping_id)
+    assert old.status == "live"
+
+
+async def test_create_fence_rechecks_inherited_seals(db_session, db_nullpool_engine, monkeypatch):
+    from daimon.core.turn import prepare as prepare_module
+
+    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, factory, sealed=True
+    )
+    account = await _account_of(factory, first.admission.account_id)
+    await _handoff_policy(factory, tenant.id, TenantAccessPolicy())
+    assert (await _click_hand_over(admission_deps, tenant)).switched
+    original = prepare_module._env_bytes_sha256
+    stamped = False
+
+    async def stamp_during_build(*args, **kwargs):
+        nonlocal stamped
+        value = await original(*args, **kwargs)
+        if not stamped:
+            stamped = True
+            await prepare_module.stamp_session_seal(
+                deps,
+                first.ma_session_id,
+                replace(first.admission, origin_seal_ids=frozenset({"channel-1", "thread-1"})),
+                tenant_id=tenant.id,
+                now=lambda: _NOW,
+            )
+        return value
+
+    monkeypatch.setattr(prepare_module, "_env_bytes_sha256", stamp_during_build)
+    creates = transport.creates
+    with pytest.raises(SessionBusyError):
+        await _prepare(
+            deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
+        )
+    assert transport.creates == creates
+    assert transport.state.sessions[first.ma_session_id].archived_at is None
+    successor = await _prepare(
+        deps,
+        await _admit_next(admission_deps, tenant),
+        tenant=tenant,
+        account=account,
+        now=_NOW + timedelta(minutes=2),
+    )
+    assert isinstance(successor, PreparedTurn)
+    from daimon.core.session_seal import seal_ids
+
+    assert seal_ids(transport.state.sessions[successor.ma_session_id].metadata) == frozenset(
+        {"channel-1", "thread-1"}
+    )
+    assert successor.admission.memory_read_only
+    assert [
+        r.access
+        for r in transport.state.sessions[successor.ma_session_id].resources
+        if r.type == "memory_store"
+    ] == ["read_only", "read_only"]
+
+
+async def test_handoff_waits_for_an_inflight_handle_send(
+    db_session, db_nullpool_engine, monkeypatch
+):
+    from daimon.core import session_preparation
+    from daimon.core.session_fence_retry import FenceUnavailable
+
+    contended = asyncio.Event()
+    original_lock = session_preparation.lock_session_mutation
+
+    async def observed_lock(*args, **kwargs):
+        try:
+            return await original_lock(*args, **kwargs)
+        except FenceUnavailable:
+            contended.set()
+            raise
+
+    monkeypatch.setattr(session_preparation, "lock_session_mutation", observed_lock)
+    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db_session, factory
+    )
+    account = await _account_of(factory, first.admission.account_id)
+    assert (await _click_hand_over(admission_deps, tenant)).switched
+    router = MARouter()
+    router.add_agent_list(first.admission.agent)
+    client = build_fake_anthropic(
+        combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
+    )
+    runtime = SimpleNamespace(
+        client=client, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+    )
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="user-1",
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    real_send = client.beta.sessions.events.send
+
+    async def paused_send(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        result = await real_send(*args, **kwargs)
+        transport.state.sessions[first.ma_session_id] = transport.state.sessions[
+            first.ma_session_id
+        ].model_copy(update={"status": "running"})
+        return result
+
+    monkeypatch.setattr(client.beta.sessions.events, "send", paused_send)
+    sending = asyncio.create_task(
+        _continue_turn_impl(runtime, auth, first.ma_session_id, "in flight")
+    )
+    replacing = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        replacing = asyncio.create_task(
+            _prepare(
+                deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
+            )
+        )
+        # Observe an actual failed PostgreSQL try-lock, not an assumed delay.
+        await asyncio.wait_for(contended.wait(), 3)
+        assert transport.state.sessions[first.ma_session_id].archived_at is None
+        release.set()
+        await asyncio.wait_for(sending, 5)
+        with pytest.raises(SessionBusyError):
+            await asyncio.wait_for(replacing, 5)
+        assert transport.state.sessions[first.ma_session_id].archived_at is None
+        assert await _count_live_rows(factory, tenant=tenant, account=account) == 1
+    finally:
+        release.set()
+        await asyncio.gather(
+            sending, *([replacing] if replacing is not None else []), return_exceptions=True
+        )
+
+
+async def _click_hand_over(admission_deps: TurnDeps, tenant: TenantRow) -> Any:
+    from daimon.core.native_admins import AdminCaller
+    from daimon.core.thread_handoff import switch_thread_on_request
+
+    return await switch_thread_on_request(
+        admission_deps.anthropic,
+        admission_deps.sessionmaker,
+        tenant_id=tenant.id,
+        platform="discord",
+        parent_channel_id="channel-1",
+        thread_id="thread-1",
+        ma_agent_id="ag_research",
+        caller=AdminCaller(platform_user_id="user-1"),
+        default=admission_deps.deployment_default,
+        channel="#channel-1",
+        now=_NOW,
+    )
+
+
+async def _review_replacement(db, factory, *, sealed=False, lift=False):
+    tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
+        db, factory, sealed=sealed
+    )
+    account = await _account_of(factory, first.admission.account_id)
+    if lift:
+        await _handoff_policy(factory, tenant.id, TenantAccessPolicy())
+    assert (await _click_hand_over(admission_deps, tenant)).switched
+    transfers = []
+
+    async def carry(**kw):
+        transfers.append(kw["old_session_id"])
+        return PreparedReplacement(
+            extra_resources=(),
+            transfer_file_id=None,
+            transfer_kind="transcript",
+            user_prefix="SEALED_WORK",
+        )
+
+    handed = await _prepare(
+        deps,
+        await _admit_next(admission_deps, tenant),
+        tenant=tenant,
+        account=account,
+        transfer=carry,
+    )
+    assert isinstance(handed, PreparedTurn)
+    return tenant, transport, deps, admission_deps, first, handed, transfers

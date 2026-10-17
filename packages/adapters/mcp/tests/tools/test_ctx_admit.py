@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
-from collections.abc import Coroutine
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -270,37 +269,40 @@ _ISOLATED = TenantAccessPolicy(
 )
 
 
-@pytest.mark.parametrize("role", [Role.USER, Role.ADMIN], ids=["channel-admin", "server-admin"])
 async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_budget(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], role: Role
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    member = await _member(db_session, policy=_ISOLATED, role=role)
-    tenant = await get_tenant(db_session, member.tenant_id)
+    admin = await _member(db_session, policy=_ISOLATED, role=Role.ADMIN)
+    tenant = await get_tenant(db_session, admin.tenant_id)
     assert tenant is not None
-    # The isolated channel is closed with a $0 budget.
     await make_channel_budget(db_session, tenant=tenant, channel_id="room", limit_usd=Decimal("0"))
     await db_session.commit()
-    auth = dataclasses.replace(
-        member, platform=tenant.platform, administered_channel_ids=frozenset({"room"})
-    )
+    auth = dataclasses.replace(admin, platform=tenant.platform)
 
     async def names(agent: str) -> tuple[str | None, ...]:
-        return (agent, None)
+        return agent, None
 
-    def admit(agent: str) -> Coroutine[object, object, AuthIdentity]:
-        return _admit(
+    with _BALANCE_OK, pytest.raises(ToolError, match="This channel has used its spending budget"):
+        await _admit(
             auth,
             sessionmaker=db_session_factory,
             billing_config=None,
             tool_name="ask",
-            agent_names=lambda: names(agent),
+            agent_names=lambda: names("local"),
             pin_exempt=True,
         )
-
-    with _BALANCE_OK, pytest.raises(ToolError, match="This channel has used its spending budget"):
-        await admit("local")
     with _BALANCE_OK:
-        assert await admit("daimon") is auth, "any other agent's hub run is not charged to room"
+        assert (
+            await _admit(
+                auth,
+                sessionmaker=db_session_factory,
+                billing_config=None,
+                tool_name="ask",
+                agent_names=lambda: names("daimon"),
+                pin_exempt=True,
+            )
+            is auth
+        )
 
 
 @pytest.mark.parametrize(

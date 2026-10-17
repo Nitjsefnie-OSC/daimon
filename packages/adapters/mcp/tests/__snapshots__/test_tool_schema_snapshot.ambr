@@ -177,7 +177,6 @@
           channel, which can only be read from inside it. A workspace admin also
           sees everyone's channel conversations with this Daimon, sealed ones
           included, and can read them with ``get_session``/``list_events``, but
-          can't continue a sealed one from here. A channel admin sees the same
           for the channels they administer.
         ''',
         'parameters': dict({
@@ -263,10 +262,9 @@
         neither can happen, the preview's summary says why and points to Add skill in
         /agent-setup. The
         skill belongs to this agent alone; ``sync_skills`` fills the shared library
-        instead, and ``remove_skill`` detaches it. A built-in agent is refused. Anyone
-        may change an agent nobody else uses (no default, bound thread, or other
-        people's routine or conversation); otherwise it takes a server admin or an
-        admin of every channel using it. Pass this turn's ``origin_context_id`` so its
+        instead, and ``remove_skill`` detaches it. A built-in agent is refused.
+        Changing skills takes a server or workspace admin. Pass this turn's
+        ``origin_context_id`` so its
         channel counts.
       ''',
       'parameters': dict({
@@ -663,8 +661,7 @@
         <blank line>
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
-        default the call is a no-op (idempotent).  Requires Manage Server (admin);
-        an admin of the channel may clear that channel's default.
+        default the call is a no-op (idempotent). Requires Manage Server (admin).
         <blank line>
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
@@ -692,7 +689,7 @@
       }),
     }),
     'clear_agent_tool_rule': dict({
-      'description': "Clear one agent's tool rule. Channel admins may act in their channels.",
+      'description': "Clear one agent's tool rule.",
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -717,25 +714,6 @@
         'required': list([
           'agent_name',
           'tool_key',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'clear_channel_admins': dict({
-      'description': '''
-        Remove every channel admin from one channel, leaving it to the server admins.
-        For example, stop the @support-leads role running #support. A no-op when the
-        channel has none. Requires Manage Server (admin).
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'type': 'string',
-          }),
-        }),
-        'required': list([
-          'channel_id',
         ]),
         'type': 'object',
       }),
@@ -766,8 +744,7 @@
         channel has none of its own.
         <blank line>
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
-        default. The workspace default requires Manage Server (admin); an admin of the
-        channel may clear that channel's environment, unless it is sealed and the
+        default. Clearing either default requires Manage Server (admin). If sealed, the
         default has unrestricted networking; then a server admin must confirm it, as
         for ``set_channel_environment``, and as when clearing the workspace default
         leaves sealed channels on such a default. A thread id resolves to its parent
@@ -871,7 +848,6 @@
         A returned ``answering`` field says the new agent is routed nowhere yet:
         post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
         without it is refused while a channel in the workspace is confidential, and with
-        it a channel admin creating the agent for their channel may set it up there.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -2863,7 +2839,6 @@
         Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
         <blank line>
         Lists every channel with its own agent or environment setting, a
-        spending budget, channel admins or confidential status, with the agent and environment that
         apply there, the roles and members administering it, and the budget's
         limit, window and spend (``budget`` is null without one), and the
         live timed promo credit with when each grant ends. Money is a decimal
@@ -2959,7 +2934,7 @@
         Give this agent token access to more repos, such as a private GitHub repo.
         <blank line>
         Show a single-use connection button bound to the selected agent to a
-        server admin, or to a channel admin who manages that agent; repos
+        server admin; repos
         connected this way are for that agent only. Other members get Ask an
         admin and a recorded request. On Teams the card goes to the requester's
         1:1 chat. Never repeat a private link in a shared reply. For a setup
@@ -3044,7 +3019,7 @@
         changes who answers a channel; neither does this. The destination must
         already answer in this workspace. A member may hand only to an agent of
         this channel (the one it answers with, or one pinned to it); any other
-        needs a server admin or a channel admin of this channel.
+        needs a server admin.
         <blank line>
         From the next message here, that agent answers, with its own keys,
         connections and memory; conversation, decisions and files move with the
@@ -3149,7 +3124,7 @@
       }),
     }),
     'list_agent_tool_rules': dict({
-      'description': "List an agent's rules. Channel admins pass their channel id.",
+      'description': "List an agent's tool rules, optionally for one channel.",
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3179,8 +3154,8 @@
         List agents visible here, including their attached ``mcp_servers`` and ``skills``.
         <blank line>
         ``mcp_servers`` and ``created_at`` are null for a caller who is neither an
-        admin nor an admin of a channel the agent is limited to: setup details are
-        for them, capabilities (name, description, model, skills) are not. Members
+        admin: setup details are
+        for admins, capabilities (name, description, model, skills) are not. Members
         see the channel/thread responders and agents explicitly allowed to run
         here; unrouted agents and other channels' agents are hidden.
         Pass this turn's ``origin_context_id`` to verify its location. Without
@@ -3212,19 +3187,6 @@
             ]),
             'default': None,
           }),
-        }),
-        'type': 'object',
-      }),
-    }),
-    'list_channel_admins': dict({
-      'description': '''
-        List the channels that have their own admins, with the groups and members
-        named for each. For example, list the admins of #support. Requires Manage
-        Server (admin).
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
         }),
         'type': 'object',
       }),
@@ -4537,9 +4499,8 @@
         Match supported authentication; an API key is not automatically an MCP token.
         <blank line>
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
-        credentials in chat. Connecting requires a workspace or server admin, or an
-        admin of every channel the agent's rule names, with all of its uses staying
-        inside those channels. This applies to new servers and replacements.
+        credentials in chat. Connecting requires a workspace or server admin.
+        This applies to new servers and replacements.
         <blank line>
         Posts a requester-only card naming the agent and the server, opening a private
         form, expiring in 30 minutes. Submission attaches the server to the agent, not
@@ -4956,10 +4917,7 @@
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
-        core).  Requires Manage Server (admin); an admin of the channel may set
-        that channel's default to a built-in agent, the workspace default, an
-        agent that answers nowhere yet, or one that answers only in channels
-        they administer.
+        core). Requires Manage Server (admin).
         <blank line>
         Discord: ``channel_id`` MUST be the parent channel's id — the one
         your context gives as
@@ -5048,7 +5006,7 @@
       }),
     }),
     'set_agent_tool_rule': dict({
-      'description': "Set one agent's tool rule. Channel admins may act in their channels.",
+      'description': "Set one agent's tool rule.",
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -5090,54 +5048,6 @@
           'agent_name',
           'tool_key',
           'rule',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'set_channel_admins': dict({
-      'description': '''
-        Name who administers one channel, on top of the server admins. For example,
-        let the @support-leads role run #support. Replaces that channel's whole list;
-        pass both lists empty to clear it. Requires Manage Server (admin).
-        <blank line>
-        A channel admin may change agents that answer only in the channels they
-        administer (instructions, skills, keys, MCP servers) and set or clear those
-        channels' default agent. Built-in agents and the workspace default stay with
-        server admins.
-        <blank line>
-        Ids are the platform's own. ``user_ids``: Discord or Slack user ids, Teams
-        Entra object ids. ``role_ids`` names groups whose members all count: Discord
-        role ids, Slack user group ids (``S...``), or a Teams team's Entra group id,
-        which admits that team's owners. ``channel_id`` MUST be the parent channel's
-        id; a Slack or Teams thread id names its channel.
-        <blank line>
-        A Slack user group makes anyone who can join or edit it a channel admin, and
-        Slack lets every member edit user groups by default: name one only where the
-        workspace limits user group management to admins.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'channel_id': dict({
-            'type': 'string',
-          }),
-          'role_ids': dict({
-            'items': dict({
-              'type': 'string',
-            }),
-            'type': 'array',
-          }),
-          'user_ids': dict({
-            'items': dict({
-              'type': 'string',
-            }),
-            'type': 'array',
-          }),
-        }),
-        'required': list([
-          'channel_id',
-          'role_ids',
-          'user_ids',
         ]),
         'type': 'object',
       }),
@@ -5214,8 +5124,7 @@
         Omit ``channel_id`` to set the workspace default, which every channel without
         its own environment uses. The environment must already exist
         (``list_environments``). Conversations pick it up from their next message.
-        The workspace default requires Manage Server (admin); an admin of the channel
-        may set that channel's environment, except one with unrestricted networking in
+        Setting either default requires Manage Server (admin). Unrestricted networking in
         a sealed channel, which needs a server admin and their confirmation, as does a
         workspace default sealed channels would run in: pass
         ``confirm_open_network=true`` only after the caller confirms it.
@@ -5505,8 +5414,7 @@
         A clear ask is enough: set it right away and reply with the returned
         line. Ask once in plain words during agent setup. Use an owner/repo already on
         this agent's list. Other repos have token access; clone one with gh repo clone when
-        asked. Only a server admin or an admin for this non-managed agent's
-        channels may change this setting. Pass the current turn origin and the
+        asked. Only a server admin may change this setting. Pass the current turn origin and the
         selected agent's name and MA id. If the repo is not on its list, offer
         the single Connect GitHub link.
       ''',

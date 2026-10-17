@@ -6,7 +6,7 @@ admin-set allow rule was in the store at the moment the call was decided, and ca
 
 This models the approval-card path. Per agent, a workspace admin can mark a
 third-party tool `allow`, either from the CLI or with an "Always allow" button on its
-approval card. A channel admin may save a rule for the card's parent channel.
+approval card. A workspace admin may save a rule for the card's parent channel.
 The decider reads the rule on every call; the card's click approves the
 pending call at once, and the rule save is a compare-and-set on the revision captured
 before the card was posted.

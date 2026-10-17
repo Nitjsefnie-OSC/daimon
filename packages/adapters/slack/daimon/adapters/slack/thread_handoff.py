@@ -4,7 +4,6 @@ Slack's side of `daimon.adapters.discord.thread_handoff`: the responder-changed
 notice carries a button whose value is the agent the channel answers with now.
 A click hands the thread to that agent for the person who clicked, decided by
 `daimon.core.thread_handoff` under the tenant policy lock with their live
-admin status (`users.info`) and channel admin grants, user groups confirmed
 live. The value is only a request; an external Slack Connect member's click is
 dropped.
 """
@@ -16,7 +15,7 @@ from typing import Any, Final
 
 import structlog
 from daimon.adapters.slack.admin import resolve_is_admin
-from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
+from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -85,7 +84,7 @@ async def handle_hand_over_click(runtime: SlackRuntime, payload: dict[str, Any])
         parent_channel_id=channel_id,
         thread_id=thread_ts,
         ma_agent_id=agent_id,
-        caller=await channel_admin_caller(
+        caller=await admin_caller(
             runtime,
             client,
             tenant_id=tenant_id,

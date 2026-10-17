@@ -258,10 +258,7 @@ async def require_skill_change(
     """Raise unless the caller may add or remove one of `agent`'s skills.
 
     A built-in agent is refused; a server admin may change any other; a
-    channel admin one of theirs that answers and runs only in their channels
-    (`daimon.core.authz.channel_admin_holds`); anyone one
-    nobody else uses, read as widely as a key change
-    (`daimon.core.agent_reach.WIDE_SHARING_OPERATIONS`).
+    a server or workspace admin.
     """
     rejection = _system_agent_rejection(agent)
     if rejection is not None:
@@ -276,28 +273,9 @@ async def require_skill_change(
     )
     if decide_operation(operation, is_admin=auth.is_admin, target=facts) == "allow":
         return
-    if facts.runs_unattended_beyond_caller:
-        why = "runs unattended (a routine or queued wake) for someone with wider rights"
-    elif facts.has_unplaced_run:
-        why = reachability.UNPLACED_RUN_REASON
-    elif facts.is_local_to_caller_channels:
-        why = reachability.NOT_HELD_REASON
-    else:
-        why = (
-            "is used beyond this caller (a default, a bound thread, or someone else's "
-            "routine or conversation)"
-        )
-    from daimon.core.config import channel_admins_enabled
-
-    if not channel_admins_enabled():
-        raise ToolError(
-            f"'{agent_name}' {why}, so changing its skills needs a workspace or server admin. "
-            "Nothing was changed. Do not retry."
-        )
     raise ToolError(
-        f"'{agent_name}' {why}, so changing its skills needs a workspace or server admin, "
-        "or an admin of every channel it answers in. Tell the caller an admin can ask "
-        "Daimon to make this change. Nothing was changed. Do not retry."
+        f"Changing '{agent_name}'s skills needs a workspace or server admin. "
+        "Nothing was changed. Do not retry."
     )
 
 
@@ -720,10 +698,9 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         neither can happen, the preview's summary says why and points to Add skill in
         /agent-setup. The
         skill belongs to this agent alone; ``sync_skills`` fills the shared library
-        instead, and ``remove_skill`` detaches it. A built-in agent is refused. Anyone
-        may change an agent nobody else uses (no default, bound thread, or other
-        people's routine or conversation); otherwise it takes a server admin or an
-        admin of every channel using it. Pass this turn's ``origin_context_id`` so its
+        instead, and ``remove_skill`` detaches it. A built-in agent is refused.
+        Changing skills takes a server or workspace admin. Pass this turn's
+        ``origin_context_id`` so its
         channel counts."""
         return await _add_skill_impl(
             runtime,

@@ -27,13 +27,13 @@ from daimon.adapters.teams.deployment_admins import admin_team_owners, is_deploy
 from daimon.adapters.teams.identity import canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.core.authz import Subject
-from daimon.core.channel_admins import load_live_subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
     ConfirmationHook,
     ConfirmationPrompt,
 )
+from daimon.core.native_admins import load_live_subject
 from daimon.core.posted_controls.confirmation import (
     NOT_YOURS_MESSAGE,
     ConfirmationCard,
@@ -273,18 +273,14 @@ class TeamsConfirmationCards:
         rule_factory = runtime.sessionmaker if runtime is not None else None
 
         async def rule_subject(clicker: str) -> Subject:
-            from daimon.adapters.teams.channel_admin_groups import channel_admin_caller
+            from daimon.adapters.teams.admin_caller import admin_caller
 
             if runtime is None or tenant_id is None:
                 return Subject()
             admin = await _is_admin_now(runtime, clicker)
-            caller = await channel_admin_caller(
+            caller = await admin_caller(
                 runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin
             )
-            if caller.role_ids:  # like the admin check: only owned teams are read again
-                caller = await channel_admin_caller(
-                    runtime, tenant_id=tenant_id, user_id=clicker, is_admin=admin, fresh=True
-                )
             async with runtime.sessionmaker() as session:
                 return await load_live_subject(
                     session, tenant_id=tenant_id, platform="teams", caller=caller

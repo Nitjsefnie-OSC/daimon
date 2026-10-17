@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from daimon.adapters.discord.agent_setup.github_card_ui import github_embed
 from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
-from daimon.adapters.discord.checks import channel_admin_caller, is_member_guild_admin
+from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -370,7 +370,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 agent_names=(request.agent_name, live_agent.name),
                 ma_agent_id=str(live_agent.id),
                 default=runtime.deployment_default,
-                caller=channel_admin_caller(member),
+                caller=admin_caller(member),
                 is_daimon_managed=managed,
                 caller_platform_user_id=str(member.id),
             )

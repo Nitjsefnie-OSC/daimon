@@ -47,10 +47,9 @@ from typing import Any, Self, cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.channel_admin_roles import member_roles
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.split import split_for_discord_safe
-from daimon.core.config import DirectMessagePolicy, SupportSettings
+from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -73,7 +72,6 @@ from daimon.core.support_escalation import (
     build_custom_id,
     received_text,
 )
-from daimon.core.support_routing import support_recipient_tiers
 
 import discord
 from discord.ext import commands
@@ -275,9 +273,7 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         # The row is committed. Everything below is best-effort delivery, and
         # a total failure downgrades the confirmation wording rather than the
         # outcome -- the request is already durable.
-        delivered = await self._dm_admins(
-            interaction=interaction, note=note, tenant_id=tenant_id
-        ) or await self._post_to_channel(
+        delivered = await self._post_to_channel(
             interaction=interaction,
             note=note,
             guild_id=guild_id,
@@ -316,49 +312,6 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         marker = [f"*{SEALED_POST_MARKER}*"] if self._sealed else []
         head = f"**Human support requested** by {interaction.user.mention} ({interaction.user})"
         return "\n\n".join([head, link, *marker, note])
-
-    async def _origin_channel_id(self, bot: commands.Bot) -> str:
-        """The answer's channel, or a thread's parent, which is what a grant names."""
-        return (await _answer_place(bot, self._channel_id))[0]
-
-    async def _dm_admins(
-        self, *, interaction: discord.Interaction, note: str, tenant_id: uuid.UUID
-    ) -> bool:
-        """DM the origin channel's admins, else the server admins. True once a tier got it.
-
-        False at once for a channel with no admins of its own, so it keeps the
-        escalation channel. Each DM is held to the tenant's DM policy and goes
-        only to a current human member of the guild.
-        """
-        bot = cast(DaimonBot, interaction.client)
-        tiers = await support_recipient_tiers(
-            self._runtime.sessionmaker,
-            tenant_id=tenant_id,
-            platform="discord",
-            channel_id=await self._origin_channel_id(bot),
-            requester_id=str(interaction.user.id),
-            members=member_roles(self._runtime, bot, self._guild_id),
-        )
-        if not tiers:
-            return False
-        policies = self._runtime.settings.direct_message_policies
-        policy = policies.get(tenant_id, DirectMessagePolicy())
-        body = self._body(interaction, note)
-        chunks = split_for_discord_safe(body)
-        for tier in tiers:
-            landed = 0
-            for user_id in (uid for uid in tier if policy.allows(uid)):
-                try:
-                    dm = await bot.open_member_dm(int(self._guild_id), int(user_id))
-                    for chunk in chunks:
-                        await dm.send(chunk, allowed_mentions=discord.AllowedMentions.none())
-                    landed += 1
-                except (discord.HTTPException, LookupError, ValueError) as exc:
-                    _log.info("support.admin_dm_undelivered", err_type=type(exc).__name__)
-            if landed:
-                _log.info("support.sent_to_admins", recipients=landed)
-                return True
-        return False
 
     async def _post_to_channel(
         self,

@@ -16,7 +16,6 @@ from daimon.adapters.discord.bot import (
 )
 from daimon.adapters.discord.checks import (
     is_member_guild_admin,
-    member_role_ids,
     require_registered_guild,
 )
 from daimon.core.config import Settings
@@ -108,7 +107,6 @@ class DirectMessageCog(commands.Cog):
                 channel_id=source_channel_id,
                 thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
                 role=Role.ADMIN if is_admin else Role.USER,
-                platform_role_ids=member_role_ids(member),
                 is_dm=True,
                 dm_source_channel_id=source_channel_id,
                 now=datetime.now(UTC),
@@ -244,7 +242,6 @@ class DirectMessageCog(commands.Cog):
                         expected_scope_id=conversation.scope_id,
                         text=message.content,
                         role=role,
-                        platform_role_ids=member_role_ids(member),
                     )
             finally:
                 ticket.release()

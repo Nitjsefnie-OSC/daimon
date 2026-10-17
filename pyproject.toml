@@ -149,7 +149,6 @@ source_modules = [
     "daimon.core.billing_panel",
     "daimon.core.broker",
     "daimon.core.bundle_handle",
-    "daimon.core.channel_admins",
     "daimon.core.channel_backend",
     "daimon.core.channel_budget",
     "daimon.core.channel_budget_notice",

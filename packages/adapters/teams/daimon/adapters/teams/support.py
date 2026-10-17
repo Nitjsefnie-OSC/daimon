@@ -67,7 +67,6 @@ from daimon.adapters.teams.card_actions import (
     text_lines,
     toast,
 )
-from daimon.adapters.teams.channel_admin_groups import team_owner_lookup
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.deployment_admins import live_admin_ids
 from daimon.adapters.teams.direct_chats import DirectChats
@@ -75,6 +74,7 @@ from daimon.adapters.teams.identity import DENIED, TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.adapters.teams.team_owners import team_owner_lookup
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.ma_identity import derive_tenant_uuid

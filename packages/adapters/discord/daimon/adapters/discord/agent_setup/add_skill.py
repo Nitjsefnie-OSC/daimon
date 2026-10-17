@@ -1,12 +1,10 @@
 """Add skill, from Details: paste or upload one skill, see what it holds, then add it.
 
 The skill becomes the agent's own copy; the shared library and the built-in
-agents are never touched. A server admin may add to any agent they could edit,
-a channel admin to one that answers only in their channels, anyone to one that
-nobody else uses (read as widely as a key change). A pinned agent also takes an
-add only from a panel opened inside its channels, unless the caller is a server
-admin or an admin of every channel it is pinned to (`pin_refusal`, the private
-forms' rule). The button, the submit and the Add click each re-check both live;
+agents are never touched. A server admin may add to any editable agent. A
+pinned agent also accepts changes from a panel opened inside its channels
+(`pin_refusal`, the private forms' rule). The button, the submit and the Add click
+each re-check both live;
 Add re-reads the agent first, so every name it carries counts, and checks the
 fresh agent again right before the upload and the attach.
 """
@@ -22,7 +20,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup.hydrate import load_details_for
 from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import ADMIN_NOUN, channel_admin_caller
+from daimon.adapters.discord.checks import ADMIN_NOUN, admin_caller
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -30,7 +28,6 @@ from daimon.core.agent_details import AgentDetails
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.authz import Place, Subject
-from daimon.core.channel_admins import load_live_subject
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
@@ -40,6 +37,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.native_admins import load_live_subject
 from daimon.core.operation_policy import decide_operation
 from daimon.core.roster import RosterAgent
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
@@ -73,15 +71,7 @@ _PATH_CHARS: Final = 80
 
 
 def needs_admin_message(agent_name: str) -> str:
-    from daimon.core.config import channel_admins_enabled
-
-    if not channel_admins_enabled():
-        return f"Others use {agent_name}, so adding a skill needs {ADMIN_NOUN}."
-    return (
-        f"Others use {agent_name} (a default, a thread, or someone else's routine or "
-        f"conversation), so adding a skill needs {ADMIN_NOUN} or an admin of every channel "
-        "it answers in."
-    )
+    return f"Adding a skill to {agent_name} needs {ADMIN_NOUN}."
 
 
 def _panel_place(interaction: discord.Interaction) -> Place:
@@ -111,7 +101,7 @@ async def skill_change_refusal(
     """
     if agent.is_built_in:
         return BUILT_IN_MESSAGE
-    caller = channel_admin_caller(interaction.user)
+    caller = admin_caller(interaction.user)
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
     names = (agent.name, *(agent_pin_names(ma_agent.name, ma_agent.metadata) if ma_agent else ()))
 

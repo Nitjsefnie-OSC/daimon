@@ -24,7 +24,6 @@ from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
 from daimon.adapters.mcp.web_icons import icon, platform_mark
 from daimon.core.agent_pins import agent_pin_names
-from daimon.core.channel_admins import GroupMembers
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
@@ -1327,7 +1326,6 @@ def build_oauth_github_routes(
     client_factory: ClientFactory | None = None,
     deployment_default: DeploymentDefault | None = None,
     anthropic: AsyncAnthropic | None = None,
-    group_members: Callable[[str, str], GroupMembers | None] | None = None,
 ) -> tuple[RouteHandler, RouteHandler, RouteHandler, RouteHandler]:
     """Build connect, callback, setup and confirmation handlers."""
     config = settings.github_app
@@ -1392,11 +1390,6 @@ def build_oauth_github_routes(
         if deployment_default is None:
             return False
         metadata = live.metadata if live is not None else {}
-        members = (
-            group_members(requester.platform, requester.external_id)
-            if group_members is not None
-            else None
-        )
         return await requester_manages_agent(
             session,
             tenant_id=invitation.tenant_id,
@@ -1409,7 +1402,6 @@ def build_oauth_github_routes(
             is_daimon_managed=(
                 None if live is None else metadata.get(MA_METADATA_KEY_MANAGED) == "true"
             ),
-            members=members,
             other_names=agent_pin_names(live.name, metadata) if live is not None else (),
         )
 
@@ -2108,11 +2100,6 @@ def build_oauth_github_routes(
             is_daimon_managed = (
                 None if live is None else live.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
             )
-            members = (
-                group_members(requester.platform, requester.external_id)
-                if group_members is not None
-                else None
-            )
             try:
                 async with sessionmaker.begin() as session:
                     saved = await github_connect.confirm(
@@ -2132,7 +2119,6 @@ def build_oauth_github_routes(
                             ma_agent_id=invitation.agent_ma_id,
                             default=deployment_default,
                             is_daimon_managed=is_daimon_managed,
-                            members=members,
                             other_names=agent_pin_names(live.name, live.metadata)
                             if live is not None
                             else (),

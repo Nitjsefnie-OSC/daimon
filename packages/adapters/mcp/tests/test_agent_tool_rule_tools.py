@@ -106,45 +106,6 @@ async def test_workspace_admin_sets_lists_and_clears(
 
 
 @pytest.mark.asyncio
-async def test_channel_admin_can_edit_only_own_channel(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant, account_id = await _seed(committing_sessionmaker)
-    runtime = _runtime(committing_sessionmaker, tenant)
-    channel_admin = dataclasses.replace(
-        _auth(tenant, account_id, admin=False),
-        platform_user_id="u-ca",
-        administered_channel_ids=frozenset({_CHANNEL}),
-    )
-
-    row = cast(
-        store.AgentToolRule,
-        (await _set(runtime, channel_admin, "shared", _TOOL, "ask", channel_id=_CHANNEL))["rule"],
-    )
-    assert row.channel_id == _CHANNEL and row.rule == "ask"
-    assert (
-        len(
-            cast(
-                list[store.AgentToolRule],
-                (await _list(runtime, channel_admin, "shared", _CHANNEL))["rules"],
-            )
-        )
-        == 1
-    )
-    cleared = cast(
-        store.AgentToolRule,
-        (await _clear(runtime, channel_admin, "shared", _TOOL, _CHANNEL))["rule"],
-    )
-    assert cleared.rule is None
-
-    for channel in (_OTHER, None):
-        with pytest.raises(ToolError, match="Only an admin"):
-            await _set(runtime, channel_admin, "shared", _TOOL, "allow", channel_id=channel)
-        with pytest.raises(ToolError, match="Only an admin"):
-            await _clear(runtime, channel_admin, "shared", _TOOL, channel)
-
-
-@pytest.mark.asyncio
 async def test_agent_credentials_cannot_set_or_clear_even_with_admin_signal(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

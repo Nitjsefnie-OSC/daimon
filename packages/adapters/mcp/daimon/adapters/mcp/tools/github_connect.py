@@ -219,9 +219,6 @@ async def _github_connect_impl(
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = account.role == Role.ADMIN and auth.is_admin
-        # A channel admin may connect their own repos for an agent they manage,
-        # by their groups as the platform reports them now, not as cached.
-        lookups = runtime.group_lookups
         manages = is_admin or await requester_manages_agent(
             session,
             tenant_id=auth.tenant_id,
@@ -233,11 +230,6 @@ async def _github_connect_impl(
             ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            members=(
-                lookups.live_members(auth.platform, auth.external_id)
-                if lookups is not None and auth.external_id is not None
-                else None
-            ),
         )
         if not manages:
             await record_connect_request(
@@ -376,10 +368,7 @@ async def _github_connect_impl(
             tool_name="github_connect",
             operation="github_connect",
             outcome="allowed",
-            reason=(
-                ("admin" if is_admin else "channel admin")
-                + (" connect button posted" if intent_id else " link minted")
-            ),
+            reason=("admin" + (" connect button posted" if intent_id else " link minted")),
         )
     try:
         if auth.platform == "discord":
@@ -474,7 +463,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Give this agent token access to more repos, such as a private GitHub repo.
 
         Show a single-use connection button bound to the selected agent to a
-        server admin, or to a channel admin who manages that agent; repos
+        server admin; repos
         connected this way are for that agent only. Other members get Ask an
         admin and a recorded request. On Teams the card goes to the requester's
         1:1 chat. Never repeat a private link in a shared reply. For a setup

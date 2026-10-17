@@ -35,7 +35,7 @@ from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_c
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
-from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
+from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule, set_channel_rule
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
@@ -84,13 +84,10 @@ def _platform(auth: AuthIdentity) -> str:
 def _channel(auth: AuthIdentity, channel_id: str) -> str:
     platform = _platform(auth)
     try:
-        channel, _, _ = normalize_channel_admin_ids(
-            platform,
-            channel_id=parse_channel_target(platform, channel_id).channel_id,
-            role_ids=(),
-            user_ids=(),
+        channel = normalize_channel_id(
+            platform, parse_channel_target(platform, channel_id).channel_id
         )
-    except InvalidChannelAdminIds as exc:
+    except InvalidChannelId as exc:
         raise ToolError(f"{exc}. Nothing was changed.") from exc
     return channel
 

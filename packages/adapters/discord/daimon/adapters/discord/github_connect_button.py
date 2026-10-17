@@ -11,7 +11,7 @@ import structlog
 from daimon.adapters.discord.agent_setup.github_connect_card import connect_embed
 from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.checks import channel_admin_caller, is_member_guild_admin
+from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import (
@@ -181,7 +181,7 @@ async def _manager_refusal(
             session,
             tenant_id=tenant_id,
             platform="discord",
-            caller=channel_admin_caller(member),
+            caller=admin_caller(member),
             agent_names=(agent_name, live.name),
             ma_agent_id=ma_agent_id,
             is_daimon_managed=live.metadata.get(MA_METADATA_KEY_MANAGED) == "true",

@@ -15,7 +15,7 @@ from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
 from daimon.core.authz import build_subject
-from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
+from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.channel_rules import ChannelRuleRefused, set_channel_rule
 from daimon.core.errors import DaimonError
 from daimon.core.panel_audit import record_panel_write
@@ -60,10 +60,8 @@ async def change_rule(
         op="channel_rule",
     )
     try:
-        channel, _, _ = normalize_channel_admin_ids(
-            "slack", channel_id=channel_id, role_ids=(), user_ids=()
-        )
-    except InvalidChannelAdminIds as exc:
+        channel = normalize_channel_id("slack", channel_id)
+    except InvalidChannelId as exc:
         await audit(outcome="error", reason="invalid_channel")
         return f"{exc}. Nothing changed."
     async with runtime.sessionmaker.begin() as session:

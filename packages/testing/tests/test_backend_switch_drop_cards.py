@@ -27,8 +27,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.confirmation import ApprovedConfirmation, prompt_for_tool_call
+from daimon.core.native_admins import GroupMembersCache
 from daimon.core.stores.domain import Role
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 from daimon.testing.db import db_nullpool_engine  # noqa: F401
