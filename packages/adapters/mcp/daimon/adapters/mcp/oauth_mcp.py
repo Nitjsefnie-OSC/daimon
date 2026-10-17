@@ -1,8 +1,8 @@
 """`/oauth/mcp/start` and `/oauth/mcp/callback` — the browser half of an MCP OAuth grant.
 
 The chat adapter minted the flow row on the requester's click and handed
-them a start link nobody else saw. `start` opens it: discovery, dynamic
-client registration, then a redirect to the authorization server.
+them a start link nobody else saw. `start` opens it: discovery, a configured
+or dynamically registered client, then a redirect to the authorization server.
 `callback` spends the flow (the atomic consume is the replay gate),
 exchanges the code, stores an `mcp_oauth` credential in the requester's
 per-agent vault, attaches the server to the agent and edits the card the
@@ -171,7 +171,9 @@ def build_oauth_mcp_routes(
                 runtime.session_factory() as session,
                 session.begin(),
             ):
-                prepared = await prepare_authorization(session, http, flow=flow, fernet=fernet)
+                prepared = await prepare_authorization(
+                    session, http, flow=flow, fernet=fernet, clients=settings.mcp_oauth.clients
+                )
         except (DaimonError, httpx.HTTPError, anthropic.AnthropicError) as err:
             # Boundary: the browser needs an answer and the diagnostic belongs
             # in the operator log, not the page.
