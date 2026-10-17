@@ -62,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MCP sign-in works with authorization servers that offer no dynamic
+  client registration.** List clients registered by hand in
+  `DAIMON_MCP_OAUTH__CLIENTS`, each matched to the host of an authorization
+  server, with optional authorization and token endpoint overrides and a
+  `send_resource` switch that leaves the RFC 8707 `resource` parameter out of
+  sign-in and refresh. Servers with no matching entry still register
+  dynamically. Every sign-in now also requests `offline_access` when the
+  authorization server advertises it, so servers that only issue a refresh
+  token for that scope keep the connection alive past the first access
+  token. See docs/self-hosting.md for the Microsoft Entra ID steps.
+
 - **Self-host on OpenAI, with no Anthropic account at all.** `DAIMON_ANTHROPIC__API_KEY`
   is now optional; `docker compose up` and `daimon defaults apply` succeed
   without it. `daimon openai init` creates (or reuses) a project-scoped

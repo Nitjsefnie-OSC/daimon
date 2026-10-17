@@ -968,8 +968,9 @@ sign in to a server the agent already has. GitHub repos go through
   form. The token is checked against the server before it is stored and is
   shared by everyone who talks to that agent.
 - A server that signs people in through a browser (Notion, Slack, Atlassian)
-  gets a sign-in link. Daimon registers itself as an OAuth client, you
-  approve in the browser, and the grant lands in your own vault, refreshed
+  gets a sign-in link. Daimon registers itself as an OAuth client (or uses
+  one you registered, [below](#servers-without-dynamic-client-registration)),
+  you approve in the browser, and the grant lands in your own vault, refreshed
   by Anthropic. Each person connects their own account.
 
 The sign-in routes live at `{origin}/oauth/mcp/start` and
@@ -977,6 +978,38 @@ The sign-in routes live at `{origin}/oauth/mcp/start` and
 from a browser and `DAIMON_CRYPTO__KEYS` must be set. If one connection
 fails, the agent still answers and names the server it could not use under
 the reply. Ask it to disconnect the server or connect it again.
+
+### Servers without dynamic client registration
+
+Some authorization servers, Microsoft Entra ID among them, do not let Daimon
+register itself, and the sign-in page says the server does not offer sign-in
+Daimon can drive. Register a client by hand and list it in
+`DAIMON_MCP_OAUTH__CLIENTS`; a sign-in whose authorization server is on that
+host uses it, and every other server still registers itself. For Entra ID:
+
+1. In Entra, add an app registration. Under Authentication add a **Web**
+   platform with the redirect URI `<root>/oauth/mcp/callback`, where `<root>`
+   is `DAIMON_MCP__PUBLIC_URL` without the trailing `/mcp`.
+2. Under Certificates & secrets, create a client secret and copy its value.
+3. Under API permissions, add the delegated permissions the MCP server
+   documents, then grant admin consent, or leave consent to each person if
+   your tenant allows it.
+4. Configure the client. A single-tenant app is refused at the
+   `/organizations` endpoints MCP servers usually name (AADSTS50194), so
+   point both endpoints at your tenant. Entra also rejects a `resource`
+   parameter next to scope-based requests (AADSTS9010010), so turn it off:
+
+```bash
+DAIMON_MCP_OAUTH__CLIENTS='[{"authorization_server_host": "login.microsoftonline.com",
+  "client_id": "<application id>", "client_secret": "<secret value>",
+  "authorization_endpoint": "https://login.microsoftonline.com/<tenant id>/oauth2/v2.0/authorize",
+  "token_endpoint": "https://login.microsoftonline.com/<tenant id>/oauth2/v2.0/token",
+  "send_resource": false}]'
+```
+
+Daimon asks for `offline_access` whenever the server offers it, so the
+connection refreshes on its own. The refresh uses the client secret stored
+with each connection: after rotating the secret, people connect again.
 
 ## Backup and disaster recovery
 
