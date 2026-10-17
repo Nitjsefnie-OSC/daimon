@@ -747,9 +747,11 @@ _GITHUB_LINK_REFRESH_INTERVAL_S = 3600.0
 _GITHUB_LINK_REFRESH_DEADLINE_S = 120.0
 # One budget for everything GitHub-link-refresh related at shutdown, taken once
 # at the start of `run`'s `finally`. The worker's stop_grace_period is 90 s
-# (docker-compose.yml; `up --timeout 95`), so 45 s leaves 45 s for the rest
-# (dispatcher, health server, advisory unlock, client close, outcome drain,
-# engine dispose). Three waits come out of it, never in addition to it:
+# (docker-compose.yml; `up --timeout 95`). The refresh part waits at most 45 s
+# plus `_SHUTDOWN_CANCEL_SLACK_S` (50 s); what is left of the 90 s goes to the
+# tick already running and the rest of shutdown (dispatcher, health server,
+# advisory unlock, client close, outcome drain, engine dispose), which is not
+# guaranteed to fit. Three waits come out of the budget, never in addition to it:
 #   1. the sweep gets up to `_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S` to finish
 #      its current person (the grace is also capped by what remains);
 #   2. past the grace the sweep is cancelled, and its HTTP-client context holds

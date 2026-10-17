@@ -47,8 +47,9 @@ DB_STATEMENT_DEADLINE = timedelta(seconds=15)
 # comes on top and no timeout caps it (the database driver terminates a
 # cancelled connection, about 2 s each), so the check below reserves
 # `CANCEL_CLEANUP_ALLOWANCE` for it: an allowance, not an enforced limit. The
-# safety rests on the hour of margin, not on 145 s exactly. No live holder is
-# an hour behind; the gap only clears rows a crashed holder left.
+# safety rests on the hour of margin, not on 145 s exactly. Provided cancel
+# cleanup stays within that allowance, no live holder is an hour behind and the
+# gap only clears rows a crashed holder left.
 CLAIMED_GARBAGE_AFTER = timedelta(hours=1)
 CANCEL_CLEANUP_ALLOWANCE = timedelta(seconds=60)
 RENEWAL_GAP_BOUND = (
@@ -152,7 +153,7 @@ async def take(
     row someone else has since taken. Expired requests are deleted if never
     claimed, or once their lease lapsed `CLAIMED_GARBAGE_AFTER` ago.
 
-    That grace is safe because a live holder cannot be that far behind. Before
+    That grace is safe as long as a live holder cannot be that far behind. Before
     each request it calls `renew_claim`, which extends the lease of every row
     it still holds. The loop's own transactions (take, renew, resolve) carry
     both `asyncio.timeout` and `bound_transaction`, each `DB_STATEMENT_DEADLINE`;
@@ -163,7 +164,9 @@ async def take(
     timeout returns. So the gap between two renewals is at most
     `PER_REQUEST_DEADLINE + DETACHED_REFRESH_SETTLE + FAILURE_DELIVERY_DEADLINE
     + 2 * DB_STATEMENT_DEADLINE` = 145 s of enforced timeouts, plus uncapped
-    cancel cleanup (`CANCEL_CLEANUP_ALLOWANCE`), under the hour (checked at import).
+    cancel cleanup assumed to stay within `CANCEL_CLEANUP_ALLOWANCE`. The import
+    check confirms those constants sum to under the hour; it cannot measure
+    elapsed time.
     A holder whose row another `take` claimed anyway finds `renew_claim` no
     longer returns it and skips that request.
 
