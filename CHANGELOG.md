@@ -98,7 +98,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Linked GitHub managers can grant an agent `owner/*` in chat. Covered repositories, including ones added to the App later, receive scoped read or requested write access; removing one repo records a durable exclusion.
+- Linked GitHub managers can grant an agent `owner/*` in chat. Covered repositories, including ones added to the App later, receive scoped read or requested write access; removing one repo records a durable exclusion. Each grant result is now a status line and a supporting line, the private link card leads with its button, and the browser pages say what happened with a Back to Discord or Back to Slack button.
 
 - **Teams now answers in group chats.** Each group chat is one session: the
   bot answers an @mention, a reply to it or a command, replays the chat's

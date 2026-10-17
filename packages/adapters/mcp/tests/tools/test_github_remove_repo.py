@@ -90,6 +90,8 @@ async def test_mixed_case_owner_repo_removal_saves_canonical_exclusion(
         repo_name="Owner/Repo",
     )
     assert result.status == "removed"
+    assert result.message == "Agent can no longer use Owner/Repo.\nThe other Owner repos stay."
+    assert "http" not in result.message
     async with committing_sessionmaker() as session:
         assert (
             await session.scalar(

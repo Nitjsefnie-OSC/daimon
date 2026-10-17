@@ -140,6 +140,12 @@ async def remove_repo_impl(
             )
         if not removed and not owner_active:
             raise ToolError("That repo is no longer on this agent's list.")
+    if owner_active:
+        owner = requested.split("/", 1)[0]
+        return RemoveRepoResult(
+            status="removed",
+            message=f"{agent.name} can no longer use {requested}.\nThe other {owner} repos stay.",
+        )
     return RemoveRepoResult(
         status="removed",
         message=(
@@ -162,7 +168,7 @@ def register_github_remove_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         """Remove owner/repo or owner/* from this agent only.
 
         A clear ask is enough: call it right away and reply with the returned
-        line. Ask only if the repo or agent is unclear. confirmed is ignored.
+        lines as they are. Ask only if the repo or agent is unclear. confirmed is ignored.
         The Connect GitHub page also adds and removes repos. If it was the working
         repo, the working repo is cleared. Other agents keep their access.
         Removing owner/repo under an owner/* grant keeps that repo excluded;

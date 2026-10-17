@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
+import discord
 import httpx
 import pytest
 import pytest_asyncio
@@ -193,14 +194,14 @@ async def setup_linked(committing_sessionmaker: async_sessionmaker[AsyncSession]
         current = await get_account(session, account.id)
         return current is not None and current.role == Role.ADMIN
 
-    async def grant(*, account_id: uuid.UUID | None = None):
+    async def grant(*, account_id: uuid.UUID | None = None, repo_name: str = "acme/widgets"):
         return await linked.linked_grant(
             committing_sessionmaker,
             tenant_id=tenant.id,
             account_id=account_id or account.id,
             agent_id=agent_id,
             agent_name="Agent",
-            repo_name="acme/widgets",
+            repo_name=repo_name,
             fernet=fernet,
             client_id="synthetic",
             client_secret="synthetic",
@@ -277,7 +278,10 @@ async def test_tool_uses_verified_turn_account_and_private_link(
         runtime, auth, origin_context_id="synthetic", repo_name="acme/widgets"
     )
     assert result.status == "granted_read_only"
-    assert "read and change" not in result.message
+    assert result.message == (
+        "Agent can now read acme/widgets.\n"
+        "Everyone who talks to Agent can use this repo through Agent."
+    )
     post_link.assert_not_awaited()
     async with setup_linked.sessionmaker() as session:
         repo = next(
@@ -296,7 +300,10 @@ async def test_tool_uses_verified_turn_account_and_private_link(
         runtime, auth, origin_context_id="synthetic", repo_name="acme/widgets", access="write"
     )
     assert upgraded.status == "granted"
-    assert "read and change" in upgraded.message
+    assert upgraded.message == (
+        "Agent can now read and change acme/widgets.\n"
+        "Everyone who talks to Agent can use this repo through Agent."
+    )
     async with setup_linked.sessionmaker() as session:
         repo = next(
             row
@@ -331,7 +338,11 @@ async def test_tool_uses_verified_turn_account_and_private_link(
         runtime, auth, origin_context_id="synthetic", repo_name="acme/new"
     )
     assert result.status == "needs_install"
-    assert "https://" not in result.message
+    assert result.message == (
+        "The Daimon app isn't set up for acme/new.\n"
+        "Ask an owner or repo admin to add it on GitHub, then ask again here."
+    )
+    assert "http" not in result.message and "github.com" not in result.message
     assert post_link.await_args.kwargs["label"] == "Open GitHub setup"
     post_link.reset_mock()
     async with setup_linked.sessionmaker.begin() as session:
@@ -342,6 +353,8 @@ async def test_tool_uses_verified_turn_account_and_private_link(
         runtime, auth, origin_context_id="synthetic", repo_name="acme/new"
     )
     assert result.status == "relink"
+    assert result.message == "Your GitHub link needs renewing."
+    assert "http" not in result.message
     post_link.assert_awaited_once()
     assert "/oauth/github/link/" in post_link.await_args.kwargs["url"]
     post_link.reset_mock()
@@ -351,7 +364,8 @@ async def test_tool_uses_verified_turn_account_and_private_link(
         runtime, auth, origin_context_id="synthetic", repo_name="acme/new"
     )
     assert result.status == "needs_link"
-    assert "oauth/github/link" not in result.message
+    assert result.message == "Link GitHub to check your repo access."
+    assert "http" not in result.message
     post_link.assert_awaited_once()
     assert "/oauth/github/link/" in post_link.await_args.kwargs["url"]
 
@@ -554,6 +568,7 @@ async def test_resume_result_posts_to_originating_slack_thread(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("removed", [[], ["base"], ["base", "widgets"]])
 @pytest.mark.parametrize(
     "owner_type,login,second_permission,access,expected",
     [
@@ -573,12 +588,20 @@ async def test_owner_grant_requires_full_owner_authority(
     second_permission: str,
     access: str,
     expected: str,
+    removed: list[str],
 ) -> None:
     async with setup_linked.sessionmaker.begin() as session:
         await session.execute(
             text("UPDATE github_user_links SET login = :login WHERE github_user_id = 300"),
             {"login": login},
         )
+        for name in removed:
+            await exclude_repo(
+                session,
+                tenant_id=setup_linked.tenant.id,
+                agent_id=setup_linked.agent_id,
+                repo_full_name=f"acme/{name}",
+            )
     original = github_http.original_client
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -630,8 +653,22 @@ async def test_owner_grant_requires_full_owner_authority(
         requested_access=access,
     )
     assert result.status == expected
+    assert "http" not in result.message
     if expected == "no_github_access":
-        assert result.message == "You need access to every acme repo the GitHub App covers."
+        assert result.message == (
+            "You need access to every acme repo the Daimon app covers.\n"
+            "Ask a server admin who can open them on GitHub."
+        )
+    else:
+        ability = "read and change" if access == "write" else "read"
+        status_line = f"Agent can now {ability} acme repos the Daimon app covers"
+        status_line += f", except {len(removed)} you removed." if removed else "."
+        assert result.message.split("\n") == [
+            status_line,
+            "New repos the app covers later join automatically. "
+            "Everyone who talks to Agent can use them through Agent.",
+            *([f"Still removed: {', '.join(removed)}"] if removed else []),
+        ]
     async with setup_linked.sessionmaker() as session:
         grants = await list_owner_grants(
             session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
@@ -946,7 +983,9 @@ async def test_platform_membership_revoked_after_manages_now_returns(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["linked", "needs_install", "wrong_person", "expired_pending"])
+@pytest.mark.parametrize(
+    "scenario", ["linked", "needs_install", "wrong_person", "expired_pending", "agent_changed"]
+)
 async def test_pending_grant_resumes_from_personal_link_callback(
     setup_linked, github_http, monkeypatch: pytest.MonkeyPatch, scenario: str
 ) -> None:
@@ -1007,6 +1046,10 @@ async def test_pending_grant_resumes_from_personal_link_callback(
     url = post_link.await_args.kwargs["url"]
     if scenario == "needs_install":
         github_http.repo_visible = False
+    if scenario == "agent_changed":
+        monkeypatch.setattr(
+            linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=None)
+        )
     if scenario == "expired_pending":
         async with setup_linked.sessionmaker.begin() as session:
             await session.execute(
@@ -1061,6 +1104,8 @@ async def test_pending_grant_resumes_from_personal_link_callback(
         )
         if scenario == "wrong_person":
             assert verified.status_code == 403
+            assert "<h1>Not your link</h1>" in verified.text
+            assert "Ask in Discord for your own link." in verified.text
         else:
             assert verified.status_code == 307
             github_state = parse_qs(urlparse(verified.headers["location"]).query)["state"][0]
@@ -1068,12 +1113,25 @@ async def test_pending_grant_resumes_from_personal_link_callback(
                 "/oauth/github/callback", params={"state": github_state, "code": "github-code"}
             )
             assert linked_page.status_code == 200
+            assert "close this tab" not in linked_page.text.lower()
+            if scenario == "agent_changed":
+                assert "<h1>Ask again in chat</h1>" in linked_page.text
+                assert "Agent access changed while you were linking." in linked_page.text
+            elif scenario == "expired_pending":
+                assert "<h1>GitHub linked</h1>" in linked_page.text
+                assert "Linked as @person." in linked_page.text
+            else:
+                assert "<h1>GitHub linked</h1>" in linked_page.text
+                assert "Linked as @person. Check Discord for the result." in linked_page.text
+                assert "Back to Discord" in linked_page.text
     async with setup_linked.sessionmaker() as session:
         grants = await list_agent_grants(
             session, tenant_id=setup_linked.tenant.id, agent_id=setup_linked.agent_id
         )
     assert len(grants) == (1 if scenario == "linked" else 0)
-    assert delivery.await_count == (1 if scenario in ("linked", "needs_install") else 0)
+    assert delivery.await_count == (
+        1 if scenario in ("linked", "needs_install", "agent_changed") else 0
+    )
     if scenario == "needs_install":
         assert post_link.await_count == 2
         assert post_link.await_args.kwargs["label"] == "Open GitHub setup"
@@ -1233,3 +1291,240 @@ async def test_failed_private_recovery_delivery_still_reports_in_thread(
     assert result == [message]
     delivery.assert_awaited_once()
     assert delivery.await_args.args[2] == message
+
+
+@pytest.mark.asyncio
+async def test_each_linked_state_uses_the_agreed_status_and_supporting_line(
+    setup_linked, github_http
+) -> None:
+    """Every result is a status line then a supporting line, with no URL or token."""
+    shared = "Everyone who talks to Agent can use this repo through Agent."
+    outcomes = []
+    github_http.permission = "push"
+    outcomes.append(("granted", await setup_linked.grant()))
+    github_http.permission = "pull"
+    outcomes.append(("granted_read_only", await setup_linked.grant()))
+    github_http.permission = "none"
+    outcomes.append(("no_github_access", await setup_linked.grant()))
+    outcomes.append(("needs_install", await setup_linked.grant(repo_name="acme/new")))
+    github_http.permission = "push"
+    async with setup_linked.sessionmaker.begin() as session:
+        await session.execute(
+            text("UPDATE github_user_links SET status = 'broken' WHERE github_user_id = 300")
+        )
+    outcomes.append(("relink", await setup_linked.grant()))
+    async with setup_linked.sessionmaker.begin() as session:
+        await unlink_account(session, account_id=setup_linked.account.id)
+    outcomes.append(("needs_link", await setup_linked.grant()))
+    expected = {
+        "granted": f"Agent can now read and change acme/widgets.\n{shared}",
+        "granted_read_only": f"Agent can now read acme/widgets.\n{shared}",
+        "no_github_access": (
+            "Your GitHub account can't open acme/widgets.\n"
+            "Ask a server admin who can open this repo on GitHub."
+        ),
+        "needs_install": (
+            "The Daimon app isn't set up for acme/new.\n"
+            "Ask an owner or repo admin to add it on GitHub, then ask again here."
+        ),
+        "relink": "Your GitHub link needs renewing.",
+        "needs_link": "Link GitHub to check your repo access.",
+    }
+    for status, outcome in outcomes:
+        assert outcome.status == status
+        assert outcome.message == expected[status]
+        assert "http" not in outcome.message
+        assert "token" not in outcome.message.lower()
+    assert linked.CHANGED_MESSAGE == "Access changed while checking.\nAsk again."
+    assert (
+        linked.INSTALL_PENDING_MESSAGE == "Daimon is refreshing its repo list.\nTry again shortly."
+    )
+    assert linked.needs_install_message("acme repos") == (
+        "The Daimon app isn't set up for acme repos.\n"
+        "Ask an owner or repo admin to add it on GitHub, then ask again here."
+    )
+
+
+@pytest.mark.asyncio
+async def test_changed_result_asks_again(setup_linked, github_http) -> None:
+    async with setup_linked.sessionmaker.begin() as session:
+        await set_role(session, setup_linked.account.id, Role.USER)
+    result = await setup_linked.grant()
+    assert result.status == "changed_try_again"
+    assert result.message == "Access changed while checking.\nAsk again."
+
+
+@pytest.mark.asyncio
+async def test_private_link_card_puts_the_button_first_on_discord(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: dict[str, object] = {}
+
+    class _User:
+        async def send(self, **kwargs: object) -> None:
+            sent.update(kwargs)
+
+    class _Client:
+        async def fetch_user(self, _user_id: int) -> _User:
+            return _User()
+
+    class _Rest:
+        async def __aenter__(self) -> _Client:
+            return _Client()
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(connect_tool, "rest_client", lambda _token: _Rest())
+    monkeypatch.setattr(connect_tool, "_require_bot_token", lambda _runtime: "token")
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.USER,
+        platform="discord",
+        external_id="workspace",
+        platform_user_id="123",
+    )
+    for label, line in (
+        ("Link GitHub", "This link is just for you and works once."),
+        ("Open GitHub setup", connect_tool.SETUP_CARD_LINE),
+    ):
+        sent.clear()
+        await connect_tool._post_personal_link(  # pyright: ignore[reportPrivateUsage]
+            SimpleNamespace(),  # type: ignore[arg-type]
+            auth,
+            url="https://private.example/link",
+            channel_id="c",
+            thread_id="t",
+            label=label,
+        )
+        assert set(sent) == {"view"}, "a layout view carries no separate message content"
+        first, second = sent["view"].children  # type: ignore[attr-defined]
+        assert [child.label for child in first.children] == [label]
+        assert first.children[0].url == "https://private.example/link"
+        assert second.content == line
+
+
+@pytest.mark.asyncio
+async def test_private_link_card_puts_the_button_first_on_slack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SimpleNamespace(chat_postEphemeral=AsyncMock())
+    monkeypatch.setattr(connect_tool, "slack_web_client", AsyncMock(return_value=client))
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.USER,
+        platform="slack",
+        external_id="T1",
+        platform_user_id="U1",
+    )
+    await connect_tool._post_personal_link(  # pyright: ignore[reportPrivateUsage]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        auth,
+        url="https://private.example/link",
+        channel_id="c",
+        thread_id="t",
+    )
+    blocks = client.chat_postEphemeral.await_args.kwargs["blocks"]
+    assert [block["type"] for block in blocks] == ["actions", "context"]
+    assert blocks[0]["elements"][0]["text"]["text"] == "Link GitHub"
+    assert blocks[1]["elements"][0]["text"] == "This link is just for you and works once."
+    assert "https://" not in client.chat_postEphemeral.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_resume_says_when_agent_access_changed(
+    setup_linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = SimpleNamespace(client=AsyncMock(), session_factory=setup_linked.sessionmaker)
+    async with setup_linked.sessionmaker.begin() as session:
+        await linked_pending.save_pending(
+            session,
+            tenant_id=setup_linked.tenant.id,
+            account_id=setup_linked.account.id,
+            agent_id=setup_linked.agent_id,
+            ma_agent_id="ma_agent",
+            agent_name="Agent",
+            repo_name="acme/widgets",
+            platform="discord",
+            platform_user_id="person",
+            workspace_id=setup_linked.tenant.external_id,
+            parent_channel_id="123",
+            thread_id="456",
+        )
+    delivery = AsyncMock()
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=None))
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    result = await linked_pending.resume_pending(
+        runtime,  # type: ignore[arg-type]
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        platform="discord",
+        platform_user_id="person",
+    )
+    assert result == ["Agent access changed while you were linking.\nAsk again in chat."]
+    assert delivery.await_args.args[2] == result[0]
+
+
+@pytest.mark.asyncio
+async def test_private_delivery_failure_is_a_plain_message_without_a_button(
+    setup_linked, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = McpRuntime(
+        session_factory=setup_linked.sessionmaker,
+        client=AsyncMock(),
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
+            anthropic=AnthropicSettings(api_key=SecretStr("test")),
+            mcp=McpSettings(public_url=HttpUrl("https://mcp.test/mcp")),
+            github_app=GithubAppSettings(
+                app_id="42",
+                app_slug="sample-app",
+                private_key=SecretStr("pem"),
+                client_id="client",
+                client_secret=SecretStr("secret"),
+            ),
+        ),
+        deployment_default=DeploymentDefault(),
+        fernet=setup_linked.fernet,
+    )
+    auth = AuthIdentity(
+        account_id=setup_linked.account.id,
+        tenant_id=setup_linked.tenant.id,
+        role=Role.ADMIN,
+        platform="discord",
+        external_id=setup_linked.tenant.external_id,
+        platform_user_id="person",
+        is_admin=True,
+    )
+    origin = SimpleNamespace(
+        configuration_target_name="Agent",
+        configuration_target_ma_agent_id="ma_agent",
+        responder_name="Daimon",
+        responder_ma_agent_id="ma_daimon",
+        parent_channel_id="123",
+        thread_id="456",
+    )
+    monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))
+    monkeypatch.setattr(
+        connect_tool,
+        "resolve_setup_agent",
+        AsyncMock(return_value=SimpleNamespace(id="ma_agent", name="Agent", metadata={})),
+    )
+    refused = discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "blocked")
+    monkeypatch.setattr(connect_tool, "_post_personal_link", AsyncMock(side_effect=refused))
+    install = await connect_tool._github_connect_impl(
+        runtime, auth, origin_context_id="synthetic", repo_name="acme/new"
+    )
+    assert install.status == "delivery_failed"
+    assert install.message == "I couldn't send the private GitHub setup button. Try again."
+    async with setup_linked.sessionmaker.begin() as session:
+        await unlink_account(session, account_id=setup_linked.account.id)
+    link = await connect_tool._github_connect_impl(
+        runtime, auth, origin_context_id="synthetic", repo_name="acme/widgets"
+    )
+    assert link.status == "delivery_failed"
+    assert link.message == "I couldn't send the private GitHub link. Try again."
+    for result in (install, link):
+        assert "http" not in result.message

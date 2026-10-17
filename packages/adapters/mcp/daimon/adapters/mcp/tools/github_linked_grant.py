@@ -56,6 +56,64 @@ LinkedStatus = Literal[
 ]
 
 
+# Each chat result is a status line, then a supporting line. The private link and
+# setup buttons travel separately, so no text here holds a URL or a token.
+NEEDS_LINK_MESSAGE = "Link GitHub to check your repo access."
+RELINK_MESSAGE = "Your GitHub link needs renewing."
+CHANGED_MESSAGE = "Access changed while checking.\nAsk again."
+INSTALL_PENDING_MESSAGE = "Daimon is refreshing its repo list.\nTry again shortly."
+
+
+def no_access_message(repo_name: str) -> str:
+    return (
+        f"Your GitHub account can't open {repo_name}.\n"
+        "Ask a server admin who can open this repo on GitHub."
+    )
+
+
+def owner_no_access_message(owner: str) -> str:
+    return (
+        f"You need access to every {owner} repo the Daimon app covers.\n"
+        "Ask a server admin who can open them on GitHub."
+    )
+
+
+def needs_install_message(target: str) -> str:
+    return (
+        f"The Daimon app isn't set up for {target}.\n"
+        "Ask an owner or repo admin to add it on GitHub, then ask again here."
+    )
+
+
+def _ability(access: Literal["read", "write"]) -> str:
+    return "read and change" if access == "write" else "read"
+
+
+def granted_message(agent_name: str, repo_name: str, access: Literal["read", "write"]) -> str:
+    return (
+        f"{agent_name} can now {_ability(access)} {repo_name}.\n"
+        f"Everyone who talks to {agent_name} can use this repo through {agent_name}."
+    )
+
+
+def owner_granted_message(
+    agent_name: str,
+    owner: str,
+    access: Literal["read", "write"],
+    removed: list[str],
+) -> str:
+    status = f"{agent_name} can now {_ability(access)} {owner} repos the Daimon app covers"
+    status += f", except {len(removed)} you removed." if removed else "."
+    lines = [
+        status,
+        "New repos the app covers later join automatically. "
+        f"Everyone who talks to {agent_name} can use them through {agent_name}.",
+    ]
+    if removed:
+        lines.append(f"Still removed: {', '.join(removed)}")
+    return "\n".join(lines)
+
+
 class LinkedOutcome(BaseModel):
     model_config = ConfigDict(frozen=True)
     status: LinkedStatus
@@ -124,17 +182,13 @@ async def linked_grant(
     async with sessionmaker() as session:
         account = await get_account(session, account_id)
         if account is None or account.tenant_id != tenant_id or account.is_external:
-            return LinkedOutcome(
-                status="needs_link", message="Link GitHub to check your repo access."
-            )
+            return LinkedOutcome(status="needs_link", message=NEEDS_LINK_MESSAGE)
         link = await get_account_link(session, account_id=account_id)
         if link is None:
-            return LinkedOutcome(
-                status="needs_link", message="Link GitHub to check your repo access."
-            )
+            return LinkedOutcome(status="needs_link", message=NEEDS_LINK_MESSAGE)
         user = await get_user(session, github_user_id=link.github_user_id)
         if user is None or user.status != "active":
-            return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
+            return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             access_token, checked_generation = await linked_access_token_with_generation(
@@ -146,7 +200,7 @@ async def linked_grant(
                 client_secret=client_secret,
             )
             if access_token is None:
-                return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
+                return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
             installations = await _installations(client, access_token)
             owner = repo_name.split("/", 1)[0]
             candidates = [i for i in installations if i.owner_login.casefold() == owner.casefold()]
@@ -157,17 +211,14 @@ async def linked_grant(
                 if r.full_name.casefold() == repo_name.casefold()
             ]
             if not covering:
-                message = (
-                    "Add this repo on GitHub's App installation page."
-                    if any(i.repository_selection == "selected" for i in candidates)
-                    else "Install the GitHub App for this owner first."
+                return LinkedOutcome(
+                    status="needs_install", message=needs_install_message(repo_name)
                 )
-                return LinkedOutcome(status="needs_install", message=message)
             installation, listed_repo = covering[0]
             if not listed_repo.usable:
                 return LinkedOutcome(
                     status="no_github_access",
-                    message="Your GitHub account cannot access this repo.",
+                    message=no_access_message(repo_name),
                 )
             detail = await get_app_installation_details(
                 client,
@@ -183,12 +234,12 @@ async def linked_grant(
             ):
                 return LinkedOutcome(
                     status="needs_install",
-                    message="The GitHub App installation cannot cover this repo now.",
+                    message=needs_install_message(repo_name),
                 )
             async with sessionmaker() as session:
                 fresh_user = await get_user(session, github_user_id=link.github_user_id)
             if fresh_user is None or fresh_user.status != "active":
-                return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
+                return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
             response = await client.get(
                 f"https://api.github.com/repos/{repo_name}",
                 headers={
@@ -197,17 +248,17 @@ async def linked_grant(
                 },
             )
             if response.status_code == 401:
-                return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
+                return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
             if response.status_code == 404:
                 return LinkedOutcome(
                     status="no_github_access",
-                    message="Your GitHub account cannot access this repo.",
+                    message=no_access_message(repo_name),
                 )
             response.raise_for_status()
             repo_payload: object = response.json()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
-                return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
+                return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
             if exc.response.status_code == 403 and (
                 exc.response.headers.get("x-ratelimit-remaining") == "0"
                 or "retry-after" in exc.response.headers
@@ -216,30 +267,22 @@ async def linked_grant(
             if exc.response.status_code in (403, 404):
                 return LinkedOutcome(
                     status="no_github_access",
-                    message="Your GitHub account cannot access this repo.",
+                    message=no_access_message(repo_name),
                 )
             raise
     try:
         repo = _RepoPayload.model_validate(repo_payload)
     except ValidationError:
-        return LinkedOutcome(
-            status="no_github_access", message="Your GitHub account cannot access this repo."
-        )
+        return LinkedOutcome(status="no_github_access", message=no_access_message(repo_name))
     if repo.full_name.casefold() != repo_name.casefold():
-        return LinkedOutcome(
-            status="no_github_access", message="Your GitHub account cannot access this repo."
-        )
+        return LinkedOutcome(status="no_github_access", message=no_access_message(repo_name))
     repo_id = repo.id
     owner_id = repo.owner.id
     if repo_id != listed_repo.id or owner_id != installation.owner_id:
-        return LinkedOutcome(
-            status="no_github_access", message="Your GitHub account cannot access this repo."
-        )
+        return LinkedOutcome(status="no_github_access", message=no_access_message(repo_name))
     policy = proposed_linked_grant_policy(repo.permissions)
     if policy is None:
-        return LinkedOutcome(
-            status="no_github_access", message="Your GitHub account cannot access this repo."
-        )
+        return LinkedOutcome(status="no_github_access", message=no_access_message(repo_name))
     access, permission = policy
     if listed_repo.permission in ("triage", "read"):
         access = "read"
@@ -252,7 +295,7 @@ async def linked_grant(
         if originally_present and not installation_covers_repo(
             original_installation, repo.full_name
         ):
-            return LinkedOutcome(status="changed_try_again", message="Access changed. Try again.")
+            return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
     await _before_commit()
 
     async with sessionmaker.begin() as session:
@@ -277,7 +320,7 @@ async def linked_grant(
             or (originally_present and current_installation is None)
             or not await manages_now(session)
         ):
-            return LinkedOutcome(status="changed_try_again", message="Access changed. Try again.")
+            return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
         await upsert_linked_agent_authorization(
             session,
             tenant_id=tenant_id,
@@ -331,10 +374,9 @@ async def linked_grant(
         await clear_exclusion(
             session, tenant_id=tenant_id, agent_id=agent_id, repo_full_name=repo.full_name
         )
-    ability = "read and change" if access == "write" else "read"
     return LinkedOutcome(
         status="granted" if access == "write" else "granted_read_only",
-        message=f"{agent_name} can now {ability} {repo_name}.",
+        message=granted_message(agent_name, repo_name, access),
     )
 
 
@@ -360,17 +402,13 @@ async def linked_owner_grant(
     async with sessionmaker() as session:
         account = await get_account(session, account_id)
         if account is None or account.tenant_id != tenant_id or account.is_external:
-            return LinkedOutcome(
-                status="needs_link", message="Link GitHub to check your repo access."
-            )
+            return LinkedOutcome(status="needs_link", message=NEEDS_LINK_MESSAGE)
         link = await get_account_link(session, account_id=account_id)
         if link is None:
-            return LinkedOutcome(
-                status="needs_link", message="Link GitHub to check your repo access."
-            )
+            return LinkedOutcome(status="needs_link", message=NEEDS_LINK_MESSAGE)
         user = await get_user(session, github_user_id=link.github_user_id)
         if user is None or user.status != "active":
-            return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
+            return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             token, checked_generation = await linked_access_token_with_generation(
@@ -382,12 +420,12 @@ async def linked_owner_grant(
                 client_secret=client_secret,
             )
             if token is None:
-                return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
+                return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
             installations = await _installations(client, token)
             candidates = [i for i in installations if i.owner_login.casefold() == owner.casefold()]
             if not candidates:
                 return LinkedOutcome(
-                    status="needs_install", message="Install the GitHub App for this owner first."
+                    status="needs_install", message=needs_install_message(f"{owner} repos")
                 )
             checked: list[tuple[int, str, frozenset[str], list[tuple[int, str, str]]]] = []
             async with sessionmaker() as session:
@@ -442,7 +480,7 @@ async def linked_owner_grant(
                     ):
                         return LinkedOutcome(
                             status="no_github_access",
-                            message=f"You need access to every {owner} repo the GitHub App covers.",
+                            message=owner_no_access_message(owner),
                         )
                     if candidate.owner_type.casefold() != "user" and any(
                         name.casefold() not in listed
@@ -456,7 +494,7 @@ async def linked_owner_grant(
                     ):
                         return LinkedOutcome(
                             status="no_github_access",
-                            message=f"You need access to every {owner} repo the GitHub App covers.",
+                            message=owner_no_access_message(owner),
                         )
                     new_rows = [
                         (listed[name.casefold()].id, name, listed[name.casefold()].permission or "")
@@ -467,21 +505,22 @@ async def linked_owner_grant(
             if not checked:
                 return LinkedOutcome(
                     status="needs_install",
-                    message="The GitHub App installation cannot cover this owner now.",
+                    message=needs_install_message(f"{owner} repos"),
                 )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 401:
-            return LinkedOutcome(status="relink", message="Your GitHub link needs renewing.")
+            return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
         if (
             exc.response.status_code in (403, 404)
             and exc.response.headers.get("x-ratelimit-remaining") != "0"
         ):
             return LinkedOutcome(
                 status="no_github_access",
-                message=f"You need access to every {owner} repo the GitHub App covers.",
+                message=owner_no_access_message(owner),
             )
         raise
     await _before_commit()
+    removed: list[str] = []
     async with sessionmaker.begin() as session:
         await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
         current_link = await get_account_link_for_update(session, account_id=account_id)
@@ -494,7 +533,7 @@ async def linked_owner_grant(
             or current_user.link_generation != checked_generation
             or not await manages_now(session)
         ):
-            return LinkedOutcome(status="changed_try_again", message="Access changed. Try again.")
+            return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
         for installation_id, _owner_login, names, new_rows in checked:
             current = await get_for_update(session, installation_id=installation_id)
             if current is not None and (
@@ -508,15 +547,11 @@ async def linked_owner_grant(
                 )
                 != names
             ):
-                return LinkedOutcome(
-                    status="changed_try_again", message="Access changed. Try again."
-                )
+                return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
             if not new_rows and not await installation_associated(
                 session, tenant_id=tenant_id, installation_id=installation_id
             ):
-                return LinkedOutcome(
-                    status="changed_try_again", message="Access changed. Try again."
-                )
+                return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
         for installation_id, owner_login, _names, new_rows in checked:
             if new_rows:
                 for repo_id, repo_full_name, permission in new_rows:
@@ -566,11 +601,18 @@ async def linked_owner_grant(
                 access=access,
                 account_id=account_id,
             )
-    ability = "read and change" if access == "write" else "read"
+        prefix = f"{owner.casefold()}/"
+        removed = sorted(
+            name[len(prefix) :]
+            for name in await session.scalars(
+                text(
+                    "SELECT lower(repo_full_name) FROM agent_github_owner_exclusions "
+                    "WHERE tenant_id = :tenant AND agent_id = :agent"
+                ).bindparams(tenant=tenant_id, agent=agent_id)
+            )
+            if name.startswith(prefix)
+        )
     return LinkedOutcome(
         status="granted" if access == "write" else "granted_read_only",
-        message=(
-            f"{agent_name} can now {ability} all {owner} repos the GitHub App covers, "
-            "including ones it covers later."
-        ),
+        message=owner_granted_message(agent_name, owner, access, removed),
     )

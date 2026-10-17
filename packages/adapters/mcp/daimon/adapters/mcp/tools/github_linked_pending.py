@@ -15,7 +15,7 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
-from daimon.adapters.mcp.tools.github_linked_grant import linked_grant
+from daimon.adapters.mcp.tools.github_linked_grant import CHANGED_MESSAGE, linked_grant
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
@@ -29,6 +29,11 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _log = structlog.get_logger(__name__)
+
+AGENT_CHANGED_MESSAGE = "Agent access changed while you were linking.\nAsk again in chat."
+GITHUB_DOWN_MESSAGE = "GitHub didn't answer.\nAsk again in chat."
+# The browser page shows "Ask again in chat" when every resumed request ended this way.
+REQUEST_CHANGED_MESSAGES = frozenset({AGENT_CHANGED_MESSAGE, CHANGED_MESSAGE})
 
 
 async def save_pending(
@@ -180,7 +185,7 @@ async def resume_pending(
             or str(agent.id) != row.ma_agent_id
             or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)) != row.agent_id
         ):
-            message = "Agent access changed. Ask again in chat."
+            message = AGENT_CHANGED_MESSAGE
         else:
 
             async def manages_now(
@@ -216,7 +221,7 @@ async def resume_pending(
             async with runtime.session_factory() as session:
                 allowed = await manages_now(session)
             if not allowed:
-                message = "Agent access changed. Ask again in chat."
+                message = AGENT_CHANGED_MESSAGE
             else:
                 config = runtime.settings.github_app
                 try:
@@ -251,9 +256,9 @@ async def resume_pending(
                 except DBAPIError as exc:
                     if getattr(exc.orig, "sqlstate", None) not in ("40001", "23505"):
                         raise
-                    message = "Access changed. Ask again in chat."
+                    message = CHANGED_MESSAGE
                 except httpx.HTTPError:
-                    message = "GitHub didn't answer. Ask again in chat."
+                    message = GITHUB_DOWN_MESSAGE
         try:
             await _deliver_result(runtime, row, message)
         except Exception:

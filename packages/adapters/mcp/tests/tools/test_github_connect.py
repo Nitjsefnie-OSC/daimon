@@ -115,8 +115,8 @@ async def test_connected_repo_is_granted_immediately_in_chat(
     )
     assert result.status == "granted"
     assert result.message == (
-        "Agent can now read and change owner/repo from the next message. "
-        "To undo, ask me to remove it."
+        "Agent can now read and change owner/repo.\n"
+        "Everyone who talks to Agent can use this repo through Agent."
     )
     delivery.assert_not_awaited()
     async with committing_sessionmaker() as session:
@@ -136,10 +136,7 @@ async def test_connected_repo_is_granted_immediately_in_chat(
         confirmed=True,
     )
     assert write.status == "granted"
-    assert write.message == (
-        "Agent can now read and change owner/repo from the next message. "
-        "To undo, ask me to remove it."
-    )
+    assert write.message == result.message
     async with committing_sessionmaker() as session:
         [grant] = await github_access.list_agent_grants(
             session, tenant_id=tenant.id, agent_id=agent_id
@@ -154,8 +151,10 @@ async def test_connected_repo_is_granted_immediately_in_chat(
     )
     assert read.status == "granted_read_only"
     assert read.message == (
-        "Agent can now read owner/repo from the next message. To undo, ask me to remove it."
+        "Agent can now read owner/repo.\n"
+        "Everyone who talks to Agent can use this repo through Agent."
     )
+    assert "http" not in read.message
     async with committing_sessionmaker() as session:
         [grant] = await github_access.list_agent_grants(
             session, tenant_id=tenant.id, agent_id=agent_id
@@ -220,6 +219,10 @@ async def test_connected_repo_is_granted_immediately_in_chat(
         runtime, channel_auth, origin_context_id=str(uuid.uuid4()), repo_name="owner/foreign"
     )
     assert foreign.status == "client_agent"
+    assert foreign.message == (
+        "This agent only works in some channels, so it can't use the server's shared repos.\n"
+        "Ask whoever runs Daimon for this server to connect repos for it."
+    )
     async with committing_sessionmaker() as session:
         assert all(
             grant.repo_id != 12346
@@ -378,8 +381,8 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
         runtime, member, origin_context_id=str(uuid.uuid4())
     )
     assert result.status == "ask_admin" and result.message == (
-        "Only an admin can connect repos to ConnectedBot. Tell the person in one line to ask "
-        "an admin to say here: connect GitHub to ConnectedBot."
+        "Only a server admin can give ConnectedBot repos.\n"
+        "Ask a server admin to say here: connect GitHub to ConnectedBot."
     )
     delivery.assert_not_awaited()
     agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
@@ -518,8 +521,8 @@ async def test_member_request_is_recorded_and_admin_gets_bound_thread_button(
     )
     assert other_channel.status == "ask_admin"
     assert other_channel.message == (
-        "Only an admin can connect repos to ConnectedBot. Tell the person in one line to ask "
-        "an admin to say here: connect owner/repo to ConnectedBot."
+        "Only a server admin can give ConnectedBot repos.\n"
+        "Ask a server admin to say here: connect owner/repo to ConnectedBot."
     )
     async with committing_sessionmaker.begin() as session:
         await set_access_policy(

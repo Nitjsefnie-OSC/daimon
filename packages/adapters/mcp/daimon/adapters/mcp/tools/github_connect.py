@@ -13,7 +13,11 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
-from daimon.adapters.mcp.tools.github_linked_grant import linked_grant
+from daimon.adapters.mcp.tools.github_linked_grant import (
+    CHANGED_MESSAGE,
+    granted_message,
+    linked_grant,
+)
 from daimon.adapters.mcp.tools.github_linked_pending import save_pending
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
@@ -82,6 +86,12 @@ class ConnectResult(BaseModel):
         "client_agent",
     ]
     message: str
+
+
+def _status_and_support(text: str) -> str:
+    """Split a core message into a status line and a supporting line."""
+    head, separator, tail = text.partition(". ")
+    return f"{head}.\n{tail}" if separator else text
 
 
 async def _post_discord_connect_card(
@@ -182,6 +192,10 @@ async def _post_teams_connect_card(
     )
 
 
+LINK_CARD_LINE = "This link is just for you and works once."
+SETUP_CARD_LINE = "Open GitHub setup to add this repo to the App installation."
+
+
 async def _post_personal_link(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -191,27 +205,30 @@ async def _post_personal_link(
     thread_id: str,
     label: str = "Link GitHub",
 ) -> None:
-    """Keep GitHub link and setup URLs in private buttons, outside model results."""
+    """Keep GitHub link and setup URLs in private buttons, outside model results.
+
+    The button comes first, then one supporting line.
+    """
     if auth.platform_user_id is None:
         raise ToolError("GitHub linking needs a chat requester.")
+    line = LINK_CARD_LINE if label == "Link GitHub" else SETUP_CARD_LINE
     if auth.platform == "discord":
-        view = discord.ui.View(timeout=None)
-        view.add_item(discord.ui.Button(label=label, style=discord.ButtonStyle.link, url=url))
+        # A layout view lets the button sit above the line; a classic message cannot.
+        card = discord.ui.LayoutView(timeout=None)
+        row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+        row.add_item(discord.ui.Button(label=label, style=discord.ButtonStyle.link, url=url))
+        card.add_item(row)
+        card.add_item(discord.ui.TextDisplay(line))
         async with rest_client(_require_bot_token(runtime)) as client:
             user = await client.fetch_user(int(auth.platform_user_id or ""))
-            await user.send(
-                "Link GitHub to check access to your requested repo."
-                if label == "Link GitHub"
-                else "Open GitHub setup to add this repo to the App installation.",
-                view=view,
-            )
+            await user.send(view=card)
     elif auth.platform == "slack":
         client = await slack_web_client(runtime, team_id=auth.external_id or "")
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
             thread_ts=thread_id,
             user=auth.platform_user_id,
-            text=label,
+            text=f"{label}. {line}",
             blocks=[
                 {
                     "type": "actions",
@@ -225,7 +242,8 @@ async def _post_personal_link(
                             "text": {"type": "plain_text", "text": label},
                         }
                     ],
-                }
+                },
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": line}]},
             ],
         )
 
@@ -284,7 +302,7 @@ async def _github_connect_impl(
                 agent_name=agent.name,
             )
         except PinnedAgentConnectionError as exc:
-            return ConnectResult(status="client_agent", message=str(exc))
+            return ConnectResult(status="client_agent", message=_status_and_support(str(exc)))
         account = await get_account(session, auth.account_id)
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
@@ -334,8 +352,8 @@ async def _github_connect_impl(
             return ConnectResult(
                 status="ask_admin",
                 message=(
-                    f"Only an admin can connect repos to {agent.name}. Tell the person in one "
-                    f"line to ask an admin to say here: connect {repo_label} to {agent.name}."
+                    f"Only a server admin can give {agent.name} repos.\n"
+                    f"Ask a server admin to say here: connect {repo_label} to {agent.name}."
                 ),
             )
         if repo_name is not None:
@@ -405,12 +423,7 @@ async def _github_connect_impl(
                         raise ToolError(str(error)) from error
                     return ConnectResult(
                         status="granted" if repo.max_access == "write" else "granted_read_only",
-                        message=(
-                            f"{agent.name} can now "
-                            f"{'read and change' if repo.max_access == 'write' else 'read'} "
-                            f"{repo.repo_full_name} "
-                            "from the next message. To undo, ask me to remove it."
-                        ),
+                        message=granted_message(agent.name, repo.repo_full_name, repo.max_access),
                     )
 
             async def manages_now(current_session: AsyncSession) -> bool:
@@ -440,9 +453,7 @@ async def _github_connect_impl(
                 )
 
             if not policy_manages:
-                return ConnectResult(
-                    status="changed_try_again", message="Agent access changed. Ask again."
-                )
+                return ConnectResult(status="changed_try_again", message=CHANGED_MESSAGE)
             try:
                 outcome = await linked_grant(
                     runtime.session_factory,
@@ -464,9 +475,7 @@ async def _github_connect_impl(
             except DBAPIError as exc:
                 if getattr(exc.orig, "sqlstate", None) not in ("40001", "23505"):
                     raise
-                return ConnectResult(
-                    status="changed_try_again", message="Access changed. Try again."
-                )
+                return ConnectResult(status="changed_try_again", message=CHANGED_MESSAGE)
             if outcome.status in ("needs_link", "relink") and auth.platform in ("discord", "slack"):
                 try:
                     async with runtime.session_factory.begin() as link_session:
@@ -537,12 +546,7 @@ async def _github_connect_impl(
                                     "I couldn't send the private GitHub setup button. Try again."
                                 ),
                             )
-                    return ConnectResult(
-                        status="needs_install",
-                        message=(
-                            "This repo isn't in a GitHub App installation for this workspace yet."
-                        ),
-                    )
+                    return ConnectResult(status="needs_install", message=outcome.message)
                 return ConnectResult(status=outcome.status, message=outcome.message)
         intent_id: uuid.UUID | None = None
         token: str | None = None
@@ -715,6 +719,8 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         gives token access; it does not put them all in the filesystem.
         After it posts, nothing is connected until the person saves on the page.
         The card carries the steps: never repeat them, and never say done or connected.
+        For a granted, refused or other result that is not sent, reply with the returned
+        lines as they are.
         """
         return await _github_connect_impl(
             runtime,
