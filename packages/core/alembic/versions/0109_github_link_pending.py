@@ -9,8 +9,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0108_github_link_pending"
-down_revision: str | None = "0107_github_installation_truth"
+revision: str = "0109_github_link_pending"
+down_revision: str | None = "0108_github_installation_truth"
 branch_labels: str | None = None
 depends_on: str | None = None
 
