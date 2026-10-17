@@ -14,7 +14,7 @@ from daimon.core.channel_admins import (
     grant_group_ids,
     read_stored_admin,
 )
-from daimon.core.config import Settings
+from daimon.core.config import Settings, channel_admins_enabled
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
 from daimon.core.operation_policy import decide_operation
 from daimon.core.scope import DeploymentDefault
@@ -132,6 +132,8 @@ async def requester_manages_agent(
     )
     if stored.is_admin:
         return True
+    if not channel_admins_enabled():
+        return False
     if platform_user_id is None:
         # No one to look up: a stored role would count unchecked.
         return False

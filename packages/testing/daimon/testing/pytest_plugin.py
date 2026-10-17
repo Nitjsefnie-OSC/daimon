@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import pytest
@@ -43,3 +44,13 @@ def db_preflight(db_schema: str) -> DatabasePreflight:
     from daimon.testing.db import preflight_test_database
 
     return preflight_test_database(db_schema)
+
+
+@pytest.fixture(autouse=True)
+def reset_channel_admins_switch() -> Iterator[None]:
+    """Keep one test's channel-admin switch, primed or cached, out of the next test."""
+    from daimon.core.config import reset_channel_admins_enabled
+
+    reset_channel_admins_enabled()
+    yield
+    reset_channel_admins_enabled()

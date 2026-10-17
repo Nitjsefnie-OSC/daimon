@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import httpx
@@ -51,6 +52,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.agent_google_binding import get_agent_google_binding
+from daimon.core.stores.agent_tool_rules import get_rule
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -79,6 +81,7 @@ class _FakeMcp:
 class _FakeSettings:
     cli = _FakeCli()
     mcp = _FakeMcp()
+    tool_safety = SimpleNamespace(agent_rules=True)
 
 
 def _agent_json(
@@ -1169,6 +1172,45 @@ def _install_agents_runtime(
 
     monkeypatch.setattr(agents_cmd, "build_runtime", fake_build_runtime)
     monkeypatch.setattr(agents_cmd, "load_settings", lambda: cast(Settings, _FakeSettings()))
+
+
+def test_tool_rules_set_channel_persists_through_the_cli(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def seed() -> uuid.UUID:
+        async with schema_sessionmaker.begin() as session:
+            return (await make_tenant(session, platform="cli", workspace_id="local")).id
+
+    tenant_id = asyncio.run(seed())
+    agent = _agent_json(agent_id="ag_helper", name="helper", tenant_id=tenant_id)
+    agent["mcp_servers"] = [{"name": "remote", "type": "url", "url": "https://example.test/mcp"}]
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([agent]))
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(router.dispatch), base_url="https://api.anthropic.com"
+    )
+    anthropic = AsyncAnthropic(api_key="test", http_client=http_client)
+    _install_agents_runtime(monkeypatch, anthropic=anthropic, sessionmaker=schema_sessionmaker)
+
+    result = CliRunner().invoke(
+        main_mod.app,
+        ["agents", "tool-rules", "set", "helper", "remote/append_note", "allow", "--channel", "C1"],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    async def read():  # type: ignore[no-untyped-def]
+        async with schema_sessionmaker() as session:
+            return await get_rule(
+                session,
+                tenant_id=tenant_id,
+                agent_id="ag_helper",
+                tool_key="remote/append_note",
+                channel_id="C1",
+            )
+
+    row = asyncio.run(read())
+    assert row is not None and row.rule == "allow" and row.channel_id == "C1"
 
 
 def test_agents_list_with_guild_override_lists_that_guilds_agents(

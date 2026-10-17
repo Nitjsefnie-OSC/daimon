@@ -21,7 +21,7 @@ from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.support import SupportCommand
 from daimon.core._models import SupportEscalation
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
-from daimon.core.config import SupportSettings
+from daimon.core.config import SupportSettings, reset_channel_admins_enabled
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_admins import set_channel_admins
@@ -417,6 +417,43 @@ async def test_a_channel_with_its_own_admins_sends_the_request_to_them_first(
         assert ops == [], "the escalation channel only when no admin got it"
     else:
         assert chats == [] and len(ops) == 1, "no admin reachable: the escalation channel"
+
+
+async def test_disabled_grants_send_support_to_escalation_without_requester_or_former_holder_dm(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
+    async with db_session_factory.begin() as session:
+        tenant = await get_tenant(session, TENANT)
+        await make_platform_principal(session, platform="teams", external_id=LEAD, tenant=tenant)
+        await set_channel_admins(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            channel_id=CHANNEL_ID,
+            role_ids=[],
+            user_ids=[LEAD, AAD_OBJECT_ID],
+            actor_account_id=None,
+        )
+    try:
+        reset_channel_admins_enabled()
+        monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
+        async with _running(db_session_factory, teams_api_fake) as service:
+            card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
+            reply = await _send(service, _token(card), "the routine broke")
+        assert support.RECEIVED.format(remaining=2) in reply
+        assert not [
+            post
+            for post in _posts_to(teams_api_fake, DIRECT_CHAT_ID)
+            if "Human support requested" in post
+        ]
+        assert len(_posts_to(teams_api_fake, OPS)) == 1
+        assert not any(f"/members/{LEAD}" in r.url for r in teams_api_fake.requests)
+    finally:
+        reset_channel_admins_enabled()
 
 
 async def test_a_database_error_picking_admins_still_reaches_the_support_channel(

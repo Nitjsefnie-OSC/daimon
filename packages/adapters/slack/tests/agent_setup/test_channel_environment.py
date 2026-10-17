@@ -28,6 +28,7 @@ from daimon.core.channel_environments import (
     EnvironmentPicker,
     environment_option_value,
 )
+from daimon.core.config import reset_channel_admins_enabled
 from daimon.core.roster import paginate
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
@@ -255,6 +256,46 @@ async def test_a_channel_admin_picks_this_channels_environment_and_hands_it_back
     assert await get_scope(db_session, scope=scope) is None, (
         "handing the channel back leaves no row, exactly as before any pick"
     )
+
+
+async def test_disabled_former_holder_gets_no_picker_and_stale_pick_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
+    tenant_id = await _seed(db_session_factory, grant=True)
+    monkeypatch.setattr(actions, "resolve_is_admin", AsyncMock(return_value=False))
+    try:
+        reset_channel_admins_enabled()
+        monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
+        calls: list[str] = []
+        runtime = _runtime(db_session_factory, tenant_id, calls)
+        client = _client()
+        view = await load_routing_view(
+            runtime,
+            client,
+            tenant_id=tenant_id,
+            meta=META,
+            is_admin=False,
+            user_id=USER,
+        )
+        assert _select(view) is None
+        assert "/v1/environments" not in calls
+        assert not await actions.github_can_choose_agent(
+            runtime, tenant_id=tenant_id, user_id=USER, is_admin=False
+        )
+        await _pick(runtime, client, tenant_id, environment_option_value("science"))
+        assert ENVIRONMENT_NEED_ADMIN_MESSAGE in client.chat_postEphemeral.call_args.kwargs["text"]
+        assert (
+            await get_scope(
+                db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL)
+            )
+            is None
+        )
+    finally:
+        reset_channel_admins_enabled()
 
 
 @pytest.mark.parametrize(

@@ -107,6 +107,11 @@ def token_row_refusal(
                 return "chat_binding_mismatch"
         elif claims.get("agent_id") != row.agent_id:
             return "agent_mismatch"
+        if row.channel_id is not None and identity.role is not Role.ADMIN:
+            from daimon.core.config import channel_admins_enabled
+
+            if not channel_admins_enabled():
+                return "channel_admins_disabled"
         return None
     if claims.get("kind") != row.kind:
         return "kind_mismatch"

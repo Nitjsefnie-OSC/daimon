@@ -24,6 +24,7 @@ from daimon.core.channel_admins import (
     fold_mentions,
     normalize_channel_admin_ids,
 )
+from daimon.core.config import channel_admins_enabled
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.panel_audit import record_panel_write
 from daimon.core.stores.channel_admins import (
@@ -129,6 +130,11 @@ class ChannelAdminsView(PanelViewBase):
         await self.swap_to(interaction, routing)
 
     async def _on_edit(self, interaction: discord.Interaction) -> None:
+        if not channel_admins_enabled():
+            await interaction.response.send_message(
+                "Channel admins are disabled. Nothing changed.", ephemeral=True
+            )
+            return
         if await refuse_if_not_admin(interaction):  # pyright: ignore[reportArgumentType]  # only reads user/guild/response
             return
         await interaction.response.send_modal(ChannelAdminsModal(self))
@@ -158,6 +164,11 @@ class ChannelAdminsModal(discord.ui.Modal):
         self.add_item(discord.ui.Label(text="Members", component=self.users))
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not channel_admins_enabled():
+            await interaction.response.send_message(
+                "Channel admins are disabled. Nothing changed.", ephemeral=True
+            )
+            return
         view, state = self._view, self._view.state
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(state.guild_id))
         audit = functools.partial(

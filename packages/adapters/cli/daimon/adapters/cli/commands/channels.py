@@ -46,7 +46,7 @@ from daimon.core.channel_rules import (
 )
 from daimon.core.channel_skills import REFUSALS as CHANNEL_SKILL_REFUSALS
 from daimon.core.channel_skills import add_skill_to_channel
-from daimon.core.config import load_settings
+from daimon.core.config import channel_admins_enabled, load_settings
 from daimon.core.errors import DaimonError, StoreError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -567,6 +567,11 @@ def _ids(
         raise typer.BadParameter(str(exc)) from exc
 
 
+def _require_channel_admins_enabled() -> None:
+    if not channel_admins_enabled():
+        raise typer.BadParameter("Channel admins are disabled. Nothing changed.")
+
+
 @admins_app.command("get")
 def channels_admins_get_command(
     platform: str,
@@ -575,6 +580,7 @@ def channels_admins_get_command(
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
     """Show channel admins. A channel with none is run by the server admins alone."""
+    _require_channel_admins_enabled()
     console = Console(highlight=False)
 
     async def _run() -> None:
@@ -600,6 +606,7 @@ async def channels_admins_get(
     channel_id: str | None,
     as_json: bool,
 ) -> None:
+    _require_channel_admins_enabled()
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     async with rt.sessionmaker() as session:
         if channel_id is None:
@@ -632,6 +639,7 @@ def channels_admins_set_command(
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
     """Replace one channel's admins with the given roles and users."""
+    _require_channel_admins_enabled()
     console = Console(highlight=False)
 
     async def _run() -> None:
@@ -661,6 +669,7 @@ async def channels_admins_set(
     users: list[str],
     as_json: bool,
 ) -> None:
+    _require_channel_admins_enabled()
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     channel, role_ids, user_ids = _ids(platform, channel_id, roles=roles, users=users)
     if not role_ids and not user_ids:
@@ -681,6 +690,7 @@ async def channels_admins_set(
 @admins_app.command("clear")
 def channels_admins_clear_command(platform: str, workspace_id: str, channel_id: str) -> None:
     """Remove one channel's admins, leaving it to the server admins."""
+    _require_channel_admins_enabled()
     console = Console(highlight=False)
 
     async def _run() -> None:
@@ -699,6 +709,7 @@ def channels_admins_clear_command(platform: str, workspace_id: str, channel_id: 
 async def channels_admins_clear(
     *, rt: CliRuntime, console: Console, platform: str, workspace_id: str, channel_id: str
 ) -> None:
+    _require_channel_admins_enabled()
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
     async with rt.sessionmaker() as session, session.begin():

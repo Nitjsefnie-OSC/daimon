@@ -66,7 +66,7 @@ from daimon.core.agent_details import (
 )
 from daimon.core.answering_map import AnsweringMap, build_answering_map
 from daimon.core.channel_rules import ChannelRuleStatus
-from daimon.core.config import TurnSettings
+from daimon.core.config import TurnSettings, reset_channel_admins_enabled
 from daimon.core.github_repo_auth import RepoAccess, RepoAccessKind
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
@@ -1354,6 +1354,17 @@ def test_routing_view_lists_channel_admins_and_offers_edit_to_admins_only() -> N
     in_dm = _routing(channel_admins=[grant], channel_id="D0DIRECT")
     assert ACTION_CHANNEL_ADMINS not in _action_ids(in_dm), "a DM has no channel admins to edit"
     assert "U0LEAD1" in "\n".join(_texts(in_dm)), "a DM panel still lists the grants"
+
+
+def test_routing_hides_grants_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
+    try:
+        view = _routing(channel_admins=[])
+        assert ACTION_CHANNEL_ADMINS not in _action_ids(view)
+        assert not any("Channel admins" in text for text in _texts(view))
+    finally:
+        reset_channel_admins_enabled()
 
 
 def test_channel_admins_listing_fits_one_section_without_clipping() -> None:

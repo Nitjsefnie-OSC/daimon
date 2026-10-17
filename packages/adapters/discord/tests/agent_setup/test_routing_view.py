@@ -27,6 +27,7 @@ from daimon.adapters.discord.agent_setup.routing_view import (
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer, SetupThreadRef, TenantAnswer
+from daimon.core.config import reset_channel_admins_enabled
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent, paginate
@@ -388,6 +389,27 @@ def test_routing_offers_channel_admins_to_server_admins(account_id: uuid.UUID) -
         "Channel skills",
         "Done",
     }, "a server admin is also offered Channel admins, Permissions, Operator tokens and skills"
+
+
+def test_routing_hides_channel_admins_when_disabled(
+    account_id: uuid.UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
+    try:
+        state = _state(_map(), account_id=account_id, is_admin=True)
+        view = RoutingView(
+            state,
+            runtime=_make_runtime(),
+            allowed_user_id=42,
+            lines=_lines(3),
+            server_default=None,
+        )
+        labels = {node.label for node in _walk(view) if isinstance(node, discord.ui.Button)}
+        assert "Channel admins" not in labels
+        assert "Permissions" in labels
+    finally:
+        reset_channel_admins_enabled()
 
 
 async def test_back_returns_to_the_roster_page_the_reader_left(account_id: uuid.UUID) -> None:

@@ -127,6 +127,10 @@ async def _require_pick_allowed(
     if not pick.decision and pick.decision.reason != "not_a_reader":
         if target.channel_id is None:
             _require_admin(auth)  # the workspace default's own copy
+        from daimon.core.config import channel_admins_enabled
+
+        if not channel_admins_enabled():
+            raise ToolError("This change needs a workspace or server admin. Do not retry.")
         raise ToolError(_NEEDS_ADMIN)
     # Only a caller who may make the change learns whether a name exists, and never a hidden one.
     hidden = await load_caller_hidden_environments(runtime, auth)

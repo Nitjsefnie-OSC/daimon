@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Annotated, Final
 import httpx
 import structlog
 from daimon.core.authz import Subject, build_subject
+from daimon.core.config import channel_admins_enabled
 from daimon.core.errors import DaimonError
 from daimon.core.stores.accounts import (
     get_account,
@@ -221,6 +222,8 @@ def is_channel_admin(caller: ChannelAdminCaller, *, grant: ChannelAdminsRow | No
     """Server admin, or the channel's grant lists the caller's user id or one of their roles."""
     if caller.is_server_admin:
         return True
+    if not channel_admins_enabled():
+        return False
     if grant is None:
         return False
     if caller.platform_user_id is not None and caller.platform_user_id in grant.user_ids:
@@ -232,6 +235,8 @@ def administered_channel_ids(
     caller: ChannelAdminCaller, grants: Iterable[ChannelAdminsRow]
 ) -> frozenset[str]:
     """The channels whose grant names the caller. A server admin needs no grant."""
+    if not channel_admins_enabled():
+        return frozenset()
     return frozenset(
         grant.channel_id
         for grant in grants
@@ -488,8 +493,10 @@ async def load_administered_channel_ids(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, caller: ChannelAdminCaller
 ) -> frozenset[str]:
     """Shell half of `administered_channel_ids`: read this tenant's grants."""
-    if platform not in CHANNEL_ADMIN_PLATFORMS or (
-        caller.platform_user_id is None and not caller.role_ids
+    if (
+        not channel_admins_enabled()
+        or platform not in CHANNEL_ADMIN_PLATFORMS
+        or (caller.platform_user_id is None and not caller.role_ids)
     ):
         return frozenset()
     grants = await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
@@ -570,6 +577,8 @@ async def confirm_stored_subject(stored: StoredAdmin, members: GroupMembers | No
     """
     if stored.is_admin:
         return build_subject(is_admin=True, platform_user_id=stored.platform_user_id)
+    if not channel_admins_enabled():
+        return build_subject(is_admin=False, platform_user_id=stored.platform_user_id)
     role_ids = await confirm_stored_group_ids(
         stored.platform,
         stored.platform_user_id,
@@ -643,6 +652,8 @@ async def channel_admin_user_ids(
     Reads in sessions of their own, closed before the lookup, so a slow
     platform never holds a pooled connection.
     """
+    if not channel_admins_enabled():
+        return None
     async with sessionmaker() as session:
         grant = await get_channel_admins(
             session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
