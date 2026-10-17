@@ -61,6 +61,7 @@ __all__ = [
     "ToolVerdict",
     "VerdictReason",
     "backend_switch_tools",
+    "microsoft_send_tools",
     "classify_tool",
     "decide_tool_call",
     "has_confirmation_gate",
@@ -137,6 +138,8 @@ ANY_KEY: Final[str] = "*"
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_skill": "content_hash",
     "request_agent_backend_switch": "preview_digest",
+    # Every call names its action, so every call asks.
+    "microsoft_send": "action",
 }
 
 
@@ -145,9 +148,18 @@ def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     return frozenset({"request_agent_backend_switch"}) if enabled else frozenset()
 
 
+def microsoft_send_tools(*, enabled: bool) -> frozenset[str]:
+    """Mail and invites sent as the person ask on the card, tool safety on or off."""
+    return frozenset({"microsoft_send"}) if enabled else frozenset()
+
+
 def _always_confirmed_tools() -> frozenset[str]:
     """Every other confirmation-table entry requires review when policy is on."""
-    return frozenset(CONFIRMED_DAIMON_TOOLS) - backend_switch_tools(enabled=True)
+    return (
+        frozenset(CONFIRMED_DAIMON_TOOLS)
+        - backend_switch_tools(enabled=True)
+        - microsoft_send_tools(enabled=True)
+    )
 
 
 #: Daimon's own tools that put content behind a link whoever holds it opens.

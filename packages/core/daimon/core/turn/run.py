@@ -30,7 +30,7 @@ from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
     ToolRuleCardReference,
-    backend_switch_tools_for_turn,
+    confirmed_tools_for_turn,
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.errors import TurnError
@@ -940,7 +940,7 @@ async def run_prepared_turn_impl(
     breach can never loop into a second wall-clock-priced attempt.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
-    confirmed_tools: frozenset[str] = backend_switch_tools_for_turn(deps)
+    confirmed_tools: frozenset[str] = confirmed_tools_for_turn(deps)
     if confirmed_tools:
         revision = prepared.admission.backend_revision
         if (

@@ -28,7 +28,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
 
-from daimon.core.tool_safety import DAIMON_SERVER_NAME, PUBLISH_TOOLS, ToolCall
+from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
+    PUBLISH_TOOLS,
+    ToolCall,
+    microsoft_send_tools,
+)
 from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.ids import Provider
 from mux.contracts.resources import AgentSpec
@@ -270,6 +275,19 @@ def prompt_for_tool_call(
             f"Shared with: {_short(recipients)}",
             f"Spending cap: ${cap}" if cap is not None else "Spending cap: Not set",
         )
+    elif call.tool_name == "microsoft_send" and server == DAIMON_SERVER_NAME:
+        invite = data.get("action") == "create_event"
+        subject = str(data.get("subject") or "")
+        noun = "invite" if invite else "email"
+        action = f'Send {noun} "{subject}"'
+        title = f"{action}?"
+        denied_action = f"{noun.capitalize()} not sent"
+        consequence = "It goes out from your Microsoft account."
+        detail_lines = (
+            f"To: {_short(_recipients(data.get('to')))}",
+            f"Subject: {_short(subject)}",
+            *((f"When: {_short(f'{data.get("start")} to {data.get("end")}')}",) if invite else ()),
+        )
     elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
         agent = str(data.get("agent_name") or data.get("agent") or "agent")
         if not name:
@@ -315,9 +333,11 @@ def prompt_for_tool_call(
     )
 
 
-def backend_switch_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
-    """Read the turn's already-injected selector without another feature flag."""
-    return backend_switch_tools(enabled=deps.backend_selection_enabled)
+def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
+    """Daimon's tools this turn's session asks before, from already-injected selectors."""
+    return backend_switch_tools(enabled=deps.backend_selection_enabled) | microsoft_send_tools(
+        enabled=deps.microsoft_send
+    )
 
 
 def backend_switch_callbacks(

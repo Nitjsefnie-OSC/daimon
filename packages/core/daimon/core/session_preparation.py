@@ -44,7 +44,7 @@ import structlog
 from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.authz import build_agent_ref
-from daimon.core.confirmation import backend_switch_tools_for_turn
+from daimon.core.confirmation import confirmed_tools_for_turn
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
@@ -913,7 +913,7 @@ async def _prepare_session_for_turn_locked(
             public_url=deps.public_url,
             memory_read_only=admission.memory_read_only,
             asks_before_publishing=admission.asks_before_publishing,
-            confirmed_tools=backend_switch_tools_for_turn(deps),
+            confirmed_tools=confirmed_tools_for_turn(deps),
             channel_skills=admission.channel_skills,
         )
         if fresh_start:
@@ -1120,7 +1120,7 @@ async def _prepare_session_for_turn_locked(
                 is_external=admission.is_external,
                 now=moment,
                 asks_before_publishing=admission.asks_before_publishing,
-                confirmed_tools=backend_switch_tools_for_turn(deps),
+                confirmed_tools=confirmed_tools_for_turn(deps),
                 mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
             )
 
