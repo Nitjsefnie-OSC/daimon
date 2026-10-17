@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
 - GitHub connection confirmation now checks the requester's live Discord, Slack, or Teams admin status before saving repository access.
 - Channel admins are removed. Grants no longer give any rights; server and workspace admins are unchanged. Stored grant rows are kept until a later release drops them.
 - Offer “Opus 5.5 fast” as a separate model choice for new Managed Agents sessions, with twice the standard token rates.
