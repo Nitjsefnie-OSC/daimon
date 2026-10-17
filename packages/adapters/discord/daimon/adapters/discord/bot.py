@@ -712,7 +712,6 @@ class DaimonBot(commands.Bot):
                 parse_interaction(data)
 
         self._connection.parsers["INTERACTION_CREATE"] = parse_allowed_interaction
-        self.tree.interaction_check = self._interaction_allowed  # type: ignore[method-assign]
         # Per-thread concurrency state. _processing: thread IDs with an active turn.
         # _pending: mentions queued behind an in-flight turn for that thread.
         # Drained after the current turn finishes into a single composite follow-up
@@ -2028,15 +2027,12 @@ class DaimonBot(commands.Bot):
     def _allows_guild(self, guild_id: int | None) -> bool:
         """Non-production accepts only configured guilds; DMs have no guild to allow."""
         name = self.runtime.settings.environment.name
-        if type(name) is not str or not name:
+        if not name:
             return True
         settings = self.runtime.settings.discord
         return (
             guild_id is not None and settings is not None and guild_id in settings.command_guild_ids
         )
-
-    async def _interaction_allowed(self, interaction: discord.Interaction) -> bool:
-        return self._allows_guild(interaction.guild_id)
 
     def dispatch(self, event: str, /, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
         """Stop guild events before any registered cog listener sees them."""
@@ -2063,7 +2059,7 @@ class DaimonBot(commands.Bot):
             if self.runtime.settings.discord is not None
             else set[int]()
         )
-        non_production = type(environment_name) is str and bool(environment_name)
+        non_production = bool(environment_name)
         log.info(
             "discord_command_environment",
             environment=environment_name if non_production else "production",
@@ -2293,7 +2289,7 @@ class DaimonBot(commands.Bot):
                 guild_obj = discord.Object(id=guild.id)
                 self.tree.clear_commands(guild=guild_obj)
                 environment_name = self.runtime.settings.environment.name
-                if type(environment_name) is str and environment_name:
+                if environment_name:
                     self.tree.copy_global_to(guild=guild_obj)
                 await self.tree.sync(guild=guild_obj)
                 log.info("synced_commands_on_join", guild_id=guild_id, guild_name=guild.name)

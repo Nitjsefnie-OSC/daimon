@@ -8,21 +8,42 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.core.config import DiscordSettings, EnvironmentSettings
+from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    DiscordSettings,
+    EnvironmentSettings,
+    Settings,
+)
+from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.notebooks._rate_limit import RateLimiter
+from daimon.core.scope import DeploymentDefault
 from discord.ext import commands
-from pydantic import SecretStr
+from pydantic import PostgresDsn, SecretStr
 
 from .harness import make_bot
-from .test_bot import _make_runtime  # pyright: ignore[reportPrivateUsage]
 
 
 async def _ready_bot(
     name: str, guild_ids: list[int]
 ) -> tuple[DaimonBot, AsyncMock, AsyncMock, MagicMock]:
-    runtime = _make_runtime(MagicMock())  # type: ignore[arg-type]
-    runtime.settings.environment = EnvironmentSettings(name=name)
-    runtime.settings.discord = DiscordSettings(
-        bot_token=SecretStr("test"), command_guild_ids=guild_ids
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]  # BaseSettings accepts this
+        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test@localhost/test")),
+        anthropic=AnthropicSettings(api_key=SecretStr("test")),
+        environment=EnvironmentSettings(name=name),
+        discord=DiscordSettings(bot_token=SecretStr("test"), command_guild_ids=guild_ids),
+    )
+    runtime = DiscordRuntime(
+        settings=settings,
+        anthropic=AsyncMock(),
+        sessionmaker=MagicMock(),
+        notebook_rate_limiter=RateLimiter(max_requests=999),
+        billing_config=None,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        turn_deps=MagicMock(),
     )
     bot = make_bot(runtime)
     bot._connection.application_id = 99  # pyright: ignore[reportPrivateUsage]
@@ -98,8 +119,6 @@ async def test_non_allowlisted_messages_interactions_and_dms_are_ignored() -> No
         await bot.on_message(SimpleNamespace(guild=None))  # type: ignore[arg-type]
         await bot.on_interaction(SimpleNamespace(guild_id=222))  # type: ignore[arg-type]
         await bot.on_interaction(SimpleNamespace(guild_id=None))  # type: ignore[arg-type]
-        assert not await bot.tree.interaction_check(SimpleNamespace(guild_id=222))  # type: ignore[arg-type]
-        assert await bot.tree.interaction_check(SimpleNamespace(guild_id=111))  # type: ignore[arg-type]
     remember.assert_not_called()
     # The SDK otherwise routes slash commands, buttons, and modals before
     # on_interaction; invalid stubs here prove rejection before SDK parsing.
@@ -107,9 +126,11 @@ async def test_non_allowlisted_messages_interactions_and_dms_are_ignored() -> No
         Callable[[dict[str, object]], None],
         bot._connection.parsers["INTERACTION_CREATE"],  # pyright: ignore[reportPrivateUsage]
     )
-    for kind in (2, 3, 5):
-        parse({"type": kind, "guild_id": "222"})
-        parse({"type": kind})
+    with patch("discord.state.Interaction") as make_interaction:
+        for kind in (2, 3, 5):
+            parse({"type": kind, "guild_id": "222"})
+            parse({"type": kind})
+        make_interaction.assert_not_called()
     with patch.object(commands.Bot, "dispatch") as inherited_dispatch:
         bot.dispatch("message", SimpleNamespace(guild=SimpleNamespace(id=222)))
         bot.dispatch("interaction", SimpleNamespace(guild_id=222))
