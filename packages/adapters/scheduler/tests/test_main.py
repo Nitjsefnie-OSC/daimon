@@ -3175,24 +3175,24 @@ async def test_shutdown_cancels_the_sweep_then_drains_before_the_client_and_engi
 ) -> None:
     """Production order: cancel the sweep mid-call, drain, then close; the rotation is stored."""
     from daimon.adapters.scheduler import main as scheduler_main
-    from daimon.core._models import GitHubUserLink
-    from daimon.core.github_credentials import decrypt_token, encrypt_token
+    from daimon.core.github_credentials import decrypt_token
     from daimon.core.github_requester_access import drain_detached_refreshes
     from daimon.core.stores import github_links
 
     fernet = build_multifernet((Fernet.generate_key().decode(),))
-    now = datetime.now(UTC)
     async with db_session_factory.begin() as session:
-        session.add(
-            GitHubUserLink(
-                github_user_id=8801,
-                login="user8801",
-                encrypted_access_token=encrypt_token(fernet, "access-8801"),
-                encrypted_refresh_token=encrypt_token(fernet, "refresh-8801"),
-                access_expires_at=now + timedelta(hours=5),
-                refresh_expires_at=now + timedelta(days=1),
-                status="active",
-            )
+        await github_links.save_verified_link(
+            session,
+            intent_account_id=uuid.uuid4(),
+            platform="discord",
+            platform_user_id="8801",
+            github_user_id=8801,
+            login="user8801",
+            access_token="access-8801",
+            refresh_token="refresh-8801",
+            expires_in=5 * 3600,
+            refresh_expires_in=86400,
+            fernet=fernet,
         )
     in_flight = asyncio.Event()
     release = asyncio.Event()

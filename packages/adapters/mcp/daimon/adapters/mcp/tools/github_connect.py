@@ -697,7 +697,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         access: Literal["read", "write"] = "read",
         confirmed: bool = False,
     ) -> ConnectResult:
-        """Grant this agent owner/repo or all App-covered owner/* repositories.
+        """Give this agent token access to more repos: owner/repo, or all App-covered owner/*.
 
         Use this when someone asks to let an agent read a private repository
         at github.com/owner/repo. Show a single-use
