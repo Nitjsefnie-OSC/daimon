@@ -24,6 +24,7 @@ typo is silent — check the spelling here.
 - [Observability](#observability)
 - [Ops](#ops)
 - [MCP Server](#mcp-server)
+- [MCP OAuth](#mcp-oauth)
 - [Hub](#hub)
 - [Agent Identity](#agent-identity)
 - [Environment](#environment)
@@ -347,6 +348,24 @@ directly — a deployment running no scheduler will never reclaim these objects.
 
 Per-token cap on tool calls an operator token (minted with `daimon mcp mint-operator-
 token`) may make per rolling minute, counted in each MCP process. Set to 0 to disable.
+
+## MCP OAuth
+
+Read from `daimon.core.config.McpOAuthSettings`. Prefix `DAIMON_MCP_OAUTH__`.
+
+### `DAIMON_MCP_OAUTH__CLIENTS`
+
+`list[McpOAuthClientSettings]` · optional · default unset
+
+OAuth clients registered by hand, for authorization servers that offer no dynamic client
+registration. A JSON array; each entry has authorization_server_host (the host of the
+authorization server an MCP server names, so one client covers every MCP server behind
+it), client_id, client_secret, token_endpoint_auth_method (client_secret_post by
+default, client_secret_basic, or none for a public client without a secret), optional
+authorization_endpoint and token_endpoint overrides (public https), and send_resource
+(default true; false leaves the RFC 8707 resource parameter out of sign-in and refresh).
+A sign-in whose authorization server matches an entry uses that client instead of
+registering one. Default: [] (always register).
 
 ## Hub
 

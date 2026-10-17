@@ -301,6 +301,81 @@ class McpSettings(BaseModel):
         return str(self.public_url).rstrip("/").removesuffix("/mcp").rstrip("/")
 
 
+class McpOAuthClientSettings(BaseModel):
+    """One OAuth client registered by hand at an authorization server."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    authorization_server_host: str = Field(min_length=1)
+    client_id: str = Field(min_length=1)
+    client_secret: SecretStr | None = None
+    token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"] = (
+        "client_secret_post"
+    )
+    authorization_endpoint: str | None = None
+    token_endpoint: str | None = None
+    send_resource: bool = True
+
+    @field_validator("authorization_server_host")
+    @classmethod
+    def _bare_host(cls, value: str) -> str:
+        host = value.strip().rstrip(".").lower()
+        if not host or any(char in host for char in "/:@ "):
+            raise ValueError("authorization_server_host must be a bare host name")
+        return host
+
+    @field_validator("authorization_endpoint", "token_endpoint")
+    @classmethod
+    def _public_https(cls, value: str | None) -> str | None:
+        # Imported here: the package pulls in the Anthropic SDK, which a plain
+        # settings load should not pay for when no client is configured.
+        from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
+
+        if value is None:
+            return None
+        try:
+            return assert_public_https_url(value, what="endpoint override")
+        except McpUrlError as err:
+            raise ValueError(str(err)) from err
+
+    @model_validator(mode="after")
+    def _secret_matches_auth_method(self) -> McpOAuthClientSettings:
+        if (self.client_secret is None) != (self.token_endpoint_auth_method == "none"):
+            raise ValueError(
+                "client_secret is required unless token_endpoint_auth_method is none, "
+                "and refused when it is"
+            )
+        return self
+
+
+class McpOAuthSettings(BaseModel):
+    clients: list[McpOAuthClientSettings] = Field(
+        default_factory=list[McpOAuthClientSettings],
+        description=(
+            "OAuth clients registered by hand, for authorization servers that offer no "
+            "dynamic client registration. A JSON array; each entry has "
+            "authorization_server_host (the host of the authorization server an MCP server "
+            "names, so one client covers every MCP server behind it), client_id, "
+            "client_secret, token_endpoint_auth_method (client_secret_post by default, "
+            "client_secret_basic, or none for a public client without a secret), optional "
+            "authorization_endpoint and token_endpoint overrides (public https), and "
+            "send_resource (default true; false leaves the RFC 8707 resource parameter out "
+            "of sign-in and refresh). A sign-in whose authorization server matches an entry "
+            "uses that client instead of registering one. Default: [] (always register)."
+        ),
+    )
+
+    @field_validator("clients")
+    @classmethod
+    def _one_client_per_host(
+        cls, value: list[McpOAuthClientSettings]
+    ) -> list[McpOAuthClientSettings]:
+        hosts = [client.authorization_server_host for client in value]
+        if len(hosts) != len(set(hosts)):
+            raise ValueError("each authorization_server_host may have one client")
+        return value
+
+
 _HUB_SIGNING_KEY_BYTES = 32
 
 
@@ -1620,6 +1695,7 @@ class Settings(BaseSettings):
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
+    mcp_oauth: McpOAuthSettings = Field(default_factory=McpOAuthSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)

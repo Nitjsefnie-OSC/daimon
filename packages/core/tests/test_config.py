@@ -14,6 +14,8 @@ from daimon.core.config import (
     DatabaseSettings,
     DiscordSettings,
     HubSettings,
+    McpOAuthClientSettings,
+    McpOAuthSettings,
     McpSettings,
     Settings,
     SlackSettings,
@@ -273,6 +275,70 @@ def test_mcp_settings_parsed_from_nested_env(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.mcp.jwt_secret is not None
     assert settings.mcp.jwt_secret.get_secret_value() == "a" * 32
     assert str(settings.mcp.public_url) == "https://mcp.example.com/mcp"
+
+
+def test_mcp_oauth_clients_are_empty_unless_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_MCP_OAUTH__CLIENTS", raising=False)
+    assert load_settings(_env_file=None).mcp_oauth.clients == [], (
+        "with no client configured every sign-in registers dynamically"
+    )
+
+
+def test_mcp_oauth_clients_parse_from_a_top_level_json_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv(
+        "DAIMON_MCP_OAUTH__CLIENTS",
+        '[{"authorization_server_host": "Login.Example.com.", "client_id": "cid", '
+        '"client_secret": "sec", "token_endpoint": "https://login.example.com/t1/token", '
+        '"send_resource": false}]',
+    )
+    (client,) = load_settings(_env_file=None).mcp_oauth.clients
+    assert client.authorization_server_host == "login.example.com", "the host is normalised"
+    assert client.client_secret is not None and client.client_secret.get_secret_value() == "sec"
+    assert client.token_endpoint_auth_method == "client_secret_post", "post is the default"
+    assert client.token_endpoint == "https://login.example.com/t1/token"
+    assert client.authorization_endpoint is None and client.send_resource is False
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ({"authorization_server_host": "https://login.example.com"}, "bare host name"),
+        ({"authorization_endpoint": "http://login.example.com/authorize"}, "must be https"),
+        ({"token_endpoint": "https://10.0.0.1/token"}, "non-public address"),
+        ({"client_secret": None}, "client_secret is required"),
+        ({"token_endpoint_auth_method": "none"}, "client_secret is required"),
+    ],
+)
+def test_mcp_oauth_client_rejects_an_unusable_entry(entry: dict[str, object], message: str) -> None:
+    base: dict[str, object] = {
+        "authorization_server_host": "login.example.com",
+        "client_id": "cid",
+        "client_secret": "sec",
+    }
+    with pytest.raises(ValidationError, match=message):
+        McpOAuthClientSettings.model_validate(base | entry)
+
+
+def test_mcp_oauth_client_accepts_a_public_client_without_a_secret() -> None:
+    client = McpOAuthClientSettings(
+        authorization_server_host="login.example.com",
+        client_id="cid",
+        token_endpoint_auth_method="none",
+    )
+    assert client.client_secret is None, "a public client authenticates with no secret"
+
+
+def test_mcp_oauth_settings_refuse_two_clients_for_one_host() -> None:
+    entry = {"authorization_server_host": "login.example.com", "client_id": "cid"}
+    entry |= {"client_secret": "sec"}
+    with pytest.raises(ValidationError, match="one client"):
+        McpOAuthSettings.model_validate({"clients": [entry, entry | {"client_id": "other"}]})
 
 
 def test_mcp_app_root_url_strips_mcp_suffix() -> None:
