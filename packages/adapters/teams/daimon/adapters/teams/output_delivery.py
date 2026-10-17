@@ -135,22 +135,29 @@ def picture_key(filename: str) -> str:
 
 
 def previews_first(filenames: Sequence[str]) -> list[int]:
-    """A 1:1 sweep's order: each preview output just before its document, else in place.
+    """A sweep's order: each preview output just before its document, else in place.
 
     The agent renders a document before picturing it, so the listing may name
     the picture second; the previews then keep the order of the cards below.
+    A picture of `report.pdf` also pairs with `report`, which a mime type saves so.
     """
     documents = {picture_key(name) for name in filenames if not is_preview_output(name)}
+
+    def pictured(name: str) -> str | None:
+        label = preview_label(name)
+        keys = (picture_key(label), picture_key(label.rsplit(".", 1)[0]))
+        return next((key for key in keys if key in documents), None)
+
     held: dict[str, list[int]] = {}
     for index, name in enumerate(filenames):
-        if is_preview_output(name) and (key := picture_key(preview_label(name))) in documents:
+        if is_preview_output(name) and (key := pictured(name)) is not None:
             held.setdefault(key, []).append(index)
     order: list[int] = []
     for index, name in enumerate(filenames):
         if not is_preview_output(name):
             order.extend(held.pop(picture_key(name), []))
             order.append(index)
-        elif picture_key(preview_label(name)) not in documents:
+        elif pictured(name) is None:
             order.append(index)
     return order
 
@@ -287,12 +294,19 @@ class TeamsOutputDelivery:
         )
 
     async def sweep(
-        self, inbound: TeamsInbound, session_id: str, *, append: AppendToAnswer | None = None
+        self,
+        inbound: TeamsInbound,
+        session_id: str,
+        *,
+        append: AppendToAnswer | None = None,
+        quiet_s: float | None = None,
     ) -> None:
         """Deliver the session's outputs. Chained per session: two sweeps never overlap.
 
-        `append` puts file links and previews below the turn's answer.
+        `append` puts file links and previews below the turn's answer. `quiet_s`:
+        seconds since the turn's last tool call ended, which shortens the listing's settle.
         """
+        started = self._clock()
         previous = self._sweeps.get(session_id)
         current = asyncio.current_task()
         if current is not None:
@@ -301,8 +315,10 @@ class TeamsOutputDelivery:
             if previous is not None:
                 with contextlib.suppress(Exception):
                     await previous
+            if quiet_s is not None:
+                quiet_s += self._clock() - started
             if inbound.kind != "dm":  # a group chat has no files: each is skipped
-                await self._sweep_channel(inbound, session_id, append)
+                await self._sweep_channel(inbound, session_id, append, quiet_s)
                 return
             previews: list[Attachment] = []
             await sweep_session_outputs(
@@ -312,6 +328,7 @@ class TeamsOutputDelivery:
                 on_skip=_log_skip,
                 sleep=self._sleep,
                 order=previews_first,
+                quiet_s=quiet_s,
             )
             # In the answer, above the consent cards; else one message each.
             inline = previews[:MAX_PREVIEWS]
@@ -345,17 +362,21 @@ class TeamsOutputDelivery:
         return await self._preview(preview_label(file.filename), file.content, mime_type)
 
     async def _sweep_channel(
-        self, inbound: TeamsInbound, session_id: str, append: AppendToAnswer | None
+        self,
+        inbound: TeamsInbound,
+        session_id: str,
+        append: AppendToAnswer | None,
+        quiet_s: float | None,
     ) -> None:
         files = self._files
         if files is None or not await files.is_available(inbound):
-            await self._sweep_unsaved(inbound, session_id)
+            await self._sweep_unsaved(inbound, session_id, quiet_s)
             return
         links: list[str] = []
         previews: list[Attachment] = []
-        # Uploaded documents, by the name asked for, whose first page is looked up once
-        # every file is in; one the agent made a preview output of needs none.
-        documents: list[tuple[set[str], DriveItem]] = []
+        # Uploaded documents, by the name asked for, each with its first-page lookup,
+        # started at the upload; one the agent made a preview output of needs none.
+        documents: list[asyncio.Task[Attachment | None]] = []
         pictured: set[str] = set()
 
         async def upload(file: DeliverableFile) -> None:
@@ -398,26 +419,33 @@ class TeamsOutputDelivery:
                 and (item.name or name).lower().endswith(THUMBNAIL_SUFFIXES)
             ):
                 # The name asked for, or as saved: a mime type may have added an extension.
-                documents.append(({picture_key(file.filename), picture_key(name)}, item))
+                keys = {picture_key(file.filename), picture_key(name)}
+                if not keys & pictured:  # Its preview output, if any, went first.
+                    documents.append(asyncio.create_task(self._thumbnail(files, item)))
 
-        await sweep_session_outputs(
-            self._runtime.anthropic,
-            session_id=session_id,
-            post=upload,
-            on_skip=_log_skip,
-            sleep=self._sleep,
-        )
-        # Links and images in one edit of the answer; refused, each goes as on its own.
-        text = "\n".join(links)
-        if not links:
-            await self._show_previews(inbound, previews, append)
-        elif not (previews and append is not None and await append(text, previews)):
-            await self._post_links(inbound, text, append)
-            await self._send_previews(inbound, previews)
-        # Images first, as they are ready: a thumbnail may take seconds or never come,
-        # so documents get an edit of their own rather than images' places.
-        unpictured = [item for keys, item in documents if not keys & pictured]
-        await self._show_previews(inbound, await self._thumbnails(files, unpictured), append)
+        try:
+            await sweep_session_outputs(
+                self._runtime.anthropic,
+                session_id=session_id,
+                post=upload,
+                on_skip=_log_skip,
+                sleep=self._sleep,
+                order=previews_first,
+                quiet_s=quiet_s,
+            )
+            # Links and images in one edit of the answer; refused, each goes as on its own.
+            text = "\n".join(links)
+            if not links:
+                await self._show_previews(inbound, previews, append)
+            elif not (previews and append is not None and await append(text, previews)):
+                await self._post_links(inbound, text, append)
+                await self._send_previews(inbound, previews)
+            # Images first, as they are ready: a thumbnail may take seconds or never come,
+            # so documents get an edit of their own rather than images' places.
+            await self._show_previews(inbound, await self._thumbnails(documents), append)
+        finally:  # Cancelled or failed, no lookup outlives the sweep.
+            for task in documents:
+                task.cancel()
 
     async def _show_previews(
         self, inbound: TeamsInbound, previews: list[Attachment], append: AppendToAnswer | None
@@ -427,7 +455,9 @@ class TeamsOutputDelivery:
             return
         await self._send_previews(inbound, previews)
 
-    async def _sweep_unsaved(self, inbound: TeamsInbound, session_id: str) -> None:
+    async def _sweep_unsaved(
+        self, inbound: TeamsInbound, session_id: str, quiet_s: float | None
+    ) -> None:
         """A channel or group chat whose files cannot be saved: every file takes the skip path.
 
         A skipped file is logged, then deleted if it fits the cap; one over it
@@ -441,25 +471,20 @@ class TeamsOutputDelivery:
             sleep=self._sleep,
             max_bytes=0,
             discard_skipped_up_to=MAX_BYTES_PER_FILE,
+            quiet_s=quiet_s,
         )
 
-    async def _thumbnails(
-        self, files: ChannelFiles, documents: list[DriveItem]
-    ) -> list[Attachment]:
-        """The first-page thumbnails of `documents` that came within the budget, in order."""
-        thumbnails: dict[int, Attachment] = {}
-
-        async def fetch(index: int, item: DriveItem) -> None:
-            if (thumbnail := await self._thumbnail(files, item)) is not None:
-                thumbnails[index] = thumbnail
-
-        if documents:
-            try:
-                async with asyncio.timeout(THUMBNAIL_BUDGET_S):
-                    await asyncio.gather(*(fetch(n, item) for n, item in enumerate(documents)))
-            except TimeoutError:
-                log.info("teams.output_thumbnail.skipped", reason="timed_out")
-        return [thumbnails[index] for index in sorted(thumbnails)]
+    async def _thumbnails(self, lookups: list[asyncio.Task[Attachment | None]]) -> list[Attachment]:
+        """The first-page thumbnails that came within the budget, in order."""
+        if not lookups:
+            return []
+        done, pending = await asyncio.wait(lookups, timeout=THUMBNAIL_BUDGET_S)
+        if pending:
+            log.info("teams.output_thumbnail.skipped", reason="timed_out")
+        for task in pending:
+            task.cancel()
+        found = [task.result() for task in lookups if task in done and task.exception() is None]
+        return [thumbnail for thumbnail in found if thumbnail is not None]
 
     async def _thumbnail(self, files: ChannelFiles, item: DriveItem) -> Attachment | None:
         """Graph's first-page thumbnail of an uploaded document, re-encoded as a preview.

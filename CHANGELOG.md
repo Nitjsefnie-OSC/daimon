@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer are a plain list, without the "Saved to this channel's files"
   heading.
 
+- **The Teams feedback card comes after the files.** After a turn that
+  wrote output files, the 👍/👎 and Ask a person card waits for their
+  links and previews, so it stays the last message. Delivery starts
+  sooner: the listing wait counts from the turn's last tool call, and
+  document thumbnails are requested as each file uploads.
+
 - **Teams output previews show inside the answer.** Image previews and
   document first pages go into the answer's last message as markdown images
   after its text and file links, instead of following it as separate

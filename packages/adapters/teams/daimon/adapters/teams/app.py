@@ -194,6 +194,8 @@ _RECOVERY_RETRY_DELAY_S = 1.0
 # A turn's output sweep polls the listing for up to 14 s, then uploads: 15 s cut a
 # sweep that began 14 s before a deploy's SIGTERM. Within the documented 90 s grace.
 DRAIN_GRACE_S = 60.0
+# The controls card waits this long at most for the output sweep it goes below.
+CONTROLS_WAIT_S = 30.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
@@ -292,6 +294,15 @@ def _admission_refusal(
     return admission_refusal_text(err.reason, TEAMS_REFUSAL_NOUNS, in_dm=in_dm)
 
 
+async def _controls_after(sweep: asyncio.Task[None], lifecycle: TeamsTurnLifecycle) -> None:
+    """The turn's controls below whatever its output sweep posts, or after CONTROLS_WAIT_S."""
+    try:
+        with contextlib.suppress(Exception):  # The sweep logs its own failure.
+            await asyncio.wait_for(asyncio.shield(sweep), CONTROLS_WAIT_S)
+    finally:  # A drain's cancel too: the answer landed, so do they.
+        await lifecycle.release_controls()
+
+
 def _agent_name_prefix(
     *, enabled: bool, name: str, metadata: Mapping[str, str] | None, default_name: str | None
 ) -> str | None:
@@ -368,6 +379,9 @@ class TeamsApp:
         self.provider_actions = TeamsProviderActions(self._sender, feed=feed)
         self._processing: set[str] = set()
         self._pending: dict[str, list[TeamsInbound]] = {}
+        # Controls held for a turn's output sweep, by conversation: the next turn
+        # there posts them before its own card.
+        self._held_controls: dict[str, TeamsTurnLifecycle] = {}
         # Per-tenant turn slots, with the queue a turn waits in at the cap.
         self.turn_queue = TurnQueue.from_settings(runtime.settings.turn_queue, platform="teams")
         # cancel_key (the card intent id) -> (cancel Event, author's Entra id).
@@ -1271,6 +1285,8 @@ class TeamsApp:
         One slot per turn: when it ends, the next turn in the chat (a drained
         follow-up or a continuation) re-enters admission (`wait_for_slot`).
         """
+        if (held := self._held_controls.pop(inbound.conversation_id, None)) is not None:
+            await held.release_controls()  # The last turn's, its sweep still going.
         try:
             with observe_turn(
                 self.runtime.sessionmaker,
@@ -1395,6 +1411,7 @@ class TeamsApp:
                 budget_channel_id=admission.budget_channel_id,
                 acknowledge=None if continuation else self._reactions.acknowledger(inbound),
                 roster_open=roster_open,
+                hold_controls=True,
             )
             holder.append(attempt)
             return attempt
@@ -1472,6 +1489,7 @@ class TeamsApp:
                 )
                 capture_exception_with_scope(exc)
                 await holder[-1].close_with_notice(_FAILED)
+                await holder[-1].release_controls()  # An answer that landed keeps its own.
                 if reraise:
                     raise
         finally:
@@ -1672,11 +1690,22 @@ class TeamsApp:
             )
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
-        if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
-            append = holder[-1].append_to_answer
-            sweep = self.outputs.sweep(inbound, outcome.ma_session_id, append=append)
-            self.spawn(sweep, name="teams.output-sweep")
         final = holder[-1]
+        if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
+            sweep = self.outputs.sweep(
+                inbound,
+                outcome.ma_session_id,
+                append=final.append_to_answer,
+                quiet_s=final.outputs_quiet_s(),
+            )
+            swept = self.spawn(sweep, name="teams.output-sweep")
+            self._held_controls[inbound.conversation_id] = final
+            controls = self.spawn(_controls_after(swept, final), name="teams.turn-controls")
+            controls.add_done_callback(
+                functools.partial(self._forget_controls, inbound.conversation_id, final)
+            )
+        else:
+            await final.release_controls()
         if outcome.continuity.state == "replaced_after_loss":
             kind: Literal["transcript", "history"] = (
                 "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
@@ -1698,6 +1727,12 @@ class TeamsApp:
         if prepared.continuity.pending:
             # The change was saved where it was made; the next turn applies it.
             log.info("teams.turn.change_pending", reasons=prepared.continuity.pending)
+
+    def _forget_controls(
+        self, conversation_id: str, lifecycle: TeamsTurnLifecycle, _: asyncio.Task[None]
+    ) -> None:
+        if self._held_controls.get(conversation_id) is lifecycle:
+            del self._held_controls[conversation_id]
 
     async def _files_reachable(self, inbound: TeamsInbound) -> bool | None:
         if inbound.kind != "channel":

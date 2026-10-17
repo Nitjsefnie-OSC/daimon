@@ -326,6 +326,64 @@ async def test_a_drain_waits_for_an_output_sweep_spawned_while_it_runs(
     assert delivered.is_set(), "the sweep spawned during the drain ran to the end"
 
 
+async def test_the_controls_follow_the_sweep_or_its_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finished, failed or overdue, the sweep is followed by the controls; never cut short."""
+    monkeypatch.setattr(app_module, "CONTROLS_WAIT_S", 0.05)
+    events: list[str] = []
+    lifecycle: Any = SimpleNamespace(
+        release_controls=AsyncMock(side_effect=lambda: events.append("controls"))
+    )
+
+    async def sweep(outcome: str, delay: float) -> None:
+        await asyncio.sleep(delay)
+        events.append(outcome)
+        if outcome == "failed":
+            raise RuntimeError("Graph is down")
+
+    for outcome, delay in (("swept", 0.0), ("failed", 0.0)):
+        task = asyncio.create_task(sweep(outcome, delay))
+        await app_module._controls_after(task, lifecycle)
+    slow = asyncio.create_task(sweep("late", 0.1))
+    await app_module._controls_after(slow, lifecycle)
+    await slow
+    assert events == ["swept", "controls", "failed", "controls", "controls", "late"]
+
+    monkeypatch.setattr(app_module, "CONTROLS_WAIT_S", 30.0)
+    stuck = asyncio.create_task(sweep("never", 3600))
+    waiting = asyncio.create_task(app_module._controls_after(stuck, lifecycle))
+    await asyncio.sleep(0)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    stuck.cancel()
+    assert events[-1] == "controls", "a drain's cancel still posts them"
+
+
+async def test_the_next_turn_in_a_chat_posts_the_held_controls_first(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A follow-up's card never lands above the last turn's controls."""
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+    )
+    events: list[str] = []
+    held: Any = SimpleNamespace(
+        release_controls=AsyncMock(side_effect=lambda: events.append("controls"))
+    )
+    teams._held_controls[CONVERSATION_ID] = held
+    with patch.object(
+        teams, "_run_turn_observed", AsyncMock(side_effect=lambda *a, **k: events.append("turn"))
+    ):
+        await teams._run_turn(make_inbound(), TENANT)
+        await teams._run_turn(make_inbound(), TENANT)
+    assert events == ["controls", "turn", "turn"], "posted once, before the next turn"
+
+
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_mention_drops_the_threads_waiting_batch_only_once_its_turn_runs(
     db_session_factory: async_sessionmaker[AsyncSession],
