@@ -374,6 +374,45 @@ async def find_workspace_disposable_sentinel(
     return None
 
 
+def _lane_workspace_port(client: AsyncAnthropic) -> tuple[CoreAdmin, Scope]:
+    scope = Scope.platform(
+        reason="lane workspace ownership: explicit operator check, enumerates all tenants"
+    )
+    backend = managed_agents(client, scope=scope)
+    return backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1), scope
+
+
+async def list_workspace_agents_for_lane(
+    client: AsyncAnthropic, *, include_archived: bool = False
+) -> list[BetaManagedAgentsAgent]:
+    """Every agent in the workspace behind this key, for the lane ownership check."""
+    port, scope = _lane_workspace_port(client)
+    return [
+        construct_type_unchecked(value=record, type_=BetaManagedAgentsAgent)
+        async for record in legacy_iter(
+            port.workspace_agents(scope, include_archived=include_archived)
+        )
+    ]
+
+
+async def workspace_has_resources_for_lane(client: AsyncAnthropic) -> bool:
+    """True when the workspace holds any environment, vault or memory store, archived included."""
+    port, scope = _lane_workspace_port(client)
+    return await legacy_call(port.workspace_has_resources(scope))
+
+
+async def create_lane_marker_agent(
+    client: AsyncAnthropic, *, name: str, description: str, model: str, metadata: dict[str, str]
+) -> None:
+    """Create the idle agent that marks a workspace as owned by one dev lane."""
+    port, scope = _lane_workspace_port(client)
+    await legacy_call(
+        port.create_workspace_agent(
+            scope, name=name, description=description, model=model, metadata=metadata
+        )
+    )
+
+
 async def delete_entire_workspace_for_testing(
     client: AsyncAnthropic, *, i_understand_this_destroys_all_tenants: bool = False
 ) -> None:

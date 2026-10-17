@@ -15,7 +15,12 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_WORKSPACE,
     MA_METADATA_VALUE_WORKSPACE_DISPOSABLE,
 )
-from daimon.core.ma import delete_entire_workspace_for_testing
+from daimon.core.ma import (
+    create_lane_marker_agent,
+    delete_entire_workspace_for_testing,
+    list_workspace_agents_for_lane,
+    workspace_has_resources_for_lane,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -51,7 +56,8 @@ def _is_marker(agent: object, name: str) -> bool:
 async def _create_marker(client: AsyncAnthropic, name: str) -> None:
     # An idle agent costs no session and doubles as the existing cleanup helper's
     # disposable sentinel. The helper leaves one such agent in place.
-    await client.beta.agents.create(
+    await create_lane_marker_agent(
+        client,
         model="claude-haiku-5-5",
         name=name,
         description="Ownership marker for a disposable dev lane workspace.",
@@ -64,20 +70,15 @@ async def check_workspace(client: AsyncAnthropic, lane_environment: str) -> None
     if require_lane_environment() != lane_environment:
         raise RuntimeError("workspace lane does not match DAIMON_ENVIRONMENT__NAME")
     name = _marker_name(lane_environment)
-    agents = [agent async for agent in client.beta.agents.list(limit=100, include_archived=True)]
+    agents = await list_workspace_agents_for_lane(client, include_archived=True)
     if any(_is_marker(agent, name) for agent in agents):
         return
 
     refused = WorkspaceNotOwned(f"workspace not owned by {lane_environment}; refusing")
     if agents:
         raise refused
-    for resource in (
-        client.beta.environments,
-        client.beta.vaults,
-        client.beta.memory_stores,
-    ):
-        async for _ in resource.list(limit=100, include_archived=True):
-            raise refused
+    if await workspace_has_resources_for_lane(client):
+        raise refused
     # Built-in Anthropic skills do not belong to a customer workspace. Custom
     # skills are deleted by the cleanup helper, so they must block first claim.
     if any(skill.source == "custom" for skill in await list_skills_strict(client)):
@@ -90,7 +91,7 @@ async def wipe_workspace(client: AsyncAnthropic, lane_environment: str) -> None:
     await check_workspace(client, lane_environment)
     await delete_entire_workspace_for_testing(client, i_understand_this_destroys_all_tenants=True)
     name = _marker_name(lane_environment)
-    remaining = [agent async for agent in client.beta.agents.list(limit=100)]
+    remaining = await list_workspace_agents_for_lane(client)
     if not any(_is_marker(agent, name) for agent in remaining):
         await _create_marker(client, name)
 

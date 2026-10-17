@@ -58,6 +58,10 @@ jobs:
       REGION: ${{ vars.LANES_REGION }}
       ZONE: ${{ vars.LANES_ZONE }}
       HOST: ${{ vars.LANES_HOST }}
+      # gcloud ssh below takes neither --project nor --quiet: the workflow SSH
+      # guard (tests/test_deploy_workflow_quotes.py) fixes its argument shape.
+      CLOUDSDK_CORE_PROJECT: ${{ vars.LANES_PROJECT }}
+      CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
       ACTOR: ${{ github.actor }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -102,8 +106,12 @@ jobs:
           remote="/tmp/daimon-lane-${LANE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.yml"
           # Install the host CLI version that infra last applied to VM metadata.
           refresh='curl -fsS -H Metadata-Flavor:Google http://metadata.google.internal/computeMetadata/v1/instance/attributes/lane-script -o /tmp/lane.new && sudo install -m 0755 /tmp/lane.new /usr/local/bin/lane'
-          gcloud compute ssh "$HOST" --project="$PROJECT" --zone="$ZONE" \
-            --tunnel-through-iap --quiet --command="$refresh" >/dev/null 2>&1
+          # Redirects stay at the call sites so the SSH line keeps the guarded shape.
+          lane_ssh() {
+            gcloud compute ssh ${{ vars.LANES_HOST }} --zone "$ZONE" \
+              --tunnel-through-iap --command="$1"
+          }
+          lane_ssh "$refresh" >/dev/null 2>&1
           if [[ "$ACTION" == deploy ]]; then
             gcloud compute scp deploy/lanes/compose.lane.yml "$HOST:$remote" \
               --project="$PROJECT" --zone="$ZONE" --tunnel-through-iap --quiet
@@ -114,8 +122,7 @@ jobs:
           fi
           # The host owns full deployment logs. This public workflow prints no
           # remote output, including failure output from older host CLI versions.
-          if ! gcloud compute ssh "$HOST" --project="$PROJECT" --zone="$ZONE" \
-            --tunnel-through-iap --quiet --command="$command" >/dev/null 2>"$RUNNER_TEMP/lane.err"; then
+          if ! lane_ssh "$command" >/dev/null 2>"$RUNNER_TEMP/lane.err"; then
             # Only the host CLI's fixed-format messages are safe to show here.
             grep -E '^(missing enabled secret version: lane-[a-z0-9-]+|secret access failed: lane-[a-z0-9-]+|unknown lane: [a-z0-9-]+|lane [a-z0-9-]+ is busy|no recorded deployment|invalid sha|image does not match lane and SHA|service=[a-z0-9_-]+ state=[a-z]+ exit=[0-9-]+ restarts=[0-9]+)$' \
               "$RUNNER_TEMP/lane.err" >&2 || true
@@ -127,8 +134,11 @@ jobs:
         run: |
           set -euo pipefail
           printf -v command '%q ' sudo lane status "$LANE" --json
-          raw=$(gcloud compute ssh "$HOST" --project="$PROJECT" --zone="$ZONE" \
-            --tunnel-through-iap --quiet --command="$command" 2>/dev/null) || raw='{}'
+          lane_ssh() {
+            gcloud compute ssh ${{ vars.LANES_HOST }} --zone "$ZONE" \
+              --tunnel-through-iap --command="$1"
+          }
+          raw=$(lane_ssh "$command" 2>/dev/null) || raw='{}'
           # State JSON also carries run_url and other metadata; allow only the
           # fields approved for public Actions summaries.
           safe=$(jq -ce '{sha: (.sha // ""), image: (.image // ""),
