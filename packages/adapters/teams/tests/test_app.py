@@ -326,6 +326,31 @@ async def test_a_drain_waits_for_an_output_sweep_spawned_while_it_runs(
     assert delivered.is_set(), "the sweep spawned during the drain ran to the end"
 
 
+async def test_the_controls_follow_the_sweep_or_its_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finished, failed or overdue, the sweep is followed by the controls; never cut short."""
+    monkeypatch.setattr(app_module, "CONTROLS_WAIT_S", 0.05)
+    events: list[str] = []
+    lifecycle: Any = SimpleNamespace(
+        release_controls=AsyncMock(side_effect=lambda: events.append("controls"))
+    )
+
+    async def sweep(outcome: str, delay: float) -> None:
+        await asyncio.sleep(delay)
+        events.append(outcome)
+        if outcome == "failed":
+            raise RuntimeError("Graph is down")
+
+    for outcome, delay in (("swept", 0.0), ("failed", 0.0)):
+        task = asyncio.create_task(sweep(outcome, delay))
+        await app_module._controls_after(task, lifecycle)
+    slow = asyncio.create_task(sweep("late", 0.1))
+    await app_module._controls_after(slow, lifecycle)
+    await slow
+    assert events == ["swept", "controls", "failed", "controls", "controls", "late"]
+
+
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_mention_drops_the_threads_waiting_batch_only_once_its_turn_runs(
     db_session_factory: async_sessionmaker[AsyncSession],

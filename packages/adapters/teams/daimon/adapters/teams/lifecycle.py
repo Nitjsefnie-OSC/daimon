@@ -120,6 +120,13 @@ def retry_hint(text: str, *, direct_chat: bool) -> str:
     return text.replace("Mention me to try again.", "Send a message to try again.")
 
 
+def _may_have_outputs(state: TurnState) -> bool:
+    """A tool call of the turn names the outputs folder: the sweep may post files."""
+    return any(
+        isinstance(block, ToolUseBlock) and "outputs" in str(block.input) for block in state.content
+    )
+
+
 class TeamsTurnLifecycle:
     """Implements `daimon.core.turn.lifecycle.TurnLifecycle`. One per turn attempt."""
 
@@ -149,8 +156,17 @@ class TeamsTurnLifecycle:
         on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         acknowledge: Callable[[Acknowledgment], None] | None = None,
         roster_open: Callable[[bool], Awaitable[bool]] | None = None,
+        hold_controls: bool = False,
     ) -> None:
         self._sender = sender
+        # The caller posts the controls after the output sweep (`release_controls`),
+        # so they land below every file it posts; only for a turn that may have outputs.
+        self._hold_controls = hold_controls
+        self._held_controls: MessageActivityInput | None = None
+        # When the turn's last tool call ended: every output was written before it.
+        self._finished_tools = 0
+        self._tool_done_at: float | None = None
+        self._tool_open = False
         # A group chat's `group_chats.turn_guard`: False withholds all the turn's work.
         self._roster_open = roster_open
         self._withheld = False
@@ -282,6 +298,7 @@ class TeamsTurnLifecycle:
             )
 
     async def on_render(self, state: TurnState) -> None:
+        self._note_tools(state)
         if self._terminal or self._message_id is None:
             return
         self._state = card.on_activity(self._state, state)
@@ -292,6 +309,21 @@ class TeamsTurnLifecycle:
         if (self._state.draft or self._state.tool_lines) and await self._withhold(fresh=False):
             return
         await self._send(self._status(), message_id=self._message_id)
+
+    def _note_tools(self, state: TurnState) -> None:
+        finished = state.finished_tool_ids
+        if len(finished) > self._finished_tools:
+            self._finished_tools = len(finished)
+            self._tool_done_at = self._clock()
+        self._tool_open = any(
+            isinstance(block, ToolUseBlock) and block.id not in finished for block in state.content
+        )
+
+    def outputs_quiet_s(self) -> float | None:
+        """Seconds since the turn's last tool call ended; None when none did or one is open."""
+        if self._tool_done_at is None or self._tool_open:
+            return None
+        return self._clock() - self._tool_done_at
 
     async def _withhold(self, *, fresh: bool) -> bool:
         """True once the group chat holds an outsider: the card then says only that."""
@@ -394,6 +426,7 @@ class TeamsTurnLifecycle:
         ran and billed. `final_message_id` stays None so the watermark cannot
         pass an answer nobody saw.
         """
+        self._note_tools(state)
         if await self._withhold(fresh=True):  # the roster is read afresh before any answer
             return
         self._terminal = True
@@ -443,7 +476,7 @@ class TeamsTurnLifecycle:
             self.final_message_id = current
             if fresh:  # retire before the best-effort controls so a lost post can't strand it
                 await self._retire_card()
-            await self._post_controls(state)
+            await self._post_controls(state, hold=self._hold_controls and _may_have_outputs(state))
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
@@ -468,12 +501,27 @@ class TeamsTurnLifecycle:
                 await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
 
-    async def _post_controls(self, state: TurnState) -> None:
-        """The summary line, Ask a human and 👍/👎 below the answer; best effort, it landed."""
+    async def _post_controls(self, state: TurnState, *, hold: bool = False) -> None:
+        """The summary line, Ask a human and 👍/👎 below the answer; best effort, it landed.
+
+        `hold` keeps them for `release_controls`, timed as the turn ended.
+        """
+        named = self._agent_name_prefix is not None
+        summary = await self._summary(state, named_above=named)
+        controls = card.controls_card(summary, ask_human=self._ask_human)
+        if hold:
+            self._held_controls = controls
+        else:
+            await self._send_controls(controls)
+
+    async def release_controls(self) -> None:
+        """Post the controls held for the output sweep, once; a no-op when none are."""
+        if (controls := self._held_controls) is not None:
+            self._held_controls = None
+            await self._send_controls(controls)
+
+    async def _send_controls(self, controls: MessageActivityInput) -> None:
         try:
-            named = self._agent_name_prefix is not None
-            summary = await self._summary(state, named_above=named)
-            controls = card.controls_card(summary, ask_human=self._ask_human)
             await self._send(controls, message_id=None)
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.controls_failed", exc_info=True)

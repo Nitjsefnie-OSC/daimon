@@ -95,6 +95,53 @@ async def test_sweep_posts_file_when_it_first_appears_on_second_poll() -> None:
     assert delays == [2.0, 4.0], "settle floor must force the confirming t=6 poll before concluding"
 
 
+@pytest.mark.parametrize(
+    ("quiet_s", "files", "expected"),
+    [
+        (0.0, 1, [6.0]),
+        (5.0, 1, [2.0]),
+        (9.0, 1, [2.0]),
+        (9.0, 0, []),
+    ],
+)
+async def test_quiet_time_counts_toward_the_settle_floor(
+    quiet_s: float, files: int, expected: list[float]
+) -> None:
+    """Time since the last tool call counts; a new file still needs a confirming poll."""
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    row = FileMetadata(
+        id="file_a",
+        created_at=NOW,
+        filename="a.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        type="file",
+        downloadable=True,
+    ).model_dump(mode="json")
+    router = MARouter()
+    router.add("GET", r"/v1/files", lambda request, match: list_response([row] * files))
+    router.add("GET", r"/v1/files/([^/]+)/content", lambda r, m: httpx.Response(200, content=b"a"))
+    router.add(
+        "DELETE",
+        r"/v1/files/([^/]+)",
+        lambda r, m: httpx.Response(200, json={"id": m.group(1), "type": "file_deleted"}),
+    )
+
+    async def post(file: DeliverableFile) -> None:
+        pass
+
+    client = build_fake_anthropic(router.dispatch)
+    count = await sweep_session_outputs(
+        client, session_id="sesn_1", post=post, sleep=sleep, quiet_s=quiet_s
+    )
+
+    assert count == files and delays == expected
+
+
 async def test_sweep_catches_straggler_when_new_file_appears_at_settle_floor() -> None:
     """A file first appearing in the t=6 poll extends the schedule to t=14 and
     both files are posted."""

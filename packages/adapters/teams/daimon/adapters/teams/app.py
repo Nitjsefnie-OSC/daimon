@@ -194,6 +194,8 @@ _RECOVERY_RETRY_DELAY_S = 1.0
 # A turn's output sweep polls the listing for up to 14 s, then uploads: 15 s cut a
 # sweep that began 14 s before a deploy's SIGTERM. Within the documented 90 s grace.
 DRAIN_GRACE_S = 60.0
+# The controls card waits this long at most for the output sweep it goes below.
+CONTROLS_WAIT_S = 30.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
@@ -290,6 +292,13 @@ def _admission_refusal(
     if err.reason == "writers_none":
         return None
     return admission_refusal_text(err.reason, TEAMS_REFUSAL_NOUNS, in_dm=in_dm)
+
+
+async def _controls_after(sweep: asyncio.Task[None], lifecycle: TeamsTurnLifecycle) -> None:
+    """The turn's controls below whatever its output sweep posts, or after CONTROLS_WAIT_S."""
+    with contextlib.suppress(Exception):  # The sweep logs its own failure.
+        await asyncio.wait_for(asyncio.shield(sweep), CONTROLS_WAIT_S)
+    await lifecycle.release_controls()
 
 
 def _agent_name_prefix(
@@ -1395,6 +1404,7 @@ class TeamsApp:
                 budget_channel_id=admission.budget_channel_id,
                 acknowledge=None if continuation else self._reactions.acknowledger(inbound),
                 roster_open=roster_open,
+                hold_controls=True,
             )
             holder.append(attempt)
             return attempt
@@ -1672,11 +1682,18 @@ class TeamsApp:
             )
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
-        if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
-            append = holder[-1].append_to_answer
-            sweep = self.outputs.sweep(inbound, outcome.ma_session_id, append=append)
-            self.spawn(sweep, name="teams.output-sweep")
         final = holder[-1]
+        if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
+            sweep = self.outputs.sweep(
+                inbound,
+                outcome.ma_session_id,
+                append=final.append_to_answer,
+                quiet_s=final.outputs_quiet_s(),
+            )
+            swept = self.spawn(sweep, name="teams.output-sweep")
+            self.spawn(_controls_after(swept, final), name="teams.turn-controls")
+        else:
+            await final.release_controls()
         if outcome.continuity.state == "replaced_after_loss":
             kind: Literal["transcript", "history"] = (
                 "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"

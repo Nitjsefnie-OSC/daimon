@@ -721,6 +721,50 @@ async def test_a_lost_controls_card_leaves_the_answer_as_delivered() -> None:
     assert lifecycle.final_message_id == sender.activities[1].id, "the answer counts as seen"
 
 
+def _wrote(command: str, *, done: bool = True) -> TurnState:
+    bash = ToolUseBlock(
+        kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={"command": command}
+    )
+    finished = ("t1",) if done else ()
+    return TurnState(
+        content=[bash, TextBlock(kind="text", text="Made it.")], finished_tool_ids=finished
+    )
+
+
+async def test_held_controls_wait_for_their_release_and_post_once() -> None:
+    """A turn that wrote to the outputs folder: the controls follow the sweep's files."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender, hold_controls=True)
+    await lifecycle.on_terminal_success(_wrote("python plot.py > /mnt/session/outputs/a.png"))
+    assert len(sender.activities) == 2 and not _rated(sender.activities[-1]), "answer only"
+
+    await lifecycle.release_controls()
+    await lifecycle.release_controls()
+    assert len(sender.activities) == 3 and _rated(sender.activities[-1]), "then once, below"
+
+
+async def test_a_turn_that_wrote_no_outputs_posts_its_controls_at_once() -> None:
+    sender = FakeSender()
+    lifecycle = await _posted(sender, hold_controls=True)
+    await lifecycle.on_terminal_success(_wrote("ls /tmp"))
+    assert _rated(sender.activities[-1]), "nothing to wait for"
+    await lifecycle.release_controls()
+    assert len(sender.activities) == 3, "the release posts nothing more"
+
+
+async def test_outputs_quiet_time_runs_from_the_last_finished_tool_call() -> None:
+    sender, clock = FakeSender(), Clock()
+    lifecycle = await _posted(sender, clock)
+    assert lifecycle.outputs_quiet_s() is None, "no tool call ended"
+    await lifecycle.on_render(_wrote("ls"))
+    clock.now += 3
+    assert lifecycle.outputs_quiet_s() == 3.0
+    await lifecycle.on_render(_wrote("ls"))
+    assert lifecycle.outputs_quiet_s() == 3.0, "the same call ending again restarts nothing"
+    await lifecycle.on_render(_wrote("ls", done=False))
+    assert lifecycle.outputs_quiet_s() is None, "an open call may still be writing"
+
+
 async def test_with_support_on_a_one_part_answer_and_its_edits_are_ones_teams_takes() -> None:
     """Production's shape: one part, edited in place, then amended by later notices."""
     sender = FakeSender()
