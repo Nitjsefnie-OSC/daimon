@@ -164,7 +164,9 @@ def test_deploy_workflow_remote_scripts() -> None:
     scripts = 0
     for workflow in sorted((*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml"))):
         scripts += _check_workflow(workflow.name, workflow.read_text())
-    assert scripts == 4, f"expected exactly 4 remote scripts, found {scripts}"
+    # deploy.yml has 4 inline payloads; lane.yml has 2 `lane_ssh` wrappers that each
+    # forward one shell variable as the single --command argument.
+    assert scripts == 6, f"expected exactly 6 remote scripts, found {scripts}"
 
 
 @pytest.mark.parametrize(
