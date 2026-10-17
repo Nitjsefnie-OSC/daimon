@@ -460,7 +460,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         repo_name: str | None = None,
         confirmed: bool = False,
     ) -> ConnectResult:
-        """Give an agent access to a private GitHub repo through the GitHub App.
+        """Give this agent token access to more repos, such as a private GitHub repo.
 
         Use this when someone asks to let an agent read a private repository
         at github.com/owner/repo. Show a single-use
