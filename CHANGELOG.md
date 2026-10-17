@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owners. Guest owners no longer count for channel-admin team grants
   (`role_ids`) either.
 
+- **Agents no longer narrate file delivery.** The file guidance tells the
+  agent to say what it made and name each file, and to explain where files
+  go only when asked, so answers stop saying files "should be" in the Files
+  tab or asking to be told when one is missing. Teams file links below an
+  answer are a plain list, without the "Saved to this channel's files"
+  heading.
+
 - **Teams output previews show inside the answer.** Image previews and
   document first pages go into the answer's last message as markdown images
   after its text and file links, instead of following it as separate

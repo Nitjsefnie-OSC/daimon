@@ -168,10 +168,6 @@ class SharePoint:
         return False
 
 
-# Heads the saved-file links daimon adds below an answer; history replay strips it.
-SAVED_FILES_HEADING = "Saved to this channel's files:"
-
-
 def file_link(name: str, web_url: str | None) -> str:
     """A markdown list line for a saved file, linked only when its URL is on SharePoint."""
     label = name.replace("[", "\\[").replace("]", "\\]")

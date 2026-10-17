@@ -209,7 +209,7 @@ async def test_a_channel_reply_replays_the_thread_inlines_the_image_and_explains
 
     message = turn["user_message"]
     assert 'files="unavailable" files_hint=' in message, "the agent is told files do not work"
-    assert "must grant daimon's app the Files.ReadWrite.All" in message, (
+    assert "grants daimon's app the Files.ReadWrite.All" in message, (
         "the hint names the permission an admin must grant"
     )
     assert '<thread_history source="teams" trust="untrusted">' in message

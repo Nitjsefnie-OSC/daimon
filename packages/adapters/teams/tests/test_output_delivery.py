@@ -476,7 +476,7 @@ async def test_channel_outputs_are_uploaded_and_linked_below_the_answer(
     base = "https://example.sharepoint.com/sites/team/Shared%20Documents/Q3%20%28plan%29"
     assert answer.edits == [
         (
-            f"Saved to this channel's files:\n- [data.csv]({base}/data.csv)\n- [b.csv]({base}/b.csv)",
+            f"- [data.csv]({base}/data.csv)\n- [b.csv]({base}/b.csv)",
             [],
         )
     ], "one block of links, parentheses escaped so the markdown link holds"
@@ -652,7 +652,7 @@ async def test_neutral_graph_upload_preserves_bytes_and_appends_actual_link(
     )
     assert len(puts) == 1 and puts[0].content == b"pdf!"
     assert links == [
-        "Saved to this channel's files:\n- [report.pdf](https://example.sharepoint.com/sites/team/Shared%20Documents/Q3%20%28plan%29/report.pdf)"
+        "- [report.pdf](https://example.sharepoint.com/sites/team/Shared%20Documents/Q3%20%28plan%29/report.pdf)"
     ]
     assert not harness.sender.sent and not harness.deletes
 

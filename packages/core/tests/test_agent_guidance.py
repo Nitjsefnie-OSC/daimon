@@ -112,19 +112,14 @@ def test_one_file_rule_for_discord_slack_and_teams_chats() -> None:
     # working .typ file swept in after it, and a reply that said "attached above".
     files = _files_section()
     assert (
-        "On Discord, on Slack, and in a Teams 1:1 chat (its channel id starts with `a:`), "
-        "saving a file under /mnt/session/outputs IS the delivery path" in files
+        "In a chat turn on Discord, Slack or Teams, every file you save under "
+        "/mnt/session/outputs is attached to your reply" in files
     ), "one rule for every chat whose files go out with the reply"
-    assert "attaches each file there to your reply" in files
-    assert "download card" in files, "a Teams 1:1 chat offers each file as a card"
     assert "interactive turns only" in files and "a scheduled routine delivers nothing" in files
     assert "keep working files (sources, drafts, intermediate data, logs) in /root/work" in files, (
         "a working file in outputs is sent to the person"
     )
-    assert "Name each file in your reply by its filename" in files
-    assert 'never say a file is "above" or "below"' in files, (
-        "the file's place relative to the reply differs by platform"
-    )
+    assert "just say what you made, naming each file by its filename" in files
     assert (
         "Do NOT call create_file_upload_url or send_message for a file going to the thread "
         "you were invoked from" in files
@@ -132,7 +127,24 @@ def test_one_file_rule_for_discord_slack_and_teams_chats() -> None:
     block = CREDENTIAL_GUIDANCE_BLOCK
     assert "NOT a delivery path" not in block, "the old Discord exception is gone"
     assert "interactive exception is Discord file delivery" not in block
-    assert block.count("On Discord") == 1, "Discord has no separate file rule any more"
+    assert _collapse(block).count("on Discord") == 1, "Discord has no separate file rule any more"
+
+
+def test_file_guidance_keeps_delivery_out_of_the_reply() -> None:
+    # Regression for Teams channel answers that said files "should be saved to this
+    # channel's Files tab, with links below this message" and ended with "If a file
+    # doesn't show up in the Files tab, tell me": the guidance described delivery.
+    block = _collapse(CREDENTIAL_GUIDANCE_BLOCK)
+    assert "Do not describe how files are delivered, where they are stored or where they show" in (
+        block
+    )
+    assert "never ask the person to tell you if one is missing" in block
+    assert "unless they ask how file delivery works" in block
+    assert "Calling `read` on an image shows it to you only, never to the person" in block, (
+        "an agent read its image and reported it delivered"
+    )
+    for narration in ("Files tab", "below your reply", "Saved to", "download card", "hedge"):
+        assert narration not in block, f"{narration!r} invites the agent to narrate delivery"
 
 
 def test_routines_and_other_channels_keep_the_upload_route() -> None:
@@ -145,55 +157,26 @@ def test_routines_and_other_channels_keep_the_upload_route() -> None:
     assert "not invoked from" in routines, "and so does a file for another channel"
 
 
-def test_teams_guidance_splits_one_to_one_delivery_from_channels() -> None:
+def test_teams_guidance_follows_the_channel_files_attribute() -> None:
     # Regression for a Teams 1:1 turn where the agent said file posting was not
     # built for Teams while the adapter offered the file anyway, and for channel
     # threads that got a separate note per file the agent could not deliver.
-    files = _files_section()
-    assert "Teams 1:1 chat (its channel id starts with `a:`)" in files, (
-        "the agent must be able to tell a 1:1 chat from the channel id it is given"
+    block = CREDENTIAL_GUIDANCE_BLOCK
+    teams = _collapse(block[block.index("In a Teams channel") : block.index("Calling `read`")])
+    assert "the `files` attribute on `<channel>` says whether files can be attached" in teams
+    assert "no file can be attached, so never promise one and save none" in teams, (
+        "where nothing is attached, a file the agent names as made would be discarded"
     )
-    assert "download card the person accepts" in files, (
-        "a Teams 1:1 chat delivers through the same sweep; the person accepts each file"
-    )
-    teams = _collapse(
-        CREDENTIAL_GUIDANCE_BLOCK[
-            CREDENTIAL_GUIDANCE_BLOCK.index("In a Teams channel") : CREDENTIAL_GUIDANCE_BLOCK.index(
-                "Calling `read`"
-            )
-        ]
+    assert "say so once, following the channel's `files_hint`" in teams, (
+        "the adapter no longer posts a note per file, so the reply carries the message"
     )
     assert "never call it or create_file_upload_url for one" in teams, (
         "send_message cannot attach a file where files are unavailable"
     )
-    assert "follow the `files` attribute on `<channel>`" in teams, (
-        "whether a channel takes files depends on what Graph allows there"
-    )
-    assert "saves each output to the channel's Files and links it" in teams, (
-        "with access, outputs are delivered as links, so the agent may reference them"
-    )
-    assert "put only deliverables there and keep working files in /root/work" in teams, (
-        "every file in outputs is uploaded to the channel, so scratch files would land there too"
-    )
-    assert "no file can be attached" in teams and "never promise one" in teams, (
-        "without access a channel cannot take files at all"
-    )
-    assert "Say so once in your reply" in teams, (
-        "the adapter no longer posts a note per file, so the reply carries the message"
-    )
-    assert "Follow the channel's `files_hint`: it says what an admin must grant" in teams, (
-        "the per-turn hint names the permission an admin must grant"
-    )
+    assert "a separate conversation where the file would be made again" in teams
     assert "enable_channel_files" not in teams, "no card or tool turns files on any more"
-    assert "separate conversation, so the file would be made again there" in teams, (
-        "a 1:1 chat does not share the channel thread's workspace"
-    )
-    # Regression for a channel turn whose agent copied daimon's footer from replayed
-    # answers ("Saved to this channel's files: ...") into its own reply, and hedged.
-    assert 'never write that list, a file link or a "Saved to" line yourself' in teams, (
-        "daimon adds the saved-files list; the agent must not imitate it from history"
-    )
-    assert "never hedge about delivery" in teams, "the delivery is daimon's, not a maybe"
+    # Regression for a channel turn whose agent copied daimon's links from replayed answers.
+    assert "Never write file links yourself, even when earlier replies show them" in teams
     assert "come back as attachments of your replayed messages, with a download URL" in teams, (
         "earlier deliveries are readable from history"
     )

@@ -323,6 +323,12 @@ async def test_a_long_answer_overflows_into_new_messages_then_the_controls() -> 
     assert _rated(controls), "the 👍/👎 follow the last part"
     assert lifecycle.final_message_id == f"m-{len(sender.sent) - 1}", "the answer's last part"
 
+    assert await lifecycle.append_to_answer("- [a](u)", [_image("a.png")])
+    edit = sender.activities[-1]
+    assert edit.id == lifecycle.final_message_id, "links and previews go in the last part only"
+    assert (edit.text or "").startswith(chunks[-1].text or "-") and _names(edit) == ["a.png"]
+    assert sender.activities[1:-1] == [*chunks, controls], "nothing is posted below the controls"
+
 
 async def test_a_failed_answer_post_collapses_the_card_and_leaves_no_watermark() -> None:
     sender = FakeSender(fail_on={1})
@@ -532,12 +538,10 @@ async def test_file_links_are_edited_in_below_a_prefixed_single_message_answer()
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
     assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
-    assert await lifecycle.append_to_answer("Saved to this channel's files:\n- [a](u)")
+    assert await lifecycle.append_to_answer("- [a](u)")
     final = sender.activities[-1]
     assert final.id == "m-1", "the answer is edited, nothing new is posted"
-    assert final.text == (
-        "I lost the workspace.\n\nThe posterior mean is 3.\n\nSaved to this channel's files:\n- [a](u)"
-    )
+    assert final.text == ("I lost the workspace.\n\nThe posterior mean is 3.\n\n- [a](u)")
     assert not _rated(final) and not final.attachments
 
 
@@ -547,7 +551,7 @@ async def test_file_links_that_would_overflow_the_last_message_are_refused() -> 
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("x" * (card.TEAMS_LIMIT - 5)))
 
-    assert not await lifecycle.append_to_answer("Saved to this channel's files:")
+    assert not await lifecycle.append_to_answer("- [a](u)")
     assert len(sender.sent) == 3, "no edit was tried"
 
 
@@ -567,14 +571,13 @@ async def test_previews_ride_the_links_edit_and_later_edits_keep_them() -> None:
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(_answer("The posterior mean is 3."))
 
-    assert await lifecycle.append_to_answer("Saved to this channel's files:", [_image("a.png")])
+    assert await lifecycle.append_to_answer("- [a](u)", [_image("a.png")])
     assert await lifecycle.append_to_answer(attachments=[_image("deck.pptx")])
     assert await lifecycle.prepend_revealed_answer("I lost the workspace.")
     links, thumbnails, notice = sender.activities[-3:]
     assert {links.id, thumbnails.id, notice.id} == {"m-1"}, "each one an edit of the answer"
     assert links.text == (
-        "The posterior mean is 3.\n\nSaved to this channel's files:"
-        "\n\n![a.png](data:image/png;base64,AA==)"
+        "The posterior mean is 3.\n\n- [a](u)\n\n![a.png](data:image/png;base64,AA==)"
     ), "the image follows the links, in the same text"
     assert links.text_format == "markdown", "Graph reads back a markdown message's images"
     assert _names(thumbnails) == ["a.png", "deck.pptx"], "added after the one already there"
@@ -591,7 +594,7 @@ async def test_previews_the_answer_cannot_take_are_refused() -> None:
     posted = len(sender.sent)
     assert not await lifecycle.append_to_answer(attachments=[_image("a.png")]), "a notice card"
     assert len(sender.sent) == posted, "no edit was tried"
-    assert await lifecycle.append_to_answer("Saved to this channel's files:"), "links still fit"
+    assert await lifecycle.append_to_answer("- [a](u)"), "links still fit"
 
     sender = FakeSender()
     lifecycle = await _posted(sender)
@@ -615,7 +618,7 @@ async def test_previews_stay_out_of_an_answer_with_math() -> None:
 
     assert not await lifecycle.append_to_answer(attachments=[_image("a.png")]), "math"
     assert len(sender.sent) == edits, "no edit was tried"
-    assert await lifecycle.append_to_answer("Saved to this channel's files:"), "links still fit"
+    assert await lifecycle.append_to_answer("- [a](u)"), "links still fit"
     assert sender.activities[-1].text_format == "extendedmarkdown", "the math still renders"
 
 
@@ -702,7 +705,7 @@ async def test_the_answer_stays_text_and_its_controls_follow_in_a_card(ask_human
     assert last.text and last.text.startswith("x"), "the answer stays markdown text"
     assert _rated(sender.activities[-1]), "the 👍/👎 open daimon's own form"
     assert _asks(sender, -1) is ask_human, "Ask a human only when support is on"
-    assert await lifecycle.append_to_answer("Saved to this channel's files:")
+    assert await lifecycle.append_to_answer("- [a](u)")
     edit = sender.activities[-1]
     assert edit.text and not _rated(edit) and not edit.attachments, "an edit stays text"
 
@@ -728,7 +731,7 @@ async def test_with_support_on_a_one_part_answer_and_its_edits_are_ones_teams_ta
     assert answer.id == "m-1" and answer.text == "The posterior mean is 3.", "the card became it"
     assert controls.id is None and _asks(sender, -1), "the button follows in a post of its own"
     assert await lifecycle.prepend_revealed_answer("I lost the workspace."), "a notice fits above"
-    assert await lifecycle.append_to_answer("Saved to this channel's files:"), "links fit below"
+    assert await lifecycle.append_to_answer("- [a](u)"), "links fit below"
     assert all(not a.attachments for a in sender.activities[-2:]), "both edits stay text"
 
 

@@ -30,7 +30,7 @@ from daimon.core.teams_graph import (
     linked_files,
     message_text,
 )
-from daimon.core.teams_sharepoint import SAVED_FILES_HEADING
+from daimon.core.teams_sharepoint import file_link
 from daimon.core.thread_participation import ClassifierMessage
 from daimon.core.untrusted import untrusted_block
 
@@ -43,14 +43,14 @@ HISTORY_IMAGE_LIMIT = 4
 HISTORY_FILE_LIMIT = 10
 # What the agent does, in a channel where files cannot be saved, when asked for one.
 _FILES_HINT = (
-    "Files you make cannot be saved in this channel: Microsoft Graph refused daimon its Files "
-    "folder. A Microsoft 365 admin must grant daimon's app the Files.ReadWrite.All application "
-    "permission, with admin consent. Say so when someone asks for a file here; do not swap in "
-    "an artifact, report or notebook unless they ask for one."
+    "Files can't be attached in this channel until a Microsoft 365 admin grants daimon's app "
+    "the Files.ReadWrite.All application permission, with admin consent. Mention it only if "
+    "someone asks for a file here; do not swap in an artifact, report or notebook unless they "
+    "ask for one."
 )
 _GROUP_FILES_HINT = (
-    "Files you make cannot be shared in a group chat. Say so when someone asks for a file "
-    "here; they can ask you for it in their 1:1 chat with you."
+    "Files can't be attached in a group chat. Mention it only if someone asks for a file "
+    "here: they can ask you for it in their 1:1 chat with you."
 )
 # A 1:1 chat has no Graph thumbnails: the agent may picture a document itself
 # (`output_delivery.is_preview_output`). Page one only: typst's PNG export of a multi-page
@@ -120,8 +120,37 @@ def _files(message: GraphMessage) -> list[SharedFile]:
     return shared + [SharedFile(name, url) for name, url in linked_files(message)]
 
 
-# daimon's own saved-files footer: replayed, the agent copied it into its next answer.
-_SAVED_FOOTER = re.compile(rf"\n*^{re.escape(SAVED_FILES_HEADING)}(?:\n+- [^\n]*)*", re.M)
+# Headed daimon's file links until the list stood alone; older answers still carry it.
+_LEGACY_HEADING = "Saved to this channel's files:"
+
+
+def _without_saved_links(text: str, message: GraphMessage) -> str:
+    """daimon's answer without the file links it added below: replayed, the agent copied them.
+
+    They end the answer, one line per link, among blank lines and its previews'
+    `[image]`. Older answers head them with `_LEGACY_HEADING`, unlinked lines included.
+    """
+    lines = text.split("\n")
+    stripped = [line.strip() for line in lines]
+    dropped: set[int] = set()
+    if _LEGACY_HEADING in stripped:
+        start = len(stripped) - 1 - stripped[::-1].index(_LEGACY_HEADING)
+        tail = range(start + 1, len(lines))
+        if all(stripped[n] in ("", "[image]") or stripped[n].startswith("- ") for n in tail):
+            dropped = {start, *(n for n in tail if stripped[n].startswith("- "))}
+    else:
+        links = [{f"- {name}", file_link(name, url)} for name, url in linked_files(message)]
+        index = len(lines)
+        while index and links:
+            index -= 1
+            if stripped[index] in ("", "[image]"):
+                continue
+            if (link := next((ln for ln in links if stripped[index] in ln), None)) is None:
+                break
+            links.remove(link)
+            dropped.add(index)
+    kept = [line for n, line in enumerate(lines) if n not in dropped]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
 def channel_media(
@@ -195,7 +224,7 @@ def _render(
     is_bot = user is None and app is not None
     if is_bot and app is not None and app.id == bot_app_id:
         # Its files are listed as attachments below, not in its words.
-        text = _SAVED_FOOTER.sub("", text).strip()
+        text = _without_saved_links(text, message)
     attrs = (
         f" author_name={quoteattr((author.display_name if author else None) or 'unknown')}"
         f" user_id={quoteattr((author.id if author else None) or '')}"
