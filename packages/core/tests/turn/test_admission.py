@@ -17,13 +17,14 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, reset_channel_admins_enabled
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import FundingMode, Role, TenantRow
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
@@ -1663,6 +1664,50 @@ async def test_admit_refuses_a_pinned_agent_outside_its_channels(
         )
 
     assert exc_info.value.reason == "runs_elsewhere"
+
+
+async def test_disabled_former_holder_cannot_admit_channel_agent_in_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
+    tenant = await _seed_admittable_tenant(db_session, policy=_PIN_DAIMON)
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="rx-chan",
+        role_ids=[],
+        user_ids=["anyone"],
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    try:
+        reset_channel_admins_enabled()
+        monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
+        deps = _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        )
+        with pytest.raises(AdmissionDenied) as exc_info:
+            await admit(
+                deps,
+                tenant_id=tenant.id,
+                platform="discord",
+                external_user_id="anyone",
+                channel_id="rx-chan",
+                thread_id="dm-scope",
+                now=_NOW,
+                role=Role.USER,
+                is_dm=True,
+            )
+        assert exc_info.value.reason == "runs_elsewhere"
+    finally:
+        reset_channel_admins_enabled()
 
 
 @pytest.mark.parametrize(

@@ -17,10 +17,12 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
 from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.config import reset_channel_admins_enabled
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.testing import AGENT_ID, build_turn_router, ma_session
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
@@ -38,13 +40,18 @@ from .test_turn_parity import _TOKEN, _call_tool, _runtime  # pyright: ignore[re
     ids=["ask-new", "ask-resume", "start_turn", "continue_turn"],
 )
 @pytest.mark.parametrize("role", [Role.USER, Role.ADMIN])
+@pytest.mark.parametrize("former_holder", [False, True])
 async def test_hub_refuses_a_members_turn_and_exempts_an_admins_on_a_pinned_agent(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tool_name: str,
     handle: str | None,
     role: Role,
+    former_holder: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     principal = await make_platform_principal(
         db_session, platform="discord", external_id="u1", tenant=tenant
@@ -56,7 +63,20 @@ async def test_hub_refuses_a_members_turn_and_exempts_an_admins_on_a_pinned_agen
         tenant_id=tenant.id,
         policy=TenantAccessPolicy(agent_channel_pins={DEFAULT_AGENT_NAME: ("c-acme",)}),
     )
+    if former_holder:
+        await set_channel_admins(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="c-acme",
+            role_ids=[],
+            user_ids=["u1"],
+            actor_account_id=None,
+        )
     await db_session.commit()
+    if former_holder:
+        reset_channel_admins_enabled()
+        monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
 
     hub_tenant = HubTenant(
         tenant_id=tenant.id,
@@ -138,7 +158,9 @@ async def test_hub_refuses_a_members_turn_and_exempts_an_admins_on_a_pinned_agen
             create_session.assert_awaited_once()
         else:
             create_session.assert_not_awaited()
+        reset_channel_admins_enabled()
         return
     assert payload["isError"], f"a pinned agent must be refused over the hub, got {payload!r}"
     assert "not found" in str(payload)
     create_session.assert_not_awaited()
+    reset_channel_admins_enabled()

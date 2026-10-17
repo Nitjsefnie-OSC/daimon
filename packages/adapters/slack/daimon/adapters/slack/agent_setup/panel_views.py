@@ -899,7 +899,9 @@ def build_routing_view(
     listing = "\n".join(links) if links else "_none open_"
     blocks.append(_section(f"*Setup conversations*\n{listing}"))
     blocks.append({"type": "divider"})
-    if channel_admins is not None:
+    from daimon.core.config import channel_admins_enabled
+
+    if channel_admins is not None and channel_admins_enabled():
         blocks.extend(_channel_admins_blocks(channel_admins, channel_id=channel_id))
     if rule_status is not None and _is_channel(channel_id):
         blocks.extend(_permissions_blocks(channel_id=channel_id, status=rule_status))

@@ -287,6 +287,13 @@ async def require_skill_change(
             "is used beyond this caller (a default, a bound thread, or someone else's "
             "routine or conversation)"
         )
+    from daimon.core.config import channel_admins_enabled
+
+    if not channel_admins_enabled():
+        raise ToolError(
+            f"'{agent_name}' {why}, so changing its skills needs a workspace or server admin. "
+            "Nothing was changed. Do not retry."
+        )
     raise ToolError(
         f"'{agent_name}' {why}, so changing its skills needs a workspace or server admin, "
         "or an admin of every channel it answers in. Tell the caller an admin can ask "

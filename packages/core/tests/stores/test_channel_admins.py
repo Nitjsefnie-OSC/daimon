@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+from daimon.core.authz import Subject
+from daimon.core.config import reset_channel_admins_enabled
+from daimon.core.stores import agent_tool_rules
 from daimon.core.stores.accounts import get_account_with_tenant, set_platform_role_ids
 from daimon.core.stores.channel_admins import (
     count_channel_admin_grants_for_user,
@@ -140,3 +144,89 @@ async def test_platform_role_ids_round_trip_through_identity_read(
     assert after is not None and after.platform_role_ids == ("r1", "r2"), (
         "role ids are stored sorted and unique"
     )
+
+
+async def test_disabled_grants_survive_restart_and_privacy_erasure_still_applies(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reset_channel_admins_enabled()
+    monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
+    tenant = await make_tenant(db_session)
+    await set_channel_admins(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="c1",
+        role_ids=[],
+        user_ids=["u1", "u2"],
+        actor_account_id=None,
+    )
+    await agent_tool_rules.set_rule(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id="ma-1",
+        agent_name="Helper",
+        tool_key="remote/append_note",
+        channel_id="c1",
+        server_url="https://example.test/mcp",
+        rule="allow",
+        set_by="admin",
+        actor=Subject(is_admin=True),
+    )
+    try:
+        reset_channel_admins_enabled()
+        monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
+        assert (
+            await list_administered_channel_ids(
+                db_session,
+                tenant_id=tenant.id,
+                platform="discord",
+                platform_user_id="u1",
+                role_ids=(),
+            )
+            == frozenset()
+        )
+        saved = await agent_tool_rules.get_rule(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id="ma-1",
+            tool_key="remote/append_note",
+            channel_id="c1",
+        )
+        assert saved is not None and saved.rule == "allow"
+        key = {"tenant_id": tenant.id, "platform": "discord", "platform_user_id": "u1"}
+        assert await count_channel_admin_grants_for_user(db_session, **key) == 1
+        assert await remove_user_from_channel_admins(db_session, **key) == 1
+        reset_channel_admins_enabled()
+        monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "true")
+        assert await list_administered_channel_ids(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            platform_user_id="u2",
+            role_ids=(),
+        ) == {"c1"}
+        assert (
+            await list_administered_channel_ids(
+                db_session,
+                tenant_id=tenant.id,
+                platform="discord",
+                platform_user_id="u1",
+                role_ids=(),
+            )
+            == frozenset()
+        )
+        retained = await get_channel_admins(
+            db_session, tenant_id=tenant.id, platform="discord", channel_id="c1"
+        )
+        assert retained is not None and retained.user_ids == ("u2",)
+        saved_again = await agent_tool_rules.get_rule(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id="ma-1",
+            tool_key="remote/append_note",
+            channel_id="c1",
+        )
+        assert saved_again == saved
+    finally:
+        reset_channel_admins_enabled()

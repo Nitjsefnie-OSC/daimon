@@ -205,7 +205,9 @@ def channel_settings_form(settings: ChannelSettings, *, notice: str | None = Non
     if settings.rule is not None:
         body += _rule_section(settings.rule)
         actions.append(_submit("Save permissions", "rule", channel))
-    if settings.admin_user_ids is not None:
+    from daimon.core.config import channel_admins_enabled
+
+    if settings.admin_user_ids is not None and channel_admins_enabled():
         body += [
             _text("**Channel admins**"),
             TextInput(

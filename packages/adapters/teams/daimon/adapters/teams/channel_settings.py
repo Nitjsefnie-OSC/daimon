@@ -64,6 +64,7 @@ from daimon.core.channel_rules import (
     set_channel_rule,
 )
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel
+from daimon.core.config import channel_admins_enabled
 from daimon.core.errors import DaimonError, SkillsListTruncatedError
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.permissions import channel_rule, own_reader_channels
@@ -103,6 +104,12 @@ _AUDIT_OPS: Final[Mapping[cards.ChannelOp, PanelOp]] = {
 }
 _MAX_ENVIRONMENT_OPTIONS: Final = 99
 _MAX_OPTION_VALUE: Final = 250
+
+
+def channels_need_admin_message() -> str:
+    return (
+        CHANNELS_NEED_ADMIN if channel_admins_enabled() else "Only a server admin can change this."
+    )
 
 
 async def _guarded[T](work: Awaitable[T], failed: T) -> T:
@@ -184,7 +191,7 @@ class ChannelSettingsDialog:
             return dialog_message(DENIED)
         subject = await self._subject(actor)
         if not actor.is_admin and not subject.administered_channel_ids:
-            return dialog_message(CHANNELS_NEED_ADMIN)
+            return dialog_message(channels_need_admin_message())
         return await self._picker(actor, subject)
 
     async def _settings(
@@ -240,7 +247,9 @@ class ChannelSettingsDialog:
             label=cards.channel_label(channel_id, name),
             picker=picker,
             rule=channel_rule_status(policy, channel_id) if actor.is_admin else None,
-            admin_user_ids=(grant.user_ids if grant else ()) if actor.is_admin else None,
+            admin_user_ids=(grant.user_ids if grant else ())
+            if actor.is_admin and channel_admins_enabled()
+            else None,
             skills=tuple(skills) if actor.is_admin else None,
         )
         return dialog("Channel settings", cards.channel_settings_form(settings, notice=notice))
@@ -268,6 +277,9 @@ class ChannelSettingsDialog:
         if op not in get_args(cards.ChannelOp):
             return await self._picker(actor, subject)
         op = cast("cards.ChannelOp", op)
+        if op == "admins" and not channel_admins_enabled():
+            await self._audit(actor, "channel_admins", outcome="denied", reason="disabled")
+            return dialog_message("Channel admins are disabled. Nothing changed.")
         typed = data.get("channel_id") if actor.is_admin else None
         channel_id = _channel(typed or data.get("channel"))
         if channel_id is None:
@@ -276,7 +288,7 @@ class ChannelSettingsDialog:
         if not actor.is_admin and channel_id not in subject.administered_channel_ids:
             if audit_op is not None:
                 await self._audit(actor, audit_op, outcome="denied", reason="needs_admin")
-            return dialog_message(CHANNELS_NEED_ADMIN)
+            return dialog_message(channels_need_admin_message())
         if audit_op is None:
             return await self._settings(actor, subject, channel_id)
         if audit_op != "environment" and not actor.is_admin:
@@ -320,7 +332,7 @@ class ChannelSettingsDialog:
             )
             if pick.decision.reason == "not_a_reader":
                 return build_limited_network_refusal(environment_name=name)
-            return CHANNELS_NEED_ADMIN
+            return channels_need_admin_message()
         if name is not None and pick.missing:
             return build_missing_environment_note(name)
         if pick.needs_confirm:

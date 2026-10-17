@@ -24,6 +24,7 @@ from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
 from daimon.core.agent_reach import load_target_facts, may_bind_as_channel_default
 from daimon.core.authz import Action, AgentRef, Place, authorize
 from daimon.core.channel_admins import ChannelAdminCaller, is_channel_admin
+from daimon.core.config import channel_admins_enabled
 from daimon.core.operation_policy import OperationKind, TargetFacts, decide_operation
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -94,6 +95,12 @@ async def require_channel_admin(
                 session, tenant_id=auth.tenant_id, platform=auth.platform, channel_id=channel_id
             )
     if not is_channel_admin(channel_admin_caller(auth), grant=grant):
+        if not channel_admins_enabled():
+            raise ToolError(
+                "This change needs a workspace or server admin. Tell the caller who can make "
+                "it and give them a sentence that admin can say, preserving the requested "
+                "action and channel. Do not retry."
+            )
         raise ToolError(
             "This change needs a workspace or server admin, or an admin of that channel, "
             "and the caller is neither. Tell them who can make it and give them a sentence "

@@ -134,6 +134,7 @@ from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.authz import build_subject
 from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
+from daimon.core.config import channel_admins_enabled
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
 from daimon.core.github_panel import (
@@ -183,6 +184,8 @@ async def github_can_choose_agent(
 ) -> bool:
     if is_admin:
         return True
+    if not channel_admins_enabled():
+        return False
     async with runtime.sessionmaker() as session:
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform="slack", external_id=user_id
@@ -597,7 +600,7 @@ async def load_routing_view(
         )
         channel_admins = (
             await list_channel_admins(session, tenant_id=tenant_id, platform="slack")
-            if is_admin
+            if is_admin and channel_admins_enabled()
             else None
         )
         operator_tokens = (
@@ -1218,6 +1221,14 @@ async def _dispatch_panel_action(
         return
 
     if action_id == panel_views.ACTION_CHANNEL_ADMINS:
+        if not channel_admins_enabled():
+            await post_ephemeral(
+                client,
+                channel_id=meta.channel_id or user_id,
+                user_id=user_id,
+                text="Channel admins are disabled. Nothing changed.",
+            )
+            return
         if not is_admin or not meta.channel_id:
             await post_ephemeral(
                 client,

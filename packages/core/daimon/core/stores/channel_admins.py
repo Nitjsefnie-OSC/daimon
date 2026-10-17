@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from daimon.core._models import ChannelAdmin
+from daimon.core.config import channel_admins_enabled
 from daimon.core.stores.domain import ChannelAdminsRow
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -23,6 +24,8 @@ async def list_channel_admins(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str
 ) -> list[ChannelAdminsRow]:
     """Every channel with admins in this tenant, ordered by channel id."""
+    if not channel_admins_enabled():
+        return []
     stmt = (
         select(ChannelAdmin)
         .where(ChannelAdmin.tenant_id == tenant_id, ChannelAdmin.platform == platform)
@@ -35,6 +38,8 @@ async def list_channel_admins(
 async def get_channel_admins(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
 ) -> ChannelAdminsRow | None:
+    if not channel_admins_enabled():
+        return None
     orm = await session.get(ChannelAdmin, (tenant_id, platform, channel_id))
     return ChannelAdminsRow.model_validate(orm) if orm is not None else None
 
@@ -50,6 +55,8 @@ async def set_channel_admins(
     actor_account_id: uuid.UUID | None,
 ) -> ChannelAdminsRow:
     """Replace one channel's admins (upsert). The caller validates the ids."""
+    if not channel_admins_enabled():
+        raise ValueError("Channel admins are disabled. Nothing changed.")
     values = {
         "tenant_id": tenant_id,
         "platform": platform,
@@ -82,6 +89,8 @@ async def delete_channel_admins(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
 ) -> bool:
     """Remove one channel's admins. True when a row existed."""
+    if not channel_admins_enabled():
+        raise ValueError("Channel admins are disabled. Nothing changed.")
     result = await session.execute(
         delete(ChannelAdmin).where(
             ChannelAdmin.tenant_id == tenant_id,
@@ -102,6 +111,8 @@ async def list_administered_channel_ids(
     role_ids: Sequence[str],
 ) -> frozenset[str]:
     """The channels whose grant names the member, by user id or role."""
+    if not channel_admins_enabled():
+        return frozenset()
     stmt = select(ChannelAdmin.channel_id).where(
         ChannelAdmin.tenant_id == tenant_id,
         ChannelAdmin.platform == platform,

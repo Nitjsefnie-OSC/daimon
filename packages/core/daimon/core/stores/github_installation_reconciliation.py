@@ -18,7 +18,7 @@ from daimon.core.stores.github_removal_notices import (
     confirm_removal,
     queue_removal,
 )
-from sqlalchemy import CursorResult, and_, case, delete, or_, select, update
+from sqlalchemy import CursorResult, DateTime, and_, case, delete, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -100,6 +100,58 @@ async def enqueue(
             )
         )
     return True
+
+
+async def enqueue_never_refreshed(session: AsyncSession, *, now: datetime, limit: int) -> int:
+    """Queue a refresh for each live App installation GitHub has never been read for.
+
+    Migration 0108 queues these once, but a scheduler still running the previous
+    image can complete those jobs without writing the snapshot. This statement
+    heals that: it selects only installations with no snapshot, not removed, and
+    with no queue row or a ``done`` one, so a pending (including backing-off) or
+    running job already counts as queued. The conflict clause re-checks ``done``
+    so a job claimed between the select and the write is left alone.
+    """
+    installation = GitHubAppInstallation
+    queue = GitHubInstallationReconciliation
+    candidates = (
+        select(
+            installation.installation_id,
+            literal(1),
+            literal("pending"),
+            literal(0),
+            literal(now, type_=DateTime(timezone=True)),
+        )
+        .outerjoin(queue, queue.installation_id == installation.installation_id)
+        .where(
+            installation.app == "github_app",
+            installation.github_refreshed_at.is_(None),
+            installation.github_removed_at.is_(None),
+            or_(queue.installation_id.is_(None), queue.state == "done"),
+        )
+        .order_by(installation.installation_id)
+        .limit(limit)
+    )
+    stmt = (
+        pg_insert(queue)
+        .from_select(
+            ["installation_id", "generation", "state", "attempts", "available_at"], candidates
+        )
+        .on_conflict_do_update(
+            index_elements=["installation_id"],
+            set_={
+                "generation": queue.generation + 1,
+                "attempts": 0,
+                "state": "pending",
+                "available_at": now,
+                "last_error": None,
+                "updated_at": now,
+            },
+            where=queue.state == "done",
+        )
+        .returning(queue.installation_id)
+    )
+    return len((await session.execute(stmt)).all())
 
 
 async def get(

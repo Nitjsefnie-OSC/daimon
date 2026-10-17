@@ -12,8 +12,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 JARS = (Path.home() / ".cache/daimon/tla/tla2tools.jar",)
-MAX_SECONDS = 30
-MAX_META_BYTES = 64 * 1024 * 1024
+MAX_SECONDS = 180
+MAX_META_BYTES = 256 * 1024 * 1024
 
 
 def size(path: Path) -> int:
@@ -30,6 +30,10 @@ def run(config: str, jar: Path) -> tuple[str, int]:
         str(jar),
         "tlc2.TLC",
         "-deadlock",
+        # Check liveness once, after the full search; the default checks at
+        # intervals and makes counts of liveness counterexamples vary by timing.
+        "-lncheck",
+        "final",
         "-workers",
         "1",
         "-metadir",
@@ -67,7 +71,11 @@ def run(config: str, jar: Path) -> tuple[str, int]:
         elif "Invariant NoStaleOverwrite is violated" in output:
             verdict = "violates:NoStaleOverwrite"
         elif "Temporal properties were violated" in output:
-            verdict = "violates:EventuallyConsistent"
+            # Name the property from the config; only configs with one PROPERTY may violate.
+            properties = re.findall(r"^PROPERTY (\w+)$", (HERE / f"{config}.cfg").read_text(), re.M)
+            if len(properties) != 1:
+                raise RuntimeError(f"{config}: cannot name the violated property")
+            verdict = f"violates:{properties[0]}"
         elif "Invariant NoReorderDuplicateWitness is violated" in output:
             verdict = "witness:ReorderDuplicateConverges"
         else:

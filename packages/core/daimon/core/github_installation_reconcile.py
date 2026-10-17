@@ -23,6 +23,7 @@ _log = structlog.get_logger(__name__)
 _LEASE_FOR = timedelta(minutes=2)
 _LEASE_RENEW_INTERVAL_S = 30
 _MAX_JOBS_PER_TICK = 5
+_MAX_BACKFILL_PER_TICK = 50
 _MAX_RETRY_DELAY = timedelta(minutes=5)
 
 
@@ -41,6 +42,15 @@ async def drain_github_installation_reconciliations(
     """Refresh due installations; each refresh writes only its claimed generation."""
     if github_app.app_id is None or github_app.private_key is None:
         return 0
+
+    # Heal installations whose migration-time refresh was consumed without a
+    # snapshot by a scheduler still on the previous image during the deploy.
+    async with sessionmaker.begin() as session:
+        queued = await reconciliation_store.enqueue_never_refreshed(
+            session, now=now or datetime.now(UTC), limit=_MAX_BACKFILL_PER_TICK
+        )
+    if queued:
+        _log.info("github.installation_reconciliation.backfill_queued", count=queued)
 
     jobs_processed = 0
     for _ in range(_MAX_JOBS_PER_TICK):

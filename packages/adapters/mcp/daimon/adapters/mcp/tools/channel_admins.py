@@ -23,6 +23,7 @@ from daimon.core.channel_admins import (
     InvalidChannelAdminIds,
     normalize_channel_admin_ids,
 )
+from daimon.core.config import channel_admins_enabled
 from daimon.core.stores.channel_admins import (
     delete_channel_admins,
     list_channel_admins,
@@ -67,6 +68,8 @@ class SetChannelAdminsResult:
 
 
 def _platform(auth: AuthIdentity) -> str:
+    if not channel_admins_enabled():
+        raise ToolError("Channel admins are disabled. Nothing changed.")
     if auth.platform not in CHANNEL_ADMIN_PLATFORMS:
         raise ToolError("Channel admins exist only on Discord, Slack and Teams.")
     return auth.platform

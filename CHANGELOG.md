@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Channel admins are deprecated. Hosted Daimon turns them off; self-hosters can set `DAIMON_CHANNEL_ADMINS__ENABLED=false` now. The next release defaults this switch to false, and a later release removes the feature. Existing grant data is kept.
+
 - GitHub repository access now uses the GitHub App for every agent. Migration deletes staged grants, keeps live App grants, carries a matching working repo, and retires saved GitHub keys. `daimon github retirement-preview` reports staged rows and saved-key coverage before migration. Private skill imports use an active App grant; missing access posts Connect GitHub. Operators can preview and delete retired Managed Agents vault credentials with `daimon github cleanup-legacy-vault` (`--apply` deletes them).
 
 - **Teams admins are the owners of one team.** Set
@@ -68,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A GitHub App token mint rejected for one repository group now leaves other groups available, queues an installation refresh, and tells the next turn which repositories are unavailable, including after token rotation or reconciliation. Each repository's first refusal starts a 60-minute exclusion; rotation skips fully excluded groups, and a later turn retries with a replacement session after expiry. Notices survive reconciliation and are sent once per continuous refusal. Authentication and transient failures still stop session setup and close pending token rows.
 
 - GitHub App grants stop covering repositories removed from an installation, suspended installations, and installations GitHub confirms deleted. A refreshed GitHub repository snapshot is intersected with the tenant's confirmed Connect set; webhook changes, Connect saves, and existing installations queue a refresh. Connect cannot clear a suspension recorded by reconciliation.
+
+- Installations migrated while an older scheduler was still running no longer stay without a GitHub snapshot: the scheduler queues a refresh for any App installation that has never been refreshed.
 
 - **Teams agents can reopen the files they delivered.** History replay and
   the MCP Teams read tools resolve the SharePoint links in daimon's own

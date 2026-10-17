@@ -2,7 +2,7 @@
 EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS Repos, Workers, MaxEvents, NoGenerationCheck,
-          LegacyOnlyWrite, NoLeaseOwnerCheck
+          LegacyOnlyWrite, NoLeaseOwnerCheck, NoSweep, OldDrainer
 ASSUME Repos = {"a", "b"} /\ Workers = {1, 2} /\ MaxEvents = 2
 
 VARIABLES exists, suspended, repos, version, events, deliveries, duplicated,
@@ -10,13 +10,14 @@ VARIABLES exists, suspended, repos, version, events, deliveries, duplicated,
           expired, workerState, workerGeneration, snapshotVersion,
           snapshotExists, snapshotSuspended, snapshotRepos,
           cacheExists, cacheSuspended, cacheRepos, cacheVersion, maxWrittenVersion, badOwnerWrite, firstReceipt, duplicateProcessed,
-          expirations
+          expirations, oldCode, refreshed
 vars == <<exists, suspended, repos, version, events, deliveries, duplicated,
           receipts, generation, enqueuedVersion, job, owner, claimedGeneration,
           expired, workerState, workerGeneration, snapshotVersion,
           snapshotExists, snapshotSuspended, snapshotRepos,
           cacheExists, cacheSuspended, cacheRepos, cacheVersion, maxWrittenVersion, badOwnerWrite, firstReceipt, duplicateProcessed,
-          expirations>>
+          expirations, oldCode, refreshed>>
+ext == <<oldCode, refreshed>>
 Ids == 1..MaxEvents
 Max(a, b) == IF a >= b THEN a ELSE b
 
@@ -24,8 +25,11 @@ Init ==
   /\ exists = TRUE /\ suspended = FALSE /\ repos = {}
   /\ version = 0 /\ events = [i \in Ids |-> 0]
   /\ deliveries = [i \in Ids |-> 0] /\ duplicated = {}
-  /\ receipts = {} /\ generation = 0 /\ enqueuedVersion = 0
-  /\ job = "none" /\ owner = 0 /\ claimedGeneration = 0
+  /\ receipts = {}
+  \* Migration 0108 queues one refresh per installation at migrate time.
+  /\ generation = 1 /\ enqueuedVersion = 0
+  /\ job = "pending" /\ owner = 0 /\ claimedGeneration = 0
+  /\ oldCode = TRUE /\ refreshed = FALSE
   /\ expired = FALSE /\ expirations = 0
   /\ workerState = [w \in Workers |-> "idle"]
   /\ workerGeneration = [w \in Workers |-> 0]
@@ -55,7 +59,7 @@ GitHubChange(kind, repo) ==
                 [] kind = "remove" -> repos \ {repo}
                 [] kind = "delete" -> {}
                 [] OTHER -> repos
-  /\ UNCHANGED <<duplicated, receipts, generation, enqueuedVersion,
+  /\ UNCHANGED <<ext, duplicated, receipts, generation, enqueuedVersion,
                   job, owner, claimedGeneration, expired, workerState,
                   workerGeneration, snapshotVersion, snapshotExists,
                   snapshotSuspended, snapshotRepos, cacheExists,
@@ -65,7 +69,7 @@ Duplicate(i) ==
   /\ events[i] # 0 /\ i \notin duplicated
   /\ deliveries' = [deliveries EXCEPT ![i] = @ + 1]
   /\ duplicated' = duplicated \cup {i}
-  /\ UNCHANGED <<exists, suspended, repos, version, events, receipts,
+  /\ UNCHANGED <<ext, exists, suspended, repos, version, events, receipts,
                   generation, enqueuedVersion, job, owner, claimedGeneration,
                   expired, workerState, workerGeneration, snapshotVersion,
                   snapshotExists, snapshotSuspended, snapshotRepos,
@@ -85,20 +89,21 @@ Enqueue(i) ==
        /\ generation' = generation + 1
        /\ enqueuedVersion' = Max(enqueuedVersion, events[i])
        /\ job' = IF job = "running" THEN "running" ELSE "pending"
-  /\ UNCHANGED <<exists, suspended, repos, version, events, duplicated,
+  /\ UNCHANGED <<ext, exists, suspended, repos, version, events, duplicated,
                   owner, claimedGeneration, expired, workerState,
                   workerGeneration, snapshotVersion, snapshotExists,
                   snapshotSuspended, snapshotRepos, cacheExists,
                   cacheSuspended, cacheRepos, cacheVersion, maxWrittenVersion, badOwnerWrite, expirations>>
 
 Claim(w) ==
+  /\ ~oldCode
   /\ workerState[w] = "idle"
   /\ job = "pending" \/ (job = "running" /\ expired)
   /\ job' = "running" /\ owner' = w
   /\ claimedGeneration' = generation /\ expired' = FALSE
   /\ workerState' = [workerState EXCEPT ![w] = "claimed"]
   /\ workerGeneration' = [workerGeneration EXCEPT ![w] = generation]
-  /\ UNCHANGED <<exists, suspended, repos, version, events, deliveries,
+  /\ UNCHANGED <<ext, exists, suspended, repos, version, events, deliveries,
                   duplicated, receipts, generation, enqueuedVersion,
                   snapshotVersion, snapshotExists, snapshotSuspended,
                   snapshotRepos, cacheExists, cacheSuspended, cacheRepos,
@@ -111,7 +116,7 @@ ReadGitHub(w) ==
   /\ snapshotExists' = [snapshotExists EXCEPT ![w] = exists]
   /\ snapshotSuspended' = [snapshotSuspended EXCEPT ![w] = suspended]
   /\ snapshotRepos' = [snapshotRepos EXCEPT ![w] = repos]
-  /\ UNCHANGED <<exists, suspended, repos, version, events, deliveries,
+  /\ UNCHANGED <<ext, exists, suspended, repos, version, events, deliveries,
                   duplicated, receipts, generation, enqueuedVersion,
                   job, owner, claimedGeneration, expired, workerGeneration,
                   cacheExists, cacheSuspended, cacheRepos, cacheVersion, maxWrittenVersion, badOwnerWrite, firstReceipt, duplicateProcessed,
@@ -120,7 +125,7 @@ ReadGitHub(w) ==
 LeaseExpire ==
   /\ job = "running" /\ ~expired /\ expirations = 0
   /\ expired' = TRUE /\ expirations' = 1
-  /\ UNCHANGED <<exists, suspended, repos, version, events, deliveries,
+  /\ UNCHANGED <<ext, exists, suspended, repos, version, events, deliveries,
                   duplicated, receipts, generation, enqueuedVersion,
                   job, owner, claimedGeneration, workerState,
                   workerGeneration, snapshotVersion, snapshotExists,
@@ -133,28 +138,73 @@ Finish(w) ==
   /\ IF job # "running" \/
          (~NoLeaseOwnerCheck /\ owner # w) \/
          claimedGeneration # workerGeneration[w]
-     THEN UNCHANGED <<job, owner, claimedGeneration, expired,
+     THEN UNCHANGED <<refreshed, job, owner, claimedGeneration, expired,
                        cacheExists, cacheSuspended, cacheRepos, cacheVersion, maxWrittenVersion, badOwnerWrite, firstReceipt, duplicateProcessed>>
      ELSE IF ~NoGenerationCheck /\ generation # workerGeneration[w]
        THEN /\ job' = "pending" /\ owner' = 0
             /\ claimedGeneration' = 0 /\ expired' = FALSE
-            /\ UNCHANGED <<cacheExists, cacheSuspended, cacheRepos,
+            /\ UNCHANGED <<refreshed, cacheExists, cacheSuspended, cacheRepos,
                             cacheVersion, maxWrittenVersion, badOwnerWrite, firstReceipt, duplicateProcessed>>
        ELSE /\ job' = "done" /\ owner' = 0
             /\ claimedGeneration' = 0 /\ expired' = FALSE
             /\ IF LegacyOnlyWrite THEN
-                 UNCHANGED <<cacheExists, cacheSuspended, cacheRepos,
+                 UNCHANGED <<refreshed, cacheExists, cacheSuspended, cacheRepos,
                              cacheVersion, maxWrittenVersion, badOwnerWrite, firstReceipt, duplicateProcessed>>
-               ELSE /\ cacheExists' = snapshotExists[w]
+               ELSE /\ refreshed' = TRUE
+                    /\ cacheExists' = snapshotExists[w]
                     /\ cacheSuspended' = snapshotSuspended[w]
                     /\ cacheRepos' = snapshotRepos[w]
                     /\ cacheVersion' = snapshotVersion[w]
                     /\ maxWrittenVersion' = Max(maxWrittenVersion, snapshotVersion[w])
                     /\ badOwnerWrite' = (badOwnerWrite \/ (owner # w))
-  /\ UNCHANGED <<exists, suspended, repos, version, events, deliveries,
+  /\ UNCHANGED <<oldCode, exists, suspended, repos, version, events, deliveries,
                   duplicated, receipts, generation, enqueuedVersion,
                   workerGeneration, snapshotVersion, snapshotExists,
                   snapshotSuspended, snapshotRepos, firstReceipt,
+                  duplicateProcessed, expirations>>
+
+\* Deploy order: migrations run while the previous image's scheduler is still
+\* up. Its drain finishes the migration-queued job without writing the
+\* snapshot columns it does not know. Only the migration's job (generation 1,
+\* no webhook delivery yet) is modelled; a delivery consumed this way would
+\* also be healed by the sweep because it leaves `refreshed` false.
+OldDrain ==
+  /\ OldDrainer /\ oldCode
+  /\ job = "pending" /\ generation = 1
+  /\ job' = "done"
+  /\ UNCHANGED <<ext, exists, suspended, repos, version, events, deliveries,
+                  duplicated, receipts, generation, enqueuedVersion, owner,
+                  claimedGeneration, expired, workerState, workerGeneration,
+                  snapshotVersion, snapshotExists, snapshotSuspended,
+                  snapshotRepos, cacheExists, cacheSuspended, cacheRepos,
+                  cacheVersion, maxWrittenVersion, badOwnerWrite, firstReceipt,
+                  duplicateProcessed, expirations>>
+
+\* The new scheduler starts; the previous one is gone.
+NewCodeStart ==
+  /\ oldCode /\ oldCode' = FALSE
+  /\ UNCHANGED <<refreshed, exists, suspended, repos, version, events,
+                  deliveries, duplicated, receipts, generation,
+                  enqueuedVersion, job, owner, claimedGeneration, expired,
+                  workerState, workerGeneration, snapshotVersion,
+                  snapshotExists, snapshotSuspended, snapshotRepos,
+                  cacheExists, cacheSuspended, cacheRepos, cacheVersion,
+                  maxWrittenVersion, badOwnerWrite, firstReceipt,
+                  duplicateProcessed, expirations>>
+
+\* Start of each drain tick in new code: queue a refresh for an installation
+\* with no snapshot and no pending or running job. A done job does not count.
+Sweep ==
+  /\ ~NoSweep /\ ~oldCode /\ ~refreshed
+  /\ job \in {"none", "done"}
+  /\ generation' = generation + 1
+  /\ job' = "pending"
+  /\ UNCHANGED <<ext, exists, suspended, repos, version, events, deliveries,
+                  duplicated, receipts, enqueuedVersion, owner,
+                  claimedGeneration, expired, workerState, workerGeneration,
+                  snapshotVersion, snapshotExists, snapshotSuspended,
+                  snapshotRepos, cacheExists, cacheSuspended, cacheRepos,
+                  cacheVersion, maxWrittenVersion, badOwnerWrite, firstReceipt,
                   duplicateProcessed, expirations>>
 
 Next ==
@@ -163,10 +213,12 @@ Next ==
   \/ \E i \in Ids : Duplicate(i) \/ Enqueue(i)
   \/ \E w \in Workers : Claim(w) \/ ReadGitHub(w) \/ Finish(w)
   \/ LeaseExpire
+  \/ OldDrain \/ NewCodeStart \/ Sweep
 
 Fair == /\ \A i \in Ids : WF_vars(Enqueue(i))
         /\ \A w \in Workers : WF_vars(Claim(w)) /\ WF_vars(ReadGitHub(w))
                               /\ WF_vars(Finish(w))
+        /\ WF_vars(NewCodeStart) /\ WF_vars(Sweep)
 Spec == Init /\ [][Next]_vars /\ Fair
 
 NoStaleOverwrite == ~badOwnerWrite /\ cacheVersion = maxWrittenVersion /\
@@ -176,5 +228,11 @@ CacheMatches == cacheExists = exists /\ cacheSuspended = suspended
 NoReorderDuplicateWitness == ~(firstReceipt = 2 /\ duplicateProcessed /\
   deliveries[1] = 0 /\ deliveries[2] = 0 /\ job = "done" /\ CacheMatches)
 EventuallyConsistent == <>[]CacheMatches
+\* Every installation eventually has a GitHub snapshot (or removal marker).
+\* Relies on weak fairness for NewCodeStart, Sweep, Enqueue, Claim,
+\* ReadGitHub and Finish; none for GitHub changes, duplicates, lease expiry or
+\* the old drainer. Lease expiry is never forced, so a stranded job is only
+\* recovered by Claim taking over an expired lease.
+EventuallyRefreshed == <>refreshed
 
 =============================================================================
