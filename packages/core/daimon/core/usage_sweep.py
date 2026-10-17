@@ -68,6 +68,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
+from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, platform_scope, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call
 from daimon.core.pricing import MODEL_PRICING, ModelRates, cost_of
@@ -361,7 +362,7 @@ async def session_billing(
         platform_user_id=await _platform_user_id(
             sessionmaker, session.metadata, session_id=session.id, tenant_id=tenant_id
         ),
-        model_id=session.agent.model.id,
+        model_id=model_choice_id(session.agent.model),
         channel_id=session.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL),
         exempt_reason=session.metadata.get(MA_METADATA_KEY_BILLING_EXEMPT),
     )
