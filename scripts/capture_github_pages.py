@@ -156,7 +156,7 @@ def personal_pages() -> dict[str, Response]:
             "This link was made for another person. Ask in Discord for your own link.",
             status=403,
             tone="error",
-            back=personal_back("discord", "123", primary=True),
+            back=personal_back("discord", primary=True),
         ),
         "personal_ask_again": personal_page(
             "Ask again in chat",
@@ -172,7 +172,7 @@ def personal_pages() -> dict[str, Response]:
             back=personal_back("discord", "123"),
             action=("Try again", "#retry"),
         ),
-        "personal_expired": personal_expired(("discord", "123")),
+        "personal_expired": personal_expired("discord"),
         "personal_connection_problem": personal_unreachable(
             status=502, action=("Try again", "#retry")
         ),
