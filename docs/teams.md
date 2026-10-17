@@ -401,11 +401,14 @@ setting off the routes answer 404 and nothing is subscribed.
   the agent with its SharePoint link and version (its eTag) beside the
   download link. `replace_channel_file` saves an edited file over it as a new
   version instead of a renamed copy; SharePoint's version history keeps the
-  earlier ones. It is refused for a file outside the channel's folder, of
-  another type, or changed since the agent read it, and Graph refuses a file
-  that is locked (open in a desktop app) or whose sensitivity label blocks
-  app writes; the agent then posts its version as a new file. Slack and
-  Discord have no equivalent.
+  earlier ones. It is refused for a folder, a file outside the folder of the
+  channel the turn runs in, one of another type, or one changed since the
+  agent read it (the version is compared without the eTag's quotes), and
+  SharePoint refuses a file that is locked (open in a desktop app) or whose
+  permissions, retention policy or sensitivity label block app writes; the
+  agent then posts its version as a new file. A write is never retried: when
+  its answer is lost or SharePoint fails with a 5xx, the agent is told the file
+  may or may not have been saved. Slack and Discord have no equivalent.
 - **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as a
   base64 data URI downscaled to fit 1024x1024 and re-encoded under 512 KiB
   (PNG, else JPEG). Up to four, in delivery order, are added to the answer's
@@ -523,8 +526,10 @@ registration:
   (`delete_thread`, `archive_thread`) is not on Teams.
 - **`replace_channel_file`** (Teams only) saves a staged upload over a file
   in the channel's Files folder as its new version, for a requester who may
-  post there, only while the file is at the version the agent read (`If-Match`),
-  and returns a link line for the answer.
+  post there, from a turn in that channel (its `origin_context_id`), only
+  while the file is at the version the agent read (`If-Match`). It returns a
+  link line for the answer, and the link and new version for a further
+  replace.
 - **`send_direct_message`** opens a 1:1 chat with someone who shares a team
   with the caller and Daimon, named by Entra object ID.
 - **GitHub setup.** `github_connect` sends the Connect GitHub card to the

@@ -63,15 +63,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Agents edit Office files and update Teams channel files in place.** The
-  default agent carries Anthropic's built-in `docx`, `pptx` and `xlsx` skills,
-  which edit Word, PowerPoint and Excel files without losing formatting,
-  comments or tracked changes; other backends run without them. On Teams, the
-  new `replace_channel_file` tool saves an edited file over one in the
-  channel's Files folder as a new version, so "update the deck" no longer
-  leaves `deck 1.pptx` behind. It writes only at the version the agent read,
-  refuses files outside the channel's folder, and explains a locked or
-  sensitivity-labelled file. Shared and replayed channel files now carry the
-  link and version it takes. No new permission is needed.
+  default agent carries Anthropic's built-in `docx`, `pptx` and `xlsx` skills;
+  other backends run without them. They count toward the 20-skill session
+  limit, so a channel answered by the default agent now adds at most 6 skills
+  of its own, down from 9; any past that are left out of its turns and logged.
+  On Teams, the new `replace_channel_file` tool saves an edited file over one
+  in the channel's Files folder as a new version, so "update the deck" no
+  longer leaves `deck 1.pptx` behind. It writes only at the version the agent
+  read and only in the channel the turn runs in, and says whether a failed
+  write may have saved. Shared and replayed channel files carry the link and
+  version it takes. No new permission is needed.
 
 - **Self-host on OpenAI, with no Anthropic account at all.** `DAIMON_ANTHROPIC__API_KEY`
   is now optional; `docker compose up` and `daimon defaults apply` succeed
