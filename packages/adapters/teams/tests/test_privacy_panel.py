@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import uuid
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime
 
 import pytest
 from daimon.adapters.teams.http_service import TeamsHttpService
@@ -18,12 +19,14 @@ from daimon.adapters.teams.privacy_card import (
     post_delete_card,
 )
 from daimon.adapters.teams.privacy_panel import DELETE_PAUSED, DELETING, NAME_MISMATCH, STALE
+from daimon.core.config import MicrosoftAccountsSettings
 from daimon.core.ma import SessionDeletionReport
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.purge import AccountPurgeResult, PurgeReport
+from daimon.core.stores import microsoft_user_tokens as microsoft_tokens
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
-from pydantic import HttpUrl
+from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -223,6 +226,58 @@ async def test_a_confirmed_delete_purges_and_edits_the_card_in_place(
     assert edit.url.endswith("/activities/m-7"), "the outcome replaces the confirmation card"
     assert "account row removed" in json.dumps(edit.body), "the outcome lists what went"
     assert not await _has_principal(db_session_factory, AAD_OBJECT_ID), "the account is purged"
+
+
+async def _connect_microsoft(db_factory: async_sessionmaker[AsyncSession]) -> None:
+    async with db_factory.begin() as session:
+        await microsoft_tokens.upsert_microsoft_user_token(
+            session,
+            tenant_id=TENANT,
+            user_id=AAD_OBJECT_ID,
+            encrypted_refresh_token=b"ct",
+            scopes="User.Read",
+            now=datetime.now(UTC),
+        )
+
+
+async def test_disconnect_microsoft_shows_when_connected_and_deletes_the_token(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    await _account(db_session_factory, AAD_OBJECT_ID)
+    await _connect_microsoft(db_session_factory)
+    runtime = build_teams_runtime(
+        db_session_factory, anthropic=build_fake_anthropic(make_fake_ma_handler())
+    )
+    runtime.settings.microsoft_accounts = MicrosoftAccountsSettings(
+        client_id="app-1", client_secret=SecretStr("s"), tenant_id=ENTRA_TENANT_ID
+    )
+    async with running_service(runtime, teams_api_fake) as service:
+        panel = await post_activity(service, _click("refresh"))
+        other = await post_activity(
+            service, _click("disconnect_microsoft", user=OTHER_AAD_OBJECT_ID)
+        )
+        async with db_session_factory() as session:
+            kept = await microsoft_tokens.count_microsoft_user_tokens(
+                session, tenant_id=TENANT, user_id=AAD_OBJECT_ID
+            )
+        done = await post_activity(service, _click("disconnect_microsoft"))
+        after = await post_activity(service, _click("refresh"))
+
+    assert "Disconnect Microsoft" in json.dumps(panel, ensure_ascii=False), (
+        "a connected person must see Disconnect Microsoft"
+    )
+    assert "Microsoft disconnected" in json.dumps(other, ensure_ascii=False) and kept == 1, (
+        "another person's click must only ever touch their own connection"
+    )
+    assert "Microsoft disconnected" in json.dumps(done, ensure_ascii=False), "say it is done"
+    async with db_session_factory() as session:
+        left = await microsoft_tokens.count_microsoft_user_tokens(
+            session, tenant_id=TENANT, user_id=AAD_OBJECT_ID
+        )
+    assert left == 0, "disconnecting must delete the stored refresh token"
+    assert "Disconnect Microsoft" not in json.dumps(after, ensure_ascii=False), (
+        "the button goes once nothing is connected"
+    )
 
 
 async def test_a_click_from_another_organisation_is_refused(

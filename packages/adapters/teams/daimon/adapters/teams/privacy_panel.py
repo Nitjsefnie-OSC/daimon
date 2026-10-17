@@ -29,6 +29,7 @@ from daimon.adapters.teams.privacy_card import (
     CONFIRM_INPUT,
     confirm_card,
     export_card,
+    microsoft_disconnected_card,
     no_data_card,
     panel_card,
     post_delete_card,
@@ -37,6 +38,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.privacy import DELETE_PAUSED, collect_purge_preview
 from daimon.core.purge import purge_account
+from daimon.core.stores import microsoft_user_tokens as microsoft_tokens
 from daimon.core.stores.identity import find_platform_principal
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
@@ -84,7 +86,17 @@ class PrivacyPanel:
             bot=bot,
             policy_url=policy_url,
             delete_enabled=self._runtime.settings.privacy.delete_enabled,
+            microsoft_connected=await self._microsoft_connected(tenant_id, user_id),
         )
+
+    async def _microsoft_connected(self, tenant_id: uuid.UUID, user_id: str) -> bool:
+        if not self._runtime.settings.microsoft_accounts.configured:
+            return False
+        async with self._runtime.sessionmaker() as session:
+            count = await microsoft_tokens.count_microsoft_user_tokens(
+                session, tenant_id=tenant_id, user_id=user_id
+            )
+        return count > 0
 
     async def _act(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
@@ -97,6 +109,14 @@ class PrivacyPanel:
         op, bot = data.get("op"), activity.recipient.name or "daimon"
         if op in ("delete", "confirm_delete") and not self._runtime.settings.privacy.delete_enabled:
             return toast(DELETE_PAUSED)
+        if op == "disconnect_microsoft":
+            # Not gated on the settings: a disconnect must work after they are removed.
+            async with self._runtime.sessionmaker.begin() as session:
+                await microsoft_tokens.delete_microsoft_user_token(
+                    session, tenant_id=actor.tenant_id, user_id=actor.user_id
+                )
+            log.info("teams.privacy.microsoft_disconnected")
+            return replace_card(microsoft_disconnected_card())
         if op not in ("export", "delete", "confirm_delete"):
             return replace_card(await self._panel(actor.tenant_id, actor.user_id, bot=bot))
         account_id = await self._account(actor.tenant_id, actor.user_id)
