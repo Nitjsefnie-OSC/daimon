@@ -984,8 +984,22 @@ the reply. Ask it to disconnect the server or connect it again.
 Some authorization servers, Microsoft Entra ID among them, do not let Daimon
 register itself, and the sign-in page says the server does not offer sign-in
 Daimon can drive. Register a client by hand and list it in
-`DAIMON_MCP_OAUTH__CLIENTS`; a sign-in whose authorization server is on that
-host uses it, and every other server still registers itself. For Entra ID:
+`DAIMON_MCP_OAUTH__CLIENTS`, together with the MCP servers it may be used
+for. A sign-in uses the client only when its MCP server URL is in that list
+(compared exactly, ignoring case in the host, a default port and a trailing
+slash) and the authorization server the MCP server names is on
+`authorization_server_host`. Every other sign-in registers a client
+dynamically, as before.
+
+List only MCP servers you trust. A listed server decides which scopes the
+sign-in asks for unless you set `scope`, and it receives the tokens, so it
+can obtain anything the client's consented permissions allow. The list is
+what stops any other server from borrowing the client: anyone who can start
+a sign-in can point it at any URL. Without endpoint overrides, the
+authorization and token endpoints the server advertises must be on
+`authorization_server_host`, or the sign-in is refused.
+
+For Entra ID:
 
 1. In Entra, add an app registration. Under Authentication add a **Web**
    platform with the redirect URI `<root>/oauth/mcp/callback`, where `<root>`
@@ -997,19 +1011,24 @@ host uses it, and every other server still registers itself. For Entra ID:
 4. Configure the client. A single-tenant app is refused at the
    `/organizations` endpoints MCP servers usually name (AADSTS50194), so
    point both endpoints at your tenant. Entra also rejects a `resource`
-   parameter next to scope-based requests (AADSTS9010010), so turn it off:
+   parameter that does not match the resource the requested scope belongs
+   to, so turn it off:
 
 ```bash
 DAIMON_MCP_OAUTH__CLIENTS='[{"authorization_server_host": "login.microsoftonline.com",
+  "mcp_servers": ["<mcp server url>"],
   "client_id": "<application id>", "client_secret": "<secret value>",
   "authorization_endpoint": "https://login.microsoftonline.com/<tenant id>/oauth2/v2.0/authorize",
   "token_endpoint": "https://login.microsoftonline.com/<tenant id>/oauth2/v2.0/token",
   "send_resource": false}]'
 ```
 
-Daimon asks for `offline_access` whenever the server offers it, so the
-connection refreshes on its own. The refresh uses the client secret stored
-with each connection: after rotating the secret, people connect again.
+If the MCP server publishes no scopes, set `scope` to the space-separated
+scopes to request (for Entra, usually `<application id URI>/.default`).
+A configured client also asks for `offline_access` when the authorization
+server offers it, so the connection refreshes on its own. The client secret
+is copied into each stored connection for those refreshes: after rotating
+it, people connect again.
 
 ## Backup and disaster recovery
 
