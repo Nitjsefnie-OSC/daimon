@@ -67,6 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - GitHub App grants stop covering repositories removed from an installation, suspended installations, and installations GitHub confirms deleted. A refreshed GitHub repository snapshot is intersected with the tenant's confirmed Connect set; webhook changes, Connect saves, and existing installations queue a refresh. Connect cannot clear a suspension recorded by reconciliation.
 
+- Installations migrated while an older scheduler was still running no longer stay without a GitHub snapshot: the scheduler queues a refresh for any App installation that has never been refreshed.
+
 - **Teams agents can reopen the files they delivered.** History replay and
   the MCP Teams read tools resolve the SharePoint links in daimon's own
   saved-files list to download URLs, inside the channel's folder only, as
