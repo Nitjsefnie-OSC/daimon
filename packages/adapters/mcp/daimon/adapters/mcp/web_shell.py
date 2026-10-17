@@ -27,7 +27,7 @@ def _environment_chip() -> str:
     if not _environment_label:
         return ""
     name = html.escape(_environment_label)
-    return f'<span class="web-env" aria-label="Environment: {name}">{name}</span>'
+    return f'<span class="web-env"><span class="web-sr-only">Environment: </span>{name}</span>'
 
 
 def render_page(

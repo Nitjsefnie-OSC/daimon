@@ -2,16 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 from daimon.adapters.mcp.web_shell import configure_environment_label, render_page
-
-
-@pytest.fixture(autouse=True)
-def _reset_label() -> Iterator[None]:
-    yield
-    configure_environment_label(name="", label="")
 
 
 def _header(name: str, label: str) -> str:
@@ -35,10 +27,11 @@ def test_production_shows_no_chip() -> None:
 )
 def test_chip_text_prefers_label_then_sentence_cased_name(name: str, label: str, text: str) -> None:
     header = _header(name, label)
-    assert f'<span class="web-env" aria-label="Environment: {text}">{text}</span></div>' in header
+    chip = f'<span class="web-env"><span class="web-sr-only">Environment: </span>{text}</span>'
+    assert f"{chip}</div>" in header
 
 
 def test_chip_text_is_escaped() -> None:
     header = _header("", "<b>x</b>")
     assert "<b>" not in header
-    assert "Environment: &lt;b&gt;x&lt;/b&gt;" in header
+    assert "</span>&lt;b&gt;x&lt;/b&gt;</span>" in header
