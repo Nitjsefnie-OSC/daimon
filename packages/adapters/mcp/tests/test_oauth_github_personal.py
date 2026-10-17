@@ -152,7 +152,7 @@ async def test_personal_link_verifies_browser_and_discord_user(
             "/oauth/github/callback", params={"state": github_state, "code": "github-code"}
         )
         assert linked.status_code == 200
-        assert "Linked as @carlos." in linked.text
+        assert "Linked as @carlos." in _text(linked)
         repeated = await browser.get(
             "/oauth/github/callback", params={"state": github_state, "code": "github-code"}
         )
@@ -287,7 +287,7 @@ async def test_personal_link_signs_in_with_slack_before_github(
             "/oauth/github/callback", params={"state": github_state, "code": "github-code"}
         )
         assert linked.status_code == 200
-        assert "Linked as @carlos." in linked.text
+        assert "Linked as @carlos." in _text(linked)
     async with committing_sessionmaker() as session:
         assert await account_link_status(session, account_id=account.id) == "carlos"
 
@@ -423,7 +423,9 @@ def _github_state(verified: httpx.Response) -> str:
 
 
 def _text(page: httpx.Response) -> str:
-    return html.unescape(page.text)
+    """The visible text: no style block, no tags, entities decoded."""
+    body = re.sub(r"<style>.*?</style>", "", page.text, flags=re.S)
+    return html.unescape(re.sub(r"<[^>]+>", "", body))
 
 
 def _heading(page: httpx.Response) -> str:
@@ -436,7 +438,7 @@ def _hrefs(page: httpx.Response) -> dict[str, str]:
     return {
         label.strip(): href.replace("&amp;", "&")
         for href, label in re.findall(
-            r'<a class="gh-(?:primary|link)[^"]*" href="([^"]+)">(?:<svg.*?</svg>)?([^<]+)</a>',
+            r'<a class="gh-(?:primary|secondary)[^"]*" href="([^"]+)">(?:<svg.*?</svg>)?([^<]+)</a>',
             page.text,
             flags=re.S,
         )
@@ -577,6 +579,9 @@ async def test_wrong_account_page_names_the_repo_and_reuses_the_start_route(
         assert page.status_code == 200
         assert _heading(page) == "Wrong GitHub account"
         assert "@sam-rivera can't open northwind-labs/analysis." in _text(page)
+        # Names never break at a hyphen: each sits in its own nowrap span.
+        assert '<span style="white-space:nowrap">northwind-labs/analysis</span>' in page.text
+        assert '<span style="white-space:nowrap">@sam-rivera</span>' in page.text
         hrefs = _hrefs(page)
         # "Cancel request" would need a new state-changing endpoint, so it is not offered.
         assert list(hrefs) == ["Use another GitHub account", "Back to Discord"]
@@ -608,3 +613,82 @@ async def test_plain_link_does_not_ask_github_to_choose_an_account(
         assert flagged.status_code == 307
         verified = await _until_platform_verified(browser, await world.new_link())
     assert _SELECT not in verified.headers["location"]
+
+
+def test_names_are_escaped_before_they_are_wrapped() -> None:
+    from daimon.adapters.mcp.oauth_github_personal import (
+        _nowrap,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    wrapped = _nowrap(
+        "<b>@sam-rivera</b> can't open northwind-labs/analysis & northwind-labs/*.",
+        ("northwind-labs/analysis", "northwind-labs/*", "@sam-rivera"),
+    )
+    assert "<b>" not in wrapped and "&lt;b&gt;" in wrapped and "&amp;" in wrapped
+    for name in ("northwind-labs/analysis", "northwind-labs/*", "@sam-rivera"):
+        assert f'<span style="white-space:nowrap">{name}</span>' in wrapped
+    assert wrapped.count("<span") == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "platform,back_url",
+    [
+        ("discord", "https://discord.com/channels/123"),
+        ("slack", "https://app.slack.com/client/T123"),
+    ],
+)
+async def test_expired_link_with_a_known_platform_offers_the_way_back(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], platform: str, back_url: str
+) -> None:
+    world = await _world(committing_sessionmaker, platform=platform)
+    async with world.browser() as browser:
+        link = await world.new_link()
+        assert (await browser.get(link)).status_code == 307
+        # Opening a link that was already started finds its row, so the platform is known.
+        again = await browser.get(link)
+    assert again.status_code == 400
+    assert _heading(again) == "Link expired"
+    assert _hrefs(again) == {f"Back to {platform.title()}": back_url}
+    assert 'class="gh-primary"' in again.text
+    assert "close this tab" not in _text(again).lower()
+
+
+@pytest.mark.asyncio
+async def test_back_button_is_an_outline_button_with_a_44px_tap_target(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(committing_sessionmaker, platform="discord")
+    async with world.browser() as browser:
+        opened = await browser.get(await world.new_link())
+        state = parse_qs(urlparse(opened.headers["location"]).query)["state"][0]
+        refused = await browser.get("/oauth/github/link/platform-callback", params={"state": state})
+    assert 'class="gh-primary"' in refused.text  # Try again
+    assert re.search(
+        r'<a class="gh-secondary" href="https://discord.com/channels/123">', refused.text
+    )
+    css = refused.text.split(".gh-secondary{", 1)[1].split("}", 1)[0]
+    for rule in (
+        "min-height:44px",
+        "gap:8px",
+        "display:inline-flex",
+        "background:#fff",
+        "border:1px solid",
+    ):
+        assert rule in css
+    assert "web-brand-link" not in refused.text
+
+
+def test_a_name_that_looks_like_an_entity_cannot_break_the_escaping() -> None:
+    from daimon.adapters.mcp.oauth_github_personal import (
+        _nowrap,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    wrapped = _nowrap("@x27 can't open acme/a-b.", ("@x27", "acme/a-b"))
+    assert wrapped == (
+        '<span style="white-space:nowrap">@x27</span> can&#x27;t open '
+        '<span style="white-space:nowrap">acme/a-b</span>.'
+    )
+    bare = _nowrap("x27 & amp can't", ("x27", "amp"))
+    assert "&amp;" in bare and "&#x27;" in bare
+    assert bare.count("<span") == 2

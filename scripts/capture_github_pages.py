@@ -121,6 +121,7 @@ def personal_pages() -> dict[str, Response]:
         "personal_linked": personal_page(
             "GitHub linked",
             "Linked as @sam-rivera. Check Discord for the result.",
+            names=("@sam-rivera",),
             status=200,
             mark="circle-check",
             back=personal_back("discord", "123", primary=True),
@@ -128,6 +129,7 @@ def personal_pages() -> dict[str, Response]:
         "personal_linked_slack": personal_page(
             "GitHub linked",
             "Linked as @sam-rivera. Check Slack for the result.",
+            names=("@sam-rivera",),
             status=200,
             mark="circle-check",
             back=personal_back("slack", "T123", primary=True),
@@ -135,6 +137,7 @@ def personal_pages() -> dict[str, Response]:
         "personal_linked_idle": personal_page(
             "GitHub linked",
             "Linked as @sam-rivera.",
+            names=("@sam-rivera",),
             status=200,
             mark="circle-check",
             back=personal_back("discord", "123", primary=True),
@@ -142,6 +145,7 @@ def personal_pages() -> dict[str, Response]:
         "personal_wrong_account": personal_page(
             "Wrong GitHub account",
             "@sam-rivera can't open northwind-labs/analysis.",
+            names=("@sam-rivera", "northwind-labs/analysis"),
             status=200,
             tone="error",
             back=personal_back("discord", "123"),
@@ -168,7 +172,7 @@ def personal_pages() -> dict[str, Response]:
             back=personal_back("discord", "123"),
             action=("Try again", "#retry"),
         ),
-        "personal_expired": personal_expired(),
+        "personal_expired": personal_expired(("discord", "123")),
         "personal_connection_problem": personal_unreachable(
             status=502, action=("Try again", "#retry")
         ),
@@ -401,6 +405,13 @@ def main() -> None:
                     ]
                     assert page.locator("#connect-repos").inner_text() == "Add 1 repo"
                 if state.startswith("personal_"):
+                    buttons = page.locator(".gh-actions a")
+                    boxes = [buttons.nth(i).bounding_box() for i in range(buttons.count())]
+                    assert all(box and box["height"] >= 44 for box in boxes)
+                    if width == 390:
+                        # On a phone every button starts at the same left edge.
+                        assert len({round(box["x"]) for box in boxes if box}) <= 1
+                        print(state, "left x", [round(box["x"]) for box in boxes if box])
                     assert "close this tab" not in page.locator("main").inner_text().lower()
                     assert page.locator("h1").inner_text() == (
                         "GitHub linked"

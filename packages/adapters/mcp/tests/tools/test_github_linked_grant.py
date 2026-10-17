@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -44,6 +45,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.routing import Route
+
+
+def _visible(page_html: str) -> str:
+    """The text a person reads: tags removed, since names sit in nowrap spans."""
+    return re.sub(r"<[^>]+>", "", page_html)
 
 
 @pytest.fixture
@@ -1119,10 +1125,12 @@ async def test_pending_grant_resumes_from_personal_link_callback(
                 assert "Agent access changed while you were linking." in linked_page.text
             elif scenario == "expired_pending":
                 assert "<h1>GitHub linked</h1>" in linked_page.text
-                assert "Linked as @person." in linked_page.text
+                assert "Linked as @person." in _visible(linked_page.text)
             else:
                 assert "<h1>GitHub linked</h1>" in linked_page.text
-                assert "Linked as @person. Check Discord for the result." in linked_page.text
+                assert "Linked as @person. Check Discord for the result." in _visible(
+                    linked_page.text
+                )
                 assert "Back to Discord" in linked_page.text
     async with setup_linked.sessionmaker() as session:
         grants = await list_agent_grants(

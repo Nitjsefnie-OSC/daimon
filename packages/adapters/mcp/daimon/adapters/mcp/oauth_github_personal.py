@@ -6,6 +6,7 @@ import base64
 import hashlib
 import html
 import logging
+import re
 import secrets
 import uuid
 from collections.abc import Awaitable, Callable
@@ -34,7 +35,12 @@ from daimon.core.stores.github_access_requests import (
     ready_and_continue,
 )
 from daimon.core.stores.github_links import save_verified_link, verified_platform_account
-from daimon.core.stores.github_personal_links import digest, find_by_state, get_intent, mint_link
+from daimon.core.stores.github_personal_links import (
+    digest,
+    find_by_state,
+    get_intent,
+    mint_link,
+)
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
@@ -55,6 +61,39 @@ def _platform_name(platform: str) -> str:
     return _PLATFORM_NAMES.get(platform, platform.title())
 
 
+_NOWRAP = "white-space:nowrap"
+# The way back is an outline button as tall as the primary one (44px tap target), with its
+# icon 8px from the text. It lives here so the shared page shell and its icons stay as they are.
+_SECONDARY_CSS = (
+    ".gh-secondary{box-sizing:border-box;min-height:44px;display:inline-flex;"
+    "align-items:center;justify-content:center;gap:8px;padding:8px 20px;"
+    "border:1px solid var(--input);border-radius:calc(var(--radius) - 2px);"
+    "background:#fff;color:var(--foreground);font-size:14px;font-weight:600;"
+    "text-decoration:none}"
+    ".gh-secondary:hover{background:var(--muted)}"
+    ".gh-secondary:focus-visible{outline:3px solid var(--ring);outline-offset:2px}"
+)
+
+
+def _nowrap(text: str, names: tuple[str, ...]) -> str:
+    """Keep each name on one line. Split the raw text on the names, then escape each piece.
+
+    Escaping first would let a short name match inside an entity such as `&#x27;`.
+    """
+    unique = sorted({name for name in names if name}, key=len, reverse=True)
+    if not unique:
+        return html.escape(text)
+    pattern = "(" + "|".join(re.escape(name) for name in unique) + ")"
+    known = set(unique)
+    return "".join(
+        f'<span style="{_NOWRAP}">{html.escape(piece)}</span>'
+        if piece in known
+        else html.escape(piece)
+        for piece in re.split(pattern, text)
+        if piece
+    )
+
+
 def _page(
     title: str,
     message: str | None = None,
@@ -64,10 +103,12 @@ def _page(
     mark: str = "triangle-alert",
     back: str | None = None,
     action: tuple[str, str] | None = None,
+    names: tuple[str, ...] = (),
 ) -> Response:
     """One browser outcome: a title, an optional line, then at most a retry and a way back.
 
     Retry buttons only point at the existing link-start route; none of them posts anything.
+    Each of `names` (repos, owners, logins) is kept on one line wherever it appears in the line.
     """
     primary = (
         f'<a class="gh-primary" href="{html.escape(action[1], quote=True)}">'
@@ -76,13 +117,14 @@ def _page(
         else ""
     )
     buttons = f'<div class="gh-actions">{primary}{back or ""}</div>' if primary or back else ""
-    line = f'<p class="gh-action-line">{html.escape(message)}</p>' if message else ""
+    line = f'<p class="gh-action-line">{_nowrap(message, names)}</p>' if message else ""
     return branded_page(
         title=title,
         state_bar=" status-bar--rose" if tone == "error" else "",
         body_html=(
             '<div class="gh-flow gh-flow--status">'
             f'<div class="gh-status-icon">{icon(mark)}</div>'
+            f"<style>{_SECONDARY_CSS}</style>"
             f"<h1>{html.escape(title)}</h1>{line}{buttons}</div>"
         ),
         status=status,
@@ -98,13 +140,23 @@ def _back(platform: str, workspace_id: str, *, primary: bool = False) -> str:
         target = f"https://app.slack.com/client/{html.escape(workspace_id, quote=True)}"
     label = f"Back to {_platform_name(platform)}"
     return (
-        f'<a class="{"gh-primary" if primary else "gh-link web-brand-link"}" href="{target}">'
+        f'<a class="{"gh-primary" if primary else "gh-secondary"}" href="{target}">'
         f"{platform_mark(platform)}{label}</a>"
     )
 
 
-def _expired() -> Response:
-    return _page("Link expired", "This link expired. Ask again in chat.", mark="clock")
+def _expired(origin: tuple[str, str] | None = None) -> Response:
+    """An expired or used link. With a known link's (platform, workspace), offer the way back.
+
+    When no link row matches the token or state, the platform is unknown and the page
+    has no button.
+    """
+    return _page(
+        "Link expired",
+        "This link expired. Ask again in chat.",
+        mark="clock",
+        back=_back(origin[0], origin[1], primary=True) if origin is not None else None,
+    )
 
 
 def _unreachable(*, status: int, action: tuple[str, str] | None = None) -> Response:
@@ -246,12 +298,14 @@ def build_personal_link_routes(
                 session, token_hash=digest(token), lock=True, include_expired=True
             )
             if intent is None:
-                return _expired()
+                return _expired((intent.platform, intent.platform_workspace_id) if intent else None)
             if intent.expires_at <= datetime.now(UTC):
-                return _expired()
+                return _expired((intent.platform, intent.platform_workspace_id) if intent else None)
             else:
                 if intent.phase != "new":
-                    return _expired()
+                    return _expired(
+                        (intent.platform, intent.platform_workspace_id) if intent else None
+                    )
                 platform = intent.platform
                 workspace_id = intent.platform_workspace_id
                 configured = (
@@ -327,7 +381,7 @@ def build_personal_link_routes(
         async with sessionmaker() as session:
             intent = await find_by_state(session, state=state, phase="platform")
             if intent is None or intent.browser_cookie_hash != cookie_hash:
-                return _expired()
+                return _expired((intent.platform, intent.platform_workspace_id) if intent else None)
             platform, expected_user, expected_workspace = (
                 intent.platform,
                 intent.platform_user_id,
@@ -434,7 +488,7 @@ def build_personal_link_routes(
         async with sessionmaker.begin() as session:
             intent = await find_by_state(session, state=state, phase="platform", lock=True)
             if intent is None or intent.browser_cookie_hash != cookie_hash:
-                return _expired()
+                return _expired((intent.platform, intent.platform_workspace_id) if intent else None)
             intent.github_state = github_state
             intent.encrypted_verifier = encrypt_token(fernet, verifier)
             intent.phase = "github"
@@ -462,7 +516,7 @@ def build_personal_link_routes(
                 or intent.browser_cookie_hash != cookie_hash
                 or intent.encrypted_verifier is None
             ):
-                return _expired()
+                return _expired((intent.platform, intent.platform_workspace_id) if intent else None)
             platform, workspace_id = intent.platform, intent.platform_workspace_id
             verifier = decrypt_token(fernet, intent.encrypted_verifier)
         if not code:
@@ -530,7 +584,9 @@ def build_personal_link_routes(
             async with sessionmaker.begin() as session:
                 intent = await find_by_state(session, state=state, phase="github", lock=True)
                 if intent is None or intent.browser_cookie_hash != cookie_hash:
-                    return _expired()
+                    return _expired(
+                        (intent.platform, intent.platform_workspace_id) if intent else None
+                    )
                 if not await verified_platform_account(
                     session,
                     tenant_id=intent.tenant_id,
@@ -538,7 +594,9 @@ def build_personal_link_routes(
                     platform=intent.platform,
                     platform_user_id=intent.platform_user_id,
                 ):
-                    return _expired()
+                    return _expired(
+                        (intent.platform, intent.platform_workspace_id) if intent else None
+                    )
                 await save_verified_link(
                     session,
                     intent_account_id=intent.account_id,
@@ -641,6 +699,7 @@ def build_personal_link_routes(
                 response = _page(
                     "GitHub linked",
                     f"Linked as @{login}. Check {_platform_name(platform)} for the result.",
+                    names=(f"@{login}",),
                     status=200,
                     mark="circle-check",
                     back=_back(platform, workspace_id, primary=True),
@@ -652,6 +711,7 @@ def build_personal_link_routes(
                 f"@{login} can't open {_repo_phrase(missing)}."
                 if missing
                 else f"@{login} can't open what this request needs.",
+                names=(f"@{login}", *missing),
                 status=200,
                 tone="error",
                 back=_back(platform, workspace_id),
@@ -665,6 +725,7 @@ def build_personal_link_routes(
             response = _page(
                 "GitHub linked",
                 f"Linked as @{login}.",
+                names=(f"@{login}",),
                 status=200,
                 mark="circle-check",
                 back=_back(platform, workspace_id, primary=True),
