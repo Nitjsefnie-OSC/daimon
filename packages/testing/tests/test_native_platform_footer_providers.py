@@ -32,6 +32,8 @@ from .test_native_platform_footer import account as account
 from .test_native_platform_footer import footer_engine as footer_engine
 from .test_native_platform_footer import save_d11_proof as save_d11_proof
 
+pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
+
 
 @pytest.mark.parametrize("surface", ["discord", "slack", "teams"])
 async def test_actual_native_sdk_host_footer_joins_complete_controlled_inventory(

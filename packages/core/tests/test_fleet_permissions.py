@@ -868,6 +868,52 @@ def test_invalid_backend_override_is_a_typed_secret_free_refusal():
     assert caught.value.field == "backend" and caught.value.reason == "unsupported"
 
 
+def test_fresh_worker_omitted_metadata_inherits_immutable_parent_stamps():
+    root = parent()
+    stamps = {
+        "daimon_account": root.fleet.scope.account_id,
+        "daimon_name": "root",
+        "daimon_spec_hash": "retained-source-digest",
+        "daimon_tenant": root.fleet.scope.tenant_id,
+    }
+    root = replace(root, spec=root.spec.model_copy(update={"metadata": stamps}))
+    source = AgentSpec(name="worker", model=root.spec.model, system="Review accounting.")
+    result = resolve(root, source)
+    assert dict(result.spec.metadata) == stamps
+    assert dict(result.permissions.spec.metadata) == stamps
+    assert dict(root.spec.metadata) == stamps
+    assert source.metadata is None and "metadata" not in source.model_fields_set
+
+
+@pytest.mark.parametrize(
+    "change",
+    (None, {}, "daimon_account", "daimon_name", "daimon_spec_hash", "daimon_tenant", "extra"),
+)
+def test_fresh_worker_supplied_metadata_cannot_change_parent_stamps(change):
+    root = parent()
+    stamps = {
+        "daimon_account": root.fleet.scope.account_id,
+        "daimon_name": "root",
+        "daimon_spec_hash": "retained-source-digest",
+        "daimon_tenant": root.fleet.scope.tenant_id,
+    }
+    root = replace(root, spec=root.spec.model_copy(update={"metadata": stamps}))
+    supplied = {**stamps, change: "changed"} if isinstance(change, str) else change
+    source = AgentSpec(name="worker", model=root.spec.model, metadata=supplied)
+    assert "metadata" in source.model_fields_set
+    with pytest.raises(WorkerSpecRefused, match="scope: not_subset"):
+        resolve(root, source)
+    assert dict(root.spec.metadata) == stamps
+
+
+def test_fresh_worker_supplied_exact_parent_metadata_remains_allowed():
+    root = parent()
+    stamps = {"daimon_tenant": root.fleet.scope.tenant_id, "daimon_name": "root"}
+    root = replace(root, spec=root.spec.model_copy(update={"metadata": stamps}))
+    source = AgentSpec(name="worker", model=root.spec.model, metadata=stamps)
+    assert dict(resolve(root, source).spec.metadata) == stamps
+
+
 @pytest.mark.parametrize("metadata", ({}, {"source_only": None}))
 def test_clone_metadata_patch_preserves_unmentioned_root_stamps(metadata):
     root = parent()

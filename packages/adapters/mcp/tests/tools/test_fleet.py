@@ -918,3 +918,76 @@ async def test_default_bridge_collects_the_original_run_from_a_real_completion_f
     assert workers == (worker,) and worker.status == "cancelled"
     assert sum(r.method == "POST" and r.path.endswith("/events") for r in transport.requests) == 2
     assert sum(r.method == "POST" and r.path == "/v1/sessions" for r in transport.requests) == 1
+
+
+@pytest.mark.parametrize("tool", ["fleet_spawn", "fleet_cross_review"])
+@pytest.mark.parametrize("caps", [None, (262144, 65536)])
+async def test_public_token_caps_reach_existing_worker_limits(tool, caps) -> None:
+    root = host_parent()
+    orchestrator = create_autospec(FleetOrchestrator, instance=True)
+    orchestrator.spawn.return_value = {"run_id": str(RUN), "status": "pending"}
+
+    async def load(caller):
+        assert caller is AUTH
+        return root, TenantAccessPolicy(enabled_backends=("anthropic",))
+
+    request = arguments(tool)
+    if caps is not None:
+        request.update(max_input_tokens=caps[0], max_output_tokens=caps[1])
+    async with Client(registered(HostFleetToolService(orchestrator, load))) as client:
+        await client.call_tool(tool, request)
+    limits = orchestrator.spawn.await_args.kwargs["limits"]
+    assert isinstance(limits, WorkerLimits)
+    assert limits.budget_usd == Decimal(request["budget_usd"])
+    assert limits.max_input_tokens == (caps[0] if caps else None)
+    assert limits.max_output_tokens == (caps[1] if caps else None)
+    if caps is None:
+        assert not {"max_input_tokens", "max_output_tokens"} & limits.model_dump().keys()
+
+
+@pytest.mark.parametrize("tool", ["fleet_spawn", "fleet_cross_review"])
+@pytest.mark.parametrize("field", ["max_input_tokens", "max_output_tokens"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "262144"])
+async def test_public_token_caps_reject_invalid_shapes_before_owner(tool, field, value) -> None:
+    stub = service()
+    request = arguments(tool)
+    request[field] = value
+    async with Client(registered(cast(FleetToolService, stub))) as client:
+        with pytest.raises(ToolError):
+            await client.call_tool(tool, request)
+    stub.spawn.assert_not_awaited()
+
+
+@pytest.mark.parametrize("fault", ["expanded", "unsupported", "incomplete"])
+async def test_public_token_caps_keep_existing_resolver_refusals(fault) -> None:
+    root = host_parent()
+    selected = backend_selection("gemini")
+    model = ModelRef(provider="gemini", id=selected.model)
+    root = replace(
+        root,
+        spec=root.spec.model_copy(update={"model": model}),
+        backend_grants=(selected,),
+        models=(model,),
+        limits=root.limits.model_copy(
+            update={"max_input_tokens": 262144, "max_output_tokens": 65536}
+        ),
+    )
+    if fault == "unsupported":
+        root = host_parent()
+
+    async def load(caller):
+        return root, TenantAccessPolicy(enabled_backends=("anthropic", "gemini"))
+
+    request = arguments("fleet_spawn")
+    request.update(
+        backend=root.backend_grants[0].model_dump(mode="json"),
+        agent=root.spec.model_dump(mode="json"),
+        max_input_tokens=262145 if fault == "expanded" else 262144,
+        max_output_tokens=None if fault == "incomplete" else 65536,
+        max_turns=1,
+    )
+    owner = host_owner()
+    async with Client(registered(HostFleetToolService(FleetOrchestrator(owner), load))) as client:
+        with pytest.raises(ToolError, match="not_subset|budget: unsupported"):
+            await client.call_tool("fleet_spawn", request)
+    owner.admit.assert_not_awaited()

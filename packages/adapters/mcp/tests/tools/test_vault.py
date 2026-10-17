@@ -13,6 +13,7 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.tools.vault import VaultCredentialSummary, _list_credentials_impl
 from daimon.core.mcp_vault import ensure_agent_mcp_vault
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -144,9 +145,12 @@ async def test_list_credentials_resolves_vault_provisioned_by_ensure_agent_mcp_v
     """The reader must never hand-name the vault: it has to agree with
     whatever the real provisioning helper wrote, not a fake built to match.
     """
-    account_id = uuid.uuid4()
+    async with committing_sessionmaker() as db, db.begin():
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    account_id = account.id
     agent_id = uuid.uuid4()
-    tenant_id = uuid.uuid4()
+    tenant_id = tenant.id
 
     vaults: dict[str, dict[str, object]] = {}
     credentials: dict[str, list[dict[str, object]]] = {}

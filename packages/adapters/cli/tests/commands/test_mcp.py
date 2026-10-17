@@ -31,7 +31,7 @@ from daimon.core.config import (
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import ConfigError
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_fake_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from rich.console import Console
@@ -449,11 +449,11 @@ def _make_sweep_rt(
     """Build a CliRuntime stub for sweep-credentials tests.
 
     Uses build_fake_anthropic with a transport-level handler for vault operations.
-    session_factory is not used by sweep_stale_admin_credentials so a dummy is fine.
+    Dry-run does not touch the registry; apply tests inject their owned session factory.
     """
     settings = _build_settings(jwt_secret=jwt_secret, public_url=public_url)
     anthropic = build_fake_anthropic(handler if handler is not None else _noop_handler)
-    # sweep_stale_admin_credentials does not use sessionmaker — pass a dummy.
+    # Dry-run never opens a DB session. Apply tests replace this factory.
     dummy_sessionmaker = cast(
         "async_sessionmaker[AsyncSession]",
         object(),
@@ -518,9 +518,13 @@ async def test_sweep_credentials_dry_run_lists_target_without_writes(
 @pytest.mark.asyncio
 async def test_sweep_credentials_apply_issues_delete_and_create(
     capsys: pytest.CaptureFixture[str],
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """mcp_sweep_credentials with apply=True: DELETE+POST fired for the public_url cred."""
-    account_id = uuid.uuid4()
+    async with db_session_factory() as db, db.begin():
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    account_id = account.id
     display = f"daimon-mcp:{account_id}:{uuid.uuid4()}"
 
     deleted_ids: list[str] = []
@@ -568,6 +572,7 @@ async def test_sweep_credentials_apply_issues_delete_and_create(
         raise AssertionError(f"unexpected call: {req.method} {req.url}")
 
     rt = _make_sweep_rt(handler=handler)
+    object.__setattr__(rt, "sessionmaker", db_session_factory)
     console = Console(highlight=False)
     await mcp_sweep_credentials(rt=rt, console=console, apply=True)
 
@@ -576,6 +581,9 @@ async def test_sweep_credentials_apply_issues_delete_and_create(
     token: str = created_bodies[0]["auth"]["token"]
     claims: dict[str, Any] = pyjwt.decode(token, _JWT_SECRET, algorithms=["HS256"])
     assert "is_admin" not in claims, "recreated token must not carry is_admin"
+    assert claims["exp"] - claims["iat"] == 3600
+    assert claims["chat_agent_id"] == display.split(":")[2]
+    assert isinstance(claims["jti"], str)
 
 
 @pytest.mark.asyncio

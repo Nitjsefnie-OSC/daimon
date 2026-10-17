@@ -11,12 +11,12 @@ import datetime as dt
 import uuid
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_auth import mint_jwt, mint_panel_mcp_token
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
     "make_identity",
@@ -92,3 +92,19 @@ async def seed_server_admin(
             account=account,
         )
     return tenant.id, account.id
+
+
+async def registered_account_token(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    account_id: uuid.UUID,
+    secret: bytes = b"a" * 32,
+) -> str:
+    """The production registered checkout identity, committed before HTTP admission."""
+    async with sessionmaker.begin() as session:
+        return await mint_panel_mcp_token(
+            session,
+            account_id=account_id,
+            secret=secret,
+            now=dt.datetime.now(dt.UTC),
+        )

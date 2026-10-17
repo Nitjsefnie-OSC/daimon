@@ -4,6 +4,70 @@ This guide expands the README quickstart. It covers the full Docker Compose
 setup, running the processes by hand, Slack, Microsoft Teams, the Claude Code
 login mounts, chart storage and connecting MCP servers.
 
+## Upgrading an existing installation
+
+The new MCP server is strict immediately by default: credentials need a live
+registry entry. Re-mint old CLI or MCP-client tokens that do not contain a `jti`
+with the updated `daimon mcp mint-token` command, then replace them in the
+clients that use them. Use the updated agent/operator mint commands for those
+credential types. Treat command output as a credential and store it privately.
+
+Chat credentials renew automatically on session reuse and agent-chat or hub
+continuation. Existing turns using older vault credentials can stop reaching
+MCP if the verifier is upgraded before their minters. Use a staged upgrade when
+preserving those turns matters.
+
+### Staged MCP upgrade
+
+1. Apply migrations with the existing migration procedure. Deploy the updated
+   MCP service first: it also creates credentials for agent-chat, hub and OAuth
+   sessions. For the initial rollout only, explicitly set
+   `DAIMON_MCP__ALLOW_LEGACY_TOKENS=true` and
+   `DAIMON_MCP__LEGACY_TOKEN_CUTOFF` to a timezone-aware UTC deadline five hours
+   ahead. Only non-internal legacy credentials qualify. Unregistered internal
+   credentials are refused immediately, including during this window; replace
+   any external callers with registered credentials before updating MCP.
+2. Update every credential minter, including platform workers, the scheduler
+   and any separately installed CLI. Refresh notebook services too. Record when
+   worker refresh completes and when the new MCP revision finishes deploying.
+   Old MCP requests can still create credentials after traffic switches, so
+   add the old revision's request timeout to its deployment completion time.
+3. From the later of worker completion and that last possible old MCP mint,
+   allow the existing 45-minute turn ceiling plus one minute. Complete this
+   drain before the original deadline.
+4. Set `DAIMON_MCP__ALLOW_LEGACY_TOKENS=false` on every MCP replica. After this
+   flip, or when the deadline passes, every unregistered credential is refused
+   regardless of issuance time. Keep clients on the updated minters.
+
+The deployment workflow automates this order for an existing MCP service. A
+retry preserves the original deadline; it never extends or reopens the window.
+An expired deadline allows boot but remains strict. Configuration refuses dates
+before 2026-10-16 UTC, naive/invalid dates and deadlines over six hours ahead.
+Enabling compatibility without an explicit deadline is also refused.
+
+A missing MCP service needs deliberate provisioning before this workflow. A
+stopped worker cannot provide a refresh receipt; resume and update it before
+attempting the first cutover. Do not fabricate a receipt. Rolling back to old
+minters after strict admission is unsupported: their output will be refused.
+
+### Interrupted rollout and recovery
+
+If rollout stops after the MCP update but before worker refresh, the deadline
+still closes admission automatically. Old workers can then lose MCP access
+until they are updated. Alert on the failed rollout and authentication failures;
+finish worker refresh promptly, using the original deadline. If it has already
+expired, repair the minters while leaving admission strict. Do not reset the
+window to hide an interrupted upgrade.
+
+A provider or database error during credential renewal prevents a continued
+turn from sending. Check those dependencies and retry; renewal keeps the
+existing session mutation fence. Renewal never creates a missing credential
+slot or replaces a person's OAuth credential.
+
+Billing checkout revokes its temporary credential after the HTTP hop. Cleanup
+failure is logged without credential values and preserves the checkout URL or
+original HTTP error; the original ten-minute expiry remains its upper bound.
+
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) 23 or later (the image build
@@ -384,7 +448,7 @@ You need:
 | Register the app in Entra | Anyone, if your organisation lets users register apps; otherwise the Application Developer role |
 | Create the Azure Bot | Contributor (or Owner) on the subscription or a resource group |
 | Upload the app to Teams | A Teams administrator, or anyone if custom app uploads are allowed |
-| Turn on channel files (optional) | A global administrator (or Privileged Role Administrator) to consent once, then a SharePoint or global admin who is a member of the channel |
+| Turn on channel files (optional) | A global administrator (or Privileged Role Administrator) to consent once |
 
 ### 1. Register the app in Entra
 
@@ -405,8 +469,15 @@ This registration is the identity Daimon signs in as.
 
 You don't need to add any API permissions here. The bot reads channels
 through a team-level permission that a team owner grants when they add the
-app (more on that in step 7). Only the optional channel files need a Graph
-permission.
+app (more on that in step 7), and group chats through a chat-level one
+(`ChatMessage.Read.Chat`) granted when the app is added to the chat. Only two optional features need a Graph
+application permission: channel files (`Files.ReadWrite.All`) and private and
+shared channel messages (`ChannelMessage.Read.All`, which is tenant-wide; see
+[below](#private-and-shared-channels-optional)).
+The same team-level consent covers activity feed notices
+(`TeamsActivity.Send.Group`). A team that added a package from before 0.6.0 needs the
+rebuilt one uploaded again (see Updating the app) and an owner to accept it;
+until then its notices are refused and only logged.
 
 ### 2. Create the Azure Bot and connect it to Teams
 
@@ -437,11 +508,13 @@ az bot msteams create -g <resource-group> -n <bot-name>
 
 ### 3. Run the Teams service
 
-**Find your admins.** Teams doesn't tell bots who its admins are, so you list
-Daimon's admins yourself, by their Entra object ID: Entra → **Users** → pick
-the person → copy **Object ID**. Admins can create routines, mint
-coding-tool tokens, replace shared keys, top up and see everyone's usage.
-Anyone can create an agent. You can change the list later.
+**Pick your admin team.** The owners of one team are Daimon's admins: they
+can create routines, mint coding-tool tokens, replace shared keys, top up and
+see everyone's usage. Anyone can create an agent. In Teams, open the team's
+⋯ → **Get link to team** and copy the `groupId` parameter from the link. Once
+the service runs, add the app to that team (step 7). To add or remove an
+admin later, change the team's owners; no redeploy. A removed owner loses
+admin within about a minute, everywhere, routines and tools included.
 
 **Add the values to `.env`:**
 
@@ -449,7 +522,7 @@ Anyone can create an agent. You can change the list later.
 DAIMON_TEAMS__CLIENT_ID=<application (client) ID>
 DAIMON_TEAMS__TENANT_ID=<directory (tenant) ID>
 DAIMON_TEAMS__CLIENT_SECRET=<client secret value>
-DAIMON_TEAMS__ADMIN_USER_IDS=["<object ID>","<another object ID>"]
+DAIMON_TEAMS__ADMIN_TEAM_ID=<groupId of the admin team>
 ```
 
 A few things to know:
@@ -457,7 +530,9 @@ A few things to know:
 - **Set the three credentials together.** Once any `DAIMON_TEAMS__` value is
   set, every Daimon process expects the full set. A half-filled block stops
   them all from starting, not just Teams.
-- **The admin list is a JSON array**, not a comma-separated list.
+- **Admins are the admin team's owners.** `DAIMON_TEAMS__ADMIN_USER_IDS` is
+  no longer read, and a leftover value is ignored: make those people owners
+  of the admin team.
 - **`DAIMON_CRYPTO__KEYS` must be set** (see step 1 of this guide).
 - **The `mcp` service reads these same values**, because the agent's Teams
   tools (posting, reading channels, sending files) run there. With Compose,
@@ -479,7 +554,7 @@ over HTTPS. Any reverse proxy or tunnel works. With
 
 ```text
 teams.example.com {
-	@teams path /api/messages /healthz /readyz /oauth/teams/files/callback
+	@teams path /api/messages /healthz /readyz
 	handle @teams {
 		reverse_proxy 127.0.0.1:3978
 	}
@@ -518,7 +593,8 @@ Teams installs apps from a zip file holding three files at its top level:
 
 The manifest template is
 [`teams-app-manifest.yaml`](teams-app-manifest.yaml), in manifest version
-1.25 so the app can be added to private and shared channels. Fill in your client ID
+1.30 so the app can be added to private and shared channels and answer
+privately in a thread. Fill in your client ID
 and hostname and convert it to JSON. From the repository root, with any
 Python 3 that has PyYAML:
 
@@ -580,15 +656,18 @@ your apps** → **Upload an app**.
   bot reads the thread it is asked about. The bot then posts a welcome in
   the team. To ask it something, @mention it in a post or a reply. Pick the
   name from the autocomplete list so it turns into a highlighted mention:
-  typed text alone doesn't count.
+  typed text alone doesn't count. Add it to the admin team too, or nobody
+  is an admin.
 - **A private or shared channel:** adding the app to the team doesn't add it
   there. The channel's owner adds it from the channel itself, in the
   channel's apps settings. A package built from an
   older template, before manifest 1.25, can't be added to these channels:
   rebuild it and upload it again (see Updating the app).
 
-Group chats aren't supported: the package doesn't offer them, and the bot
-turns away any that reach it.
+- **A group chat:** add the app from the chat's apps, and allow it to read
+  the chat's messages (`ChatMessage.Read.Chat`) when asked. The bot answers
+  there only while everyone in the chat is from your organisation. See
+  [`teams.md`](teams.md#group-chats).
 
 ### People from another organisation (optional)
 
@@ -640,26 +719,14 @@ those files and save its own outputs to the channel's Files tab:
 
 1. Entra → **App registrations** → your app → **API permissions** → **Add a
    permission** → **Microsoft Graph** → **Application permissions** →
-   `Sites.Selected` → **Grant admin consent**. This permission reaches only
-   the sites you grant one by one, not every site in the organisation.
-2. Same app → **Authentication** → **Add a platform** → **Web**, with the
-   redirect URI `https://teams.example.com/oauth/teams/files/callback`.
-3. Set `DAIMON_TEAMS__PUBLIC_URL=https://teams.example.com` in `.env` (your
-   hostname, without `/api/messages`) and run
-   `docker compose --profile teams up -d` so the service picks it up.
-4. In the channel, a Daimon admin asks the bot to turn files on ("enable
-   files in this channel"), or shares a file it can't open, and the bot posts
-   an **Enable files** card. Click it and sign in as a SharePoint or global
-   admin who is a member of that channel. The first sign-in in your
-   organisation must be a global admin, who approves this for everyone.
-   Daimon then grants itself access to that channel's site, and the next
-   message can read the file.
+   `Files.ReadWrite.All` → **Grant admin consent**. No restart is needed:
+   each channel's files turn on within 10 minutes.
 
-One sign-in covers a team's standard channels, which share its site; each
-private or shared channel is turned on from inside it. Open a new channel's
-Files tab once first. A shared channel hosted by another organisation keeps
-its files there, out of reach. [`teams.md`](teams.md#channel-files-optional)
-also shows how to grant a team's site by hand.
+This one permission covers every channel, private and shared ones included.
+It reaches every file in your organisation, so Daimon only opens a shared
+file inside the channel's own Files folder and only saves there. Open a new
+channel's Files tab once first. A shared channel hosted by another
+organisation keeps its files there, out of reach.
 
 ### Private and shared channels (optional)
 
@@ -687,8 +754,13 @@ Details are in [`teams.md`](teams.md#private-and-shared-channels-optional).
 - **A Reply on a bot message gets no answer in a private channel:** Teams
   sends the bot only the private channel posts that @mention it. Mention it.
 - **Every Daimon process fails at startup after adding Teams:** a
-  `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_USER_IDS` isn't
-  a JSON array of object IDs.
+  `DAIMON_TEAMS__` value is missing, or `DAIMON_TEAMS__ADMIN_TEAM_ID` isn't a
+  group ID.
+- **Nobody is an admin:** `DAIMON_TEAMS__ADMIN_TEAM_ID` is unset, or the app
+  isn't installed in that team (`teams.admin_team.lookup_failed` in the logs
+  gives the reason and status). After a failed read the last owners count for
+  up to an hour; once no owner list has been read within an hour, nobody is
+  an admin until the next good read. Re-adding the app restores the owners.
 - **`teams.tenant_reconcile_failed` in the logs:** Daimon couldn't finish
   setting up your organisation, and it refuses turns until it does. The log
   line says why.
@@ -702,7 +774,9 @@ Changes to the manifest only reach Teams in a new package. Bump `version` in
 `manifest.json`, zip it again and upload it over the existing app in the
 Teams admin center (the app → **Upload file**). Teams that already have the
 app pick up the update, and a team owner may be asked to accept new
-permissions.
+permissions. A package from before template version 0.6.0 has no `/`
+commands, prompt starters, private messages to Daimon, group chats or
+activity feed notices: rebuild it.
 
 ## Claude Code login mounts
 

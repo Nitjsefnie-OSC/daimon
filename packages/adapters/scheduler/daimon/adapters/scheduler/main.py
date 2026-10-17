@@ -646,6 +646,27 @@ async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
         log.exception("scheduler.hub_oauth_kv_sweep.failed")
 
 
+async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Bound ephemeral credential history without pruning operator/external keys."""
+    from daimon.core.mcp_auth import (
+        CHAT_TOKEN_LABEL_PREFIX,
+        EPHEMERAL_TOKEN_RETENTION,
+        PANEL_TOKEN_LABEL,
+    )
+    from daimon.core.stores.mcp_tokens import prune_expired_ephemeral_tokens
+
+    try:
+        async with sm.begin() as session:
+            await prune_expired_ephemeral_tokens(
+                session,
+                expires_before=datetime.now(UTC) - EPHEMERAL_TOKEN_RETENTION,
+                chat_label_prefix=CHAT_TOKEN_LABEL_PREFIX,
+                panel_label=PANEL_TOKEN_LABEL,
+            )
+    except SQLAlchemyError:
+        log.exception("scheduler.mcp_token_sweep.failed")
+
+
 async def _sweep_github_connect_flows(sm: async_sessionmaker[AsyncSession]) -> None:
     """Discard expired encrypted GitHub browser-flow tokens."""
     try:
@@ -1284,6 +1305,7 @@ async def run(
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
+            await _sweep_mcp_tokens(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
@@ -1317,6 +1339,7 @@ async def run(
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
+            await _sweep_mcp_tokens(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(

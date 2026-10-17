@@ -68,7 +68,6 @@ from daimon.adapters.mcp.tools.channel_skills import register_channel_skill_tool
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
-from daimon.adapters.mcp.tools.enable_files import register_enable_files_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
 from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_repo_tools
@@ -333,6 +332,8 @@ def create_mcp_app(
             # `python -O`. Use an explicit raise so the failure mode is real.
             raise BootstrapError("DAIMON_MCP__JWT_SECRET missing after validation")
         effective_auth = DaimonJWTVerifier(
+            legacy_token_cutoff=effective_settings.mcp.legacy_token_cutoff,
+            allow_legacy_tokens=effective_settings.mcp.allow_legacy_tokens,
             secret=secret_value.get_secret_value().encode(),
             sessionmaker=effective_sessionmaker,
             group_members=group_lookups.members,
@@ -547,7 +548,6 @@ def create_mcp_app(
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)
-        register_enable_files_tools(mcp)  # tagged `teams`; the Teams adapter posts the card
         if effective_settings.discord is not None or effective_settings.slack is not None:
             register_tidy_tools(mcp, runtime)  # edit/delete the agent's own posts
     else:

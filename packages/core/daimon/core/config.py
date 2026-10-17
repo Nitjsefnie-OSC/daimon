@@ -11,6 +11,7 @@ import binascii
 import json
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, cast
@@ -19,6 +20,7 @@ from uuid import UUID
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -165,6 +167,37 @@ class McpSettings(BaseModel):
             "Secret used to sign and verify MCP bearer tokens. Required to run the MCP adapter."
         ),
     )
+    legacy_token_cutoff: AwareDatetime | None = Field(
+        default=None,
+        description=(
+            "UTC deadline for a temporary legacy-token deployment window. Dates before "
+            "2026-10-16 or over six hours in the future are refused. At/after the deadline "
+            "all unregistered tokens are rejected, regardless of issuance time. Internal "
+            "tokens are always rejected without a registry row."
+        ),
+    )
+    allow_legacy_tokens: bool = Field(
+        default=False,
+        description=(
+            "Temporary minters-first deployment compatibility only. Requires a bounded "
+            "legacy_token_cutoff; only non-internal legacy tokens qualify and stop working at that "
+            "deadline even if the deployment is interrupted. Default false requires "
+            "registered tokens immediately."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def bounded_legacy_window(self) -> McpSettings:
+        cutoff = self.legacy_token_cutoff
+        now = datetime.now(UTC)
+        if cutoff is not None and cutoff < datetime(2026, 10, 16, tzinfo=UTC):
+            raise ValueError("legacy_token_cutoff must be on or after 2026-10-16 UTC")
+        if cutoff is not None and cutoff > now + timedelta(hours=6):
+            raise ValueError("legacy_token_cutoff cannot be more than six hours ahead")
+        if self.allow_legacy_tokens and cutoff is None:
+            raise ValueError("legacy compatibility requires an explicit cutoff")
+        return self
+
     require_routine_destination: bool = Field(
         default=False,
         description=(
@@ -716,20 +749,21 @@ class TeamsSettings(BaseModel):
         default=None,
         description=(
             "Externally reachable base URL of the Teams service (the Bot "
-            "Framework messaging endpoint without /api/messages). Enables the "
-            "admin sign-in that grants Daimon a team's SharePoint site; its "
-            "callback is <public_url>/oauth/teams/files/callback, which must be "
-            "a Web redirect URI on the app registration."
+            "Framework messaging endpoint without /api/messages). Graph's change "
+            "notifications for private and shared channels post to it."
         ),
     )
-    admin_user_ids: tuple[str, ...] = Field(
-        default=(),
+    admin_team_id: str | None = Field(
+        default=None,
         description=(
-            "Entra object IDs of the people who administer this deployment "
-            "from Teams. Teams exposes no admin role to bots, so this list is "
-            "the admin check: admins get the admin role in turns, create "
-            "routines, replace shared keys, top up and see everyone's usage. "
-            "Everyone else is a regular user."
+            "Entra group ID of the team whose owners administer this deployment "
+            "from Teams: admins get the admin role in turns, create routines, "
+            "replace shared keys, top up and see everyone's usage. Adding an "
+            "admin means making them an owner of that team; no redeploy. The "
+            "app must be installed in that team. To find the ID, open the "
+            "team's ⋯ menu in Teams, choose Get link to team and copy the "
+            "groupId parameter. Guests and people from another organisation "
+            "are never admins. Unset: nobody is an admin."
         ),
     )
     restrict_guests: bool = Field(
@@ -752,15 +786,17 @@ class TeamsSettings(BaseModel):
         ),
     )
 
-    @field_validator("admin_user_ids")
+    @field_validator("admin_team_id")
     @classmethod
-    def _canonicalize_admin_user_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        """Compare against the canonical lowercase form inbound ids arrive in."""
+    def _canonicalize_admin_team_id(cls, value: str | None) -> str | None:
+        """Compare against the canonical lowercase form Graph and activities use."""
+        if value is None or not value.strip():
+            return None
         try:
-            return tuple(str(UUID(item)) for item in value)
+            return str(UUID(value))
         except ValueError:
             raise ValueError(
-                "DAIMON_TEAMS__ADMIN_USER_IDS must list Entra object ID UUIDs"
+                "DAIMON_TEAMS__ADMIN_TEAM_ID must be the team's Entra group ID UUID"
             ) from None
 
     @field_validator("tenant_id")

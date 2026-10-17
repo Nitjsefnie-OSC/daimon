@@ -1,4 +1,4 @@
-"""Migration 0107 queues GitHub truth refreshes without replacing Connect confirmation."""
+"""Migration 0108 queues GitHub truth refreshes without replacing Connect confirmation."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 async def test_existing_github_app_rows_are_queued_for_first_snapshot(
     db_session: AsyncSession,
 ) -> None:
-    path = Path(__file__).parents[1] / "alembic/versions/0107_github_installation_truth.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0108_github_installation_truth.py"
     spec = importlib.util.spec_from_file_location("migration_github_installation_truth", path)
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)

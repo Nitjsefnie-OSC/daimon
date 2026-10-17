@@ -38,7 +38,7 @@ from daimon.adapters.mcp.tools.sessions import (
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_auth import mint_jwt
+from daimon.core.mcp_auth import mint_agent_mcp_token, mint_chat_mcp_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.thread_sessions import create_thread_session
@@ -560,12 +560,14 @@ async def test_a_chat_turn_token_does_not_reach_the_agent_chat_turn_tools(
         ),
         sessionmaker=world.sessionmaker,
     )
-    token = mint_jwt(
-        account_id=world.account_id,
-        secret=_SECRET,
-        now=dt.datetime.now(dt.UTC),
-        chat_agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
-    )
+    async with world.sessionmaker() as db, db.begin():
+        token, _, _ = await mint_chat_mcp_token(
+            db,
+            account_id=world.account_id,
+            agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
+            secret=_SECRET,
+            now=dt.datetime.now(dt.UTC),
+        )
 
     result = await call_mcp_tool(app, token=token, name=tool, arguments=arguments)
 
@@ -780,12 +782,16 @@ async def _bearer(world: _World, role: Role) -> str:
     await world.db.commit()
     world.add_session("ses_headless")
     world.sessions["ses_headless"]["metadata"]["daimon_account"] = str(account.id)
-    return mint_jwt(
-        account_id=account.id,
-        secret=_SECRET,
-        now=dt.datetime.now(dt.UTC),
-        agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
-    )
+    async with world.sessionmaker.begin() as session:
+        return await mint_agent_mcp_token(
+            session,
+            account_id=account.id,
+            tenant_id=world.tenant_id,
+            secret=_SECRET,
+            now=dt.datetime.now(dt.UTC),
+            agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id=_AGENT),
+            label=None,
+        )
 
 
 async def _pin(world: _World, agent: str) -> None:

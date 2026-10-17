@@ -34,6 +34,7 @@ from daimon.adapters.mcp.tools._session_access import (
     sessions_outside_seals,
 )
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
+from daimon.core.ma_identity import derive_agent_uuid
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.errors import ScopeViolation
@@ -95,7 +96,7 @@ class SessionEventOut(BaseModel):
 
 
 def _session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIdentity) -> bool:
-    """True when the session was opened by this caller's account.
+    """True for this account and, when agent-scoped, this executing agent.
 
     ``create_session`` stamps ``daimon_account`` on every session it opens
     (``core/sessions.py``), and the privacy deletion path already keys on it.
@@ -103,6 +104,11 @@ def _session_belongs_to_caller(session: BetaManagedAgentsSession, auth: AuthIden
     metadata and cannot be attributed, and a transcript is not something to
     hand over on a maybe.
     """
+    executing = auth.chat_agent_id or auth.agent_id
+    if executing is not None and executing != derive_agent_uuid(
+        tenant_id=auth.tenant_id, ma_agent_id=session.agent.id
+    ):
+        return False
     return session_belongs_to_caller(session, auth)
 
 
