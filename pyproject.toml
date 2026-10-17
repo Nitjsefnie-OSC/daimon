@@ -226,6 +226,7 @@ source_modules = [
     "daimon.core.memory_view",
     "daimon.core.message_feedback",
     "daimon.core.message_split",
+    "daimon.core.microsoft_identity",
     "daimon.core.model_presets",
     "daimon.core.models_catalog",
     "daimon.core.name_mentions",
