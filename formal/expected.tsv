@@ -363,23 +363,42 @@ github_linked_grant	GitHubChatGrant	rule_read_unlocked	violates:NoStaleAuthority
 github_linked_grant	GitHubChatGrant	rule_lock_no_abort	violates:NoStaleAuthority	21586	-seed 1 -fp 0	unsafe: rule FOR SHARE that returns the snapshot value instead of aborting (PostgreSQL abort assumption removed)
 github_linked_grant	GitHubChatGrant	role_abort_witness	violates:RoleAbortNeverHappens	13642	-seed 1 -fp 0	witness: the locked role read aborts the grant after a demotion committed since the snapshot
 github_linked_grant	GitHubChatGrant	rule_abort_witness	violates:RuleAbortNeverHappens	21586	-seed 1 -fp 0	witness: the locked rule read aborts the grant after the rule was revoked since the snapshot
-# ---- linked GitHub pending requests ----
-github_linked_pending	LinkedPending	safe	clean	789113	-seed 1 -fp 0 -lncheck final	fixed design with cleanup of never-claimed expired rows only: token claim and renewal, token resolve, atomic recovery; crash, lease lapse, expiry, second take
-github_linked_pending	LinkedPending	live	clean	262137	-seed 1 -fp 0 -lncheck final	fixed design, no crash: a held request reaches an outcome and an outcome reaches a post attempt while another in its batch fails (weak fairness on worker steps)
-github_linked_pending	LinkedPending	lapsed_cleanup	violates:NoSilentLoss	245	-seed 1 -fp 0 -lncheck final	unsafe: cleanup of expired rows whose lease lapsed deletes a request a live slow worker still holds unstarted
-github_linked_pending	LinkedPending	expiry_deletes_claimed	violates:NoSilentLoss	84	-seed 1 -fp 0 -lncheck final	unsafe: cleanup deletes expired rows even under a live claim
+github_linked_pending	LinkedPending	safe	clean	4454461	-seed 1 -fp 0 -lncheck final	real design: token claim, heartbeat on all held rows, per-request deadline, cleanup of expired rows once the lease lapsed one hour ago, atomic recovery; crash, expiry, renewal exception, second take
+github_linked_pending	LinkedPending	live	clean	441885	-seed 1 -fp 0 -lncheck final	real design, no crash or renewal exception: a held request reaches an outcome (or is skipped) and an outcome reaches a post attempt (weak fairness on worker steps)
+github_linked_pending	LinkedPending	lapsed_cleanup	violates:NoSilentLoss	1405	-seed 1 -fp 0 -lncheck final	unsafe: cleanup of expired rows whose lease lapsed, no grace, deletes a request a live slow worker still holds unstarted
+github_linked_pending	LinkedPending	expiry_deletes_claimed	violates:NoSilentLoss	82	-seed 1 -fp 0 -lncheck final	unsafe: cleanup deletes expired rows even under a live claim (9441d430d)
+github_linked_pending	LinkedPending	no_heartbeat	violates:NoSilentLoss	33209	-seed 1 -fp 0 -lncheck final	unsafe: renewal of the current row only, one hour of grace, no per-request deadline: a slow request lets the unstarted rows age out and be deleted
+github_linked_pending	LinkedPending	no_deadline	violates:NoSilentLoss	33209	-seed 1 -fp 0 -lncheck final	unsafe: heartbeat and grace but no per-request deadline: one request longer than the grace lets the unstarted rows be deleted
 github_linked_pending	LinkedPending	delete_on_claim	violates:CrashLeavesRetakeable	26	-seed 1 -fp 0 -lncheck final	unsafe: the old take deletes the rows it returns, so a crash destroys the requests
 github_linked_pending	LinkedPending	abort_batch_on_exception	violates:HeldReachesOutcome	529	-seed 1 -fp 0 -lncheck final	unsafe: the old loop (delete on claim, exception leaves the loop): later requests get no outcome
-github_linked_pending	LinkedPending	resolve_before_delivery	violates:CrashLeavesRetakeable	777	-seed 1 -fp 0 -lncheck final	unsafe: row deleted before the result is posted
-github_linked_pending	LinkedPending	take_ignores_lease	violates:NoDuplicateDelivery	16877	-seed 1 -fp 0 -lncheck final	unsafe: a second take returns rows whose lease is live
-github_linked_pending	LinkedPending	renew_ignores_token	violates:NoDuplicateDelivery	23137	-seed 1 -fp 0 -lncheck final	unsafe: renewal by id lets a worker that lost its claim process and post the request again
-github_linked_pending	LinkedPending	resolve_ignores_token	clean	898425	-seed 1 -fp 0 -lncheck final	witness: resolve by id alone is not what prevents a duplicate post; the renewal token check is (see README)
-github_linked_pending	LinkedPending	nonatomic_recovery	violates:RecoveryAtomic	289	-seed 1 -fp 0 -lncheck final	unsafe: the replacement row commits before the original is resolved (9441d430d): both exist
-github_linked_pending	LinkedPending	retake_after_crash_witness	violates:RetakeAfterCrashNeverFinishes	4538	-seed 1 -fp 0 -lncheck final	witness: the request a crashed worker held is answered by a second take
-github_linked_pending	LinkedPending	failure_does_not_block_witness	violates:FailureNeverUnblocksOthers	12730	-seed 1 -fp 0 -lncheck final	witness: after one request fails the next in the batch finishes
-github_linked_pending	LinkedPending	delivery_failure_witness	violates:DeliveryFailureAlwaysVisible	617	-seed 1 -fp 0 -lncheck final	witness (accepted gap): a failed post is logged, not retried, and the row is deleted
-github_linked_pending	LinkedPending	recovery_commit_witness	violates:RecoveryNeverCommits	242	-seed 1 -fp 0 -lncheck final	witness: the recovery transaction commits and the original is gone with a replacement present
-github_linked_pending	LinkedPending	renew_skip_witness	violates:SkipNeverHappens	223	-seed 1 -fp 0 -lncheck final	witness: a worker whose claim was lost skips the request
+github_linked_pending	LinkedPending	resolve_before_delivery	violates:CrashLeavesRetakeable	725	-seed 1 -fp 0 -lncheck final	unsafe: row deleted before the result is posted
+github_linked_pending	LinkedPending	take_ignores_lease	violates:NoDuplicateDelivery	20177	-seed 1 -fp 0 -lncheck final	unsafe: a second take returns rows whose lease is live
+github_linked_pending	LinkedPending	renew_ignores_token	violates:NoDuplicateDelivery	508318	-seed 1 -fp 0 -lncheck final	unsafe: renewal by id lets a worker that lost its claim process and post the request again
+github_linked_pending	LinkedPending	resolve_ignores_token	clean	4124183	-seed 1 -fp 0 -lncheck final	witness: resolve by id alone is not what prevents a duplicate post; the renewal token check is (see README)
+github_linked_pending	LinkedPending	nonatomic_recovery	violates:RecoveryAtomic	276	-seed 1 -fp 0 -lncheck final	unsafe: the replacement row commits before the original is resolved (9441d430d): both exist
+github_linked_pending	LinkedPending	retake_after_crash_witness	violates:RetakeAfterCrashNeverFinishes	4807	-seed 1 -fp 0 -lncheck final	witness: the request a crashed worker held is answered by a second take
+github_linked_pending	LinkedPending	failure_does_not_block_witness	violates:FailureNeverUnblocksOthers	13815	-seed 1 -fp 0 -lncheck final	witness: after one request fails the next in the batch finishes
+github_linked_pending	LinkedPending	delivery_failure_witness	violates:DeliveryFailureAlwaysVisible	575	-seed 1 -fp 0 -lncheck final	witness (accepted gap): a failed post is logged, not retried, and the row is deleted
+github_linked_pending	LinkedPending	recovery_commit_witness	violates:RecoveryNeverCommits	231	-seed 1 -fp 0 -lncheck final	witness: the recovery transaction commits and the original is gone with a replacement present
+github_linked_pending	LinkedPending	renew_skip_witness	violates:SkipNeverHappens	1004	-seed 1 -fp 0 -lncheck final	witness: a worker whose claim was lost skips the request (renewal exception off)
+github_linked_pending	LinkedPending	renew_exception_witness	violates:RenewExceptionNeverSkips	26	-seed 1 -fp 0 -lncheck final	witness: a renewal exception skips the request and leaves its row claimed
+github_linked_pending	LinkedPending	deadline_witness	violates:DeadlineNeverFires	584	-seed 1 -fp 0 -lncheck final	witness: a request that hits its deadline ends with a failure line in its thread
+github_linked_pending	LinkedPending	grace_cleanup_witness	violates:GraceNeverCleans	17878	-seed 1 -fp 0 -lncheck final	witness: a claimed expired row is deleted once its lease lapsed the grace ago (the row a crashed holder left)
+github_one_installation	OneInstallation	safe	clean	36732	-seed 1 -fp 0 -lncheck final	fence row bumped under every writer, installation lock before the fence on every path, 40001 and 40P01 mapped to try-again: at most one installation, no deadlock, every writer ends; no reliance on SSI
+github_one_installation	OneInstallation	advisory_lock	violates:AtMostOneInstallation	18044	-seed 1 -fp 0	unsafe: advisory agent lock (ac782e183): a READ COMMITTED writer commits after a SERIALIZABLE writer took its snapshot and the older snapshot cannot see it
+github_one_installation	OneInstallation	advisory_fast_owner	violates:AtMostOneInstallation	4060	-seed 1 -fp 0	unsafe: the review schedule, a fast-path explicit grant on B commits between the owner grant snapshot and its lock
+github_one_installation	OneInstallation	advisory_two_serializable	clean	24008	-seed 1 -fp 0	witness: with only SERIALIZABLE writers the advisory lock is saved by SSI (modelled as an abort at commit)
+github_one_installation	OneInstallation	advisory_serializable_no_ssi	violates:AtMostOneInstallation	12180	-seed 1 -fp 0	unsafe: advisory lock, SERIALIZABLE writers only, SSI removed: the lock alone does not refresh the snapshot
+github_one_installation	OneInstallation	fence_no_abort	violates:AtMostOneInstallation	18394	-seed 1 -fp 0	unsafe: fence row without the 40001 on a row changed after the snapshot (PostgreSQL abort assumption removed)
+github_one_installation	OneInstallation	inverted_order	clean	35784	-seed 1 -fp 0 -lncheck final	owner path takes the agent fence before the installation lock (ac782e183 order) with 40P01 mapped: no grant is lost and every writer ends
+github_one_installation	OneInstallation	inverted_order_witness	violates:NoDeadlock	6788	-seed 1 -fp 0	witness: the inverted lock order reaches a deadlock that PostgreSQL aborts
+github_one_installation	OneInstallation	inverted_order_unmapped	violates:NoUnhandledOutcome	6788	-seed 1 -fp 0	unsafe: inverted order and 40P01 not mapped: the aborted writer ends with an unhandled error
+github_one_installation	OneInstallation	serialization_unmapped	violates:NoUnhandledOutcome	9851	-seed 1 -fp 0	unsafe: 40001 not mapped: a stale snapshot ends with an unhandled error
+github_one_installation	OneInstallation	serialization_abort_witness	violates:NoSerializationFailure	9851	-seed 1 -fp 0	witness: the fence row aborts a SERIALIZABLE writer whose snapshot predates a committed grant
+github_one_installation	OneInstallation	refusal_witness	violates:NeverRefused	6696	-seed 1 -fp 0	witness: a writer for the other installation is refused
+github_one_installation	OneInstallation	owner_commit_witness	violates:NoOwnerCommit	6835	-seed 1 -fp 0	witness: an owner grant commits
+github_one_installation	OneInstallation	two_commits_witness	violates:NoTwoCommits	9809	-seed 1 -fp 0	witness: two writers for the same installation both commit
+# ---- linked GitHub pending requests ----
 # ---- GitHub owner grants ----
 github_owner_grant	OwnerGrant	clean	clean	66096	-seed 1 -fp 0	owner coverage, exclusions and future repositories
 github_owner_grant	OwnerGrant	no_exclusion	violates:ExcludedNeverMinted	114	-seed 1 -fp 0	owner coverage, exclusions and future repositories

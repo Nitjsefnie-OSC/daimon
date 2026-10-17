@@ -8,8 +8,8 @@ the same serialized refresh path Connect uses, which gives the row a new one.
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import MutableMapping
+import time
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -25,11 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
-# Per person: bounds the refresh lock wait, the GitHub call and the commit.
-PER_USER_DEADLINE_S = 15.0
+# How long one person's refresh waits for the refresh lock another worker holds
+# (a Postgres interval). The GitHub call is bounded by the HTTP client's timeout.
+LOCK_TIMEOUT = "15s"
 # How long a failed person is left out of the sweep, so persistent failures
-# cannot hold every slot.
-FAILURE_BACKOFF = timedelta(hours=6)
+# cannot hold every slot. Long, because an hourly sweep that retried them after a
+# few hours would cycle the same failures back in front of a healthy later row.
+FAILURE_BACKOFF = timedelta(hours=24)
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,9 @@ class LinkRefreshCounts:
     refreshed: int = 0
     broken: int = 0
     failed: int = 0
+    # People selected but not started because the budget ran out or a stop was
+    # asked for. They are not backed off: they stay first in line.
+    not_attempted: int = 0
 
 
 async def refresh_expiring_links(
@@ -51,26 +56,31 @@ async def refresh_expiring_links(
     limit: int = 50,
     backoff: MutableMapping[int, datetime] | None = None,
     failure_backoff: timedelta = FAILURE_BACKOFF,
-    per_user_deadline_s: float | None = PER_USER_DEADLINE_S,
+    lock_timeout: str | None = LOCK_TIMEOUT,
+    budget_s: float | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> LinkRefreshCounts:
     """Refresh up to ``limit`` active links whose refresh token expires within ``window``.
 
     A link whose refresh token GitHub rejects becomes broken, as on any Connect
-    use. A transport or 429/5xx failure, or a person taking longer than
-    ``per_user_deadline_s``, counts as failed. Failures are logged by GitHub
-    user id only.
+    use. A transport or 429/5xx failure, or a wait for the refresh lock longer
+    than ``lock_timeout`` (SQLSTATE 55P03), counts as failed. Failures are logged
+    by GitHub user id only.
 
     ``backoff`` maps a GitHub user id to when it may be tried again. A failed
     person is entered there for ``failure_backoff``, and anyone still backed off
     is left out of the selection, so persistent failures cannot occupy every
     slot. The caller keeps the map between sweeps.
 
-    The deadline cancels one person's refresh. The rotation runs in one
-    transaction, so a cancelled refresh rolls back to the old tokens, never half
-    a rotation; when GitHub had already accepted the call the old refresh token
-    is spent, the same exposure as a timed-out request, and the next use marks
-    the link broken so the person links again.
+    Nothing here cancels a person's refresh: GitHub retires the old tokens when
+    it answers, so a refresh that began is finished and stored. ``budget_s`` and
+    ``should_stop`` are checked only before starting each person; once either
+    says stop, the rest are counted ``not_attempted`` and left out of the
+    backoff. One person's refresh is bounded by ``lock_timeout``, the client's
+    HTTP timeout and database time.
     """
+    started = monotonic()
     before = now + window
     excluded: set[int] = set()
     if backoff is not None:
@@ -85,18 +95,27 @@ async def refresh_expiring_links(
             session, now=now, before=before, limit=limit, exclude_user_ids=excluded
         )
     refreshed = broken = failed = 0
-    for user_id in user_ids:
+    for position, user_id in enumerate(user_ids):
+        if (should_stop is not None and should_stop()) or (
+            budget_s is not None and monotonic() - started >= budget_s
+        ):
+            return LinkRefreshCounts(
+                refreshed=refreshed,
+                broken=broken,
+                failed=failed,
+                not_attempted=len(user_ids) - position,
+            )
         try:
-            async with asyncio.timeout(per_user_deadline_s):
-                token, _ = await linked_access_token_with_generation(
-                    sessionmaker,
-                    client,
-                    user_id=user_id,
-                    fernet=fernet,
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    refresh_if_refresh_expires_before=before,
-                )
+            token, _ = await linked_access_token_with_generation(
+                sessionmaker,
+                client,
+                user_id=user_id,
+                fernet=fernet,
+                client_id=client_id,
+                client_secret=client_secret,
+                refresh_if_refresh_expires_before=before,
+                lock_timeout=lock_timeout,
+            )
         except Exception as exc:
             failed += 1
             if backoff is not None:
@@ -105,6 +124,7 @@ async def refresh_expiring_links(
                 "github_link_refresh.failed",
                 github_user_id=user_id,
                 error_type=type(exc).__name__,
+                sqlstate=getattr(getattr(exc, "orig", None), "sqlstate", None),
                 status_code=exc.response.status_code
                 if isinstance(exc, httpx.HTTPStatusError)
                 else None,

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -271,13 +272,17 @@ async def linked_access_token_with_generation(
     client_id: str,
     client_secret: str,
     refresh_if_refresh_expires_before: datetime | None = None,
+    lock_timeout: str | None = None,
 ) -> tuple[str | None, int | None]:
     """Return the token and link generation from the same stored credential row.
 
     ``refresh_if_refresh_expires_before`` also refreshes a still-valid access token,
     but only while the row's refresh token still expires before that moment, judged
     under the refresh lock. A refresh another caller finished first is reused, never
-    spent again.
+    spent again. ``lock_timeout`` (a Postgres interval such as ``"15s"``) bounds the
+    wait for that lock; hitting it raises SQLSTATE 55P03 before any call to GitHub.
+    Once GitHub has answered, the new tokens are stored even if this call is
+    cancelled.
     """
     for _ in range(3):
         async with sessionmaker() as session:
@@ -295,11 +300,141 @@ async def linked_access_token_with_generation(
                 client_secret=client_secret,
                 cache=PermissionCache(ttl_seconds=0),
                 refresh_if_refresh_expires_before=refresh_if_refresh_expires_before,
+                lock_timeout=lock_timeout,
             )
             return token, link_generation
         except _RefreshRace:
             continue
     raise RuntimeError("GitHub user token changed repeatedly during refresh")
+
+
+# Refresh transactions still running after their caller was cancelled.
+_detached_refreshes: set[asyncio.Task[tuple[str | None, int, int]]] = set()
+
+
+def _release_detached(task: asyncio.Task[tuple[str | None, int, int]]) -> None:
+    _detached_refreshes.discard(task)
+    if not task.cancelled():
+        # Nobody awaits a detached refresh; its failure is the next use's to retry.
+        _ = task.exception()
+
+
+async def _shielded(
+    work: Coroutine[object, object, tuple[str | None, int, int]],
+) -> tuple[str | None, int, int]:
+    """Run `work` so a cancel of the caller cannot stop it half way.
+
+    The caller's cancellation still raises at its await, while the work runs to
+    its commit in the background (kept referenced here until it ends).
+    """
+    task = asyncio.ensure_future(work)
+    _detached_refreshes.add(task)
+    task.add_done_callback(_release_detached)
+    return await asyncio.shield(task)
+
+
+async def _refresh_locked(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: httpx.AsyncClient,
+    *,
+    user_id: int,
+    row: GitHubUser,
+    fernet: MultiFernet,
+    client_id: str,
+    client_secret: str,
+    cache: PermissionCache,
+    needs_refresh: Callable[[GitHubUser], bool],
+    lock_timeout: str | None,
+) -> tuple[str | None, int, int]:
+    """The refresh transaction: lock, spend the refresh token, store the new pair."""
+    async with sessionmaker.begin() as session:
+        if lock_timeout is not None:
+            # Bounds the wait for the lock below (and any row lock after it), so a
+            # sweep gives up on a held refresh instead of waiting without end.
+            await session.execute(
+                text("SELECT set_config('lock_timeout', :value, true)"), {"value": lock_timeout}
+            )
+        # A transaction-scoped advisory lock serializes refreshes across workers.
+        # Unlike FOR UPDATE, it never locks the token row during the GitHub call.
+        await session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended('github-refresh:' || CAST(:user_id AS text), 0))"
+            ),
+            {"user_id": str(user_id)},
+        )
+        fresh = await get_user(session, github_user_id=user_id)
+        if fresh is None or fresh.status != "active":
+            return None, row.token_generation, row.link_generation
+        row = fresh
+        if needs_refresh(row):
+            if row.encrypted_refresh_token is None or (
+                row.refresh_expires_at is not None and row.refresh_expires_at <= datetime.now(UTC)
+            ):
+                broken = await bump_link_generation(
+                    session,
+                    github_user_id=user_id,
+                    broken=True,
+                    expected_token_generation=row.token_generation,
+                )
+                if broken is None:
+                    raise _RefreshRace
+                cache.drop_user(user_id)
+                return None, row.token_generation, row.link_generation
+            response = await client.post(
+                "https://github.com/login/oauth/access_token",
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "grant_type": "refresh_token",
+                    "refresh_token": decrypt_token(fernet, row.encrypted_refresh_token),
+                },
+                headers={"Accept": "application/json"},
+            )
+            if response.status_code == 429 or response.status_code >= 500:
+                response.raise_for_status()
+            payload: object = response.json()
+            error_payload = (
+                TypeAdapter(dict[str, object]).validate_python(payload)
+                if isinstance(payload, dict)
+                else {}
+            )
+            if error_payload.get("error") in (
+                "bad_refresh_token",
+                "invalid_grant",
+            ):
+                broken = await bump_link_generation(
+                    session,
+                    github_user_id=user_id,
+                    broken=True,
+                    expected_token_generation=row.token_generation,
+                )
+                if broken is None:
+                    raise _RefreshRace
+                cache.drop_user(user_id)
+                return None, row.token_generation, row.link_generation
+            response.raise_for_status()
+            if isinstance(error_payload.get("error"), str):
+                raise RuntimeError(f"GitHub refresh refused: {error_payload['error']}")
+            body = _RefreshPayload.model_validate(payload)
+            rotated = await rotate_user_tokens(
+                session,
+                github_user_id=user_id,
+                expected_generation=row.token_generation,
+                encrypted_access_token=encrypt_token(fernet, body.access_token),
+                encrypted_refresh_token=encrypt_token(fernet, body.refresh_token),
+                access_expires_at=datetime.now(UTC) + timedelta(seconds=body.expires_in),
+                refresh_expires_at=datetime.now(UTC)
+                + timedelta(seconds=body.refresh_token_expires_in),
+            )
+            if not rotated:
+                raise _RefreshRace
+            token = body.access_token
+            used_generation = row.token_generation + 1
+        else:
+            token = decrypt_token(fernet, row.encrypted_access_token)
+            used_generation = row.token_generation
+    return token, used_generation, row.link_generation
 
 
 async def _linked_access_token_once(
@@ -313,6 +448,7 @@ async def _linked_access_token_once(
     client_secret: str,
     cache: PermissionCache,
     refresh_if_refresh_expires_before: datetime | None = None,
+    lock_timeout: str | None = None,
 ) -> tuple[str | None, int, int]:
     def needs_refresh(candidate: GitHubUser) -> bool:
         now = datetime.now(UTC)
@@ -327,90 +463,21 @@ async def _linked_access_token_once(
         )
 
     if needs_refresh(row):
-        async with sessionmaker.begin() as session:
-            # A transaction-scoped advisory lock serializes refreshes across workers.
-            # Unlike FOR UPDATE, it never locks the token row during the GitHub call.
-            await session.execute(
-                text(
-                    "SELECT pg_advisory_xact_lock("
-                    "hashtextextended('github-refresh:' || CAST(:user_id AS text), 0))"
-                ),
-                {"user_id": str(user_id)},
+        # GitHub retires the old pair the moment it answers, so the answer must be
+        # stored: a cancel between the response and the commit must not roll it back.
+        return await _shielded(
+            _refresh_locked(
+                sessionmaker,
+                client,
+                user_id=user_id,
+                row=row,
+                fernet=fernet,
+                client_id=client_id,
+                client_secret=client_secret,
+                cache=cache,
+                needs_refresh=needs_refresh,
+                lock_timeout=lock_timeout,
             )
-            fresh = await get_user(session, github_user_id=user_id)
-            if fresh is None or fresh.status != "active":
-                return None, row.token_generation, row.link_generation
-            row = fresh
-            if needs_refresh(row):
-                if row.encrypted_refresh_token is None or (
-                    row.refresh_expires_at is not None
-                    and row.refresh_expires_at <= datetime.now(UTC)
-                ):
-                    broken = await bump_link_generation(
-                        session,
-                        github_user_id=user_id,
-                        broken=True,
-                        expected_token_generation=row.token_generation,
-                    )
-                    if broken is None:
-                        raise _RefreshRace
-                    cache.drop_user(user_id)
-                    return None, row.token_generation, row.link_generation
-                response = await client.post(
-                    "https://github.com/login/oauth/access_token",
-                    data={
-                        "client_id": client_id,
-                        "client_secret": client_secret,
-                        "grant_type": "refresh_token",
-                        "refresh_token": decrypt_token(fernet, row.encrypted_refresh_token),
-                    },
-                    headers={"Accept": "application/json"},
-                )
-                if response.status_code == 429 or response.status_code >= 500:
-                    response.raise_for_status()
-                payload: object = response.json()
-                error_payload = (
-                    TypeAdapter(dict[str, object]).validate_python(payload)
-                    if isinstance(payload, dict)
-                    else {}
-                )
-                if error_payload.get("error") in (
-                    "bad_refresh_token",
-                    "invalid_grant",
-                ):
-                    broken = await bump_link_generation(
-                        session,
-                        github_user_id=user_id,
-                        broken=True,
-                        expected_token_generation=row.token_generation,
-                    )
-                    if broken is None:
-                        raise _RefreshRace
-                    cache.drop_user(user_id)
-                    return None, row.token_generation, row.link_generation
-                response.raise_for_status()
-                if isinstance(error_payload.get("error"), str):
-                    raise RuntimeError(f"GitHub refresh refused: {error_payload['error']}")
-                body = _RefreshPayload.model_validate(payload)
-                rotated = await rotate_user_tokens(
-                    session,
-                    github_user_id=user_id,
-                    expected_generation=row.token_generation,
-                    encrypted_access_token=encrypt_token(fernet, body.access_token),
-                    encrypted_refresh_token=encrypt_token(fernet, body.refresh_token),
-                    access_expires_at=datetime.now(UTC) + timedelta(seconds=body.expires_in),
-                    refresh_expires_at=datetime.now(UTC)
-                    + timedelta(seconds=body.refresh_token_expires_in),
-                )
-                if not rotated:
-                    raise _RefreshRace
-                token = body.access_token
-                used_generation = row.token_generation + 1
-            else:
-                token = decrypt_token(fernet, row.encrypted_access_token)
-                used_generation = row.token_generation
-    else:
-        token = decrypt_token(fernet, row.encrypted_access_token)
-        used_generation = row.token_generation
-
-    return token, used_generation, row.link_generation
+        )
+    token = decrypt_token(fernet, row.encrypted_access_token)
+    return token, row.token_generation, row.link_generation

@@ -3093,6 +3093,19 @@ class AgentGitHubOwnerGrant(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AgentGitHubGrantFence(Base):
+    """One row per agent that every grant writer bumps (see `lock_agent_grants`)."""
+
+    __tablename__ = "agent_github_grant_fences"
+    __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id"),)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    version: Mapped[int] = mapped_column(BigInteger, server_default="1")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class AgentGitHubOwnerExclusion(Base):
     __tablename__ = "agent_github_owner_exclusions"
     __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id", "repo_full_name"),)

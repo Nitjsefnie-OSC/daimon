@@ -173,6 +173,7 @@ def register_github_remove_repo_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         repo, the working repo is cleared. Other agents keep their access.
         Removing owner/repo under an owner/* grant keeps that repo excluded;
         removing owner/* leaves exclusions for later regrants.
+        Asked to remove "all owner repos" or "every owner repo", pass owner/*.
         Pass the current turn origin and selected agent identity.
         """
         return await remove_repo_impl(

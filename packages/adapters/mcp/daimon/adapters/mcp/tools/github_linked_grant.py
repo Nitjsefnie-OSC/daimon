@@ -53,6 +53,7 @@ LinkedStatus = Literal[
     "relink",
     "no_github_access",
     "needs_install",
+    "app_unusable",
     "install_pending",
     "other_installation",
     "changed_try_again",
@@ -98,17 +99,30 @@ def owner_needs_install_message(owner: str) -> str:
     )
 
 
-def other_installation_message(agent_name: str, org: str | None) -> str:
+def app_unusable_message(owner: str) -> str:
+    # The Daimon app is installed for this owner but cannot be used as it stands
+    # (wrong account, suspended, too few permissions). Adding repos would not
+    # help and the install flow is the wrong button, so no setup card goes with it.
+    return (
+        f"Daimon can't use its app on {owner}.\n"
+        f"Ask an owner of {owner} to check the Daimon app in their GitHub settings."
+    )
+
+
+def other_installation_message(
+    agent_name: str, org: str | None, kind: Literal["repo", "owner"] = "repo"
+) -> str:
+    """`kind` is what blocks: an owner-wide grant needs all the org's repos removed."""
     if org is None:
         return (
-            f"{agent_name} already uses repos from another GitHub account or org.\n"
+            f"{agent_name} already has repos from another GitHub account or org.\n"
             "An agent uses one GitHub account or org at a time. "
             "To switch, remove those repos first."
         )
+    scope = f"all {org} repos" if kind == "owner" else f"the {org} repos"
     return (
-        f"{agent_name} already uses repos from {org}.\n"
-        "An agent uses one GitHub account or org at a time. "
-        f"To switch, remove the {org} repos first."
+        f"{agent_name} already has repos from {org}.\n"
+        f"An agent uses one GitHub account or org at a time. To switch, remove {scope} first."
     )
 
 
@@ -259,10 +273,7 @@ async def linked_grant(
                 or not installation_supports_write(detail.permissions)
                 or installation.repository_selection not in ("all", "selected")
             ):
-                return LinkedOutcome(
-                    status="needs_install",
-                    message=needs_install_message(repo_name),
-                )
+                return LinkedOutcome(status="app_unusable", message=app_unusable_message(owner))
             async with sessionmaker() as session:
                 fresh_user = await get_user(session, github_user_id=link.github_user_id)
             if fresh_user is None or fresh_user.status != "active":
@@ -408,7 +419,7 @@ async def linked_grant(
         # The transaction rolled back, so no authorization or grant row was saved.
         return LinkedOutcome(
             status="other_installation",
-            message=other_installation_message(agent_name, exc.org),
+            message=other_installation_message(agent_name, exc.org, exc.kind),
         )
     return LinkedOutcome(
         status="granted" if access == "write" else "granted_read_only",
@@ -539,10 +550,7 @@ async def linked_owner_grant(
                     ]
                     checked.append((candidate.id, candidate.owner_login, names, new_rows))
             if not checked:
-                return LinkedOutcome(
-                    status="needs_install",
-                    message=owner_needs_install_message(owner),
-                )
+                return LinkedOutcome(status="app_unusable", message=app_unusable_message(owner))
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 401:
             return LinkedOutcome(status="relink", message=RELINK_MESSAGE)
@@ -571,14 +579,12 @@ async def linked_owner_grant(
                 or not await manages_now(session)
             ):
                 return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
-            await require_owner_grant_installations(
-                session,
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                installation_ids={installation_id for installation_id, *_ in checked},
-                agent_name=agent_name,
-            )
-            for installation_id, _owner_login, names, new_rows in checked:
+            # Lock the installations, in id order, before the agent's grant fence
+            # that `require_owner_grant_installations` bumps: the explicit path
+            # takes them in that order too, so two grants never wait on each other.
+            for installation_id, _owner_login, names, new_rows in sorted(
+                checked, key=lambda entry: entry[0]
+            ):
                 current = await get_for_update(session, installation_id=installation_id)
                 if current is not None and (
                     current.suspended_at is not None
@@ -596,6 +602,13 @@ async def linked_owner_grant(
                     session, tenant_id=tenant_id, installation_id=installation_id
                 ):
                     return LinkedOutcome(status="changed_try_again", message=CHANGED_MESSAGE)
+            await require_owner_grant_installations(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                installation_ids={installation_id for installation_id, *_ in checked},
+                agent_name=agent_name,
+            )
             for installation_id, owner_login, _names, new_rows in checked:
                 if new_rows:
                     for repo_id, repo_full_name, permission in new_rows:
@@ -662,7 +675,7 @@ async def linked_owner_grant(
         # The transaction rolled back, so no authorization or grant row was saved.
         return LinkedOutcome(
             status="other_installation",
-            message=other_installation_message(agent_name, exc.org),
+            message=other_installation_message(agent_name, exc.org, exc.kind),
         )
     return LinkedOutcome(
         status="granted" if access == "write" else "granted_read_only",

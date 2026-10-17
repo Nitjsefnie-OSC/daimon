@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Literal
 
@@ -23,10 +24,13 @@ from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
+from daimon.core.stores.github_access import is_concurrent_grant_change
 from daimon.core.stores.github_linked_pending import (
+    FAILURE_DELIVERY_DEADLINE,
+    PER_REQUEST_DEADLINE,
     ClaimLostError,
     PendingGrant,
-    renew,
+    renew_claim,
     resolve,
     save,
     take,
@@ -96,9 +100,10 @@ async def _take_pending(
         return rows
 
 
-async def _renew_pending(runtime: McpRuntime, row: PendingGrant) -> bool:
+async def _renew_claim(runtime: McpRuntime, claim_token: uuid.UUID | None) -> set[uuid.UUID]:
+    """Extend the lease of every request this callback still holds; return their ids."""
     async with runtime.session_factory.begin() as session:
-        return await renew(session, row.id, row.claim_token)
+        return await renew_claim(session, claim_token)
 
 
 async def _resolve_pending(runtime: McpRuntime, row: PendingGrant) -> bool:
@@ -270,11 +275,42 @@ async def _outcome_message(
                 )
                 message = "I couldn't send the private GitHub link. Ask me again."
     except DBAPIError as exc:
-        if getattr(exc.orig, "sqlstate", None) not in ("40001", "23505"):
+        if not is_concurrent_grant_change(exc) and getattr(exc.orig, "sqlstate", None) != "23505":
             raise
         message = CHANGED_MESSAGE
     except httpx.HTTPError:
         message = GITHUB_DOWN_MESSAGE
+    return message
+
+
+async def _answer_request(
+    runtime: McpRuntime,
+    row: PendingGrant,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    platform_user_id: str,
+) -> str:
+    """Compute one request's outcome and deliver it to its thread (best effort)."""
+    try:
+        message = await _outcome_message(
+            runtime,
+            row,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            platform=platform,
+            platform_user_id=platform_user_id,
+        )
+    except ClaimLostError:
+        raise
+    except Exception:
+        _log.exception("github.linked_resume.request_failed", request_id=str(row.id))
+        message = FAILED_MESSAGE
+    try:
+        await _deliver_result(runtime, row, message)
+    except Exception:
+        _log.warning("github.linked_resume.result_delivery_failed", request_id=str(row.id))
     return message
 
 
@@ -289,10 +325,15 @@ async def resume_pending(
     """Run each claimed request on its own and answer it in its thread.
 
     A request leaves the table only after it has an outcome and its result
-    delivery was attempted. Any failure of one request, including after its grant
-    committed, ends that request with `FAILED_MESSAGE` and leaves the rest to run.
-    A crash leaves unresolved requests claimed until their lease passes (see
-    `take`). A request whose claim another callback took over is skipped.
+    delivery was attempted; recovery is the exception, which deletes the original
+    atomically with saving its replacement, before the private delivery. Any
+    failure of one request, including after its grant committed, ends that
+    request with `FAILED_MESSAGE` and leaves the rest to run. Each request runs
+    under `PER_REQUEST_DEADLINE`: one that hits it gets the same failure line and
+    the next request still runs. Before each request the lease of every row this
+    callback still holds is renewed, which bounds the gap between renewals (see
+    `take`). A crash leaves unresolved requests claimed until their lease passes.
+    A request whose claim another callback took over is skipped.
     """
     pending = await _take_pending(
         runtime,
@@ -303,36 +344,39 @@ async def resume_pending(
     )
     results: list[str] = []
     for row in pending:
-        # Renew just before running: a slow earlier request must not let this
-        # lease lapse, and a callback that took the row over owns it now.
+        # Heartbeat the whole claim: a slow earlier request must not let the
+        # lease of the rows behind it lapse, and a row another callback took
+        # over is missing from the held set, so this request is not answered.
         try:
-            renewed = await _renew_pending(runtime, row)
+            held = await _renew_claim(runtime, row.claim_token)
         except Exception:
             _log.warning("github.linked_resume.renew_failed", request_id=str(row.id))
             continue
-        if not renewed:
+        if row.id not in held:
             _log.warning("github.linked_resume.claim_lost", request_id=str(row.id))
             continue
         try:
-            message = await _outcome_message(
-                runtime,
-                row,
-                tenant_id=tenant_id,
-                account_id=account_id,
-                platform=platform,
-                platform_user_id=platform_user_id,
-            )
+            async with asyncio.timeout(PER_REQUEST_DEADLINE.total_seconds()):
+                message = await _answer_request(
+                    runtime,
+                    row,
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    platform=platform,
+                    platform_user_id=platform_user_id,
+                )
         except ClaimLostError:
             # Another callback took the request while this one ran; it answers.
             _log.warning("github.linked_resume.claim_lost", request_id=str(row.id))
             continue
-        except Exception:
-            _log.exception("github.linked_resume.request_failed", request_id=str(row.id))
+        except TimeoutError:
+            _log.warning("github.linked_resume.request_timed_out", request_id=str(row.id))
             message = FAILED_MESSAGE
-        try:
-            await _deliver_result(runtime, row, message)
-        except Exception:
-            _log.warning("github.linked_resume.result_delivery_failed", request_id=str(row.id))
+            try:
+                async with asyncio.timeout(FAILURE_DELIVERY_DEADLINE.total_seconds()):
+                    await _deliver_result(runtime, row, message)
+            except Exception:
+                _log.warning("github.linked_resume.result_delivery_failed", request_id=str(row.id))
         try:
             if not await _resolve_pending(runtime, row):
                 _log.info("github.linked_resume.already_resolved", request_id=str(row.id))

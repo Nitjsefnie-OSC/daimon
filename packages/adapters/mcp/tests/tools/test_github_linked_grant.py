@@ -34,6 +34,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import github_access
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.channel_admins import (
@@ -42,7 +43,13 @@ from daimon.core.stores.channel_admins import (
     set_channel_admins,
 )
 from daimon.core.stores.domain import Role
-from daimon.core.stores.github_access import list_agent_grants, list_authorized_repos
+from daimon.core.stores.github_access import (
+    SecondInstallationError,
+    list_agent_grants,
+    list_authorized_repos,
+    require_owner_grant_installations,
+    stage_grant,
+)
 from daimon.core.stores.github_app_installations import get as get_installation
 from daimon.core.stores.github_installation_reconciliation import get as get_reconciliation
 from daimon.core.stores.github_linked_pending import (
@@ -54,7 +61,11 @@ from daimon.core.stores.github_linked_pending import (
 from daimon.core.stores.github_linked_pending import resolve as resolve_pending
 from daimon.core.stores.github_linked_pending import take as take_pending
 from daimon.core.stores.github_links import get_account_link, save_verified_link, unlink_account
-from daimon.core.stores.github_owner_grants import exclude_repo, list_owner_grants
+from daimon.core.stores.github_owner_grants import (
+    exclude_repo,
+    list_owner_grants,
+    upsert_owner_grant,
+)
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -948,10 +959,18 @@ async def test_github_coverage_loss_never_grants(setup_linked, github_http, chan
     assert (await setup_linked.grant()).status == "changed_try_again"
 
 
+_APP_UNUSABLE_ACME = (
+    "Daimon can't use its app on acme.\n"
+    "Ask an owner of acme to check the Daimon app in their GitHub settings."
+)
+
+
 @pytest.mark.asyncio
 async def test_new_suspended_installation_never_grants(setup_linked, github_http) -> None:
     github_http.installation_suspended = True
-    assert (await setup_linked.grant()).status == "needs_install"
+    result = await setup_linked.grant()
+    assert result.status == "app_unusable"
+    assert result.message == _APP_UNUSABLE_ACME
 
 
 @pytest.mark.asyncio
@@ -1438,15 +1457,22 @@ async def test_each_linked_state_uses_the_agreed_status_and_supporting_line(
         "If you can open them on GitHub, ask an owner to add them to the Daimon app."
     )
     assert linked.other_installation_message("Agent", "widgets-org") == (
-        "Agent already uses repos from widgets-org.\n"
+        "Agent already has repos from widgets-org.\n"
         "An agent uses one GitHub account or org at a time. "
         "To switch, remove the widgets-org repos first."
     )
-    assert linked.other_installation_message("Agent", None) == (
-        "Agent already uses repos from another GitHub account or org.\n"
+    assert linked.other_installation_message("Agent", "widgets-org", "owner") == (
+        "Agent already has repos from widgets-org.\n"
         "An agent uses one GitHub account or org at a time. "
-        "To switch, remove those repos first."
+        "To switch, remove all widgets-org repos first."
     )
+    for kind in ("repo", "owner"):
+        assert linked.other_installation_message("Agent", None, kind) == (
+            "Agent already has repos from another GitHub account or org.\n"
+            "An agent uses one GitHub account or org at a time. "
+            "To switch, remove those repos first."
+        )
+    assert linked.app_unusable_message("acme") == _APP_UNUSABLE_ACME
 
 
 @pytest.mark.asyncio
@@ -2262,7 +2288,7 @@ async def test_second_installation_is_a_defined_result(setup_linked, github_http
     result = await setup_linked.grant(repo_name="gadgets/tools")
     assert result.status == "other_installation"
     assert result.message == (
-        "Agent already uses repos from acme.\nAn agent uses one GitHub account or org at a time. "
+        "Agent already has repos from acme.\nAn agent uses one GitHub account or org at a time. "
         "To switch, remove the acme repos first."
     )
     assert "http" not in result.message
@@ -2292,7 +2318,7 @@ async def test_second_installation_through_the_public_tool_sends_no_private_card
     )
     assert result.status == "other_installation"
     assert result.message == (
-        "Agent already uses repos from acme.\nAn agent uses one GitHub account or org at a time. "
+        "Agent already has repos from acme.\nAn agent uses one GitHub account or org at a time. "
         "To switch, remove the acme repos first."
     )
     post_link.assert_not_awaited()
@@ -2319,7 +2345,7 @@ async def test_second_installation_on_resume_posts_to_the_thread_and_runs_the_ne
         platform_user_id="person",
     )
     assert result[0] == (
-        "Agent already uses repos from acme.\nAn agent uses one GitHub account or org at a time. "
+        "Agent already has repos from acme.\nAn agent uses one GitHub account or org at a time. "
         "To switch, remove the acme repos first."
     )
     assert result[1].startswith("Agent can now read and change acme/widgets.")
@@ -2413,23 +2439,24 @@ async def _owner_installations(setup_linked) -> list[int]:
 
 
 _OTHER_ORG_MESSAGE = (
-    "Agent already uses repos from {org}.\nAn agent uses one GitHub account or org at a time. "
-    "To switch, remove the {org} repos first."
+    "Agent already has repos from {org}.\nAn agent uses one GitHub account or org at a time. "
+    "To switch, remove {scope} first."
 )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("first", "second", "org"),
+    ("first", "second", "org", "scope"),
     [
-        ("acme/*", "gadgets/tools", "acme"),
-        ("acme/widgets", "gadgets/*", "acme"),
-        ("acme/*", "gadgets/*", "acme"),
-        ("gadgets/*", "acme/widgets", "gadgets"),
+        # An owner grant blocks: every repo of the org has to go, not one by one.
+        ("acme/*", "gadgets/tools", "acme", "all acme repos"),
+        ("acme/widgets", "gadgets/*", "acme", "the acme repos"),
+        ("acme/*", "gadgets/*", "acme", "all acme repos"),
+        ("gadgets/*", "acme/widgets", "gadgets", "all gadgets repos"),
     ],
 )
 async def test_owner_grants_keep_one_installation_per_agent(
-    setup_linked, two_orgs, first: str, second: str, org: str
+    setup_linked, two_orgs, first: str, second: str, org: str, scope: str
 ) -> None:
     await _seed_second_installation(setup_linked)
     assert (await setup_linked.grant(repo_name=first)).status.startswith("granted")
@@ -2437,7 +2464,7 @@ async def test_owner_grants_keep_one_installation_per_agent(
     owners_before = await _owner_installations(setup_linked)
     result = await setup_linked.grant(repo_name=second)
     assert result.status == "other_installation"
-    assert result.message == _OTHER_ORG_MESSAGE.format(org=org)
+    assert result.message == _OTHER_ORG_MESSAGE.format(org=org, scope=scope)
     assert await _grant_count(setup_linked) == explicit_before
     assert await _owner_installations(setup_linked) == owners_before
 
@@ -2670,3 +2697,523 @@ async def test_consecutive_read_grants_through_the_public_tool_stay_read_only(
         assert [(g.repo_id, g.baseline_access, g.ceiling_access) for g in grants] == [
             (101, "read", "read")
         ]
+
+
+# --- pending timing: heartbeat and per-request deadline -----------------------
+
+
+async def _shift_pending_back(setup_linked, delta: timedelta) -> None:
+    """Move every stored pending timestamp into the past, as if `delta` had gone by."""
+    async with setup_linked.sessionmaker.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE github_linked_connect_pending "
+                "SET expires_at = expires_at - CAST(:delta AS interval), "
+                "claimed_until = claimed_until - CAST(:delta AS interval)"
+            ),
+            {"delta": delta},
+        )
+
+
+async def _pending_threads(setup_linked) -> list[str]:
+    async with setup_linked.sessionmaker() as session:
+        return sorted(
+            await session.scalars(text("SELECT thread_id FROM github_linked_connect_pending"))
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_slow_first_request_keeps_the_second_requests_lease_alive(
+    setup_linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    await _save_request(setup_linked, thread_id="t2")
+    delivery = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    stranger = {
+        "tenant_id": setup_linked.tenant.id,
+        "account_id": uuid.uuid4(),
+        "platform": "discord",
+        "platform_user_id": "someone-else",
+    }
+    survived: list[list[str]] = []
+
+    async def outcome(runtime, row, **_kwargs) -> str:
+        if row.thread_id == "t1":
+            # The first request runs for more than the garbage window: every stored
+            # timestamp, the second row's included, is now older than that.
+            await _shift_pending_back(
+                setup_linked, CLAIMED_GARBAGE_AFTER + CLAIM_LEASE + timedelta(minutes=5)
+            )
+            return "first"
+        # Another person's callback cleans up while the second request runs.
+        async with setup_linked.sessionmaker.begin() as session:
+            await take_pending(session, **stranger)
+        survived.append(await _pending_threads(setup_linked))
+        return "second"
+
+    monkeypatch.setattr(linked_pending, "_outcome_message", outcome)
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked), **_pending_scope(setup_linked)
+    )
+    assert result == ["first", "second"]
+    assert survived == [["t2"]], "the heartbeat renewed the second row before it ran"
+    assert [(c.args[1].thread_id, c.args[2]) for c in delivery.await_args_list] == [
+        ("t1", "first"),
+        ("t2", "second"),
+    ]
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_without_the_heartbeat_the_stranger_cleanup_would_delete_the_second_row(
+    setup_linked,
+) -> None:
+    """Control: the same elapsed time with no renewal loses the row."""
+    await _save_request(setup_linked, thread_id="t1")
+    await _save_request(setup_linked, thread_id="t2")
+    await _take_at(setup_linked)
+    await _shift_pending_back(
+        setup_linked, CLAIMED_GARBAGE_AFTER + CLAIM_LEASE + timedelta(minutes=5)
+    )
+    async with setup_linked.sessionmaker.begin() as session:
+        await take_pending(
+            session,
+            tenant_id=setup_linked.tenant.id,
+            account_id=uuid.uuid4(),
+            platform="discord",
+            platform_user_id="someone-else",
+        )
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_row_another_callback_took_is_skipped_even_when_others_are_held(
+    setup_linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    await _save_request(setup_linked, thread_id="t2")
+    delivery = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+
+    async def outcome(runtime, row, **_kwargs) -> str:
+        if row.thread_id == "t1":
+            # t2's lease lapsed meanwhile and a second callback took it.
+            async with setup_linked.sessionmaker.begin() as session:
+                await session.execute(
+                    text(
+                        "UPDATE github_linked_connect_pending SET claim_token = :other "
+                        "WHERE thread_id = 't2'"
+                    ),
+                    {"other": uuid.uuid4()},
+                )
+        return f"answered {row.thread_id}"
+
+    monkeypatch.setattr(linked_pending, "_outcome_message", outcome)
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked), **_pending_scope(setup_linked)
+    )
+    assert result == ["answered t1"]
+    assert [c.args[1].thread_id for c in delivery.await_args_list] == ["t1"]
+    assert await _pending_threads(setup_linked) == ["t2"]
+
+
+@pytest.mark.asyncio
+async def test_a_request_past_its_deadline_gets_the_failure_line_and_the_next_still_runs(
+    setup_linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    await _save_request(setup_linked, thread_id="t2")
+    delivery = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    monkeypatch.setattr(linked_pending, "PER_REQUEST_DEADLINE", timedelta(milliseconds=100))
+    cancelled: list[str] = []
+
+    async def outcome(runtime, row, **_kwargs) -> str:
+        if row.thread_id == "t1":
+            try:
+                await asyncio.sleep(30)  # GitHub listing that never ends
+            except asyncio.CancelledError:
+                cancelled.append(row.thread_id)
+                raise
+        return "second"
+
+    monkeypatch.setattr(linked_pending, "_outcome_message", outcome)
+    result = await asyncio.wait_for(
+        linked_pending.resume_pending(_runtime(setup_linked), **_pending_scope(setup_linked)),
+        timeout=10,
+    )
+    assert result == [linked_pending.FAILED_MESSAGE, "second"]
+    assert cancelled == ["t1"]
+    assert [(c.args[1].thread_id, c.args[2]) for c in delivery.await_args_list] == [
+        ("t1", linked_pending.FAILED_MESSAGE),
+        ("t2", "second"),
+    ]
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_the_failure_line_after_a_deadline_is_best_effort(
+    setup_linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    monkeypatch.setattr(
+        linked_pending, "_deliver_result", AsyncMock(side_effect=RuntimeError("thread gone"))
+    )
+    monkeypatch.setattr(linked_pending, "PER_REQUEST_DEADLINE", timedelta(milliseconds=50))
+
+    async def outcome(runtime, row, **_kwargs) -> str:
+        await asyncio.sleep(30)
+        return "never"
+
+    monkeypatch.setattr(linked_pending, "_outcome_message", outcome)
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked), **_pending_scope(setup_linked)
+    )
+    assert result == [linked_pending.FAILED_MESSAGE]
+    assert await _count_pending(setup_linked) == 0
+
+
+def test_the_lease_and_deadline_fit_inside_the_garbage_window() -> None:
+    from daimon.core.stores import github_linked_pending as store
+
+    assert (
+        store.PER_REQUEST_DEADLINE + store.FAILURE_DELIVERY_DEADLINE + store.CLAIM_LEASE
+        < store.CLAIMED_GARBAGE_AFTER
+    )
+
+
+# --- app_unusable: the app is installed but cannot be used ---------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo_name", ["acme/widgets", "acme/*"])
+async def test_an_unusable_app_sends_no_setup_card_through_the_public_tool(
+    setup_linked, two_orgs, monkeypatch: pytest.MonkeyPatch, repo_name: str
+) -> None:
+    two_orgs.installation_suspended = True
+    _patch_tool_agent(monkeypatch)
+    post_link = AsyncMock()
+    monkeypatch.setattr(connect_tool, "_post_personal_link", post_link)
+    result = await connect_tool._github_connect_impl(
+        _runtime(setup_linked),
+        _admin_auth(setup_linked),
+        origin_context_id="synthetic",
+        repo_name=repo_name,
+    )
+    assert result.status == "app_unusable"
+    assert result.message == _APP_UNUSABLE_ACME
+    post_link.assert_not_awaited()
+    assert await _grant_count(setup_linked) == 0
+    assert await _owner_installations(setup_linked) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo_name", ["acme/widgets", "acme/*"])
+async def test_an_unusable_app_is_reported_by_the_grant_on_both_paths(
+    setup_linked, two_orgs, repo_name: str
+) -> None:
+    two_orgs.installation_suspended = True
+    result = await setup_linked.grant(repo_name=repo_name)
+    assert (result.status, result.message) == ("app_unusable", _APP_UNUSABLE_ACME)
+
+
+@pytest.mark.asyncio
+async def test_resume_sends_no_private_card_for_an_unusable_app(
+    setup_linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    monkeypatch.setattr(linked_pending, "requester_manages_agent", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        linked_pending,
+        "linked_grant",
+        AsyncMock(
+            return_value=linked.LinkedOutcome(
+                status="app_unusable", message=linked.app_unusable_message("acme")
+            )
+        ),
+    )
+    delivery = AsyncMock()
+    private_button = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    monkeypatch.setattr(connect_tool, "_post_personal_link", private_button)
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked), **_pending_scope(setup_linked)
+    )
+    assert result == [_APP_UNUSABLE_ACME]
+    delivery.assert_awaited_once()
+    private_button.assert_not_awaited()
+    assert await _count_pending(setup_linked) == 0
+
+
+# --- one installation under concurrency ----------------------------------------
+
+
+async def _seed_gadgets_server_wide_repo(setup_linked) -> None:
+    """A second org's installation with a server-wide repo, as the fast path grants."""
+    await _seed_second_installation(setup_linked)
+    async with setup_linked.sessionmaker.begin() as session:
+        await session.execute(
+            text(
+                "INSERT INTO tenant_github_repos "
+                "(tenant_id, repo_id, scope_agent_id, owner_id, installation_id, "
+                "repo_full_name, max_access, authorized_by_github_user_id, "
+                "authorized_by_account_id, status) VALUES "
+                "(:tenant_id, 102, NULL, 13, 202, 'gadgets/tools', 'read', 300, "
+                ":account_id, 'active')"
+            ),
+            {"tenant_id": setup_linked.tenant.id, "account_id": setup_linked.account.id},
+        )
+
+
+async def _fast_path_explicit_grant(session: AsyncSession, setup_linked) -> None:
+    """What the server-wide fast path does: `stage_grant` in a READ COMMITTED transaction."""
+    await stage_grant(
+        session,
+        tenant_id=setup_linked.tenant.id,
+        agent_id=setup_linked.agent_id,
+        repo_id=102,
+        baseline_access="read",
+        ceiling_access="read",
+        granted_by_account_id=setup_linked.account.id,
+        agent_name="Agent",
+    )
+
+
+async def _owner_a_through_the_tool(setup_linked, monkeypatch, race):
+    """Owner-A through the public tool; `race` runs after its SERIALIZABLE snapshot exists."""
+    _patch_tool_agent(monkeypatch)
+    monkeypatch.setattr(connect_tool, "_post_personal_link", AsyncMock())
+    real = connect_tool.requester_manages_agent
+    raced = False
+
+    async def racing(session, **kwargs):
+        nonlocal raced
+        if kwargs.get("lock_authority") and not raced:
+            raced = True
+            await race()
+        return await real(session, **kwargs)
+
+    monkeypatch.setattr(connect_tool, "requester_manages_agent", racing)
+    return await connect_tool._github_connect_impl(
+        _runtime(setup_linked),
+        _admin_auth(setup_linked),
+        origin_context_id="synthetic",
+        repo_name="acme/*",
+    )
+
+
+@pytest.mark.asyncio
+async def test_fast_path_explicit_grant_committed_after_the_owner_snapshot_fails_the_owner_grant(
+    setup_linked, two_orgs, other_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_gadgets_server_wide_repo(setup_linked)
+
+    async def explicit_b_commits() -> None:
+        async with other_db.begin() as session:
+            await _fast_path_explicit_grant(session, setup_linked)
+
+    result = await _owner_a_through_the_tool(setup_linked, monkeypatch, explicit_b_commits)
+    assert result.status == "changed_try_again"
+    assert result.message == linked.CHANGED_MESSAGE
+    assert await _grant_count(setup_linked) == 1, "explicit-B committed"
+    assert await _owner_installations(setup_linked) == [], "owner-A rolled back"
+    # Asking again sees B and refuses cleanly.
+    again = await setup_linked.grant(repo_name="acme/*")
+    assert again.status == "other_installation"
+    assert again.message == _OTHER_ORG_MESSAGE.format(org="gadgets", scope="the gadgets repos")
+
+
+@pytest.mark.asyncio
+async def test_the_old_advisory_lock_let_both_installations_through(
+    setup_linked, two_orgs, other_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control: the same schedule with the lock this replaced ends on two installations."""
+    await _seed_gadgets_server_wide_repo(setup_linked)
+
+    async def advisory_lock(session, *, tenant_id, agent_id) -> None:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"github-agent-grants:{tenant_id}:{agent_id}"},
+        )
+
+    monkeypatch.setattr(github_access, "lock_agent_grants", advisory_lock)
+
+    async def explicit_b_commits() -> None:
+        async with other_db.begin() as session:
+            await _fast_path_explicit_grant(session, setup_linked)
+
+    result = await _owner_a_through_the_tool(setup_linked, monkeypatch, explicit_b_commits)
+    assert result.status.startswith("granted")
+    assert await _grant_count(setup_linked) == 1
+    assert await _owner_installations(setup_linked) == [201], "two installations: the bug"
+
+
+@pytest.mark.asyncio
+async def test_owner_grant_waiting_on_a_fast_path_grant_fails_when_that_commits(
+    setup_linked, two_orgs, other_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reverse order: explicit-B holds the fence first and owner-A queues behind it."""
+    await _seed_gadgets_server_wide_repo(setup_linked)
+    b_ready = asyncio.Event()
+    b_commit = asyncio.Event()
+
+    async def explicit_b() -> None:
+        async with other_db.begin() as session:
+            await _fast_path_explicit_grant(session, setup_linked)
+            b_ready.set()
+            await b_commit.wait()
+
+    b_task = asyncio.create_task(explicit_b())
+    await asyncio.wait_for(b_ready.wait(), timeout=10)
+
+    async def noop() -> None:
+        return None
+
+    owner_a = asyncio.create_task(_owner_a_through_the_tool(setup_linked, monkeypatch, noop))
+    await asyncio.sleep(0.5)
+    assert not owner_a.done(), "owner-A waits for the fence B holds"
+    b_commit.set()
+    await b_task
+    result = await asyncio.wait_for(owner_a, timeout=10)
+    assert result.status == "changed_try_again"
+    assert await _grant_count(setup_linked) == 1
+    assert await _owner_installations(setup_linked) == []
+
+
+@pytest.mark.asyncio
+async def test_fast_path_grant_waiting_on_an_owner_grant_sees_it_and_refuses(
+    setup_linked, two_orgs, other_db
+) -> None:
+    """READ COMMITTED explicit-B queues behind owner-A, then reads fresh state."""
+    await _seed_gadgets_server_wide_repo(setup_linked)
+    a_ready = asyncio.Event()
+    a_commit = asyncio.Event()
+
+    async def owner_a() -> None:
+        async with other_db.begin() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
+            await require_owner_grant_installations(
+                session,
+                tenant_id=setup_linked.tenant.id,
+                agent_id=setup_linked.agent_id,
+                installation_ids={201},
+                agent_name="Agent",
+            )
+            await upsert_owner_grant(
+                session,
+                tenant_id=setup_linked.tenant.id,
+                agent_id=setup_linked.agent_id,
+                installation_id=201,
+                owner_login="acme",
+                access="read",
+                account_id=setup_linked.account.id,
+            )
+            a_ready.set()
+            await a_commit.wait()
+
+    a_task = asyncio.create_task(owner_a())
+    await asyncio.wait_for(a_ready.wait(), timeout=10)
+
+    async def explicit_b() -> None:
+        async with setup_linked.sessionmaker.begin() as session:
+            await _fast_path_explicit_grant(session, setup_linked)
+
+    b_task = asyncio.create_task(explicit_b())
+    await asyncio.sleep(0.5)
+    assert not b_task.done(), "explicit-B waits for the fence owner-A holds"
+    a_commit.set()
+    await a_task
+    with pytest.raises(SecondInstallationError) as refused:
+        await asyncio.wait_for(b_task, timeout=10)
+    assert (refused.value.org, refused.value.kind) == ("acme", "owner")
+    assert await _grant_count(setup_linked) == 0
+    assert await _owner_installations(setup_linked) == [201]
+
+
+@pytest.mark.asyncio
+async def test_both_paths_bump_the_same_fence_row(setup_linked, two_orgs) -> None:
+    assert (await setup_linked.grant(repo_name="acme/widgets")).status == "granted"
+    assert (await setup_linked.grant(repo_name="acme/*")).status.startswith("granted")
+    async with setup_linked.sessionmaker() as session:
+        version = await session.scalar(
+            text(
+                "SELECT version FROM agent_github_grant_fences "
+                "WHERE tenant_id = :t AND agent_id = :a"
+            ),
+            {"t": setup_linked.tenant.id, "a": setup_linked.agent_id},
+        )
+    assert version is not None and version >= 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sqlstate", ["40001", "40P01"])
+async def test_a_deadlock_or_serialization_failure_asks_again_in_the_tool_and_on_resume(
+    setup_linked, monkeypatch: pytest.MonkeyPatch, sqlstate: str
+) -> None:
+    failure = DBAPIError("grant", {}, SimpleNamespace(sqlstate=sqlstate))
+    grant = AsyncMock(side_effect=failure)
+    _patch_tool_agent(monkeypatch)
+    monkeypatch.setattr(connect_tool, "linked_grant", grant)
+    monkeypatch.setattr(connect_tool, "_post_personal_link", AsyncMock())
+    result = await connect_tool._github_connect_impl(
+        _runtime(setup_linked),
+        _admin_auth(setup_linked),
+        origin_context_id="synthetic",
+        repo_name="acme/widgets",
+    )
+    assert (result.status, result.message) == ("changed_try_again", linked.CHANGED_MESSAGE)
+
+    await _save_request(setup_linked, thread_id="t1")
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    monkeypatch.setattr(linked_pending, "requester_manages_agent", AsyncMock(return_value=True))
+    monkeypatch.setattr(linked_pending, "linked_grant", grant)
+    monkeypatch.setattr(linked_pending, "_deliver_result", AsyncMock())
+    resumed = await linked_pending.resume_pending(
+        _runtime(setup_linked), **_pending_scope(setup_linked)
+    )
+    assert resumed == [linked.CHANGED_MESSAGE]
+
+
+@pytest.mark.asyncio
+async def test_another_database_error_is_not_mapped_to_ask_again(
+    setup_linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grant = AsyncMock(side_effect=DBAPIError("grant", {}, SimpleNamespace(sqlstate="57014")))
+    _patch_tool_agent(monkeypatch)
+    monkeypatch.setattr(connect_tool, "linked_grant", grant)
+    with pytest.raises(DBAPIError):
+        await connect_tool._github_connect_impl(
+            _runtime(setup_linked),
+            _admin_auth(setup_linked),
+            origin_context_id="synthetic",
+            repo_name="acme/widgets",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repo_name", ["acme/widgets", "acme/*"])
+async def test_both_linked_paths_lock_the_installation_before_the_agent_fence(
+    setup_linked, two_orgs, monkeypatch: pytest.MonkeyPatch, repo_name: str
+) -> None:
+    order: list[str] = []
+    real_installation_lock = linked.get_for_update
+    real_fence = github_access.lock_agent_grants
+
+    async def installation_lock(*args, **kwargs):
+        order.append("installation")
+        return await real_installation_lock(*args, **kwargs)
+
+    async def fence(*args, **kwargs):
+        order.append("fence")
+        return await real_fence(*args, **kwargs)
+
+    monkeypatch.setattr(linked, "get_for_update", installation_lock)
+    monkeypatch.setattr(github_access, "lock_agent_grants", fence)
+    assert (await setup_linked.grant(repo_name=repo_name)).status.startswith("granted")
+    assert "fence" in order and "installation" in order
+    assert order.index("installation") < order.index("fence")
+    assert max(i for i, step in enumerate(order) if step == "installation") < order.index("fence")

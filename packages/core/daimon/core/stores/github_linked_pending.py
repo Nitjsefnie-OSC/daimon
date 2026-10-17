@@ -12,13 +12,24 @@ from sqlalchemy import CursorResult, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # How long a claimed request stays out of reach of another `take`. A request not
-# resolved by then (the process died mid-batch) can be taken again. `renew` gives
-# each request a fresh lease just before it runs.
+# resolved by then (the process died mid-batch) can be taken again. The resume
+# renews the lease of every request it still holds before each request runs.
 CLAIM_LEASE = timedelta(minutes=2)
+# The longest one request may run, outcome and result delivery included. The
+# resume enforces it with `asyncio.timeout`; a request that hits it is answered
+# with a failure line and resolved, so the next request runs.
+PER_REQUEST_DEADLINE = timedelta(minutes=5)
+# The longest the failure line for a request that hit its deadline may take.
+FAILURE_DELIVERY_DEADLINE = timedelta(seconds=30)
 # A claimed row is garbage once its lease lapsed this long ago. A live callback
-# renews before each request and every GitHub call has a timeout, so no live
-# holder is this far behind; the gap only clears rows a crashed holder left.
+# renews every row it holds before each request, so the gap between two
+# renewals is at most `PER_REQUEST_DEADLINE + FAILURE_DELIVERY_DEADLINE` plus
+# database time, and the lease runs `CLAIM_LEASE` past each renewal. No live
+# holder is an hour behind; the gap only clears rows a crashed holder left.
 CLAIMED_GARBAGE_AFTER = timedelta(hours=1)
+assert PER_REQUEST_DEADLINE + FAILURE_DELIVERY_DEADLINE + CLAIM_LEASE < CLAIMED_GARBAGE_AFTER, (
+    "a live holder must renew well inside the garbage window"
+)
 
 
 class ClaimLostError(Exception):
@@ -96,10 +107,17 @@ async def take(
     A claimed request is not deleted: `resolve` deletes it once it has an outcome.
     Rows another `take` claimed and has not yet released are skipped until their
     lease passes. Each returned request carries this claim's token, which
-    `renew` and `resolve` check, so a lapsed claim cannot act on a row someone
-    else has since taken. Expired requests are deleted if never claimed, or once
-    their lease lapsed `CLAIMED_GARBAGE_AFTER` ago, so a slow holder whose
-    lease lapsed mid-batch still finds its row and answers it.
+    `renew_claim`, `renew` and `resolve` check, so a lapsed claim cannot act on a
+    row someone else has since taken. Expired requests are deleted if never
+    claimed, or once their lease lapsed `CLAIMED_GARBAGE_AFTER` ago.
+
+    That grace is safe because a live holder cannot be that far behind. Before
+    each request it calls `renew_claim`, which extends the lease of every row
+    it still holds, and each request runs under `PER_REQUEST_DEADLINE`, so the
+    gap between two renewals is at most `PER_REQUEST_DEADLINE` plus one failure
+    delivery (`FAILURE_DELIVERY_DEADLINE`), under the hour (checked at import).
+    A holder whose row another `take` claimed anyway finds `renew_claim` no
+    longer returns it and skips that request.
 
     Stated limit: the resume runs inline in the OAuth callback request, so a
     crash shows the person a failed browser request and nothing retries it. Its
@@ -146,6 +164,26 @@ async def take(
         )
     )
     return pending
+
+
+async def renew_claim(
+    session: AsyncSession, claim_token: uuid.UUID | None, *, now: datetime | None = None
+) -> set[uuid.UUID]:
+    """Extend the lease of every request this claim holds; return their ids.
+
+    One statement, so a slow request cannot let the lease of the rows still
+    waiting behind it lapse. A row missing from the result is gone or another
+    claim owns it now, and the caller must not answer it.
+    """
+    if claim_token is None:
+        return set()
+    result = await session.execute(
+        update(GitHubLinkedConnectPending)
+        .where(GitHubLinkedConnectPending.claim_token == claim_token)
+        .values(claimed_until=(now or datetime.now(UTC)) + CLAIM_LEASE)
+        .returning(GitHubLinkedConnectPending.id)
+    )
+    return set(result.scalars())
 
 
 async def renew(

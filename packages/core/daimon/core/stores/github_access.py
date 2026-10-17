@@ -18,6 +18,7 @@ from daimon.core.stores.github_owner_grants import list_owner_grants
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import ColumnElement, or_, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -56,21 +57,53 @@ class AgentGrant(BaseModel):
 class SecondInstallationError(ValueError):
     """A grant would make one agent use two GitHub installations.
 
-    `org` is the owner login of the installation the agent already uses.
+    `org` is the owner login of the installation the agent already uses. `kind`
+    is what blocks the new grant: explicit repo grants (`repo`) or an owner-wide
+    grant (`owner`), which differ in what has to be removed to switch.
     """
 
-    def __init__(self, message: str, *, org: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        org: str | None = None,
+        kind: Literal["repo", "owner"] = "repo",
+    ) -> None:
         super().__init__(message)
         self.org = org
+        self.kind: Literal["repo", "owner"] = kind
+
+
+# A concurrent grant writer won: the transaction restarts from fresh state.
+# 40001 is a serialization failure and 40P01 a deadlock.
+_CONCURRENT_CHANGE_SQLSTATES = frozenset({"40001", "40P01"})
+
+
+def is_concurrent_grant_change(exc: DBAPIError) -> bool:
+    """True for a serialization failure or deadlock, which a retry resolves."""
+    return getattr(exc.orig, "sqlstate", None) in _CONCURRENT_CHANGE_SQLSTATES
 
 
 async def lock_agent_grants(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> None:
-    """Serialize grant creation even when the agent has no grant row yet."""
+    """Serialize the agent's grant writers by bumping its fence row.
+
+    Every grant writer upserts the same row, so a concurrent writer waits for
+    this transaction. Under READ COMMITTED the waiter then reads fresh state.
+    Under SERIALIZABLE, updating a row another transaction committed after the
+    waiter's snapshot raises 40001, so a stale snapshot never carries on to
+    write. An advisory lock gave neither: it left the snapshot in place. Take
+    an installation lock before this one, so every writer orders the two alike.
+    """
     await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"github-agent-grants:{tenant_id}:{agent_id}"},
+        text(
+            "INSERT INTO agent_github_grant_fences (tenant_id, agent_id, version, updated_at) "
+            "VALUES (:tenant_id, :agent_id, 1, now()) "
+            "ON CONFLICT (tenant_id, agent_id) DO UPDATE "
+            "SET version = agent_github_grant_fences.version + 1, updated_at = now()"
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id},
     )
 
 
@@ -433,13 +466,14 @@ async def require_may_grant(
 
 
 def _second_installation(
-    agent_name: str | None, agent_id: uuid.UUID, org: str
+    agent_name: str | None, agent_id: uuid.UUID, org: str, kind: Literal["repo", "owner"]
 ) -> SecondInstallationError:
     return SecondInstallationError(
         f"{agent_name or agent_id} already uses repos from {org}. "
         "One agent can use one GitHub org. Use another agent for repos from a "
         "different org.",
         org=org,
+        kind=kind,
     )
 
 
@@ -454,7 +488,7 @@ async def _refuse_other_owner_installation(
     """Refuse when an owner grant of the agent sits on an installation outside the set."""
     for owner_grant in await list_owner_grants(session, tenant_id=tenant_id, agent_id=agent_id):
         if owner_grant.installation_id not in installation_ids:
-            raise _second_installation(agent_name, agent_id, owner_grant.owner_login)
+            raise _second_installation(agent_name, agent_id, owner_grant.owner_login, "owner")
 
 
 async def require_owner_grant_installations(
@@ -467,7 +501,7 @@ async def require_owner_grant_installations(
 ) -> None:
     """An owner grant keeps the one-installation rule `stage_grant` keeps for repos.
 
-    Takes the agent's grant lock, so owner and explicit grants serialize per
+    Bumps the agent's grant fence (`lock_agent_grants`), so owner and explicit grants serialize per
     agent, then refuses when the agent has an explicit grant or an owner grant
     on an installation outside `installation_ids`. Re-adding an owner grant for the installation
     the agent already uses passes. The caller owns the transaction.
@@ -478,7 +512,9 @@ async def require_owner_grant_installations(
             session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
         )
         if other is not None and other.installation_id not in installation_ids:
-            raise _second_installation(agent_name, agent_id, other.repo_full_name.split("/", 1)[0])
+            raise _second_installation(
+                agent_name, agent_id, other.repo_full_name.split("/", 1)[0], "repo"
+            )
     await _refuse_other_owner_installation(
         session,
         tenant_id=tenant_id,
@@ -525,7 +561,9 @@ async def stage_grant(
             session, tenant_id=tenant_id, repo_id=grant.repo_id, agent_id=agent_id
         )
         if other is not None and other.installation_id != authorized.installation_id:
-            raise _second_installation(agent_name, agent_id, other.repo_full_name.split("/", 1)[0])
+            raise _second_installation(
+                agent_name, agent_id, other.repo_full_name.split("/", 1)[0], "repo"
+            )
     await _refuse_other_owner_installation(
         session,
         tenant_id=tenant_id,

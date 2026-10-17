@@ -737,8 +737,13 @@ _last_app_access_checks: dict[str, datetime] = {}
 # mints fresh tokens each attempt, so retries back off from 1 to 30 minutes.
 _app_refresh_failures: dict[str, tuple[int, datetime]] = {}
 _GITHUB_LINK_REFRESH_INTERVAL_S = 3600.0
-# Everything the hourly sweep may spend, whoever is slow; each person has a shorter one.
+# What the hourly sweep may spend before it stops starting new people. It never
+# cancels a refresh under way: one person's refresh ends within its lock timeout,
+# the HTTP client's timeout and database time.
 _GITHUB_LINK_REFRESH_DEADLINE_S = 120.0
+# How long shutdown waits for a sweep to finish its current person before it
+# cancels the sweep as a last resort. The refresh's own persistence survives that.
+_GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S = 60.0
 _REFRESH_BACKOFF_START = timedelta(minutes=1)
 _REFRESH_BACKOFF_MAX = timedelta(minutes=30)
 # A turn running continuously for longer than this is treated as abandoned and
@@ -1473,12 +1478,17 @@ class _IntervalThrottle:
 class _SingleFlight:
     """Run one background job at a time, so a slow sweep never delays a tick.
 
-    `start` skips while the previous job is still running. `aclose` cancels it at
-    shutdown, before the engine goes away.
+    `start` skips while the previous job is still running. `aclose` asks the job
+    to stop through `stopping` and waits for it, so a job in the middle of
+    something that must finish gets to; only past `grace_s` does it cancel.
     """
 
     def __init__(self) -> None:
         self._task: asyncio.Task[None] | None = None
+        self.stop_requested = asyncio.Event()
+
+    def stopping(self) -> bool:
+        return self.stop_requested.is_set()
 
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -1489,9 +1499,13 @@ class _SingleFlight:
         self._task = asyncio.create_task(job())
         return True
 
-    async def aclose(self) -> None:
+    async def aclose(self, *, grace_s: float = _GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S) -> None:
+        self.stop_requested.set()
         task, self._task = self._task, None
         if task is None or task.done():
+            return
+        done, _ = await asyncio.wait({task}, timeout=grace_s)
+        if done:
             return
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1505,13 +1519,11 @@ async def _run_github_link_refresh(
     client_id: str,
     client_secret: str,
     backoff: dict[int, datetime],
+    should_stop: Callable[[], bool] | None = None,
 ) -> None:
-    """One bounded sweep: an overall deadline here, a per-person one inside."""
+    """One sweep: it stops starting new people at its budget or on `should_stop`."""
     try:
-        async with (
-            asyncio.timeout(_GITHUB_LINK_REFRESH_DEADLINE_S),
-            httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http_client,
-        ):
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http_client:
             counts = await refresh_expiring_links(
                 sm,
                 http_client,
@@ -1520,18 +1532,17 @@ async def _run_github_link_refresh(
                 client_secret=client_secret,
                 now=datetime.now(UTC),
                 backoff=backoff,
+                budget_s=_GITHUB_LINK_REFRESH_DEADLINE_S,
+                should_stop=should_stop,
             )
-        if counts.refreshed or counts.broken or counts.failed:
+        if counts.refreshed or counts.broken or counts.failed or counts.not_attempted:
             log.info(
                 "scheduler.github_link_refresh",
                 refreshed=counts.refreshed,
                 broken=counts.broken,
                 failed=counts.failed,
+                not_attempted=counts.not_attempted,
             )
-    except TimeoutError:
-        log.warning(
-            "scheduler.github_link_refresh.deadline", deadline_s=_GITHUB_LINK_REFRESH_DEADLINE_S
-        )
     except Exception:
         log.exception("scheduler.github_link_refresh.failed")
 
@@ -1549,7 +1560,7 @@ async def _refresh_expiring_github_links(
 
     With a `flight` the sweep runs in the background, one at a time, so a slow
     GitHub never delays routine dispatch; without one (`--once`) it is awaited,
-    still under its deadline. `backoff` is the caller's per-person failure memory.
+    still within its budget. `backoff` is the caller's per-person failure memory.
     """
     app = settings.github_app
     if fernet is None or app.client_id is None or app.client_secret is None:
@@ -1568,6 +1579,7 @@ async def _refresh_expiring_github_links(
             client_id=app.client_id,
             client_secret=app.client_secret.get_secret_value(),
             backoff=backoff if backoff is not None else {},
+            should_stop=flight.stopping if flight is not None else None,
         )
 
     if flight is None:

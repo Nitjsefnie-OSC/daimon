@@ -40,6 +40,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import (
+    is_concurrent_grant_change,
     list_agent_grants,
     list_authorized_repos,
     stage_grant,
@@ -79,6 +80,7 @@ class ConnectResult(BaseModel):
         "relink",
         "no_github_access",
         "needs_install",
+        "app_unusable",
         "install_pending",
         "other_installation",
         "changed_try_again",
@@ -479,7 +481,10 @@ async def _github_connect_impl(
                     requested_access=access,
                 )
             except DBAPIError as exc:
-                if getattr(exc.orig, "sqlstate", None) not in ("40001", "23505"):
+                if (
+                    not is_concurrent_grant_change(exc)
+                    and getattr(exc.orig, "sqlstate", None) != "23505"
+                ):
                     raise
                 return ConnectResult(status="changed_try_again", message=CHANGED_MESSAGE)
             if outcome.status in ("needs_link", "relink") and auth.platform in ("discord", "slack"):
