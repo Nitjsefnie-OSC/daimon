@@ -77,19 +77,34 @@ def build_authorization_url(
     return f"{authorization_endpoint}{separator}{urlencode(query)}"
 
 
-def requested_scope(
-    resource_scopes: list[str] | None, server_scopes: list[str] | None
-) -> str | None:
-    """The MCP server's scopes, plus `offline_access` when the authorization server offers it.
+def requested_scope(scopes: list[str] | None, server_scopes: list[str] | None) -> str | None:
+    """A pre-registered client's scopes, plus `offline_access` when the server offers it.
 
     Some authorization servers issue a refresh token only for `offline_access`;
-    without one the grant lapses with its first access token. No scope stays
-    no scope, so the server's own default set is not narrowed to that one.
+    without one the grant lapses with its first access token. Dynamically
+    registered clients do not get it, so those servers see the request they
+    always did. No scope stays no scope, so the server's default set is not
+    narrowed to that one.
     """
-    if not resource_scopes:
+    if not scopes:
         return None
-    scopes = list(resource_scopes)
-    if "offline_access" in (server_scopes or []) and "offline_access" not in scopes:
+    requested = list(scopes)
+    if "offline_access" in (server_scopes or []) and "offline_access" not in requested:
+        requested.append("offline_access")
+    return " ".join(requested)
+
+
+def refresh_scope(granted: str | None, requested: str | None) -> str | None:
+    """The scope a refresh asks for: the granted one, keeping a requested `offline_access`.
+
+    Token responses often leave `offline_access` out of `scope` even when it
+    was granted, and a refresh limited to that echo would stop yielding new
+    refresh tokens.
+    """
+    if granted is None or requested is None:
+        return granted
+    scopes = granted.split()
+    if "offline_access" in requested.split() and "offline_access" not in scopes:
         scopes.append("offline_access")
     return " ".join(scopes)
 

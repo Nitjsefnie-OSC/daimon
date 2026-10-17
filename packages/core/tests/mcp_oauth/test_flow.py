@@ -14,6 +14,7 @@ from daimon.core.mcp_oauth.flow import (
     exchange_authorization_code,
     generate_pkce,
     pick_token_endpoint_auth_method,
+    refresh_scope,
     register_client,
     requested_scope,
 )
@@ -57,12 +58,25 @@ def test_requested_scope_adds_offline_access_only_when_the_server_offers_it() ->
         "an offered offline_access is requested so the grant gets a refresh token"
     )
     assert requested_scope(["read"], ["openid"]) == "read", "not offered, not requested"
-    assert requested_scope(["read"], None) == "read"
+    assert requested_scope(["read"], None) == "read", "no advertised scopes, nothing added"
     assert requested_scope(["offline_access", "read"], ["offline_access"]) == (
         "offline_access read"
     ), "never requested twice"
     assert requested_scope(None, ["offline_access"]) is None, (
         "no scope stays no scope, so the server's default set is not narrowed"
+    )
+
+
+def test_refresh_scope_keeps_a_requested_offline_access_the_response_left_out() -> None:
+    assert refresh_scope("mcp.read", "mcp.read offline_access") == "mcp.read offline_access", (
+        "a refresh limited to the echoed scope would stop yielding refresh tokens"
+    )
+    assert refresh_scope("mcp.read", "mcp.read") == "mcp.read", "nothing added unless requested"
+    assert refresh_scope("mcp.read offline_access", "mcp.read offline_access") == (
+        "mcp.read offline_access"
+    ), "never added twice"
+    assert refresh_scope(None, "mcp.read offline_access") is None, (
+        "no granted scope stays none: the refresh then asks for the original grant"
     )
 
 

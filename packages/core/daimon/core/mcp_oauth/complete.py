@@ -29,7 +29,7 @@ from daimon.core.mcp_attach import (
     attach_mcp_server_to_agent,
     decide_mcp_connect,
 )
-from daimon.core.mcp_oauth.flow import exchange_authorization_code
+from daimon.core.mcp_oauth.flow import exchange_authorization_code, refresh_scope
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenEndpointAuthMethod
 from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
 from daimon.core.mcp_vault import ensure_agent_mcp_vault, hold_agent_vault_lock
@@ -125,6 +125,7 @@ async def complete_mcp_oauth_flow(
         redirect_uri=flow.redirect_uri,
         resource=flow.resource,
     )
+    tokens = tokens.model_copy(update={"scope": refresh_scope(tokens.scope, flow.scope)})
 
     async def still_allowed() -> None:
         if may_write is not None and not await may_write():

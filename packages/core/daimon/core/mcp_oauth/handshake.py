@@ -4,8 +4,8 @@
 spends nothing but mints the flow row (state + PKCE verifier) whose start
 link only that person sees. `prepare_authorization` runs on the mcp process
 when the link is opened: discovery, a client (registered by hand for that
-authorization server, else dynamically), and the authorize URL to redirect
-to. Both take their clock, randomness and clients as arguments.
+MCP server and authorization server, else dynamically), and the authorize
+URL to redirect to. Both take their clock, randomness and clients as arguments.
 """
 
 from __future__ import annotations
@@ -23,12 +23,14 @@ from daimon.core.config import McpOAuthClientSettings
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.mcp_oauth.discovery import discover_authorization_server, probe_mcp_server
 from daimon.core.mcp_oauth.flow import (
+    McpOAuthFlowError,
     build_authorization_url,
     generate_pkce,
     register_client,
     requested_scope,
 )
-from daimon.core.mcp_oauth.models import ClientRegistration
+from daimon.core.mcp_oauth.models import AuthorizationServerMetadata, ClientRegistration
+from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.domain import CredentialRequestRow, McpOAuthFlowRow
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,17 +101,65 @@ class PreparedAuthorization:
     authorize_url: str
 
 
-def match_preregistered_client(
-    clients: Sequence[McpOAuthClientSettings], *, authorization_server_url: str
-) -> McpOAuthClientSettings | None:
-    """The configured client for the host discovery fetched the metadata from.
+def _https_host(url: str) -> str | None:
+    """The normalised host of an https URL on the default port; None for anything else."""
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "https" or port not in (None, 443):
+        return None
+    return (parsed.hostname or "").rstrip(".").lower() or None
 
-    Matched on that host, not on the `issuer` the document claims: a hostile
-    MCP server could serve metadata naming a configured issuer with its own
-    token endpoint, and the client secret would go there.
+
+def match_preregistered_client(
+    clients: Sequence[McpOAuthClientSettings],
+    *,
+    mcp_server_url: str,
+    authorization_server_url: str,
+) -> McpOAuthClientSettings | None:
+    """The configured client that lists this MCP server and whose host served the metadata.
+
+    Both must hold. Any member, or a prompt-injected agent, can start a
+    sign-in to any URL; matched on the host alone, a hostile server could
+    publish metadata naming the configured host with scopes of its choosing,
+    and a person would sign in through the deployment's app while the token
+    went to that server. The host is the one discovery fetched the metadata
+    from, not the `issuer` the document claims, which the server writes.
     """
-    host = (urlparse(authorization_server_url).hostname or "").rstrip(".").lower()
-    return next((c for c in clients if c.authorization_server_host == host), None)
+    server = canonical_mcp_url(mcp_server_url)
+    client = next((c for c in clients if server in c.mcp_servers), None)
+    if client is None or _https_host(authorization_server_url) != client.authorization_server_host:
+        return None
+    return client
+
+
+def _on_client_host(client: McpOAuthClientSettings, url: str, *, what: str) -> str:
+    """Refuse a discovered endpoint off the configured host: the secret and code go there."""
+    if _https_host(url) != client.authorization_server_host:
+        raise McpOAuthFlowError(
+            f"the discovered {what} {url} is not on {client.authorization_server_host}, "
+            f"the host configured for OAuth client {client.client_id}; configure the "
+            "endpoint on the client if it is meant to be used"
+        )
+    return url
+
+
+def _client_endpoints(
+    client: McpOAuthClientSettings, metadata: AuthorizationServerMetadata
+) -> AuthorizationServerMetadata:
+    """The metadata with the client's endpoint overrides, each other endpoint checked."""
+    return metadata.model_copy(
+        update={
+            "authorization_endpoint": client.authorization_endpoint
+            or _on_client_host(
+                client, metadata.authorization_endpoint, what="authorization_endpoint"
+            ),
+            "token_endpoint": client.token_endpoint
+            or _on_client_host(client, metadata.token_endpoint, what="token_endpoint"),
+        }
+    )
 
 
 def _reuse_registered(flow: McpOAuthFlowRow) -> PreparedAuthorization:
@@ -139,9 +189,10 @@ async def prepare_authorization(
 ) -> PreparedAuthorization | None:
     """Discover the server's authorization server, pick a client, build the URL.
 
-    A client in `clients` configured for the authorization server's host is
-    used as is, with its endpoint overrides and its choice about `resource`;
-    any other server gets a dynamically registered client.
+    A client in `clients` that lists the MCP server and is configured for the
+    authorization server's host is used as is, with its endpoint overrides,
+    scope, `offline_access` and its choice about `resource`; any other server
+    gets a dynamically registered client exactly as before.
 
     A link opened twice reuses the client the first open registered, so the
     code the provider issues is always exchanged as the client that asked for
@@ -157,32 +208,29 @@ async def prepare_authorization(
         resource_metadata_url=probe.resource_metadata_url,
     )
     metadata = discovery.authorization_server
-    scope = requested_scope(
-        discovery.resource.scopes_supported if discovery.resource else None,
-        metadata.scopes_supported,
-    )
+    resource_scopes = discovery.resource.scopes_supported if discovery.resource else None
     resource = discovery.resource.resource if discovery.resource else None
     preregistered = match_preregistered_client(
-        clients, authorization_server_url=discovery.authorization_server_url
+        clients,
+        mcp_server_url=flow.mcp_server_url,
+        authorization_server_url=discovery.authorization_server_url,
     )
     if preregistered is None:
+        scope = " ".join(resource_scopes) if resource_scopes else None
         client = await register_client(
             http, metadata, redirect_uri=flow.redirect_uri, client_name=CLIENT_NAME, scope=scope
         )
     else:
-        secret = preregistered.client_secret
+        scope = requested_scope(
+            preregistered.scope.split() if preregistered.scope else resource_scopes,
+            metadata.scopes_supported,
+        )
         client = ClientRegistration(
             client_id=preregistered.client_id,
-            client_secret=secret.get_secret_value() if secret is not None else None,
+            client_secret=preregistered.client_secret.get_secret_value(),
             token_endpoint_auth_method=preregistered.token_endpoint_auth_method,
         )
-        metadata = metadata.model_copy(
-            update={
-                "authorization_endpoint": preregistered.authorization_endpoint
-                or metadata.authorization_endpoint,
-                "token_endpoint": preregistered.token_endpoint or metadata.token_endpoint,
-            }
-        )
+        metadata = _client_endpoints(preregistered, metadata)
         if not preregistered.send_resource:
             resource = None
     saved = await flows_store.save_flow_client(
