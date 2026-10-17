@@ -84,7 +84,9 @@ from daimon.adapters.mcp.tools.teams._read import (
 from daimon.adapters.mcp.tools.teams._send import (
     GROUP_CHAT_REFUSED,
     TeamsMessageRow,
+    TeamsReplacedFile,
     _teams_create_thread_impl,  # pyright: ignore[reportPrivateUsage]
+    _teams_replace_file_impl,  # pyright: ignore[reportPrivateUsage]
     _teams_send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.teams_threads import is_group_chat
@@ -558,6 +560,45 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             content=content,
             attachments=attachments,
             file_handles=file_handles,
+        )
+
+    @mcp.tool(tags={"teams"})  # pyright: ignore[reportArgumentType]
+    async def replace_channel_file(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, channel_id: str, link: str, version: str, file_handle: str
+    ) -> TeamsReplacedFile:
+        """Save an edited file over a Teams channel file as its new version.
+
+        Use this when asked to update, fix or edit a file that is already in
+        the channel's Files, instead of posting a renamed copy. Download the
+        current file, edit it, stage the result with
+        ``create_file_upload_url`` (PUT the bytes) and pass that
+        ``file_handle``, of the same file type.
+
+        ``link`` and ``version`` come together from where you downloaded the
+        file: an ``[attachment]`` line or ``<attachment>`` element of this
+        conversation, or a file of read_channel, read_thread or get_message.
+        ``channel_id`` is this conversation's channel or thread id. Only a
+        file inside that channel's own Files folder can be replaced, and you
+        must be able to post there.
+
+        SharePoint keeps every earlier version, so an edit can be restored.
+        Refusals say what to do: a file changed since you read it is not
+        overwritten (download it again and redo the edit); a file open in a
+        desktop app is locked; a sensitivity label can block the write. Then
+        post your version as a new file with send_message instead. Put the
+        returned ``link`` line in your reply as it is: it opens the file in
+        Office for the web.
+        """
+        auth = await _auth(ctx)
+        if auth.platform != "teams":
+            raise ToolError("replace_channel_file works on Teams only")
+        return await _teams_replace_file_impl(
+            runtime,
+            auth,
+            channel_id=channel_id,
+            link=link,
+            version=version,
+            file_handle=file_handle,
         )
 
     _VALID_AUTHOR_TYPES = frozenset({"user", "bot", "webhook"})

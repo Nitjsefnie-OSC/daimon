@@ -1,6 +1,8 @@
 """Teams send_message, create_thread, post_wizard, the GitHub App link and credential cards.
 
-Files go through `_files`: saved to a channel's Files, offered in a 1:1 chat.
+Files go through `_files`: saved to a channel's Files, offered in a 1:1 chat, or
+saved over a channel file as its new version (replace_channel_file), which is
+authorised as a post to that channel is.
 
 The bot is the sender, so a caller could otherwise speak through it in a
 conversation they cannot see: the requester's Entra id must be on the target's
@@ -26,13 +28,15 @@ from daimon.adapters.mcp.tools._tidy import PostRecord, record_agent_posts
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.adapters.mcp.tools.teams._directory import split_thread
 from daimon.adapters.mcp.tools.teams._files import CHANNEL as _CHANNEL
-from daimon.adapters.mcp.tools.teams._files import MAX_FILES, post_files
+from daimon.adapters.mcp.tools.teams._files import MAX_FILES, post_files, replace_in_channel
 from daimon.core.authz import Place
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.github_app_auth import build_app_install_url
+from daimon.core.media.filenames import sanitize_title
 from daimon.core.posted_controls import CardState, RefusalReason, card_for_request
 from daimon.core.posted_controls.teams_card import build_adaptive_card
 from daimon.core.stores.domain import CredentialRequestRow
+from daimon.core.teams_sharepoint import file_link
 from daimon.core.teams_threads import conversation_of, is_group_chat
 from daimon.core.wizard.render import to_screen
 from daimon.core.wizard.spec import WizardSpec
@@ -148,6 +152,48 @@ async def _teams_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
         raise _post_failed(err) from err
     await _record(runtime, auth, conversation_id, activity_id, content)
     return TeamsMessageRow(conversation_id=conversation_id, activity_id=activity_id, text=content)
+
+
+class TeamsReplacedFile(BaseModel):
+    """A channel file daimon saved a new version of."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    version: str | None
+    """The new version (eTag): pass it to replace the file again."""
+    link: str
+    """A markdown line linking the file; put it in your reply, it opens in Office for the web."""
+
+
+async def _teams_replace_file_impl(  # pyright: ignore[reportUnusedFunction]  # registered by tools/channels.py
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    link: str,
+    version: str,
+    file_handle: str,
+) -> TeamsReplacedFile:
+    conversation_id = _conversation_id(channel_id)
+    if not _CHANNEL.fullmatch(split_thread(conversation_id)[0]):
+        raise ToolError("only a file in a Teams channel's Files can be replaced")
+    client = await _authorize(runtime, auth, conversation_id)
+    [(upload, data)] = await staged_uploads(
+        [file_handle], session_factory=runtime.session_factory, tenant_id=auth.tenant_id
+    )
+    item = await replace_in_channel(
+        runtime,
+        auth,
+        client,
+        conversation_id,
+        link=link,
+        version=version,
+        upload=upload,
+        content=data,
+    )
+    name = sanitize_title(item.name or upload.display_filename)
+    return TeamsReplacedFile(name=name, version=item.e_tag, link=file_link(name, item.web_url))
 
 
 async def _record(
