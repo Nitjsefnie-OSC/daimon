@@ -358,14 +358,17 @@ Read from `daimon.core.config.McpOAuthSettings`. Prefix `DAIMON_MCP_OAUTH__`.
 `list[McpOAuthClientSettings]` · optional · default unset
 
 OAuth clients registered by hand, for authorization servers that offer no dynamic client
-registration. A JSON array; each entry has authorization_server_host (the host of the
-authorization server an MCP server names, so one client covers every MCP server behind
-it), client_id, client_secret, token_endpoint_auth_method (client_secret_post by
-default, client_secret_basic, or none for a public client without a secret), optional
-authorization_endpoint and token_endpoint overrides (public https), and send_resource
+registration. A JSON array; each entry has authorization_server_host (the bare host of
+the authorization server), mcp_servers (required: the exact https URLs of the MCP
+servers this client may be used for), client_id, client_secret,
+token_endpoint_auth_method (client_secret_post by default, or client_secret_basic),
+optional authorization_endpoint and token_endpoint overrides (public https), optional
+scope (space-separated; replaces the scopes the MCP server publishes) and send_resource
 (default true; false leaves the RFC 8707 resource parameter out of sign-in and refresh).
-A sign-in whose authorization server matches an entry uses that client instead of
-registering one. Default: [] (always register).
+A sign-in uses an entry only when its MCP server is listed and its authorization server
+is on that host; it then also asks for offline_access when the authorization server
+offers it. Every other sign-in registers a client dynamically. Default: [] (always
+register).
 
 ## Hub
 

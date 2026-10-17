@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
+from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import (
@@ -302,18 +303,20 @@ class McpSettings(BaseModel):
 
 
 class McpOAuthClientSettings(BaseModel):
-    """One OAuth client registered by hand at an authorization server."""
+    """One OAuth client registered by hand, and the MCP servers it may sign in to."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     authorization_server_host: str = Field(min_length=1)
+    mcp_servers: list[str] = Field(min_length=1)
     client_id: str = Field(min_length=1)
-    client_secret: SecretStr | None = None
-    token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"] = (
+    client_secret: SecretStr
+    token_endpoint_auth_method: Literal["client_secret_basic", "client_secret_post"] = (
         "client_secret_post"
     )
     authorization_endpoint: str | None = None
     token_endpoint: str | None = None
+    scope: str | None = None
     send_resource: bool = True
 
     @field_validator("authorization_server_host")
@@ -324,11 +327,24 @@ class McpOAuthClientSettings(BaseModel):
             raise ValueError("authorization_server_host must be a bare host name")
         return host
 
+    @field_validator("mcp_servers")
+    @classmethod
+    def _public_https_servers(cls, value: list[str]) -> list[str]:
+        # Imported here: the package pulls in the Anthropic SDK, which a plain
+        # settings load should not pay for when no client is configured.
+        from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
+
+        try:
+            return [
+                canonical_mcp_url(assert_public_https_url(url, what="mcp_servers entry"))
+                for url in value
+            ]
+        except McpUrlError as err:
+            raise ValueError(str(err)) from err
+
     @field_validator("authorization_endpoint", "token_endpoint")
     @classmethod
     def _public_https(cls, value: str | None) -> str | None:
-        # Imported here: the package pulls in the Anthropic SDK, which a plain
-        # settings load should not pay for when no client is configured.
         from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
 
         if value is None:
@@ -338,14 +354,14 @@ class McpOAuthClientSettings(BaseModel):
         except McpUrlError as err:
             raise ValueError(str(err)) from err
 
-    @model_validator(mode="after")
-    def _secret_matches_auth_method(self) -> McpOAuthClientSettings:
-        if (self.client_secret is None) != (self.token_endpoint_auth_method == "none"):
-            raise ValueError(
-                "client_secret is required unless token_endpoint_auth_method is none, "
-                "and refused when it is"
-            )
-        return self
+    @field_validator("scope")
+    @classmethod
+    def _space_separated(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.split():
+            raise ValueError("scope must name at least one scope, or be left out")
+        return " ".join(value.split())
 
 
 class McpOAuthSettings(BaseModel):
@@ -354,25 +370,28 @@ class McpOAuthSettings(BaseModel):
         description=(
             "OAuth clients registered by hand, for authorization servers that offer no "
             "dynamic client registration. A JSON array; each entry has "
-            "authorization_server_host (the host of the authorization server an MCP server "
-            "names, so one client covers every MCP server behind it), client_id, "
-            "client_secret, token_endpoint_auth_method (client_secret_post by default, "
-            "client_secret_basic, or none for a public client without a secret), optional "
-            "authorization_endpoint and token_endpoint overrides (public https), and "
+            "authorization_server_host (the bare host of the authorization server), "
+            "mcp_servers (required: the exact https URLs of the MCP servers this client may "
+            "be used for), client_id, client_secret, token_endpoint_auth_method "
+            "(client_secret_post by default, or client_secret_basic), optional "
+            "authorization_endpoint and token_endpoint overrides (public https), optional "
+            "scope (space-separated; replaces the scopes the MCP server publishes) and "
             "send_resource (default true; false leaves the RFC 8707 resource parameter out "
-            "of sign-in and refresh). A sign-in whose authorization server matches an entry "
-            "uses that client instead of registering one. Default: [] (always register)."
+            "of sign-in and refresh). A sign-in uses an entry only when its MCP server is "
+            "listed and its authorization server is on that host; it then also asks for "
+            "offline_access when the authorization server offers it. Every other sign-in "
+            "registers a client dynamically. Default: [] (always register)."
         ),
     )
 
     @field_validator("clients")
     @classmethod
-    def _one_client_per_host(
+    def _one_client_per_server(
         cls, value: list[McpOAuthClientSettings]
     ) -> list[McpOAuthClientSettings]:
-        hosts = [client.authorization_server_host for client in value]
-        if len(hosts) != len(set(hosts)):
-            raise ValueError("each authorization_server_host may have one client")
+        servers = [url for client in value for url in client.mcp_servers]
+        if len(servers) != len(set(servers)):
+            raise ValueError("each MCP server may be listed under one client")
         return value
 
 

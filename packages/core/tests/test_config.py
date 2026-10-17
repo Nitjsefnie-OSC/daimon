@@ -293,31 +293,44 @@ def test_mcp_oauth_clients_parse_from_a_top_level_json_env(
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     monkeypatch.setenv(
         "DAIMON_MCP_OAUTH__CLIENTS",
-        '[{"authorization_server_host": "Login.Example.com.", "client_id": "cid", '
+        '[{"authorization_server_host": "Login.Example.com.", '
+        '"mcp_servers": ["HTTPS://MCP.Example.com:443/Mcp/"], "client_id": "cid", '
         '"client_secret": "sec", "token_endpoint": "https://login.example.com/t1/token", '
-        '"send_resource": false}]',
+        '"scope": "  mcp.read   mcp.write ", "send_resource": false}]',
     )
     (client,) = load_settings(_env_file=None).mcp_oauth.clients
     assert client.authorization_server_host == "login.example.com", "the host is normalised"
-    assert client.client_secret is not None and client.client_secret.get_secret_value() == "sec"
+    assert client.mcp_servers == ["https://mcp.example.com/Mcp"], (
+        "server URLs are stored in the canonical form sign-ins are compared in"
+    )
+    assert client.client_secret.get_secret_value() == "sec", "the secret is read as given"
     assert client.token_endpoint_auth_method == "client_secret_post", "post is the default"
-    assert client.token_endpoint == "https://login.example.com/t1/token"
-    assert client.authorization_endpoint is None and client.send_resource is False
+    assert client.token_endpoint == "https://login.example.com/t1/token", "override kept"
+    assert client.scope == "mcp.read mcp.write", "scope whitespace is collapsed"
+    assert client.authorization_endpoint is None and client.send_resource is False, (
+        "unset override stays unset, send_resource is read as given"
+    )
 
 
 @pytest.mark.parametrize(
     ("entry", "message"),
     [
         ({"authorization_server_host": "https://login.example.com"}, "bare host name"),
+        ({"authorization_server_host": "login.example.com:8443"}, "bare host name"),
+        ({"mcp_servers": []}, "at least 1 item"),
+        ({"mcp_servers": ["http://mcp.example.com/mcp"]}, "must be https"),
+        ({"mcp_servers": ["https://10.0.0.1/mcp"]}, "non-public address"),
         ({"authorization_endpoint": "http://login.example.com/authorize"}, "must be https"),
         ({"token_endpoint": "https://10.0.0.1/token"}, "non-public address"),
-        ({"client_secret": None}, "client_secret is required"),
-        ({"token_endpoint_auth_method": "none"}, "client_secret is required"),
+        ({"client_secret": None}, "client_secret"),
+        ({"token_endpoint_auth_method": "none"}, "token_endpoint_auth_method"),
+        ({"scope": "   "}, "at least one scope"),
     ],
 )
 def test_mcp_oauth_client_rejects_an_unusable_entry(entry: dict[str, object], message: str) -> None:
     base: dict[str, object] = {
         "authorization_server_host": "login.example.com",
+        "mcp_servers": ["https://mcp.example.com/mcp"],
         "client_id": "cid",
         "client_secret": "sec",
     }
@@ -325,20 +338,24 @@ def test_mcp_oauth_client_rejects_an_unusable_entry(entry: dict[str, object], me
         McpOAuthClientSettings.model_validate(base | entry)
 
 
-def test_mcp_oauth_client_accepts_a_public_client_without_a_secret() -> None:
-    client = McpOAuthClientSettings(
-        authorization_server_host="login.example.com",
-        client_id="cid",
-        token_endpoint_auth_method="none",
-    )
-    assert client.client_secret is None, "a public client authenticates with no secret"
+def test_mcp_oauth_client_requires_an_mcp_server_allowlist() -> None:
+    with pytest.raises(ValidationError, match="mcp_servers"):
+        McpOAuthClientSettings.model_validate(
+            {"authorization_server_host": "login.example.com", "client_id": "cid"}
+            | {"client_secret": "sec"}
+        )
 
 
-def test_mcp_oauth_settings_refuse_two_clients_for_one_host() -> None:
-    entry = {"authorization_server_host": "login.example.com", "client_id": "cid"}
-    entry |= {"client_secret": "sec"}
+def test_mcp_oauth_settings_refuse_one_server_under_two_clients() -> None:
+    entry: dict[str, object] = {
+        "authorization_server_host": "login.example.com",
+        "mcp_servers": ["https://mcp.example.com/mcp"],
+        "client_id": "cid",
+        "client_secret": "sec",
+    }
+    other = entry | {"client_id": "other", "mcp_servers": ["https://MCP.example.com/mcp/"]}
     with pytest.raises(ValidationError, match="one client"):
-        McpOAuthSettings.model_validate({"clients": [entry, entry | {"client_id": "other"}]})
+        McpOAuthSettings.model_validate({"clients": [entry, other]})
 
 
 def test_mcp_app_root_url_strips_mcp_suffix() -> None:
