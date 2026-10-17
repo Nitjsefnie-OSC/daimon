@@ -330,7 +330,9 @@ concurrency:
 jobs:
   tlc:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The GitHub linked-grant, pending and one-installation models add about
+    # eight minutes; a full run took 16 to 21 minutes on hosted runners.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
