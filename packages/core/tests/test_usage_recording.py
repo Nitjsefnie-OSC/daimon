@@ -592,3 +592,34 @@ async def test_turn_debit_is_dated_by_the_model_call_not_the_write(
     )
     [debit] = await tenant_ledger.list_for_tenant(db_session, tenant_id=tenant.id)
     assert debit.occurred_at == processed_at, "the debit should carry event.processed_at"
+
+
+async def test_fast_native_receipt_debits_fast_tariff_once(db_session, db_session_factory):
+    from daimon.core.model_presets import OPUS, OPUS_FAST
+    from daimon.core.usage_compat import event_observation
+
+    tenant = await make_tenant(db_session)
+    event = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_fast",
+        is_error=False,
+        model_request_start_id="start_fast",
+        model_usage=ma_model_usage(input_tokens=1_000_000, output_tokens=100_000),
+        processed_at=datetime.now(UTC),
+        type="span.model_request_end",
+    )
+    native = event_observation(event, session_id="s_fast", model_id=OPUS, tenant_id=str(tenant.id))
+    for _ in range(2):
+        await usage_recording.record_turn_usage(
+            sessionmaker=db_session_factory,
+            tenant_id=tenant.id,
+            platform_user_id="u_fast",
+            managed_session_id="s_fast",
+            model_id=OPUS_FAST,
+            observation=native,
+            pricing=MODEL_PRICING[OPUS_FAST],
+            markup=Decimal("1"),
+        )
+    rows = (await db_session.execute(select(UsageEvent))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].model == OPUS_FAST
+    assert await tenant_ledger.get_balance(db_session, tenant_id=tenant.id) == Decimal("-12")

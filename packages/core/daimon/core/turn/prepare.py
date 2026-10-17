@@ -1495,7 +1495,7 @@ async def bind_session_impl(
                     tenant_id=tenant_id,
                     external_user_id=external_user_id,
                     ma_session_id=fresh.ma_session_id,
-                    model_id=fresh.snapshot.model_id,
+                    model_id=fresh.snapshot.pricing_id,
                     channel_id=admission.budget_channel_id,
                 ),
                 session_ref=resource_ref(backend, "session", fresh.ma_session_id, scope=scope),

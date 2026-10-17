@@ -2,9 +2,8 @@
 
 Principle: thin passthrough. Field names mirror the `anthropic` SDK's
 `*CreateParams` TypedDicts so that YAML authors write what the SDK sees.
-No daimon-specific aliases, no runtime translation layer inside these models —
-the seed converter (separate module) is the one place that maps a `*Spec` to
-the SDK's kwargs shape.
+Local model presets expand to native model configurations during validation.
+The seed converter maps the remaining `*Spec` fields to SDK kwargs.
 
 Entry points:
 - `AgentSpec` — parsed from `defaults/agents/<name>.yaml` or user CRUD input.
@@ -22,7 +21,6 @@ from typing import Annotated, Any, Literal, cast
 import yaml
 from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
-from anthropic.types.beta.beta_managed_agents_model_param import BetaManagedAgentsModelParam
 from anthropic.types.beta.beta_managed_agents_multiagent_params import (
     BetaManagedAgentsMultiagentParams,
 )
@@ -32,6 +30,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 from anthropic.types.beta.beta_packages_params import BetaPackagesParams
 from daimon.core.context_prompt import ContextFragment, TurnContext, encode_fragments
 from daimon.core.errors import SpecError
+from daimon.core.model_presets import ModelSelection, resolve_model
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
@@ -79,9 +78,8 @@ class AgentSpec(BaseModel):
 
     Mirrors `anthropic.types.beta.agent_create_params.AgentCreateParams` with
     `extra="forbid"`. Uses the SDK's `Tool` discriminated union,
-    `BetaManagedAgentsURLMCPServerParams`, and `BetaManagedAgentsModelParam`
-    verbatim — any SDK rename or discriminator change is inherited without
-    re-declaration.
+    `BetaManagedAgentsURLMCPServerParams`, and the shared `ModelSelection`
+    shape for native model controls and local presets.
 
     Three fields diverge from the SDK:
 
@@ -110,7 +108,7 @@ class AgentSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    model: BetaManagedAgentsModelParam
+    model: ModelSelection
     description: str | None = None
     system: str | None = None
     context_fragments: dict[TurnContext, ContextFragment] = Field(
@@ -122,6 +120,11 @@ class AgentSpec(BaseModel):
     skills: list[SkillRef] = Field(default_factory=list[SkillRef], exclude=True)
     skill_repos: list[SkillRepo] = Field(default_factory=list[SkillRepo], exclude=True)
     isolated: bool = Field(default=False, exclude=True)
+
+    @model_validator(mode="after")
+    def _resolve_model_preset(self) -> AgentSpec:
+        self.model = resolve_model(self.model)
+        return self
 
     @model_validator(mode="after")
     def _require_mcp_toolset_when_mcp_servers_set(self) -> AgentSpec:

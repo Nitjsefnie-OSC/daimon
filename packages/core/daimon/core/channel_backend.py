@@ -38,6 +38,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import source_agent_record
 from daimon.core.neutral_resources import AgentFleetGrant, NeutralResourceHost, ResolvedWorkerSpec
@@ -1206,6 +1207,10 @@ def _default_cost(
     model = backend_selection(target).model or agent.model
     if model is None:
         return "List price unavailable: agent model unknown. Worst-case per turn: unknown."
+    if target == DEFAULT_BACKEND and agent.source is not None:
+        native_model = agent.source.spec.model
+        if native_model.provider == DEFAULT_BACKEND and native_model.id == model:
+            model = model_choice_id({"id": model, **dict(native_model.options)})
     rates = (prices or {}).get(model) or MODEL_PRICING.get(model)
     return list_price_preview(model, rates)
 

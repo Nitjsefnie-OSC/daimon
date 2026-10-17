@@ -69,6 +69,7 @@ from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.continuity.wakes import enqueue_worker_finished
 from daimon.core.fleet import TERMINAL, FleetConflict, FleetWorker, spawn_operation_key, worker_slot
 from daimon.core.github_app_session import close_headless_app_session
+from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
 from daimon.core.neutral_resources import WorkerPermissions, resolve_worker_spec
@@ -448,11 +449,11 @@ async def run_turn_impl(
     try:
         if (observation := current_outcome.get()) is not None:
             observation.session_id = session.id
-            observation.model_by_session[session.id] = session.agent.model.id
+            observation.model_by_session[session.id] = model_choice_id(session.agent.model)
 
         usage_record: Callable[..., Awaitable[object]] | None = None
         if usage_record_factory is not None:
-            usage_record = usage_record_factory(session.id, session.agent.model.id)
+            usage_record = usage_record_factory(session.id, model_choice_id(session.agent.model))
 
         billing: BillingPosture
         if usage_record is not None:

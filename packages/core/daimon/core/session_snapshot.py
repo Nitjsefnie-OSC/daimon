@@ -53,6 +53,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
     BetaManagedAgentsGitHubRepositoryResource,
 )
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
+from daimon.core.model_presets import model_choice_id
 from daimon.core.tool_safety import (
     OPEN_TOOL_SAFETY,
     ToolSafetyPolicy,
@@ -88,6 +89,7 @@ _IDENTITY_FIELDS = (
     "schema_version",
     "ma_agent_id",
     "model_id",
+    "model_speed",
     "system_sha256",
     "skills_sha256",
     "environment_id",
@@ -122,6 +124,12 @@ class SessionSnapshot(BaseModel):
     # Identity axis — a difference here can only be applied by replacing the session.
     ma_agent_id: str
     model_id: str
+    model_speed: Literal["standard", "fast"] = "standard"
+
+    @property
+    def pricing_id(self) -> str:
+        return model_choice_id({"id": self.model_id, "speed": self.model_speed})
+
     system_sha256: str | None
     skills_sha256: str
     environment_id: str
@@ -367,6 +375,7 @@ def _snapshot_from_session(
     return SessionSnapshot(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
+        model_speed=getattr(agent.model, "speed", None) or "standard",
         system_sha256=hash_system(agent.system),
         skills_sha256=skills_sha256,
         environment_id=session.environment_id,
@@ -493,6 +502,7 @@ def desired_snapshot(
     return SessionSnapshot(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
+        model_speed=getattr(agent.model, "speed", None) or "standard",
         system_sha256=hash_system(agent.system),
         skills_sha256=hash_skills(session_skills(agent, channel_skills)),
         environment_id=environment_id,

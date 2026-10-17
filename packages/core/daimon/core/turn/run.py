@@ -40,6 +40,7 @@ from daimon.core.handoff_context import (
     select_recent_turns,
 )
 from daimon.core.ma import replay_events
+from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
@@ -674,7 +675,9 @@ async def _replace_dead_session_locked(
                     ma_session_id=live.ma_session_id,
                     mapping_id=live.id,
                     model_id=(
-                        snapshot.model_id if snapshot is not None else admission.agent.model.id
+                        snapshot.pricing_id
+                        if snapshot is not None
+                        else model_choice_id(admission.agent.model)
                     ),
                     transfer_kind=live.transfer_kind or "history",
                     previous_session=None,
@@ -768,7 +771,7 @@ async def _replace_dead_session_locked(
     return _Replacement(
         ma_session_id=fresh.ma_session_id,
         mapping_id=fresh.mapping_id,
-        model_id=fresh.snapshot.model_id,
+        model_id=fresh.snapshot.pricing_id,
         transfer_kind=loss_transfer_kind,
         previous_session=previous_session,
         adopted=False,
