@@ -1207,9 +1207,9 @@ def _default_cost(
     model = backend_selection(target).model or agent.model
     if model is None:
         return "List price unavailable: agent model unknown. Worst-case per turn: unknown."
-    if target == "anthropic" and agent.source is not None:
+    if target == DEFAULT_BACKEND and agent.source is not None:
         native_model = agent.source.spec.model
-        if native_model.provider == "anthropic" and native_model.id == model:
+        if native_model.provider == DEFAULT_BACKEND and native_model.id == model:
             model = model_choice_id({"id": model, **dict(native_model.options)})
     rates = (prices or {}).get(model) or MODEL_PRICING.get(model)
     return list_price_preview(model, rates)

@@ -1169,6 +1169,78 @@
             ]),
             'type': 'object',
           }),
+          'ModelConfig': dict({
+            'properties': dict({
+              'effort': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'low',
+                      'medium',
+                      'high',
+                      'xhigh',
+                      'max',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'additionalProperties': dict({
+                      'type': 'string',
+                    }),
+                    'type': 'object',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'id': dict({
+                'type': 'string',
+              }),
+              'inference_geo': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'us',
+                      'global',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'speed': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'standard',
+                      'fast',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+            }),
+            'required': list([
+              'id',
+            ]),
+            'type': 'object',
+          }),
+          'ModelSelection': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                '$ref': '#/$defs/ModelConfig',
+              }),
+            ]),
+          }),
           'SkillRepo': dict({
             'additionalProperties': False,
             'description': '''
@@ -1229,28 +1301,7 @@
             'default': None,
           }),
           'model': dict({
-            'anyOf': list([
-              dict({
-                'enum': list([
-                  'claude-sonnet-5',
-                  'claude-fable-5',
-                  'claude-opus-4-8',
-                  'claude-opus-4-7',
-                  'claude-opus-4-6',
-                  'claude-sonnet-4-6',
-                  'claude-haiku-4-5',
-                  'claude-haiku-4-5-20251001',
-                  'claude-opus-4-5',
-                  'claude-opus-4-5-20251101',
-                  'claude-sonnet-4-5',
-                  'claude-sonnet-4-5-20250929',
-                ]),
-                'type': 'string',
-              }),
-              dict({
-                'type': 'string',
-              }),
-            ]),
+            '$ref': '#/$defs/ModelSelection',
           }),
           'name': dict({
             'type': 'string',
@@ -5993,6 +6044,78 @@
             ]),
             'type': 'object',
           }),
+          'ModelConfig': dict({
+            'properties': dict({
+              'effort': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'low',
+                      'medium',
+                      'high',
+                      'xhigh',
+                      'max',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'additionalProperties': dict({
+                      'type': 'string',
+                    }),
+                    'type': 'object',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'id': dict({
+                'type': 'string',
+              }),
+              'inference_geo': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'us',
+                      'global',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+              'speed': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'standard',
+                      'fast',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+              }),
+            }),
+            'required': list([
+              'id',
+            ]),
+            'type': 'object',
+          }),
+          'ModelSelection': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                '$ref': '#/$defs/ModelConfig',
+              }),
+            ]),
+          }),
         }),
         'additionalProperties': False,
         'properties': dict({
@@ -6035,24 +6158,7 @@
           'model': dict({
             'anyOf': list([
               dict({
-                'enum': list([
-                  'claude-sonnet-5',
-                  'claude-fable-5',
-                  'claude-opus-4-8',
-                  'claude-opus-4-7',
-                  'claude-opus-4-6',
-                  'claude-sonnet-4-6',
-                  'claude-haiku-4-5',
-                  'claude-haiku-4-5-20251001',
-                  'claude-opus-4-5',
-                  'claude-opus-4-5-20251101',
-                  'claude-sonnet-4-5',
-                  'claude-sonnet-4-5-20250929',
-                ]),
-                'type': 'string',
-              }),
-              dict({
-                'type': 'string',
+                '$ref': '#/$defs/ModelSelection',
               }),
               dict({
                 'type': 'null',
