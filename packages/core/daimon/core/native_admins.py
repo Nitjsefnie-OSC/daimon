@@ -60,46 +60,29 @@ class _DiscordMember(BaseModel):
     roles: list[_DiscordId]
 
 
-async def verify_backend_actor(
-    sessionmaker: async_sessionmaker[AsyncSession],
+class AdminAttestationUnavailable(DaimonError):
+    """Current platform admin authority could not be read safely."""
+
+
+async def attest_discord_admin(
     *,
-    tenant_id: uuid.UUID,
+    guild_id: str,
     platform_user_id: str,
     settings: Settings,
     http_client: httpx.AsyncClient | None = None,
-) -> BackendActor:
-    """Read fresh guild authority for an existing principal; never create or promote it."""
-    from daimon.core.channel_backend import AgentBackendRefused, BackendActor
-    from daimon.core.stores.identity import find_platform_principal
-    from daimon.core.stores.tenants import get_tenant
+) -> bool:
+    """Read current guild authority without consulting or changing a stored role."""
     from mux.drivers import isolated_ssl_context
 
-    if settings.discord is None or not re.fullmatch(_USER_ID["discord"], platform_user_id):
-        raise AgentBackendRefused("admin_attestation_unavailable")
+    if (
+        settings.discord is None
+        or not re.fullmatch(_CHANNEL_ID["discord"], guild_id)
+        or not re.fullmatch(_USER_ID["discord"], platform_user_id)
+    ):
+        raise AdminAttestationUnavailable("discord identity unavailable")
     token = settings.discord.bot_token.get_secret_value()
     if not token:
-        raise AgentBackendRefused("admin_attestation_unavailable")
-
-    async def identity() -> tuple[str, uuid.UUID]:
-        async with sessionmaker() as session:
-            tenant = await get_tenant(session, tenant_id)
-            principal = await find_platform_principal(
-                session, tenant_id=tenant_id, platform="discord", external_id=platform_user_id
-            )
-            account = await get_account(session, principal.account_id) if principal else None
-        if (
-            tenant is None
-            or tenant.platform != "discord"
-            or not re.fullmatch(_CHANNEL_ID["discord"], tenant.external_id)
-            or principal is None
-            or account is None
-            or account.tenant_id != tenant_id
-            or account.is_external
-        ):
-            raise AgentBackendRefused("actor_not_found")
-        return tenant.external_id, account.id
-
-    guild_id, account_id = await identity()
+        raise AdminAttestationUnavailable("discord token unavailable")
 
     async def attest(client: httpx.AsyncClient) -> bool:
         async def read(path: str) -> object:
@@ -143,10 +126,59 @@ async def verify_backend_actor(
                 async with httpx.AsyncClient(
                     trust_env=False, verify=isolated_ssl_context()
                 ) as client:
-                    admin = await attest(client)
-            else:
-                admin = await attest(http_client)
-    except (httpx.HTTPError, TimeoutError, ValueError):
+                    return await attest(client)
+            return await attest(http_client)
+    except (httpx.HTTPError, TimeoutError, ValueError) as exc:
+        raise AdminAttestationUnavailable("discord lookup failed") from exc
+
+
+async def verify_backend_actor(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform_user_id: str,
+    settings: Settings,
+    http_client: httpx.AsyncClient | None = None,
+) -> BackendActor:
+    """Read fresh guild authority for an existing principal; never create or promote it."""
+    from daimon.core.channel_backend import AgentBackendRefused, BackendActor
+    from daimon.core.stores.identity import find_platform_principal
+    from daimon.core.stores.tenants import get_tenant
+
+    if settings.discord is None or not re.fullmatch(_USER_ID["discord"], platform_user_id):
+        raise AgentBackendRefused("admin_attestation_unavailable")
+    if not settings.discord.bot_token.get_secret_value():
+        raise AgentBackendRefused("admin_attestation_unavailable")
+
+    async def identity() -> tuple[str, uuid.UUID]:
+        async with sessionmaker() as session:
+            tenant = await get_tenant(session, tenant_id)
+            principal = await find_platform_principal(
+                session, tenant_id=tenant_id, platform="discord", external_id=platform_user_id
+            )
+            account = await get_account(session, principal.account_id) if principal else None
+        if (
+            tenant is None
+            or tenant.platform != "discord"
+            or not re.fullmatch(_CHANNEL_ID["discord"], tenant.external_id)
+            or principal is None
+            or account is None
+            or account.tenant_id != tenant_id
+            or account.is_external
+        ):
+            raise AgentBackendRefused("actor_not_found")
+        return tenant.external_id, account.id
+
+    guild_id, account_id = await identity()
+
+    try:
+        admin = await attest_discord_admin(
+            guild_id=guild_id,
+            platform_user_id=platform_user_id,
+            settings=settings,
+            http_client=http_client,
+        )
+    except AdminAttestationUnavailable:
         raise AgentBackendRefused("admin_attestation_unavailable") from None
     if not admin:
         raise AgentBackendRefused("admin_required")
