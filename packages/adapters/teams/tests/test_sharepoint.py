@@ -88,6 +88,7 @@ def _file_routes(
     found = {"id": "01Q3", "parentReference": {"driveId": drive}}
     item = {
         "id": "01Q3",
+        "eTag": '"{Q3},4"',
         "parentReference": {"driveId": drive, "id": parent},
         "@microsoft.graph.downloadUrl": DOWNLOAD_URL,
     }
@@ -351,8 +352,10 @@ async def test_resolve_links_a_file_in_the_channels_folder_and_names_the_rest() 
         ChannelMedia(files=(inside, elsewhere)), group_id=GROUP, channel_id=CHANNEL
     )
 
-    assert media.files == (dataclasses.replace(inside, download_url=DOWNLOAD_URL), elsewhere), (
-        "the channel's file is linked; the other, which its members may not share, is not"
+    linked = dataclasses.replace(inside, download_url=DOWNLOAD_URL, version='"{Q3},4"')
+    assert media.files == (linked, elsewhere), (
+        "the channel's file is linked, with the version a replace checks; the other, which "
+        "its members may not share, is not"
     )
 
 
