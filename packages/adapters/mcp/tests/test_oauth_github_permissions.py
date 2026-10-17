@@ -9,6 +9,8 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Literal
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -23,13 +25,16 @@ from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
     Settings,
+    TeamsSettings,
 )
-from daimon.core.github_credentials import build_multifernet
+from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.native_admins import AdminAttestationUnavailable
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import github_access, github_connect
-from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import Role
+from daimon.core.stores.accounts import get_account_with_tenant, set_role
+from daimon.core.stores.domain import AccountIdentityRow, Role
+from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -91,6 +96,7 @@ class _Editor:
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     account_id: uuid.UUID
+    platform: Literal["discord", "slack"]
 
     async def page(self) -> tuple[dict[str, str], str]:
         async with self.sessionmaker.begin() as session:
@@ -105,7 +111,7 @@ class _Editor:
                 agent_ma_id="ag_editor",
                 agent_manager_verified=True,
                 operator_issued=False,
-                origin_platform="discord",
+                origin_platform=self.platform,
             )
         start = await self.browser.get(f"/oauth/github/connect/{invitation}")
         state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
@@ -139,15 +145,20 @@ async def _editor(
     sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     orgs: list[_Org],
+    *,
+    platform: Literal["discord", "slack"] = "discord",
 ) -> AsyncIterator[_Editor]:
+    monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=True))
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_editor")
     async with sessionmaker.begin() as session:
-        tenant = await make_tenant(session, id=tenant_id, workspace_id="perm-workspace")
+        tenant = await make_tenant(
+            session, id=tenant_id, workspace_id="perm-workspace", platform=platform
+        )
         account = await make_account(session, tenant=tenant, id=account_id)
         await set_role(session, account_id, Role.ADMIN)
         await make_platform_principal(
-            session, platform="discord", external_id="editor", tenant=tenant, account=account
+            session, platform=platform, external_id="editor", tenant=tenant, account=account
         )
 
     def paged(request: httpx.Request, rows: list[dict[str, object]], key: str) -> httpx.Response:
@@ -229,7 +240,144 @@ async def _editor(
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
     ) as browser:
-        yield _Editor(browser, sessionmaker, tenant_id, agent_id, account_id)
+        yield _Editor(browser, sessionmaker, tenant_id, agent_id, account_id, platform)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["discord", "slack"])
+async def test_agent_save_requires_live_admin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    platform: Literal["discord", "slack"],
+) -> None:
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org], platform=platform) as editor:
+        hidden, _ = await editor.page()
+        live = AsyncMock(side_effect=[False, AdminAttestationUnavailable("lookup failed"), True])
+        monkeypatch.setattr(oauth_github, "_attest_native_admin", live)
+        denied = await editor.save(hidden, repo="101")
+        assert denied.status_code == 403
+        assert "You can no longer manage this agent." in denied.text
+        assert await editor.grants() == {}
+        retry = await editor.save(hidden, repo="101")
+        assert retry.status_code == 503
+        assert "Try again in a minute." in retry.text
+        assert await editor.grants() == {}
+        saved = await editor.save(hidden, repo="101")
+        assert saved.status_code == 200
+        assert await editor.grants() == {101: "write"}
+        assert live.await_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ((True, False, False), True),
+        ((False, True, False), True),
+        ((False, False, True), True),
+        ((False, False, False), False),
+    ],
+)
+async def test_slack_uses_live_workspace_role(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    flags: tuple[bool, bool, bool],
+    expected: bool,
+) -> None:
+    live_attestation = oauth_github._attest_native_admin
+    org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
+    async with _editor(committing_sessionmaker, monkeypatch, [org], platform="slack") as editor:
+        key = Fernet.generate_key().decode()
+        fernet = build_multifernet((key,))
+        async with committing_sessionmaker.begin() as session:
+            await upsert_slack_bot_token(
+                session,
+                team_id="perm-workspace",
+                encrypted_token=encrypt_token(fernet, "xoxb-test"),
+            )
+            requester = await get_account_with_tenant(session, account_id=editor.account_id)
+        assert requester is not None
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            assert request.url.host == "slack.com"
+            assert request.url.params["user"] == "editor"
+            assert request.headers["Authorization"] == "Bearer xoxb-test"
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user": {
+                        "id": "editor",
+                        "is_admin": flags[0],
+                        "is_owner": flags[1],
+                        "is_primary_owner": flags[2],
+                    },
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            assert (
+                await live_attestation(
+                    requester=requester,
+                    settings=_settings(key),
+                    sessionmaker=committing_sessionmaker,
+                    fernet=fernet,
+                    http_client=client,
+                )
+                is expected
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("owner", "expected"), [(True, True), (False, False)])
+async def test_teams_uses_live_admin_team_owners(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], owner: bool, expected: bool
+) -> None:
+    key = Fernet.generate_key().decode()
+    settings = _settings(key).model_copy(
+        update={
+            "teams": TeamsSettings(
+                client_id="app-id",
+                client_secret=SecretStr("app-secret"),
+                tenant_id="00000000-0000-0000-0000-000000000001",
+                admin_team_id="00000000-0000-0000-0000-000000000002",
+            )
+        }
+    )
+    user_id = "00000000-0000-0000-0000-000000000003"
+    requester = AccountIdentityRow(
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.ADMIN,
+        platform="teams",
+        external_id="team-1",
+        platform_user_id=user_id,
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": "graph-token", "expires_in": 3600})
+        assert request.url.host == "graph.microsoft.com"
+        assert request.headers["Authorization"] == "Bearer graph-token"
+        return httpx.Response(
+            200,
+            json={
+                "value": [{"userId": user_id, "roles": ["owner"] if owner else [], "tenantId": "t"}]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        assert (
+            await oauth_github._attest_native_admin(
+                requester=requester,
+                settings=settings,
+                sessionmaker=committing_sessionmaker,
+                fernet=build_multifernet((key,)),
+                http_client=client,
+            )
+            is expected
+        )
 
 
 def _choices(page: str) -> dict[int, dict[str, str]]:
