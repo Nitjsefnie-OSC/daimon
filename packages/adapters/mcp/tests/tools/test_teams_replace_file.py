@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import uuid
 from unittest.mock import MagicMock
 
 import httpx
@@ -31,6 +30,8 @@ _TEAM = "19:team@thread.tacv2"
 _GROUP = "00000000-0000-4000-8000-0000000000aa"
 _CHANNEL = "19:chan@thread.tacv2"
 _OTHER_CHANNEL = "19:other@thread.tacv2"
+# A well-formed origin id no turn has: fixed, so test ids match across xdist workers.
+_UNKNOWN_ORIGIN = "00000000-0000-4000-8000-0000000000ff"
 _THREAD = f"{_CHANNEL};messageid=1700000000000"
 _LINK = "https://example.sharepoint.com/sites/Lab/Shared%20Documents/research/deck.pptx"
 _WEB_URL = "https://example.sharepoint.com/sites/Lab/_layouts/15/Doc.aspx?file=deck.pptx"
@@ -328,7 +329,7 @@ async def test_a_new_version_of_another_file_type_is_refused(
     [
         (_OTHER_CHANNEL, "", "only a file of the channel this conversation is in"),
         (_CHANNEL, None, "needs this turn's origin_context_id"),
-        (_CHANNEL, str(uuid.uuid4()), "needs this turn's origin_context_id"),
+        (_CHANNEL, _UNKNOWN_ORIGIN, "needs this turn's origin_context_id"),
     ],
 )
 async def test_only_the_channel_the_turn_started_in_is_written(
