@@ -3463,6 +3463,43 @@ async def test_shutdown_of_a_slow_sweep_and_a_detached_refresh_stays_inside_the_
         await _cancel_detached_refreshes()
 
 
+async def test_a_sweep_that_ignores_its_cancel_does_not_hold_shutdown_past_the_slack() -> None:
+    """The cancelled sweep's own cleanup gets the remaining budget plus a small slack only."""
+    from daimon.adapters.scheduler import main as scheduler_main
+
+    release = asyncio.Event()
+
+    async def stubborn() -> None:
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                # Cleanup that outlives the cancel, like a slow connection close.
+                continue
+
+    flight = scheduler_main._SingleFlight()  # pyright: ignore[reportPrivateUsage]
+    flight.start(stubborn)
+    await asyncio.sleep(0)
+    try:
+        with (
+            unittest.mock.patch.object(scheduler_main, "_SHUTDOWN_CANCEL_SLACK_S", 0.2),
+            unittest.mock.patch.object(scheduler_main.log, "warning") as warning,
+        ):
+            started = time.monotonic()
+            await asyncio.wait_for(
+                flight.aclose(grace_s=0.1, deadline=time.monotonic() + 0.3), timeout=5.0
+            )
+            elapsed = time.monotonic() - started
+        assert elapsed <= 0.3 + 0.2 + 0.3
+        assert (
+            unittest.mock.call("scheduler.github_link_refresh.cancel_outlived_budget")
+            in warning.call_args_list
+        )
+    finally:
+        release.set()
+        await asyncio.sleep(0)
+
+
 async def test_the_final_refresh_drain_gets_only_what_the_budget_has_left() -> None:
     from daimon.adapters.scheduler import main as scheduler_main
 

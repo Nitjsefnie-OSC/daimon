@@ -138,9 +138,11 @@ _MIN_SECRET_BYTES = 32
 # Far above the requests in flight at once; only its own request reads an entry.
 _MAX_STATE_ENTRIES = 10_000
 # Longest shutdown waits for a detached linked-token refresh to store its answer.
-# Cloud Run sends SIGTERM and kills the container 10 s later by default, so the
-# drain stays under that window and leaves time to close the rest. A refresh
-# still running then may lose GitHub's answer; that person relinks on next use.
+# Cloud Run sends SIGTERM and kills the container 10 s later by default. The
+# drain starts at lifespan teardown, not at SIGTERM, so this is best effort: it
+# stays under that window, but the whole shutdown is not guaranteed to fit. A
+# refresh still running at the kill may lose GitHub's answer; that person
+# relinks on next use.
 _GITHUB_REFRESH_SHUTDOWN_DRAIN_S = 8.0
 
 log = structlog.get_logger()

@@ -43,16 +43,21 @@ DB_STATEMENT_DEADLINE = timedelta(seconds=15)
 # (a request cancelled at its deadline may spend `DETACHED_REFRESH_SETTLE` more
 # settling a detached token refresh before the timeout returns), its failure
 # line, the resolve and the next heartbeat. The lease runs `CLAIM_LEASE` past
-# each renewal. No live holder is an hour behind; the gap only clears rows a
-# crashed holder left.
+# each renewal. Those 145 s are the enforced timeouts. Cleanup after a cancel
+# comes on top and no timeout caps it (the database driver terminates a
+# cancelled connection, about 2 s each), so the check below reserves
+# `CANCEL_CLEANUP_ALLOWANCE` for it: an allowance, not an enforced limit. The
+# safety rests on the hour of margin, not on 145 s exactly. No live holder is
+# an hour behind; the gap only clears rows a crashed holder left.
 CLAIMED_GARBAGE_AFTER = timedelta(hours=1)
+CANCEL_CLEANUP_ALLOWANCE = timedelta(seconds=60)
 RENEWAL_GAP_BOUND = (
     PER_REQUEST_DEADLINE
     + DETACHED_REFRESH_SETTLE
     + FAILURE_DELIVERY_DEADLINE
     + 2 * DB_STATEMENT_DEADLINE
 )
-assert RENEWAL_GAP_BOUND + CLAIM_LEASE < CLAIMED_GARBAGE_AFTER, (
+assert RENEWAL_GAP_BOUND + CANCEL_CLEANUP_ALLOWANCE + CLAIM_LEASE < CLAIMED_GARBAGE_AFTER, (
     "a live holder must renew well inside the garbage window"
 )
 
@@ -157,7 +162,8 @@ async def take(
     `DETACHED_REFRESH_SETTLE` settling a detached token refresh before the
     timeout returns. So the gap between two renewals is at most
     `PER_REQUEST_DEADLINE + DETACHED_REFRESH_SETTLE + FAILURE_DELIVERY_DEADLINE
-    + 2 * DB_STATEMENT_DEADLINE` = 145 s, under the hour (checked at import).
+    + 2 * DB_STATEMENT_DEADLINE` = 145 s of enforced timeouts, plus uncapped
+    cancel cleanup (`CANCEL_CLEANUP_ALLOWANCE`), under the hour (checked at import).
     A holder whose row another `take` claimed anyway finds `renew_claim` no
     longer returns it and skips that request.
 

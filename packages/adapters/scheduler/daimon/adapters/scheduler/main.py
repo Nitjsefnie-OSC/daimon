@@ -759,9 +759,15 @@ _GITHUB_LINK_REFRESH_DEADLINE_S = 120.0
 # A refresh still running when the budget is gone may lose GitHub's answer when
 # its client closes (GitHub retires the old token pair as it answers); that
 # person's link is then broken and they relink on next use. It is logged as
-# `scheduler.github_link_refresh.drain_timed_out`.
+# `scheduler.github_link_refresh.drain_timed_out`. This caps the refresh part
+# of shutdown (45 s plus `_SHUTDOWN_CANCEL_SLACK_S`), not shutdown as a whole:
+# a tick already running finishes first and the steps after it have their own
+# waits. Docker's SIGKILL at 90 s is the hard stop.
 _GITHUB_LINK_REFRESH_SHUTDOWN_BUDGET_S = 45.0
 _GITHUB_LINK_REFRESH_SHUTDOWN_GRACE_S = 20.0
+# Past the budget, how long shutdown still waits for the cancelled sweep's
+# database cancel and client close, which the budget cannot cap.
+_SHUTDOWN_CANCEL_SLACK_S = 5.0
 # How long a sweep cancelled outside shutdown (no shared deadline, as in
 # `--once`) holds its client open for a detached refresh.
 _GITHUB_LINK_REFRESH_DRAIN_S = 30.0
@@ -1564,8 +1570,19 @@ class _SingleFlight:
         if done:
             return
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        if deadline is None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            return
+        # The cancelled job's settle reads what remains of the deadline, but
+        # its database cancel and client close are not capped by it; give them
+        # a few seconds past the deadline, then leave the task to the loop's
+        # own shutdown rather than hold the worker's stop.
+        done, _ = await asyncio.wait(
+            {task}, timeout=max(0.0, deadline - time.monotonic()) + _SHUTDOWN_CANCEL_SLACK_S
+        )
+        if not done:
+            log.warning("scheduler.github_link_refresh.cancel_outlived_budget")
 
 
 async def _run_github_link_refresh(

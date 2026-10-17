@@ -357,7 +357,8 @@ async def resume_pending(
     request deadline. Together with the cleanup of a cancelled request
     (`DETACHED_REFRESH_SETTLE`) and its failure line, that bounds the gap
     between renewals at `PER_REQUEST_DEADLINE + DETACHED_REFRESH_SETTLE +
-    FAILURE_DELIVERY_DEADLINE + 2 * DB_STATEMENT_DEADLINE` = 145 s (see
+    FAILURE_DELIVERY_DEADLINE + 2 * DB_STATEMENT_DEADLINE` = 145 s of enforced
+    timeouts, plus cancel cleanup no timeout caps (`CANCEL_CLEANUP_ALLOWANCE`; see
     `take`). A heartbeat the database does not answer gets the failure line
     in the thread of the current request and of every request behind it, each
     under its own `FAILURE_DELIVERY_DEADLINE`, and stops the batch. None of

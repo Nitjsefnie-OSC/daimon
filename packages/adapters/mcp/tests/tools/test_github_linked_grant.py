@@ -2691,7 +2691,7 @@ def test_the_lease_and_deadline_fit_inside_the_garbage_window() -> None:
     )
     assert gap == timedelta(seconds=145)
     assert gap == store.RENEWAL_GAP_BOUND
-    assert gap + store.CLAIM_LEASE < store.CLAIMED_GARBAGE_AFTER
+    assert gap + store.CANCEL_CLEANUP_ALLOWANCE + store.CLAIM_LEASE < store.CLAIMED_GARBAGE_AFTER
 
 
 def test_the_gap_bound_counts_the_settle_window_a_cancelled_request_waits() -> None:
