@@ -419,6 +419,25 @@ def test_daimon_answers_replay_with_their_previews_and_saved_files_readable() ->
     assert text.count('images_attached="1"') == 2, "both previews ride along as images"
 
 
+def test_only_daimons_own_links_leave_its_replayed_answer() -> None:
+    """One line per saved link, from the bottom; the agent's own bullets and an old list stay or go whole."""
+    chart = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/chart.png"
+    listed = _bot(
+        "501",
+        f'<p>Files:</p><ul><li>chart.png</li></ul><ul><li><a href="{chart}">chart.png</a></li></ul>',
+    )
+    legacy = _bot(
+        "502",
+        body={"contentType": "text", "content": "Done.\n\nSaved to this channel's files:\n- r.pdf"},
+    )
+    block = channel_block(
+        GraphPage(value=[listed, legacy]), skip_ids=frozenset(), bot_app_id=BOT, channel_id="c"
+    )
+    text = "\n".join(block.lines)
+    assert "Files:\n\n- chart.png\n<attachments>" in text, "the agent's bullet stays, daimon's goes"
+    assert 'messageid=502">Done.</message>' in text, "an old heading goes with its unlinked lines"
+
+
 def test_another_bots_footer_stays_in_its_text() -> None:
     """Only daimon's own footer is stripped; another app's words replay as written."""
     link = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/x.csv"

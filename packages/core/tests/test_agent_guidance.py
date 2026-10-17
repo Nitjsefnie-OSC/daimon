@@ -140,6 +140,9 @@ def test_file_guidance_keeps_delivery_out_of_the_reply() -> None:
     )
     assert "never ask the person to tell you if one is missing" in block
     assert "unless they ask how file delivery works" in block
+    assert "Calling `read` on an image shows it to you only, never to the person" in block, (
+        "an agent read its image and reported it delivered"
+    )
     for narration in ("Files tab", "below your reply", "Saved to", "download card", "hedge"):
         assert narration not in block, f"{narration!r} invites the agent to narrate delivery"
 
@@ -161,7 +164,9 @@ def test_teams_guidance_follows_the_channel_files_attribute() -> None:
     block = CREDENTIAL_GUIDANCE_BLOCK
     teams = _collapse(block[block.index("In a Teams channel") : block.index("Calling `read`")])
     assert "the `files` attribute on `<channel>` says whether files can be attached" in teams
-    assert "no file can be attached, so never promise one" in teams
+    assert "no file can be attached, so never promise one and save none" in teams, (
+        "where nothing is attached, a file the agent names as made would be discarded"
+    )
     assert "say so once, following the channel's `files_hint`" in teams, (
         "the adapter no longer posts a note per file, so the reply carries the message"
     )

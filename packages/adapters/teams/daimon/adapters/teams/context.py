@@ -127,19 +127,29 @@ _LEGACY_HEADING = "Saved to this channel's files:"
 def _without_saved_links(text: str, message: GraphMessage) -> str:
     """daimon's answer without the file links it added below: replayed, the agent copied them.
 
-    They end the answer, with only blank lines and its previews' `[image]` among them.
+    They end the answer, one line per link, among blank lines and its previews'
+    `[image]`. Older answers head them with `_LEGACY_HEADING`, unlinked lines included.
     """
-    saved = {
-        line for name, url in linked_files(message) for line in (f"- {name}", file_link(name, url))
-    }
     lines = text.split("\n")
-    end = len(lines)
-    while end and lines[end - 1].strip() in {*saved, "", "[image]"}:
-        end -= 1
-    if end and lines[end - 1].strip() == _LEGACY_HEADING:
-        saved.add(_LEGACY_HEADING)
-        end -= 1
-    kept = lines[:end] + [line for line in lines[end:] if line.strip() not in saved]
+    stripped = [line.strip() for line in lines]
+    dropped: set[int] = set()
+    if _LEGACY_HEADING in stripped:
+        start = len(stripped) - 1 - stripped[::-1].index(_LEGACY_HEADING)
+        tail = range(start + 1, len(lines))
+        if all(stripped[n] in ("", "[image]") or stripped[n].startswith("- ") for n in tail):
+            dropped = {start, *(n for n in tail if stripped[n].startswith("- "))}
+    else:
+        links = [{f"- {name}", file_link(name, url)} for name, url in linked_files(message)]
+        index = len(lines)
+        while index and links:
+            index -= 1
+            if stripped[index] in ("", "[image]"):
+                continue
+            if (link := next((ln for ln in links if stripped[index] in ln), None)) is None:
+                break
+            links.remove(link)
+            dropped.add(index)
+    kept = [line for n, line in enumerate(lines) if n not in dropped]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
