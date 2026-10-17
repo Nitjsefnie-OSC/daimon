@@ -73,15 +73,19 @@ def test_switch_refuses_former_holders_bound_token_without_a_database(
         platform="discord",
         channel_id="channel",
     )
+    claims = {"agent_id": row.agent_id}
     reset_channel_admins_enabled()
     monkeypatch.setenv("DAIMON_CHANNEL_ADMINS__ENABLED", "false")
     try:
-        assert token_row_refusal(row, claims={}, identity=identity, now=now) == (
+        assert token_row_refusal(row, claims=claims, identity=identity, now=now) == (
             "channel_admins_disabled"
         )
         assert (
             token_row_refusal(
-                row, claims={}, identity=identity.model_copy(update={"role": Role.ADMIN}), now=now
+                row,
+                claims=claims,
+                identity=identity.model_copy(update={"role": Role.ADMIN}),
+                now=now,
             )
             is None
         )
