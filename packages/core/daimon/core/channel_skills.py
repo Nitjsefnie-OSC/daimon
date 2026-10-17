@@ -360,6 +360,16 @@ async def add_skill_to_channel(
     )
 
 
+def skill_room(agent: BetaManagedAgentsAgent) -> int:
+    """How many channel skills a session of `agent` may add under `AGENT_SKILL_CAP`. Pure.
+
+    Every skill the agent holds counts, Anthropic's built-in ones too: the
+    provider's per-agent limit counts the whole `skills` list, built-in and
+    custom alike.
+    """
+    return max(0, AGENT_SKILL_CAP - len({skill.skill_id for skill in agent.skills}))
+
+
 def applicable_skills(
     rows: Sequence[ChannelSkillRow],
     *,
@@ -367,11 +377,11 @@ def applicable_skills(
     agent_names: tuple[str | None, ...],
     bodies: dict[str, str] | None,
 ) -> tuple[BetaManagedAgentsCustomSkill, ...]:
-    """The rows a session of `agent` adds, in order. Pure.
+    """The rows a session of `agent` may add, in order, before the cap (`skill_room`). Pure.
 
-    Left out: another agent's upload, a skill the agent holds already, one
-    whose mount name `bodies` shows clashing with an earlier skill, and any
-    past the session cap. `bodies` None (unreadable) skips the mount check.
+    Left out: another agent's upload, a skill the agent holds already, and one
+    whose mount name `bodies` shows clashing with an earlier skill. `bodies`
+    None (unreadable) skips the mount check.
     """
     held = {skill.skill_id for skill in agent.skills}
     mounts: set[str] = (
@@ -379,12 +389,11 @@ def applicable_skills(
         if bodies is None
         else {bodies[sid].rsplit("/", 1)[-1] for sid in held if sid in bodies}
     )
-    room = AGENT_SKILL_CAP - len(held)
     picked: list[BetaManagedAgentsCustomSkill] = []
     for row in rows:
         if row.owner_agent_name is not None and row.owner_agent_name not in agent_names:
             continue
-        if row.skill_id in held or row.name in mounts or len(picked) >= room:
+        if row.skill_id in held or row.name in mounts:
             continue
         mounts.add(row.name)
         held.add(row.skill_id)
@@ -410,7 +419,8 @@ async def turn_channel_skills(
 
     One DB read; the skills list is read only when the channel adds something,
     to keep a clashing mount (which would fail the session) out. With `cache`
-    that list is shared across turns for a few seconds.
+    that list is shared across turns for a few seconds. Skills past the cap
+    (`skill_room`) are left out with a warning naming them.
     """
     if rows is None:
         async with sessionmaker() as session:
@@ -434,7 +444,17 @@ async def turn_channel_skills(
     except (anthropic.APIError, SkillsListTruncatedError):
         _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))
         bodies = None
-    return applicable_skills(rows, agent=agent, agent_names=agent_names, bodies=bodies)
+    wanted = applicable_skills(rows, agent=agent, agent_names=agent_names, bodies=bodies)
+    room = skill_room(agent)
+    if len(wanted) > room:
+        _log.warning(
+            "channel_skills.over_cap",
+            tenant_id=str(tenant_id),
+            channel_id=channel_id,
+            dropped=[skill.skill_id for skill in wanted[room:]],
+            cap=AGENT_SKILL_CAP,
+        )
+    return wanted[:room]
 
 
 __all__ = [
@@ -445,5 +465,6 @@ __all__ = [
     "applicable_skills",
     "choose_channel_skill",
     "may_set_channel_skills",
+    "skill_room",
     "turn_channel_skills",
 ]
