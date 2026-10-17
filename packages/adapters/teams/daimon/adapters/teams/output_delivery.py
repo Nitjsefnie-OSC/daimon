@@ -433,20 +433,19 @@ class TeamsOutputDelivery:
                 order=previews_first,
                 quiet_s=quiet_s,
             )
-        except BaseException:
+            # Links and images in one edit of the answer; refused, each goes as on its own.
+            text = "\n".join(links)
+            if not links:
+                await self._show_previews(inbound, previews, append)
+            elif not (previews and append is not None and await append(text, previews)):
+                await self._post_links(inbound, text, append)
+                await self._send_previews(inbound, previews)
+            # Images first, as they are ready: a thumbnail may take seconds or never come,
+            # so documents get an edit of their own rather than images' places.
+            await self._show_previews(inbound, await self._thumbnails(documents), append)
+        finally:  # Cancelled or failed, no lookup outlives the sweep.
             for task in documents:
                 task.cancel()
-            raise
-        # Links and images in one edit of the answer; refused, each goes as on its own.
-        text = "\n".join(links)
-        if not links:
-            await self._show_previews(inbound, previews, append)
-        elif not (previews and append is not None and await append(text, previews)):
-            await self._post_links(inbound, text, append)
-            await self._send_previews(inbound, previews)
-        # Images first, as they are ready: a thumbnail may take seconds or never come,
-        # so documents get an edit of their own rather than images' places.
-        await self._show_previews(inbound, await self._thumbnails(documents), append)
 
     async def _show_previews(
         self, inbound: TeamsInbound, previews: list[Attachment], append: AppendToAnswer | None

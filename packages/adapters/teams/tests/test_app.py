@@ -350,6 +350,39 @@ async def test_the_controls_follow_the_sweep_or_its_time_limit(
     await slow
     assert events == ["swept", "controls", "failed", "controls", "controls", "late"]
 
+    monkeypatch.setattr(app_module, "CONTROLS_WAIT_S", 30.0)
+    stuck = asyncio.create_task(sweep("never", 3600))
+    waiting = asyncio.create_task(app_module._controls_after(stuck, lifecycle))
+    await asyncio.sleep(0)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    stuck.cancel()
+    assert events[-1] == "controls", "a drain's cancel still posts them"
+
+
+async def test_the_next_turn_in_a_chat_posts_the_held_controls_first(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A follow-up's card never lands above the last turn's controls."""
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+    )
+    events: list[str] = []
+    held: Any = SimpleNamespace(
+        release_controls=AsyncMock(side_effect=lambda: events.append("controls"))
+    )
+    teams._held_controls[CONVERSATION_ID] = held
+    with patch.object(
+        teams, "_run_turn_observed", AsyncMock(side_effect=lambda *a, **k: events.append("turn"))
+    ):
+        await teams._run_turn(make_inbound(), TENANT)
+        await teams._run_turn(make_inbound(), TENANT)
+    assert events == ["controls", "turn", "turn"], "posted once, before the next turn"
+
 
 @pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_mention_drops_the_threads_waiting_batch_only_once_its_turn_runs(

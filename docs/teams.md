@@ -70,8 +70,9 @@ A turn shows one status card, edited in place, with a Stop button only the
 author can use. The answer replaces the card, split across messages when long,
 then a card follows with the summary line (agent, time, cost, money left; see
 [billing.md](billing.md)) and the controls below. When a tool call named the
-outputs folder, that card waits for file delivery (30 seconds at most), so it
-stays below the files, links and previews. Delivery reads the file listing
+outputs folder, that card waits for file delivery (30 seconds at most, or
+until the next turn in the chat starts), so it stays below the files, links
+and previews. Delivery reads the file listing
 from when the turn's last tool call ended, so it rarely adds more than two
 seconds, and Graph thumbnails are requested as each file uploads. Messages sent while a turn
 runs are queued, each marked ⌛ until its turn starts (only where the sender
