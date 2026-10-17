@@ -82,7 +82,8 @@ class InboundFile:
     ]
     name: str
     url: str = ""
-    # A channel file's SharePoint link and eTag, what `replace_channel_file` takes.
+    # A channel file's SharePoint link and version (`version_of` its eTag), what
+    # `replace_channel_file` takes.
     link: str = ""
     version: str = ""
 
@@ -91,7 +92,8 @@ class InboundFile:
 class SharedFile:
     """A file shared in a channel: its SharePoint URL, and a download URL once resolved.
 
-    `version` is its eTag when resolved; `refused` when Graph denied daimon the channel's files."""
+    `version` is its bare eTag when resolved; `refused` when Graph denied daimon the
+    channel's files."""
 
     name: str
     content_url: str | None = None
@@ -247,7 +249,7 @@ def _link_line(file: InboundFile, reason: str | None) -> str:
     if file.link and file.version:
         replace = (
             " To save an edited file over it as a new version, pass replace_channel_file "
-            f"link {file.link} and version {file.version}."
+            f"link `{file.link}` and version `{file.version}`."
         )
     return (
         f"[attachment] `{file.name}`, shared by the user with this message{skipped}. "

@@ -142,7 +142,7 @@ async def test_a_channel_file_line_names_the_link_and_version_a_replace_takes() 
     """A file in the channel's Files can be saved over, so its line says how."""
     link = "https://example.sharepoint.com/sites/team/Shared Documents/General/deck.pptx"
     media = ChannelMedia(
-        files=(SharedFile("deck.pptx", link, DOWNLOAD_URL, version='"{D},3"'),), group_id="g"
+        files=(SharedFile("deck.pptx", link, DOWNLOAD_URL, version="{D},3"),), group_id="g"
     )
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _: httpx.Response(500))
@@ -157,8 +157,8 @@ async def test_a_channel_file_line_names_the_link_and_version_a_replace_takes() 
         )
 
     assert DOWNLOAD_URL in prepared.prefix, "the file is still fetched by its download URL"
-    assert f'replace_channel_file link {link} and version "{{D}},3"' in prepared.prefix, (
-        "the link and version that save a new version over it"
+    assert f"replace_channel_file link `{link}` and version `{{D}},3`." in prepared.prefix, (
+        "the link and version that save a new version over it, each quoted unambiguously"
     )
 
 

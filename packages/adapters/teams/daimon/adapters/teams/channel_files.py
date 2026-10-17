@@ -19,7 +19,13 @@ import structlog
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.teams_graph import GraphUnavailable, TeamGroups
-from daimon.core.teams_sharepoint import DriveFolder, DriveItem, SharePoint, download_url_of
+from daimon.core.teams_sharepoint import (
+    DriveFolder,
+    DriveItem,
+    SharePoint,
+    download_url_of,
+    version_of,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -126,7 +132,7 @@ class ChannelFiles:
                 try:
                     item = await self._sharepoint.shared_item(file.content_url, folder=folder)
                     file = dataclasses.replace(
-                        file, download_url=download_url_of(item), version=item.e_tag
+                        file, download_url=download_url_of(item), version=version_of(item.e_tag)
                     )
                 except GraphUnavailable as err:
                     log.warning(

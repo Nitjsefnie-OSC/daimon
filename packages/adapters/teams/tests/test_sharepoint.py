@@ -358,9 +358,9 @@ async def test_resolve_links_a_file_in_the_channels_folder_and_names_the_rest() 
         ChannelMedia(files=(inside, elsewhere)), group_id=GROUP, channel_id=CHANNEL
     )
 
-    linked = dataclasses.replace(inside, download_url=DOWNLOAD_URL, version='"{Q3},4"')
+    linked = dataclasses.replace(inside, download_url=DOWNLOAD_URL, version="{Q3},4")
     assert media.files == (linked, elsewhere), (
-        "the channel's file is linked, with the version a replace checks; the other, which "
+        "the channel's file is linked, with its bare version a replace checks; the other, which "
         "its members may not share, is not"
     )
 
