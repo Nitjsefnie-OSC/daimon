@@ -77,6 +77,13 @@ GITHUB_DOWN_MESSAGE = "GitHub didn't answer.\nAsk again in chat."
 _log = structlog.get_logger(__name__)
 
 
+def ask_admin_message(agent_name: str, repo_label: str) -> str:
+    return (
+        f"Only a server admin can give {agent_name} repos.\n"
+        f"Ask a server admin to say here: connect {repo_label} to {agent_name}."
+    )
+
+
 def no_access_message(repo_name: str) -> str:
     return (
         f"Your GitHub account can't open {repo_name}.\n"

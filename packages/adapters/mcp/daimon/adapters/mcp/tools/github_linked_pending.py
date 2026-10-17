@@ -11,6 +11,10 @@ import httpx
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.oauth_github import (
+    _ADMIN_RETRY,  # pyright: ignore[reportPrivateUsage]
+    _attest_native_admin,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -19,6 +23,7 @@ from daimon.adapters.mcp.tools.discord._client import (
 from daimon.adapters.mcp.tools.github_linked_grant import (
     CHANGED_MESSAGE,
     GITHUB_DOWN_MESSAGE,
+    ask_admin_message,
     linked_grant,
 )
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
@@ -26,7 +31,8 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores.accounts import get_account
+from daimon.core.native_admins import AdminAttestationUnavailable
+from daimon.core.stores.accounts import get_account, get_account_with_tenant
 from daimon.core.stores.domain import Role
 from daimon.core.stores.github_access import is_concurrent_grant_change
 from daimon.core.stores.github_linked_pending import (
@@ -213,6 +219,50 @@ async def _deliver_recovery(runtime: McpRuntime, pending: PendingGrant, *, statu
     )
 
 
+async def live_admin_refusal(
+    runtime: McpRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    platform_user_id: str,
+    agent_name: str,
+    repo_label: str,
+    changed_message: str,
+) -> tuple[Literal["ask_admin", "changed_try_again"], str] | None:
+    """Why a linked grant must not run, or None when the requester is an admin on the platform now.
+
+    The stored role can be stale (the person may have lost admin since, and a
+    platform whose admin lookup failed leaves it as it was), so both linked-grant
+    paths read it live, as the OAuth confirm does. The requester is read in a
+    session that has closed before the platform lookup starts. Returns the
+    `ConnectResult` status and the message to show.
+    """
+    async with runtime.session_factory() as session:
+        requester = await get_account_with_tenant(session, account_id=account_id)
+    if (
+        requester is None
+        or requester.tenant_id != tenant_id
+        or requester.platform != platform
+        or requester.platform_user_id != platform_user_id
+    ):
+        return "changed_try_again", changed_message
+    if runtime.fernet is None:
+        return "changed_try_again", _ADMIN_RETRY
+    try:
+        still_admin = await _attest_native_admin(
+            requester=requester,
+            settings=runtime.settings,
+            sessionmaker=runtime.session_factory,
+            fernet=runtime.fernet,
+        )
+    except AdminAttestationUnavailable:
+        return "changed_try_again", _ADMIN_RETRY
+    if not still_admin:
+        return "ask_admin", ask_admin_message(agent_name, repo_label)
+    return None
+
+
 async def _outcome_message(
     runtime: McpRuntime,
     row: PendingGrant,
@@ -263,6 +313,18 @@ async def _outcome_message(
         allowed = await manages_now(session)
     if not allowed:
         return AGENT_CHANGED_MESSAGE
+    refusal = await live_admin_refusal(
+        runtime,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        platform=platform,
+        platform_user_id=platform_user_id,
+        agent_name=agent.name,
+        repo_label=row.repo_name,
+        changed_message=AGENT_CHANGED_MESSAGE,
+    )
+    if refusal is not None:
+        return refusal[1]
     config = runtime.settings.github_app
     message: str
     try:

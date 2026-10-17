@@ -40,6 +40,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
+@pytest.fixture(autouse=True)
+def live_admin(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Admit the live platform admin read a linked grant makes; test_github_linked_grant covers it."""
+    admit = AsyncMock(return_value=None)
+    monkeypatch.setattr(connect_tool, "live_admin_refusal", admit)
+    return admit
+
+
 @pytest.mark.asyncio
 async def test_connected_repo_is_granted_immediately_in_chat(
     committing_sessionmaker: async_sessionmaker[AsyncSession],

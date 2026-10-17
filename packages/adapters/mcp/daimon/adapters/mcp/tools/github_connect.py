@@ -15,10 +15,11 @@ from daimon.adapters.mcp.tools.discord._client import (
 )
 from daimon.adapters.mcp.tools.github_linked_grant import (
     CHANGED_MESSAGE,
+    ask_admin_message,
     granted_message,
     linked_grant,
 )
-from daimon.adapters.mcp.tools.github_linked_pending import save_pending
+from daimon.adapters.mcp.tools.github_linked_pending import live_admin_refusal, save_pending
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     require_turn_origin,
@@ -349,10 +350,7 @@ async def _github_connect_impl(
             repo_label = repo_name.strip() if repo_name else "GitHub"
             return ConnectResult(
                 status="ask_admin",
-                message=(
-                    f"Only a server admin can give {agent.name} repos.\n"
-                    f"Ask a server admin to say here: connect {repo_label} to {agent.name}."
-                ),
+                message=ask_admin_message(agent.name, repo_label),
             )
         if repo_name is not None:
             requested_repo = repo_name.strip()
@@ -457,6 +455,18 @@ async def _github_connect_impl(
 
             if not policy_manages:
                 return ConnectResult(status="changed_try_again", message=CHANGED_MESSAGE)
+            refusal = await live_admin_refusal(
+                runtime,
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                platform=auth.platform,
+                platform_user_id=auth.platform_user_id,
+                agent_name=agent.name,
+                repo_label=requested_repo,
+                changed_message=CHANGED_MESSAGE,
+            )
+            if refusal is not None:
+                return ConnectResult(status=refusal[0], message=refusal[1])
             try:
                 outcome = await linked_grant(
                     runtime.session_factory,

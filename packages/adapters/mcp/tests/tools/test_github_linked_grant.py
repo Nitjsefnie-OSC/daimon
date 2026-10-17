@@ -33,6 +33,7 @@ from daimon.core.config import (
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_panel import requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.native_admins import AdminAttestationUnavailable
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import github_access
 from daimon.core.stores.accounts import get_account, set_role
@@ -227,6 +228,14 @@ def github_http(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     state.original_client = original_client
     state.respond = respond
     return state
+
+
+@pytest.fixture(autouse=True)
+def live_admin(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """The resume path's live platform admin read; a test sets `return_value` or `side_effect`."""
+    attest = AsyncMock(return_value=True)
+    monkeypatch.setattr(linked_pending, "_attest_native_admin", attest)
+    return attest
 
 
 @pytest_asyncio.fixture
@@ -1909,6 +1918,69 @@ async def test_direct_tool_demotion_after_the_first_select_changes_nothing(
     assert await _grant_count(setup_linked) == 0
 
 
+async def _direct_tool_grant(setup_linked):
+    return await connect_tool._github_connect_impl(
+        _runtime(setup_linked),
+        _admin_auth(setup_linked),
+        origin_context_id="synthetic",
+        repo_name="acme/widgets",
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_grants_when_the_platform_still_shows_an_admin(
+    setup_linked, live_admin, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_tool_agent(monkeypatch)
+    result = await _direct_tool_grant(setup_linked)
+    live_admin.assert_awaited_once()
+    assert result.status == "granted"
+    assert await _grant_count(setup_linked) == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_refuses_a_stored_admin_the_platform_no_longer_shows(
+    setup_linked, live_admin, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Teams keeps the stored role when its admin lookup fails, so it can be stale.
+    _patch_tool_agent(monkeypatch)
+    live_admin.return_value = False
+    result = await _direct_tool_grant(setup_linked)
+    assert result.status == "ask_admin"
+    assert result.message == linked.ask_admin_message("Agent", "acme/widgets")
+    assert await _grant_count(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_with_no_live_admin_answer_grants_nothing_and_says_to_retry(
+    setup_linked, live_admin, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_tool_agent(monkeypatch)
+    live_admin.side_effect = AdminAttestationUnavailable("Teams lookup failed")
+    result = await _direct_tool_grant(setup_linked)
+    assert result.status == "changed_try_again"
+    assert result.message == (
+        "Couldn't confirm you're still a server or workspace admin. Try again in a minute."
+    )
+    assert await _grant_count(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_owner_grant_also_needs_the_live_admin_read(
+    setup_linked, live_admin, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_tool_agent(monkeypatch)
+    live_admin.return_value = False
+    result = await connect_tool._github_connect_impl(
+        _runtime(setup_linked),
+        _admin_auth(setup_linked),
+        origin_context_id="synthetic",
+        repo_name="acme/*",
+    )
+    assert result.status == "ask_admin"
+    assert await _grant_count(setup_linked) == 0
+
+
 @pytest.mark.asyncio
 async def test_resume_demotion_after_the_first_select_changes_nothing(
     setup_linked, demote, github_http, monkeypatch: pytest.MonkeyPatch
@@ -1941,6 +2013,83 @@ async def test_resume_demotion_after_the_first_select_changes_nothing(
     assert locked_reads == 2
     assert result == [linked.CHANGED_MESSAGE]
     assert delivery.await_args.args[2] == linked.CHANGED_MESSAGE
+    assert await _grant_count(setup_linked) == 0
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_grants_when_the_platform_still_shows_an_admin(
+    setup_linked, live_admin, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    monkeypatch.setattr(linked_pending, "_deliver_result", AsyncMock())
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked),
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        platform="discord",
+        platform_user_id="person",
+    )
+    live_admin.assert_awaited_once()
+    assert live_admin.await_args.kwargs["requester"].platform_user_id == "person"
+    assert result != [] and "Only a server admin" not in result[0]
+    assert await _grant_count(setup_linked) == 1
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_a_requester_demoted_on_the_platform_while_stored_admin(
+    setup_linked, live_admin, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    await _save_request(setup_linked, thread_id="t2", repo_name="acme/base")
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    delivery = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    live_admin.return_value = False
+    # The database still says ADMIN: only the live platform read has changed.
+    async with setup_linked.sessionmaker() as session:
+        stored = await get_account(session, setup_linked.account.id)
+    assert stored is not None and stored.role == Role.ADMIN
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked),
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        platform="discord",
+        platform_user_id="person",
+    )
+    refusals = [linked.ask_admin_message("Agent", name) for name in ("acme/widgets", "acme/base")]
+    assert result == refusals
+    assert refusals[0].startswith("Only a server admin can give Agent repos.")
+    assert [call.args[2] for call in delivery.await_args_list] == refusals
+    assert live_admin.await_count == 2
+    assert await _grant_count(setup_linked) == 0
+    assert await _count_pending(setup_linked) == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_with_no_live_admin_answer_grants_nothing_and_says_to_retry(
+    setup_linked, live_admin, github_http, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _save_request(setup_linked, thread_id="t1")
+    agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
+    monkeypatch.setattr(linked_pending, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    delivery = AsyncMock()
+    monkeypatch.setattr(linked_pending, "_deliver_result", delivery)
+    live_admin.side_effect = AdminAttestationUnavailable("discord lookup failed")
+    result = await linked_pending.resume_pending(
+        _runtime(setup_linked),
+        tenant_id=setup_linked.tenant.id,
+        account_id=setup_linked.account.id,
+        platform="discord",
+        platform_user_id="person",
+    )
+    retry = "Couldn't confirm you're still a server or workspace admin. Try again in a minute."
+    assert result == [retry]
+    assert delivery.await_args.args[2] == retry
     assert await _grant_count(setup_linked) == 0
     assert await _count_pending(setup_linked) == 0
 
