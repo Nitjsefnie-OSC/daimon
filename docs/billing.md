@@ -199,6 +199,18 @@ each request is priced on its own (`ModelRates.long_context`,
 `LONG_CONTEXT_PROMPT_TOKENS`). Turn cards also split the turn's token totals by
 request prompt length before pricing, so a turn spanning both tiers displays
 the sum of its request costs.
+
+`claude-opus-5-5-fast` is a client-side preset (`daimon.core.model_presets`),
+never a model id the Managed Agents API sees: `AgentSpec` expands it to
+`{"id": "claude-opus-5-5", "speed": "fast"}` on validation, preserving any
+authored `effort`/`inference_geo`. It is priced at 2x plain Opus 5.5 ($8
+input, $40 output, $10 five-minute cache write, $0.40 cache read) to cover
+Managed Agents' fast-mode surcharge. Every place a model id reaches billing or
+a cost preview must read the agent's resolved `speed` back out and price
+`claude-opus-5-5-fast` instead of `claude-opus-5-5` — `SessionSnapshot.pricing_id`
+and `daimon.core.model_presets.model_choice_id` are the two helpers that do
+this; a call site that reads a bare `model_id` off a snapshot or native model
+silently bills the preset at half its real rate.
 `AGENT_PRICING_CHECKED_ON` records the day every row was last checked against
 `AGENT_PRICING_SOURCE`. `test_pricing.py` pins each row, so a price edit fails
 until the test table and the date move with it, and

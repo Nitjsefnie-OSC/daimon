@@ -433,9 +433,10 @@ def _reject_unknown_model(model: ModelSelection) -> None:
     ``pricing.cost_of`` returns None for a model it has no rates for, so the
     turn is billed by Anthropic and recorded as free by us.
     """
-    if model_choice_id(model) not in ALLOWED_MODEL_IDS:
+    choice_id = model_choice_id(model)
+    if choice_id not in ALLOWED_MODEL_IDS:
         allowed = ", ".join(ALLOWED_MODEL_IDS)
-        raise ToolError(f"Model '{model}' is not available. Choose one of: {allowed}")
+        raise ToolError(f"Model '{choice_id}' is not available. Choose one of: {allowed}")
 
 
 def _build_create_spec(

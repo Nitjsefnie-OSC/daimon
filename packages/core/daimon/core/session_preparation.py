@@ -981,7 +981,9 @@ async def _prepare_session_for_turn_locked(
                 continuity=continuity,
             )
 
-        current_model = admission.agent.model.id if recorded is None else recorded.model_id
+        current_model = (
+            model_choice_id(admission.agent.model) if recorded is None else recorded.pricing_id
+        )
 
         tightening_memory = admission.memory_read_only and (
             recorded is None or not recorded.memory_read_only
@@ -1159,7 +1161,7 @@ async def _prepare_session_for_turn_locked(
                     pending_reasons=("session_changed",),
                     retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
                 )
-            return await on_current(CONTINUED, recorded.model_id)
+            return await on_current(CONTINUED, recorded.pricing_id)
 
         try:
             result = await run_ops()
