@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
+from daimon.core.config import McpOAuthClientSettings
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.mcp_oauth.flow import generate_pkce
@@ -20,9 +21,10 @@ from daimon.core.mcp_oauth.handshake import (
 )
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores.domain import CredentialRequestRow
+from daimon.core.stores.domain import CredentialRequestRow, McpOAuthFlowRow
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
@@ -37,7 +39,9 @@ _AS = {
 }
 
 
-async def _request(session: AsyncSession, *, kind: str = "mcp_oauth") -> CredentialRequestRow:
+async def _request(
+    session: AsyncSession, *, kind: str = "mcp_oauth", mcp_server_url: str = _MCP_URL
+) -> CredentialRequestRow:
     tenant = await make_tenant(session)
     account = await make_account(session, tenant=tenant)
     return await requests_store.create_credential_request(
@@ -48,7 +52,7 @@ async def _request(session: AsyncSession, *, kind: str = "mcp_oauth") -> Credent
         agent_id=uuid.uuid4(),
         account_id=account.id,
         target="notion",
-        mcp_server_url=_MCP_URL,
+        mcp_server_url=mcp_server_url,
         requester_platform_user_id="requester-1",
         channel_id="chan-1",
         expires_at=_NOW + timedelta(minutes=30),
@@ -134,6 +138,7 @@ async def test_prepare_authorization_registers_a_client_and_builds_the_redirect(
         httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         flow=flow,
         fernet=fernet,
+        clients=[],
     )
     assert prepared is not None
     assert registrations[0]["redirect_uris"] == [f"{_ROOT}/oauth/mcp/callback"], (
@@ -150,3 +155,134 @@ async def test_prepare_authorization_registers_a_client_and_builds_the_redirect(
     assert decrypt_token(fernet, saved.client_secret_encrypted.encode()) == "sec", (
         "a confidential client's secret is stored encrypted, never in the clear"
     )
+
+
+_EXAMPLE_MCP_URL = "https://mcp.example.com/mcp"
+_EXAMPLE_CLIENT = McpOAuthClientSettings(
+    authorization_server_host="login.example.com",
+    client_id="app-id",
+    client_secret=SecretStr("app-secret"),
+    authorization_endpoint="https://login.example.com/tenant-1/authorize",
+    token_endpoint="https://login.example.com/tenant-1/token",
+    send_resource=False,
+)
+
+
+async def _prepare_with_clients(
+    db_session: AsyncSession,
+    *,
+    authorization_server: str,
+    metadata: dict[str, object],
+    seen: list[httpx.Request],
+) -> tuple[McpOAuthFlowRow, str]:
+    """Run `prepare_authorization` with `_EXAMPLE_CLIENT` configured; return the saved row and URL.
+
+    The MCP server names `authorization_server`, whose path-aware metadata is
+    `metadata`; every request is recorded in `seen` and registration answers.
+    """
+    request = await _request(db_session, mcp_server_url=_EXAMPLE_MCP_URL)
+    flow = await begin_mcp_oauth_flow(db_session, request=request, app_root_url=_ROOT, now=_NOW)
+    issuer = urlparse(authorization_server)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        if req.url.host == "mcp.example.com" and req.url.path == "/mcp":
+            return httpx.Response(401)
+        if req.url.path == "/.well-known/oauth-protected-resource/mcp":
+            return httpx.Response(
+                200,
+                json={
+                    "resource": _EXAMPLE_MCP_URL,
+                    "authorization_servers": [authorization_server],
+                    "scopes_supported": ["mcp.read"],
+                },
+            )
+        if req.url.host == issuer.hostname and req.url.path == (
+            f"{issuer.path}/.well-known/openid-configuration"
+        ):
+            return httpx.Response(200, json=metadata)
+        if req.url.path == "/register":
+            return httpx.Response(201, json={"client_id": "registered"})
+        return httpx.Response(404)
+
+    fernet = make_fernet()
+    prepared = await prepare_authorization(
+        db_session,
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        flow=flow,
+        fernet=fernet,
+        clients=[_EXAMPLE_CLIENT],
+    )
+    assert prepared is not None, "a fresh flow always prepares"
+    saved = await flows_store.get_flow(db_session, state=flow.state)
+    assert saved is not None
+    if saved.client_secret_encrypted is not None:
+        assert decrypt_token(fernet, saved.client_secret_encrypted.encode()) == "app-secret", (
+            "a configured secret is stored encrypted like a registered one"
+        )
+    return saved, prepared.authorize_url
+
+
+async def test_prepare_authorization_uses_the_configured_client_for_its_host(
+    db_session: AsyncSession,
+) -> None:
+    """No registration, overrides used, offline_access added, resource left out."""
+    seen: list[httpx.Request] = []
+    saved, authorize_url = await _prepare_with_clients(
+        db_session,
+        authorization_server="https://login.example.com/organizations/v2.0",
+        metadata={
+            "issuer": "https://login.example.com/organizations/v2.0",
+            "authorization_endpoint": "https://login.example.com/organizations/authorize",
+            "token_endpoint": "https://login.example.com/organizations/token",
+            "scopes_supported": ["openid", "offline_access"],
+        },
+        seen=seen,
+    )
+    assert [r.url.path for r in seen if r.method == "POST"] == ["/mcp"], (
+        "a configured client is used as is, never registered"
+    )
+    assert authorize_url.startswith("https://login.example.com/tenant-1/authorize?"), (
+        "the authorization endpoint override replaces the discovered one"
+    )
+    query = parse_qs(urlparse(authorize_url).query)
+    assert query["client_id"] == ["app-id"]
+    assert query["scope"] == ["mcp.read offline_access"], (
+        "offline_access is requested because the server advertises it"
+    )
+    assert "resource" not in query, "send_resource=false leaves resource off the authorize URL"
+    assert (saved.client_id, saved.token_endpoint_auth_method) == ("app-id", "client_secret_post")
+    assert saved.token_endpoint == "https://login.example.com/tenant-1/token", (
+        "the code exchange and refresh use the token endpoint override"
+    )
+    assert saved.resource is None, "nor is resource stored for the exchange or the refresh"
+    assert saved.client_secret_encrypted is not None
+
+
+async def test_prepare_authorization_registers_when_the_metadata_host_matches_no_client(
+    db_session: AsyncSession,
+) -> None:
+    """Matching uses the host the metadata came from, not the issuer it claims."""
+    seen: list[httpx.Request] = []
+    saved, authorize_url = await _prepare_with_clients(
+        db_session,
+        authorization_server="https://auth.example.org/tenant",
+        metadata={
+            "issuer": "https://login.example.com/tenant",
+            "authorization_endpoint": "https://auth.example.org/authorize",
+            "token_endpoint": "https://auth.example.org/token",
+            "registration_endpoint": "https://auth.example.org/register",
+            "scopes_supported": ["openid"],
+        },
+        seen=seen,
+    )
+    assert [r.url.host for r in seen if r.url.path == "/register"] == ["auth.example.org"], (
+        "an unmatched server still gets a dynamically registered client"
+    )
+    query = parse_qs(urlparse(authorize_url).query)
+    assert query["client_id"] == ["registered"] and query["scope"] == ["mcp.read"], (
+        "offline_access is not requested when the server does not advertise it"
+    )
+    assert query["resource"] == [_EXAMPLE_MCP_URL], "resource is sent as before"
+    assert saved.token_endpoint == "https://auth.example.org/token"
+    assert saved.client_secret_encrypted is None, "the configured secret never leaves for it"

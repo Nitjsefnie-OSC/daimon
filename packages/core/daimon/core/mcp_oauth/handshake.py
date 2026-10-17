@@ -3,24 +3,32 @@
 `begin_mcp_oauth_flow` runs in the chat adapter on the requester's click: it
 spends nothing but mints the flow row (state + PKCE verifier) whose start
 link only that person sees. `prepare_authorization` runs on the mcp process
-when the link is opened: discovery, dynamic client registration, and the
-authorize URL to redirect to. Both take their clock, randomness and clients
-as arguments.
+when the link is opened: discovery, a client (registered by hand for that
+authorization server, else dynamically), and the authorize URL to redirect
+to. Both take their clock, randomness and clients as arguments.
 """
 
 from __future__ import annotations
 
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Final
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from cryptography.fernet import MultiFernet
+from daimon.core.config import McpOAuthClientSettings
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.mcp_oauth.discovery import discover_authorization_server, probe_mcp_server
-from daimon.core.mcp_oauth.flow import build_authorization_url, generate_pkce, register_client
+from daimon.core.mcp_oauth.flow import (
+    build_authorization_url,
+    generate_pkce,
+    register_client,
+    requested_scope,
+)
+from daimon.core.mcp_oauth.models import ClientRegistration
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.domain import CredentialRequestRow, McpOAuthFlowRow
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -91,6 +99,19 @@ class PreparedAuthorization:
     authorize_url: str
 
 
+def match_preregistered_client(
+    clients: Sequence[McpOAuthClientSettings], *, authorization_server_url: str
+) -> McpOAuthClientSettings | None:
+    """The configured client for the host discovery fetched the metadata from.
+
+    Matched on that host, not on the `issuer` the document claims: a hostile
+    MCP server could serve metadata naming a configured issuer with its own
+    token endpoint, and the client secret would go there.
+    """
+    host = (urlparse(authorization_server_url).hostname or "").rstrip(".").lower()
+    return next((c for c in clients if c.authorization_server_host == host), None)
+
+
 def _reuse_registered(flow: McpOAuthFlowRow) -> PreparedAuthorization:
     """The authorize URL for a flow whose client is already on the row."""
     assert flow.client_id is not None and flow.authorization_endpoint is not None
@@ -114,8 +135,13 @@ async def prepare_authorization(
     *,
     flow: McpOAuthFlowRow,
     fernet: MultiFernet,
+    clients: Sequence[McpOAuthClientSettings],
 ) -> PreparedAuthorization | None:
-    """Discover the server's authorization server, register a client, build the URL.
+    """Discover the server's authorization server, pick a client, build the URL.
+
+    A client in `clients` configured for the authorization server's host is
+    used as is, with its endpoint overrides and its choice about `resource`;
+    any other server gets a dynamically registered client.
 
     A link opened twice reuses the client the first open registered, so the
     code the provider issues is always exchanged as the client that asked for
@@ -131,12 +157,34 @@ async def prepare_authorization(
         resource_metadata_url=probe.resource_metadata_url,
     )
     metadata = discovery.authorization_server
-    scopes = discovery.resource.scopes_supported if discovery.resource else None
-    scope = " ".join(scopes) if scopes else None
-    resource = discovery.resource.resource if discovery.resource else None
-    client = await register_client(
-        http, metadata, redirect_uri=flow.redirect_uri, client_name=CLIENT_NAME, scope=scope
+    scope = requested_scope(
+        discovery.resource.scopes_supported if discovery.resource else None,
+        metadata.scopes_supported,
     )
+    resource = discovery.resource.resource if discovery.resource else None
+    preregistered = match_preregistered_client(
+        clients, authorization_server_url=discovery.authorization_server_url
+    )
+    if preregistered is None:
+        client = await register_client(
+            http, metadata, redirect_uri=flow.redirect_uri, client_name=CLIENT_NAME, scope=scope
+        )
+    else:
+        secret = preregistered.client_secret
+        client = ClientRegistration(
+            client_id=preregistered.client_id,
+            client_secret=secret.get_secret_value() if secret is not None else None,
+            token_endpoint_auth_method=preregistered.token_endpoint_auth_method,
+        )
+        metadata = metadata.model_copy(
+            update={
+                "authorization_endpoint": preregistered.authorization_endpoint
+                or metadata.authorization_endpoint,
+                "token_endpoint": preregistered.token_endpoint or metadata.token_endpoint,
+            }
+        )
+        if not preregistered.send_resource:
+            resource = None
     saved = await flows_store.save_flow_client(
         session,
         state=flow.state,

@@ -77,6 +77,23 @@ def build_authorization_url(
     return f"{authorization_endpoint}{separator}{urlencode(query)}"
 
 
+def requested_scope(
+    resource_scopes: list[str] | None, server_scopes: list[str] | None
+) -> str | None:
+    """The MCP server's scopes, plus `offline_access` when the authorization server offers it.
+
+    Some authorization servers issue a refresh token only for `offline_access`;
+    without one the grant lapses with its first access token. No scope stays
+    no scope, so the server's own default set is not narrowed to that one.
+    """
+    if not resource_scopes:
+        return None
+    scopes = list(resource_scopes)
+    if "offline_access" in (server_scopes or []) and "offline_access" not in scopes:
+        scopes.append("offline_access")
+    return " ".join(scopes)
+
+
 def pick_token_endpoint_auth_method(
     metadata: AuthorizationServerMetadata,
 ) -> TokenEndpointAuthMethod:

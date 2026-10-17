@@ -15,6 +15,7 @@ from daimon.core.mcp_oauth.flow import (
     generate_pkce,
     pick_token_endpoint_auth_method,
     register_client,
+    requested_scope,
 )
 from daimon.core.mcp_oauth.models import AuthorizationServerMetadata, ClientRegistration
 
@@ -49,6 +50,20 @@ def test_build_authorization_url_carries_pkce_state_and_resource() -> None:
     assert query["state"] == ["st"] and query["code_challenge"] == ["ch"]
     assert query["resource"] == ["https://mcp.notion.com"], "RFC 8707 resource indicator"
     assert query["scope"] == ["default"]
+
+
+def test_requested_scope_adds_offline_access_only_when_the_server_offers_it() -> None:
+    assert requested_scope(["read"], ["openid", "offline_access"]) == "read offline_access", (
+        "an offered offline_access is requested so the grant gets a refresh token"
+    )
+    assert requested_scope(["read"], ["openid"]) == "read", "not offered, not requested"
+    assert requested_scope(["read"], None) == "read"
+    assert requested_scope(["offline_access", "read"], ["offline_access"]) == (
+        "offline_access read"
+    ), "never requested twice"
+    assert requested_scope(None, ["offline_access"]) is None, (
+        "no scope stays no scope, so the server's default set is not narrowed"
+    )
 
 
 def test_pick_token_endpoint_auth_method_prefers_a_public_client() -> None:
@@ -124,6 +139,28 @@ async def test_exchange_sends_the_verifier_and_uses_basic_auth_for_a_confidentia
         "client_secret_basic must authenticate the token request"
     )
     assert "client_secret" not in forms[0], "basic auth means no secret in the form"
+
+
+async def test_exchange_sends_no_resource_when_none_is_given() -> None:
+    forms: list[dict[str, list[str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        forms.append(parse_qs(request.content.decode()))
+        return httpx.Response(200, json={"access_token": "at"})
+
+    await exchange_authorization_code(
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        token_endpoint="https://login.example.com/token",
+        code="code123",
+        code_verifier="verifier",
+        client=ClientRegistration(
+            client_id="cid", client_secret="sec", token_endpoint_auth_method="client_secret_post"
+        ),
+        redirect_uri="https://d.example/cb",
+        resource=None,
+    )
+    assert "resource" not in forms[0], "a flow stored without resource exchanges without it"
+    assert forms[0]["client_secret"] == ["sec"], "client_secret_post sends it in the form"
 
 
 async def test_exchange_raises_with_the_server_body_on_refusal() -> None:
