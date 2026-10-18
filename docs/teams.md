@@ -397,6 +397,10 @@ setting off the routes answer 404 and nothing is subscribed.
   Where they are unavailable, `files_hint` tells the agent that an admin must
   grant `Files.ReadWrite.All`, rather than offer an artifact, report or
   notebook.
+- **Office skills.** A Teams turn of the default agent adds Anthropic's
+  built-in `docx`, `pptx` and `xlsx` skills to its session (Anthropic backend
+  only; see `platforms` in [Defaults](defaults.md)). They count toward the
+  20-skill session limit, so such a channel adds at most 6 skills of its own.
 - **Updating a channel file.** A file in the channel's Files folder reaches
   the agent with its SharePoint link and version (its eTag) beside the
   download link. `replace_channel_file` saves an edited file over it as a new

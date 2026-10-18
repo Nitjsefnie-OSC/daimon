@@ -43,6 +43,16 @@ provider id; resolution to a real id happens in
 `packages/core/daimon/core/defaults/skills.py`, which is the single place
 allowed to do it.
 
+An entry may add `platforms: [teams]` (any of `discord`, `slack`, `teams`,
+each once) to limit the skill to turns on those platforms. Such a skill is
+left off the agent at the provider and out of its spec fingerprint, so apply
+and verify read the agent as if the entry were absent. Each turn on a listed
+platform adds it to the session instead, through the same per-session skills
+override as a channel's skills, and counts it before them toward the 20-skill
+limit. Only the Anthropic backend gets it; a custom one the provider does not
+list is left out of the turn, with a warning logged once per process. Only
+`defaults/` agents may use `platforms`; `daimon agents create` refuses it.
+
 One validator catches a failure that is otherwise a confusing upstream 400:
 declaring `mcp_servers` without a matching `{type: mcp_toolset,
 mcp_server_name: ...}` entry in `tools` is rejected at parse time.
