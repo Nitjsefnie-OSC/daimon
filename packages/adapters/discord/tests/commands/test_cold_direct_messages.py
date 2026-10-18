@@ -81,7 +81,7 @@ async def setup(db_session_factory, monkeypatch, count=1):
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
     bot.runtime.settings = SimpleNamespace(
-        direct_message_policies={}, ops=SimpleNamespace(alert_webhook_url=None)
+        direct_message_policies={}, ops=SimpleNamespace(alert_webhook_url=None), discord=None
     )
     bot.runtime.turn_deps = replace(
         deps_for(None, db_session_factory), membership_resolver=resolver
@@ -377,3 +377,143 @@ async def test_failed_selector_send_does_not_leave_an_unanswerable_pending_choic
     await cog.on_message(msg)
     assert (999, 555) not in cog._pending
     reply.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "backend_unsupported",
+        "balance_depleted",
+        "cap_exceeded",
+        "channel_budget_exceeded",
+        "invoker_not_allowed",
+        "writers_none",
+        "runs_elsewhere",
+        "own_agents_only",
+        "external_participant",
+    ],
+)
+@pytest.mark.parametrize("active_route", [False, True])
+async def test_admission_denials_preserve_notices_and_silence_access_failures(
+    db_session_factory, monkeypatch, reason, active_route
+):
+    from structlog.testing import capture_logs
+
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    try:
+        if active_route:
+            await cog.on_message(message())
+            reply.side_effect = AdmissionDenied(reason=reason)
+        else:
+            monkeypatch.setattr(
+                module, "admit_cold_dm", AsyncMock(side_effect=AdmissionDenied(reason=reason))
+            )
+        msg = message(102)
+        with capture_logs() as logs:
+            await cog.on_message(msg)
+        if reason in {
+            "invoker_not_allowed",
+            "writers_none",
+            "runs_elsewhere",
+            "own_agents_only",
+            "external_participant",
+        }:
+            msg.channel.send.assert_not_awaited()
+            assert any(entry.get("reason") == reason for entry in logs)
+        else:
+            msg.channel.send.assert_awaited_once()
+            notice = msg.channel.send.await_args.args[0]
+            if active_route:
+                assert notice == module.admission_refusal_message(
+                    reason, cog.bot.runtime.settings, in_dm=True
+                )
+            else:
+                assert notice == module._DISCOVERY_FAILURE_NOTICE
+                assert "private-0" not in notice and "Server" not in notice
+        if not active_route:
+            reply.assert_not_awaited()
+            assert await conversation(db_session_factory) is None
+    finally:
+        await cog.cog_unload()
+
+
+async def test_discovery_operational_failure_stops_before_exposing_other_candidates(
+    db_session_factory, monkeypatch
+):
+    from daimon.core.errors import UserFacingError
+
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch, count=2)
+    admit = AsyncMock(side_effect=UserFacingError("secret candidate or backend details"))
+    monkeypatch.setattr(module, "admit_cold_dm", admit)
+    try:
+        msg = message()
+        await cog.on_message(msg)
+        msg.channel.send.assert_awaited_once()
+        assert msg.channel.send.await_args.args == (module._DISCOVERY_FAILURE_NOTICE,)
+        assert not any(msg.channel.send.await_args.kwargs["allowed_mentions"].to_dict().values())
+        assert admit.await_count == 1
+        reply.assert_not_awaited()
+    finally:
+        await cog.cog_unload()
+
+
+@pytest.mark.parametrize("failure", ["resource", "policy"])
+async def test_discovery_resource_and_unreadable_policy_are_silent(
+    db_session_factory, monkeypatch, failure
+):
+    from daimon.core.ma_resolver import MAResolverMissError
+    from sqlalchemy import text
+    from structlog.testing import capture_logs
+
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    if failure == "resource":
+        monkeypatch.setattr(
+            module,
+            "admit_cold_dm",
+            AsyncMock(
+                side_effect=MAResolverMissError(
+                    kind="agent", tenant_id=tenants[0].id, daimon_tag="private-0"
+                )
+            ),
+        )
+    else:
+        async with db_session_factory.begin() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:id, CAST(:policy AS jsonb))"
+                ),
+                {"id": tenants[0].id, "policy": '{"unrecognized": true}'},
+            )
+    try:
+        msg = message()
+        with capture_logs() as logs:
+            await cog.on_message(msg)
+        msg.channel.send.assert_not_awaited()
+        reply.assert_not_awaited()
+        assert any(entry.get("event") == "discord.dm.suppressed" for entry in logs)
+    finally:
+        await cog.cog_unload()
+
+
+async def test_selector_recheck_operational_failure_is_generic_and_consumes_selection(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch, count=2)
+    try:
+        msg = message()
+        await cog.on_message(msg)
+        view = selector(msg)
+        msg.channel.send.reset_mock()
+        monkeypatch.setattr(
+            module,
+            "admit_cold_dm",
+            AsyncMock(side_effect=AdmissionDenied(reason="backend_unsupported")),
+        )
+        await view.choose(interaction(), str(tenants[0].id))
+        msg.channel.send.assert_awaited_once()
+        assert msg.channel.send.await_args.args == (module._DISCOVERY_FAILURE_NOTICE,)
+        assert (999, 555) not in cog._pending
+        assert await conversation(db_session_factory) is None
+        reply.assert_not_awaited()
+    finally:
+        await cog.cog_unload()

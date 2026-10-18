@@ -2062,7 +2062,7 @@ The provenance thread ID remains the private scope ID, matching session mapping.
 The first version delivers text replies after completion. Attachments, streaming
 cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
 slash command carries recent channel messages. Run `/dm-me` again to reset or select
-another channel. Disabling DMs prevents new turns and suppresses private result delivery; it does not cancel a model turn already running.
+another channel. Disabling DMs prevents new turns; Discord also suppresses private result delivery. Disabling DMs does not cancel a model turn already running.
 
 Slack consumes the same optional neutral-event tap for alternate-provider drafts. Its render task retains debounce and Cancel registration, and terminal callbacks replace the progress card and deregister Cancel. Foreign provider observations never become Anthropic display meters.
 
