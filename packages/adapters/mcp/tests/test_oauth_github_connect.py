@@ -2073,8 +2073,10 @@ def test_noscript_large_owner_list_uses_one_access_field() -> None:
     fallback = page.split("<noscript><section", 1)[1].split("</noscript>", 1)[0]
     assert fallback.count('name="repo"') == 6000
     footer = page.split('<div class="gh-editor-footer"', 1)[1].split("</form>", 1)[0]
-    assert footer.startswith("><div class=\"gh-editor-footer-inner\">")
-    assert '<button id="save-repos" class="gh-primary" type="submit">Save changes</button>' in footer
+    assert footer.startswith('><div class="gh-editor-footer-inner">')
+    assert (
+        '<button id="save-repos" class="gh-primary" type="submit">Save changes</button>' in footer
+    )
     assert re.search(r'name="access_\d+"', fallback) is None
     assert page.count('name="access" value="write"') == 1
     # Every checkbox can be checked without parse_qs reaching max_num_fields.

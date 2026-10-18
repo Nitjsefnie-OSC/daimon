@@ -402,9 +402,7 @@ def check_staged_edits(width: int) -> int:
 def check_no_js() -> int:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=CHROME)
-        page = browser.new_page(
-            viewport={"width": 390, "height": 900}, java_script_enabled=False
-        )
+        page = browser.new_page(viewport={"width": 390, "height": 900}, java_script_enabled=False)
         page.set_content(fixture_page(one_owner=True))
         choice = page.locator('noscript input[name="repo"]').first
         expect(choice).to_be_visible()
