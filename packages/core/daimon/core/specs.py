@@ -31,6 +31,7 @@ from anthropic.types.beta.beta_packages_params import BetaPackagesParams
 from daimon.core.context_prompt import ContextFragment, TurnContext, encode_fragments
 from daimon.core.errors import SpecError
 from daimon.core.model_presets import ModelSelection, resolve_model
+from daimon.core.stores.domain import ChatPlatform
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
@@ -54,7 +55,7 @@ class SkillRef(BaseModel):
 
     type: Literal["custom", "anthropic"]
     skill_id: str
-    platforms: tuple[Literal["discord", "slack", "teams"], ...] | None = None
+    platforms: tuple[ChatPlatform, ...] | None = None
 
     @model_validator(mode="after")
     def _platforms_are_distinct(self) -> SkillRef:

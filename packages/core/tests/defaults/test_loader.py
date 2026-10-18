@@ -14,6 +14,7 @@ from daimon.core.defaults.loader import (
 )
 from daimon.core.errors import DefaultsError
 from daimon.core.specs import SystemConfigSpec
+from structlog.testing import capture_logs
 
 
 def test_load_agent_specs(tmp_path: Path) -> None:
@@ -43,7 +44,12 @@ def test_load_platform_skills_maps_each_agent_to_its_platform_limited_skills(
     assert {name: [ref.skill_id for ref in refs] for name, refs in limited.items()} == {
         "a": ["docx"]
     }, "only platform-limited refs are listed, and only for agents that have one"
-    assert load_platform_skills(tmp_path / "missing") == {}, "no agents/ directory, nothing"
+    with capture_logs() as logs:
+        for _ in range(2):
+            assert load_platform_skills(tmp_path / "missing") == {}, "no agents/ directory"
+    assert [log["event"] for log in logs] == ["defaults.platform_skills_unread"], (
+        "a missing defaults directory is logged once, not silently empty"
+    )
 
 
 @pytest.mark.parametrize("platforms", ["[]", "[teams, teams]", "[email]"])
