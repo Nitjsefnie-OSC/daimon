@@ -653,6 +653,7 @@ async def create_session(
         tenant_id=tenant_id, account_id=account_id, call_site="sessions:create_session"
     )
     resource_agent = agent
+    source_channel_skills = channel_skills
     if resource_source is not None or worker is not None:
         from daimon.core.turn.runtime_manifest import worker_source_ceiling
 
@@ -677,8 +678,10 @@ async def create_session(
             raise ScopeViolation(
                 "worker-resources", "captured source and owned preparation required"
             )
-        if worker.declared_drops:
-            raise UnsupportedCapability(("native_worker_resource_drop",), worker.backend.profile)
+        # Channel additions are source authority, not permission to undo a
+        # worker's declared loss when constructing agent_with_overrides.
+        if "skills" in worker.spec.declared_drops:
+            channel_skills = ()
         resource_agent = sdk_agent(resource_source.source)
         scope = resource_source.resource_scope
         _check_resource_source(
@@ -1227,7 +1230,8 @@ async def create_session(
                     resource_scope=scope,
                     memory_read_only=resource_source.memory_read_only,
                     fernet=fernet,
-                    channel_skills=channel_skills,
+                    # Recheck source authority, including additions excluded from execution.
+                    channel_skills=source_channel_skills,
                     tool_safety=tool_safety,
                     asks_before_publishing=asks_before_publishing,
                     mcp_settings=mcp_settings,
