@@ -127,12 +127,16 @@ def _pure_tool_markup(text: str) -> bool:
     Match only known call-shaped tags; HTML, code examples with surrounding
     prose and ordinary angle brackets are still valid answer text.
     """
-    remaining = text.strip()
-    matched = False
-    while match := _TOOL_CALL_MARKUP.match(remaining):
-        matched = True
-        remaining = remaining[match.end() :].strip()
-    return matched and not remaining
+    text = text.strip()
+    position = 0
+    while position < len(text):
+        match = _TOOL_CALL_MARKUP.match(text, position)
+        if match is None:
+            return False
+        position = match.end()
+        while position < len(text) and text[position].isspace():
+            position += 1
+    return bool(text)
 
 
 class _CardWriteSequencer:
@@ -1193,7 +1197,7 @@ class DiscordTurnLifecycle:
         text = "".join(texts)
         if _pure_tool_markup(text):
             log.warning("turn.final_tool_markup_suppressed", turn_id=str(self._turn_id))
-            text = _TOOL_MARKUP_NOTICE
+            text = "" if self._unprompted else _TOOL_MARKUP_NOTICE
         return text
 
     def _note_discord_time(self, snowflake: object) -> None:
@@ -1338,6 +1342,24 @@ class DiscordTurnLifecycle:
                 replied_user=False,
             )
             response_text = f"<@{self._requester_id}>\n{response_text}"
+        collapsed_notice = "\n\n".join(
+            part
+            for part in (
+                _OUTPUT_COLLAPSED_NOTICE,
+                "Stopped.\nSend a message to start again." if cancelled else None,
+                degraded_notice,
+                self.answer_prefix,
+            )
+            if part
+        )
+        # Notices can include operator-provided text or many dropped servers.
+        # Their complete text is in the file; keep the visible notice bounded.
+        if len(collapsed_notice) > 1800:
+            collapsed_notice = collapsed_notice[:1750] + "…\nFull details are in answer.txt."
+        if notify:
+            collapsed_notice = f"<@{self._requester_id}>\n{collapsed_notice}"
+        if use_name_prefix:
+            collapsed_notice = fallback_name_prefix(self._agent_name, collapsed_notice)
         overflow_files: list[discord.File] = []
         remaining = _MAX_ANSWER_MESSAGES - self._sealed_message_count
         preview_chunks = (
@@ -1348,16 +1370,14 @@ class DiscordTurnLifecycle:
         if self._deferred_sealed_text or len(preview_chunks) > remaining:
             self._log_output_limit()
             overflow_files = [self._overflow_file(response_text)]
-            response_text = _OUTPUT_COLLAPSED_NOTICE
-            if notify:
-                response_text = f"<@{self._requester_id}>\n{response_text}"
-            if use_name_prefix:
-                response_text = fallback_name_prefix(self._agent_name, response_text)
-                use_name_prefix = False
+            response_text = collapsed_notice
+            use_name_prefix = False
         original_response_text = response_text
-        response_text, table_files = await render_discord_tables(
-            response_text, enabled=self._render_tables
-        )
+        table_files: list[discord.File] = []
+        if not overflow_files:
+            response_text, table_files = await render_discord_tables(
+                response_text, enabled=self._render_tables
+            )
         chunks = (
             _split_with_name_prefix(response_text, self._agent_name)
             if use_name_prefix
@@ -1371,12 +1391,7 @@ class DiscordTurnLifecycle:
                 file.close()
             table_files = []
             overflow_files = [self._overflow_file(original_response_text)]
-            notice = _OUTPUT_COLLAPSED_NOTICE
-            if notify:
-                notice = f"<@{self._requester_id}>\n{notice}"
-            if use_name_prefix:
-                notice = fallback_name_prefix(self._agent_name, notice)
-            chunks = [notice]
+            chunks = [collapsed_notice]
 
         summary = self._terminal_embed
         # A pinged answer's card shows no summary until the answer carries it.

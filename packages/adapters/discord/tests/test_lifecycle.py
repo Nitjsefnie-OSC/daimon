@@ -3182,3 +3182,85 @@ async def test_final_response_preserves_whitespace_between_distinct_blocks():
         )
     )
     assert edits[-1][1]["content"] == "Hello world."
+
+
+@pytest.mark.parametrize("notice", ["cancel", "degraded", "continuity"])
+async def test_overflow_keeps_operational_notices_visible(notice):
+    lc, _, edits = _make_lifecycle()
+    state = TurnState(content=[TextBlock(kind="text", text="Useful answer. " * 1000)])
+    if notice == "cancel":
+        state = dataclasses.replace(state, termination=TerminationReason.INTERRUPTED)
+        expected = "Stopped."
+    elif notice == "degraded":
+        state = dataclasses.replace(
+            state,
+            mcp_failures=(
+                McpServerFailure(
+                    server_name="notion",
+                    error_type="mcp_authentication_failed_error",
+                    message="access forbidden",
+                    retry_status="exhausted",
+                ),
+            ),
+        )
+        expected = "`notion`"
+    else:
+        lc.answer_prefix = "Recovered files."
+        expected = lc.answer_prefix
+    await lc.on_terminal_success(state)
+    assert expected in edits[-1][1]["content"]
+    assert expected in edits[-1][1]["attachments"][0].fp.read().decode()
+
+
+async def test_unprompted_markup_only_output_stays_silent():
+    lc, sends, edits, _ = _make_unprompted_lifecycle()
+    await lc.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="<invoke_fleet_check></invoke_fleet_check>" * 100),
+            ]
+        )
+    )
+    assert not sends and not edits
+    assert not lc.was_answered
+
+
+async def test_overflow_keeps_fallback_identity_and_bounds_long_notice():
+    lc, sends, edits = _make_lifecycle()
+    lc._fallback_active = lambda: True
+    lc.answer_prefix = "Recovery details. " * 1000
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Answer.")]))
+    visible = edits[-1][1]["content"]
+    assert visible.startswith("-# test-agent\n")
+    assert "answer.txt" in visible
+    assert len(visible) <= 2000
+    assert lc.answer_prefix in edits[-1][1]["attachments"][0].fp.read().decode()
+    assert not [sent for sent in sends if "content" in sent]
+
+
+async def test_rendered_table_expansion_respects_last_answer_slot(monkeypatch, tmp_path):
+    lc, sends, edits = _make_lifecycle()
+    state = TurnState()
+    for index in range(4):
+        state.content.extend(
+            [
+                TextBlock(kind="text", text=f"Answer {index}. " + "x" * 600),
+                ToolUseBlock(
+                    kind="tool_use", id=str(index), type="agent.tool_use", name="bash", input={}
+                ),
+            ]
+        )
+    state.content.append(TextBlock(kind="text", text="A compact table."))
+    image_path = tmp_path / "table.png"
+    image_path.write_bytes(b"image")
+    file = discord.File(image_path)
+
+    async def expanded_render(text, *, enabled):
+        return "table reference " * 300, [file]
+
+    monkeypatch.setattr(lifecycle_module, "render_discord_tables", expanded_render)
+    await lc.on_terminal_success(state)
+    assert len([sent for sent in sends if "content" in sent]) == 4
+    assert "answer.txt" in edits[-1][1]["content"]
+    assert "A compact table." in edits[-1][1]["attachments"][0].fp.read().decode()
+    assert file.fp.closed
