@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from html import escape, unescape
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -27,7 +27,11 @@ class GraphRequestError(RuntimeError):
 
 
 class AmbiguousPostError(GraphRequestError):
-    """A POST may have reached Graph, so reconcile before trying again."""
+    """A POST may have reached Graph."""
+
+
+class PostOutcomeUnknown(GraphRequestError):
+    """The one POST was not confirmed by a bounded history search."""
 
 
 def graph_time(value: object) -> datetime | None:
@@ -39,6 +43,18 @@ def graph_time(value: object) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def bot_sender_id(message: dict[str, Any]) -> str | None:
+    """Read the app ID from a Graph chat message sender."""
+    sender: Any = message.get("from")
+    if not isinstance(sender, dict):
+        return None
+    application = cast(dict[str, object], sender).get("application")
+    if not isinstance(application, dict):
+        return None
+    value = cast(dict[str, object], application).get("id")
+    return value if isinstance(value, str) else None
 
 
 class GraphTeamsDriver:
@@ -74,7 +90,7 @@ class GraphTeamsDriver:
     ) -> dict[str, Any]:
         token = self.tokens.acquire(persona, scopes)
         delay = 1.0
-        for _attempt in range(5):
+        for _attempt in range(1 if method == "POST" else 5):
             if deadline is not None and self.now() >= deadline:
                 raise GraphRequestError("Graph request deadline reached")
             try:
@@ -91,6 +107,8 @@ class GraphTeamsDriver:
                 if method == "POST":
                     raise AmbiguousPostError("Graph POST outcome unknown") from None
                 raise GraphRequestError("Graph transport failed") from None
+            if method == "POST" and (response.status_code == 429 or response.status_code >= 500):
+                raise AmbiguousPostError("Graph POST outcome unknown")
             if response.status_code == 429 or 500 <= response.status_code <= 599:
                 if response.status_code == 429 and deadline is None:
                     deadline = self.now() + 30
@@ -132,12 +150,16 @@ class GraphTeamsDriver:
         since: datetime | None = None,
         *,
         command_text: str | None = None,
+        seen_ids: frozenset[str] = frozenset(),
+        deadline: float | None = None,
     ) -> dict[str, Any] | None:
         """Search bounded recent messages for a marked or exact persona post."""
         path = self.channel + "/messages?$top=50"
         for _ in range(4):
-            data = await self._request(persona, READ, "GET", path)
+            data = await self._request(persona, READ, "GET", path, deadline=deadline)
             for item in data.get("value", []):
+                if str(item.get("id", "")) in seen_ids:
+                    continue
                 created_at = graph_time(item.get("createdDateTime"))
                 if created_at is None:
                     continue
@@ -165,10 +187,31 @@ class GraphTeamsDriver:
             path = next_link.removeprefix(BASE)
         return None
 
+    async def channel_message_ids(self, persona: str) -> frozenset[str]:
+        """Record the same bounded history pages used by reconciliation."""
+        path = self.channel + "/messages?$top=50"
+        seen: set[str] = set()
+        for _ in range(4):
+            data = await self._request(persona, READ, "GET", path)
+            seen.update(str(item["id"]) for item in data.get("value", []) if item.get("id"))
+            next_link = data.get("@odata.nextLink")
+            if not isinstance(next_link, str) or not next_link.startswith(BASE + self.channel):
+                break
+            path = next_link.removeprefix(BASE)
+        return frozenset(seen)
+
     async def post_mention(
-        self, persona: str, text: str, correlation_id: str, *, command: bool = False
+        self,
+        persona: str,
+        text: str,
+        correlation_id: str,
+        *,
+        command: bool = False,
+        seen_ids: frozenset[str] | None = None,
     ) -> dict[str, Any]:
-        """Post a bot mention, reconciling an ambiguous first attempt."""
+        """Post exactly once, then reconcile an uncertain outcome for 30 seconds."""
+        if seen_ids is None:
+            seen_ids = await self.channel_message_ids(persona)
         bot = self.config.bot_display_name
         content = f'<at id="0">{escape(bot)}</at> {escape(text)}'
         if not command:
@@ -191,24 +234,29 @@ class GraphTeamsDriver:
             ],
         }
         attempt_started = datetime.now().astimezone()
-        for attempt in range(2):
-            try:
-                return await self._request(
-                    persona, SEND, "POST", self.channel + "/messages", payload=payload
-                )
-            except AmbiguousPostError:
-                if attempt:
-                    raise
-                await self.sleep(3)
-                found = await self.find_by_correlation(
-                    persona,
-                    correlation_id,
-                    attempt_started,
-                    command_text=text if command else None,
-                )
+        try:
+            return await self._request(
+                persona, SEND, "POST", self.channel + "/messages", payload=payload
+            )
+        except AmbiguousPostError:
+            deadline = self.now() + 30
+            await self.sleep(3)
+            while self.now() < deadline:
+                try:
+                    found = await self.find_by_correlation(
+                        persona,
+                        correlation_id,
+                        attempt_started,
+                        command_text=text if command else None,
+                        seen_ids=seen_ids,
+                        deadline=deadline,
+                    )
+                except GraphRequestError:
+                    raise PostOutcomeUnknown("Graph POST outcome unknown") from None
                 if found:
                     return found
-        raise RuntimeError("post outcome unavailable")
+                await self.sleep(min(3, max(0, deadline - self.now())))
+            raise PostOutcomeUnknown("Graph POST outcome unknown") from None
 
     async def read_replies(
         self, persona: str, message_id: str, deadline: float | None = None
@@ -250,8 +298,6 @@ class GraphTeamsDriver:
             persona, CHAT, "GET", "/me/chats?$expand=members", deadline=deadline
         )
         candidates = [chat for chat in data.get("value", []) if chat.get("chatType") == "oneOnOne"]
-        if len(candidates) > 5:
-            raise ValueError("too many one-on-one chat candidates")
         matches: list[list[dict[str, Any]]] = []
         for chat in candidates:
             chat_id = chat.get("id")
@@ -261,19 +307,15 @@ class GraphTeamsDriver:
                 persona, CHAT, "GET", f"/chats/{chat_id}/messages", deadline=deadline
             )
             messages = list(response.get("value", []))
-            member_match = any(
-                member.get("userId") == self.config.bot_app_id
-                or member.get("displayName") == self.config.bot_display_name
-                for member in chat.get("members", [])
-            )
             sender_match = any(
-                message.get("from", {}).get("application", {}).get("id") == self.config.bot_app_id
-                for message in messages
+                bot_sender_id(message) == self.config.bot_app_id for message in messages
             )
-            if member_match or sender_match:
+            if sender_match:
                 matches.append(messages)
-        if len(matches) != 1:
-            raise ValueError("bot chat unavailable or ambiguous")
+        if len(matches) > 1:
+            raise ValueError("bot chat ambiguous")
+        if not matches:
+            return []
         start = since - timedelta(seconds=10)
         return [
             message

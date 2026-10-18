@@ -29,6 +29,7 @@ class Result:
     classification: Literal["allowed", "refused", "timeout", "error"]
     staging_turn: str | None = None
     action_titles: list[str] = field(default_factory=list[str])
+    error_reason: str | None = None
 
     def write(self, directory: Path) -> Path:
         """Write this result under a private directory."""

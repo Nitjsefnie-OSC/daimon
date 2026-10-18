@@ -18,7 +18,7 @@ from qa.live.teams import login as login_module
 from qa.live.teams.__main__ import main
 from qa.live.teams.access_flow_msal_signin import run as run_access_flow
 from qa.live.teams.config import TeamsQaConfig
-from qa.live.teams.graph import GraphTeamsDriver
+from qa.live.teams.graph import GraphTeamsDriver, PostOutcomeUnknown
 from qa.live.teams.journeys import card_details, resolve_journey, run_journey
 from qa.live.teams.login import AccessFlowAuthorizer, receive_redirect
 from qa.live.teams.tokens import ReauthRequired, Secret, TokenStore, access_scopes
@@ -128,13 +128,21 @@ def test_claim_mismatch_and_silent_failure(
 @pytest.mark.asyncio
 async def test_post_reconciles_ambiguous_failure(config: TeamsQaConfig) -> None:
     posts = 0
+    clock = 0.0
     found = False
+    show_after_post = False
+
+    async def sleep(seconds: float) -> None:
+        nonlocal clock
+        clock += seconds
 
     def transport(request: httpx.Request) -> httpx.Response:
-        nonlocal posts
+        nonlocal posts, found
         if request.method == "POST":
             posts += 1
-            return httpx.Response(503 if posts == 1 else 201, json={"id": "posted"})
+            if show_after_post:
+                found = True
+            return httpx.Response(503)
         return httpx.Response(
             200,
             json={
@@ -155,10 +163,11 @@ async def test_post_reconciles_ambiguous_failure(config: TeamsQaConfig) -> None:
             return Secret("FAKE_ACCESS")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
-        driver = GraphTeamsDriver(config, Tokens(), http)  # type: ignore[arg-type]
-        result = await driver.post_mention("admin", "hello", "synthetic")
-        assert result["id"] == "posted" and posts == 2
-        found = True
+        driver = GraphTeamsDriver(config, Tokens(), http, now=lambda: clock, sleep=sleep)  # type: ignore[arg-type]
+        with pytest.raises(PostOutcomeUnknown):
+            await driver.post_mention("admin", "hello", "synthetic")
+        assert posts == 1 and clock == 30
+        show_after_post = True
         posts = 0
         result = await driver.post_mention("admin", "hello", "synthetic")
         assert result["id"] == "found" and posts == 1
@@ -321,8 +330,10 @@ async def test_http_400_never_reposts(config: TeamsQaConfig) -> None:
 
     def transport(request: httpx.Request) -> httpx.Response:
         nonlocal calls
-        calls += 1
-        return httpx.Response(400, json={"error": "FAKE_CODE"})
+        if request.method == "POST":
+            calls += 1
+            return httpx.Response(400, json={"error": "FAKE_CODE"})
+        return httpx.Response(200, json={"value": []})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
         driver = GraphTeamsDriver(config, Tokens(), http)  # type: ignore[arg-type]
@@ -343,8 +354,10 @@ async def test_command_post_has_exact_text_and_reconciles_by_author(
             return Secret("FAKE_ACCESS")
 
     def transport(request: httpx.Request) -> httpx.Response:
+        nonlocal posted
         if request.method == "POST":
             posts.append(json.loads(request.content)["body"]["content"])
+            posted = True
             return httpx.Response(503)
         return httpx.Response(
             200,
@@ -357,9 +370,12 @@ async def test_command_post_has_exact_text_and_reconciles_by_author(
                         "createdDateTime": (datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
                     }
                 ]
+                if posted
+                else []
             },
         )
 
+    posted = False
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
         driver = GraphTeamsDriver(config, Tokens(), http)  # type: ignore[arg-type]
         result = await driver.post_mention("admin", "routines", "synthetic", command=True)
@@ -370,28 +386,46 @@ async def test_command_post_has_exact_text_and_reconciles_by_author(
 @pytest.mark.asyncio
 async def test_routines_card_role_assertions(config: TeamsQaConfig) -> None:
     class Driver:
+        posted = False
+
         def now(self) -> float:
-            return 0.0
+            return 0.0 if not self.posted else 1.0
 
         async def sleep(self, seconds: float) -> None:
             return None
 
+        async def channel_message_ids(self, persona: str) -> frozenset[str]:
+            return frozenset()
+
         async def post_mention(
-            self, persona: str, text: str, correlation: str, *, command: bool = False
+            self,
+            persona: str,
+            text: str,
+            correlation: str,
+            *,
+            command: bool = False,
+            seen_ids: frozenset[str] | None = None,
         ) -> dict[str, str]:
             assert command and text == "routines"
+            self.posted = True
             return {"id": "posted"}
 
         async def read_replies(
             self, persona: str, message_id: str, deadline: float
         ) -> list[dict[str, object]]:
             return [
-                {"id": "pointer", "body": {"content": "I've answered `routines` in our 1:1 chat."}}
+                {
+                    "id": "pointer",
+                    "createdDateTime": datetime.now(UTC).isoformat(),
+                    "body": {"content": "I've answered `routines` in our 1:1 chat."},
+                }
             ]
 
         async def chat_messages_with_bot(
-            self, persona: str, since: datetime, deadline: float
+            self, persona: str, since: datetime, deadline: float | None = None
         ) -> list[dict[str, object]]:
+            if not self.posted:
+                return []
             actions = [{"type": "Action.Submit", "title": "Refresh"}]
             if persona == "admin":
                 actions.append({"type": "Action.Submit", "title": "New routine"})
@@ -404,18 +438,14 @@ async def test_routines_card_role_assertions(config: TeamsQaConfig) -> None:
             return [
                 {
                     "id": "card",
+                    "createdDateTime": datetime.now(UTC).isoformat(),
                     "body": {"content": ""},
                     "attachments": [{"content": json.dumps(content)}],
                 }
             ]
 
-    driver = Driver()
-    admin = await run_journey(
-        driver, resolve_journey(config, "routines-admin"), name="routines-admin"
-    )  # type: ignore[arg-type]
-    member = await run_journey(
-        driver, resolve_journey(config, "routines-member"), name="routines-member"
-    )  # type: ignore[arg-type]
+    admin = await run_journey(Driver(), resolve_journey(config, "routines-admin"))  # type: ignore[arg-type]
+    member = await run_journey(Driver(), resolve_journey(config, "routines-member"))  # type: ignore[arg-type]
     assert admin.classification == "allowed" and "New routine" in admin.action_titles
     assert member.classification == "refused" and "New routine" not in member.action_titles
     assert admin.reply_message_ids == ["pointer", "card"]

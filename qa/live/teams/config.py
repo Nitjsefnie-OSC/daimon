@@ -22,14 +22,6 @@ class Persona(StrictModel):
     expected_oid: str | None = None
 
 
-class Journey(StrictModel):
-    persona: str
-    command: str
-    expected: Literal["allow", "refuse"]
-    refusal_phrases: list[str] = Field(default_factory=list)
-    reply_in: Literal["channel", "chat"] = "channel"
-
-
 class TeamsQaConfig(StrictModel):
     tenant_id: str
     client_id: str
@@ -42,7 +34,6 @@ class TeamsQaConfig(StrictModel):
     bot_display_name: str
     token_dir: Path = Field(strict=False)
     personas: dict[str, Persona]
-    journeys: dict[str, Journey] = Field(default_factory=dict)
     company: str = "teams-qa"
 
     @model_validator(mode="after")
@@ -58,9 +49,6 @@ class TeamsQaConfig(StrictModel):
             raise ValueError("invalid persona name")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", self.company):
             raise ValueError("invalid company name")
-        for journey in self.journeys.values():
-            if journey.persona not in self.personas:
-                raise ValueError("journey persona is not configured")
         self.token_dir = target
         return self
 

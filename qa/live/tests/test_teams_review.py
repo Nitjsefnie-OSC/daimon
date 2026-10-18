@@ -13,7 +13,7 @@ import pytest
 from qa.live.teams import __main__ as teams_cli
 from qa.live.teams.access_flow_msal_signin import run as run_access_flow
 from qa.live.teams.config import TeamsQaConfig
-from qa.live.teams.graph import CHAT, READ, SEND, TARGET, GraphTeamsDriver
+from qa.live.teams.graph import CHAT, READ, SEND, TARGET, GraphRequestError, GraphTeamsDriver
 from qa.live.teams.login import (
     AccessFlowAuthorizer,
     FlowFailed,
@@ -191,52 +191,58 @@ async def test_find_correlation_allows_clock_skew(config: TeamsQaConfig) -> None
 async def test_reconciliation_waits_three_seconds(config: TeamsQaConfig) -> None:
     sleeps: list[float] = []
     posts = 0
+    clock = 0.0
 
     class Tokens:
         def acquire(self, persona: str, scopes: list[str]) -> Secret:
             return Secret("FAKE_ACCESS")
 
     async def sleep(seconds: float) -> None:
+        nonlocal clock
         sleeps.append(seconds)
+        clock += seconds
 
     def transport(request: httpx.Request) -> httpx.Response:
         nonlocal posts
         if request.method == "POST":
             posts += 1
-            return httpx.Response(503 if posts == 1 else 201, json={"id": "posted"})
+            return httpx.Response(503)
         return httpx.Response(200, json={"value": []})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
-        driver = GraphTeamsDriver(config, Tokens(), http, sleep=sleep)  # type: ignore[arg-type]
-        await driver.post_mention("admin", "hello", "synthetic")
-    assert posts == 2 and sleeps == [3]
+        driver = GraphTeamsDriver(config, Tokens(), http, now=lambda: clock, sleep=sleep)  # type: ignore[arg-type]
+        with pytest.raises(GraphRequestError, match="POST outcome unknown"):
+            await driver.post_mention("admin", "hello", "synthetic")
+    assert posts == 1 and sleeps == [3] * 10
 
 
 @pytest.mark.asyncio
 async def test_post_429_honors_retry_after(config: TeamsQaConfig) -> None:
     sleeps: list[float] = []
     posts = 0
+    clock = 0.0
 
     class Tokens:
         def acquire(self, persona: str, scopes: list[str]) -> Secret:
             return Secret("FAKE_ACCESS")
 
     async def sleep(seconds: float) -> None:
+        nonlocal clock
         sleeps.append(seconds)
+        clock += seconds
 
     def transport(request: httpx.Request) -> httpx.Response:
         nonlocal posts
-        posts += 1
-        return (
-            httpx.Response(429, headers={"Retry-After": "2"})
-            if posts == 1
-            else httpx.Response(201, json={"id": "posted"})
-        )
+        if request.method == "POST":
+            posts += 1
+            return httpx.Response(429, headers={"Retry-After": "2"})
+        return httpx.Response(200, json={"value": []})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
-        driver = GraphTeamsDriver(config, Tokens(), http, sleep=sleep)  # type: ignore[arg-type]
-        result = await driver.post_mention("admin", "hello", "synthetic")
-    assert result["id"] == "posted" and posts == 2 and sleeps == [2]
+        driver = GraphTeamsDriver(config, Tokens(), http, now=lambda: clock, sleep=sleep)  # type: ignore[arg-type]
+        with pytest.raises(GraphRequestError, match="POST outcome unknown"):
+            await driver.post_mention("admin", "hello", "synthetic")
+    assert posts == 1 and clock == 30
 
 
 @pytest.mark.asyncio

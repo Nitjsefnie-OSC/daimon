@@ -13,6 +13,5 @@
   "personas": {
     "admin": {"upn": "admin@example.onmicrosoft.com", "role": "admin", "vault_item": "synthetic-admin"},
     "member": {"upn": "member@example.onmicrosoft.com", "role": "member", "vault_item": "synthetic-member"}
-  },
-  "journeys": {}
+  }
 }

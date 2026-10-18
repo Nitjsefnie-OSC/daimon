@@ -464,9 +464,7 @@ The separate operator driver lives in `qa/live/teams`. Copy
 `qa/live/teams/config.example.json` to a private location outside the repository,
 replace only its synthetic values. The built-in `routines-admin`,
 `routines-member`, and optional `billing-member` journeys select the sole
-persona with the required role. Additional named `journeys` use `persona`,
-`command`, `expected` (`allow` or `refuse`), `refusal_phrases`, and `reply_in`
-(`channel` or `chat`). The JSON is strict; unknown fields fail validation.
+persona with the required role. The JSON is strict; unknown fields fail validation.
 Point `--config` or `DAIMON_TEAMS_QA_CONFIG` to that private file. `token_dir`
 must be outside the checkout and is mode 0700; each persona cache is mode 0600.
 

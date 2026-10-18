@@ -49,7 +49,7 @@ async def execute(args: argparse.Namespace, config: TeamsQaConfig) -> None:
             elif args.command == "smoke":
                 journey = resolve_journey(config, args.journey)
                 await driver.verify_target(journey.persona)
-                result = await run_journey(driver, journey, name=args.journey)
+                result = await run_journey(driver, journey)
                 path = result.write(args.results)
                 print(f"{path} {result.classification}")
 
