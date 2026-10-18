@@ -401,6 +401,9 @@ dev = [
     "fastmcp>=3.2.4",
     "pyjwt>=2.12.1",
     "msal>=1.39.0",
+    "google-cloud-secret-manager>=2.25.0",
+    # Newer google-api-core needs a newer opentelemetry-api than the runtime lock pins.
+    "google-api-core<2.30",
     "daimon-testing",
     "aioresponses>=0.7.9",
     "syrupy>=5.5.3",

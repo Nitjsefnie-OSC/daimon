@@ -502,3 +502,50 @@ bot response makes the chat fail the 30-second quiet check before any post.
 team and channel before any command is sent. Offline tests use fake MSAL and
 `httpx.MockTransport`. The driver does not delete messages or change team
 membership, so clean up messages manually if needed.
+
+## QA Teams from your agent
+
+The persona token caches and the target config can live in GCP Secret Manager,
+so a coding agent needs no local files, no browser and no sign-in. Set
+`token_store` in the config to
+`{"kind": "secret_manager", "project": "<project>", "secret_prefix": "teams-qa"}`
+and store the config itself as a secret. Each persona's MSAL cache is the
+secret `<prefix>-token-<persona>`. A silent refresh that changes a cache adds
+a new version; concurrent writers are last-write-wins, which is safe because
+every recent refresh token stays valid. Versions beyond the newest three are
+destroyed when the caller may do so, otherwise left in place.
+
+Prerequisites: read access and add-version access on those secrets, and
+`gcloud auth application-default login`. Pass the config with
+`--config-secret projects/<project>/secrets/<name>` or set
+`DAIMON_TEAMS_QA_CONFIG_SECRET`.
+
+```bash
+export DAIMON_TEAMS_QA_CONFIG_SECRET=projects/<project>/secrets/<name>
+uv run python -m qa.live.teams status --persona admin
+uv run python -m qa.live.teams send --persona admin --to chat "routines"
+uv run python -m qa.live.teams wait --persona admin --after <message-id> --timeout 60
+uv run python -m qa.live.teams read --persona admin --from chat --since 5m
+```
+
+Each verb prints one JSON line. `send` posts once and never retries:
+`{"ok": true, "persona": "admin", "to": "chat", "message_id": "<id>", "posted_at": "<time>", "chat_id": "<chat-id>"}`.
+`read` and `wait` return the bot's messages with their text, card texts and
+card action titles:
+`{"ok": true, "persona": "admin", "source": "chat", "messages": [{"id": "<id>", "created": "<time>", "text": "...", "card_texts": ["..."], "action_titles": ["Refresh"]}]}`.
+Failures are `{"ok": false, "error": "<reason>", ...}` with a non-zero exit;
+`reauth_required` means a persona must sign in again with `login`, and
+`post_outcome_unknown` means the post may or may not exist, so check with
+`read` before posting again. `send` refuses a chat whose last persona post
+has no bot answer yet (`chat_not_quiet`).
+
+Send commands to the persona's 1:1 chat with the bot (`--to chat`). In a
+channel the bot answers commands privately, and Graph cannot read those
+answers. `--to channel` posts an @mention in the configured QA channel; free
+text there gets thread replies you can read with `--from thread:<message-id>`,
+and each one costs a model turn.
+
+`refresh --all` silently redeems each persona's refresh token and writes the
+new cache back without posting anything. The `Teams QA token refresh`
+workflow runs it weekly on staging. If it reports `reauthentication
+required`, run the printed `login` command once for that persona.
