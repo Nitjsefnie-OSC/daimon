@@ -101,9 +101,9 @@ async def test_replay_native_history_through_dto_adds_zero_rows(
 
 
 async def test_usage_insert_rolls_back_when_debit_fails_then_replays_once(
-    db_nullpool_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    db_committing_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     async with sessions() as session:
         tenant = await make_tenant(session)
         await session.commit()
@@ -127,7 +127,7 @@ async def test_usage_insert_rolls_back_when_debit_fails_then_replays_once(
         assert await usage_events.list_for_tenant(session, tenant_id=tenant.id) == []
         assert await tenant_ledger.list_for_tenant(session, tenant_id=tenant.id) == []
     # A new session factory models restarting the host after the failed transaction.
-    args["sessionmaker"] = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    args["sessionmaker"] = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     for _ in range(2):
         await record_turn_usage(**args)
     async with sessions() as session:

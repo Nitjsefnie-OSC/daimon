@@ -33,6 +33,7 @@ from daimon.core.turn.runtime_manifest import (
 )
 from daimon.core.turn.runtimes import build_channel_runtime
 from daimon.testing import f2_mcp_binding
+from daimon.testing.db import sibling_nullpool_engine
 from daimon.testing.f2_mcp_binding import AgentMCPAuthority, AgentMCPBinding
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import ConfigRevision
@@ -408,7 +409,12 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
     signer.chmod(0o600)
     output = tmp_path / "after-ack"
     output.mkdir(mode=0o700)
-    monkeypatch.setattr(f2_mcp_binding, "create_async_engine", lambda *_, **__: sessions.kw["bind"])
+    # The binding disposes its engine on close; give it a sibling, not the shared pool.
+    monkeypatch.setattr(
+        f2_mcp_binding,
+        "create_async_engine",
+        lambda *_, **__: sibling_nullpool_engine(sessions.kw["bind"]),
+    )
     binding = AgentMCPBinding(
         authority=AgentMCPAuthority(
             provider="openai",

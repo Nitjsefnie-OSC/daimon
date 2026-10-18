@@ -19,8 +19,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 @pytest.fixture
-async def postgres_state(db_nullpool_engine, db_clean):
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+async def postgres_state(db_committing_engine, db_clean):
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
         account = await make_account(db, tenant=tenant)

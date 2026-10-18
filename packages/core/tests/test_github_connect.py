@@ -580,7 +580,7 @@ async def test_cancel_blocks_concurrent_github_confirmation(
 
 @pytest.mark.asyncio
 async def test_expiry_sweep_rechecks_cancel_after_waiting_for_row_lock(
-    db_engine: AsyncEngine, db_nullpool_engine: AsyncEngine, db_clean: None
+    db_engine: AsyncEngine, db_committing_engine: AsyncEngine, db_clean: None
 ) -> None:
     del db_clean
     sessionmaker = async_sessionmaker(bind=db_engine, expire_on_commit=False)
@@ -635,7 +635,7 @@ async def test_expiry_sweep_rechecks_cancel_after_waiting_for_row_lock(
             await asyncio.wait_for(sweep_started.wait(), timeout=5)
             assert sweep_pid is not None
             # Confirm the DELETE reached the row lock before committing Cancel.
-            async with AsyncSession(db_nullpool_engine) as probe:
+            async with AsyncSession(db_committing_engine) as probe:
                 for _ in range(500):
                     waiting = await probe.scalar(
                         text(
@@ -1045,10 +1045,10 @@ async def test_workspace_a_can_connect_org_repo_after_workspace_b(
 
 @pytest.mark.asyncio
 async def test_refresh_serializes_for_one_github_user(
-    db_engine: AsyncEngine, db_nullpool_engine: AsyncEngine, db_clean: None
+    db_engine: AsyncEngine, db_committing_engine: AsyncEngine, db_clean: None
 ) -> None:
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
-    probe_sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    probe_sessionmaker = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     user_id = 98765
     async with sessionmaker.begin() as session:
@@ -1116,10 +1116,10 @@ async def test_refresh_serializes_for_one_github_user(
 
 @pytest.mark.asyncio
 async def test_bad_refresh_token_does_not_break_a_rotated_link(
-    db_engine: AsyncEngine, db_nullpool_engine: AsyncEngine, db_clean: None
+    db_engine: AsyncEngine, db_committing_engine: AsyncEngine, db_clean: None
 ) -> None:
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
-    probe_sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    probe_sessionmaker = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     async with sessionmaker.begin() as session:
         session.add(
@@ -1176,12 +1176,12 @@ async def test_bad_refresh_token_does_not_break_a_rotated_link(
 @pytest.mark.asyncio
 async def test_expired_refresh_does_not_break_a_rotated_link(
     db_engine: AsyncEngine,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     db_clean: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sessionmaker = async_sessionmaker(db_engine, expire_on_commit=False)
-    probe_sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    probe_sessionmaker = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     async with sessionmaker.begin() as session:
         session.add(

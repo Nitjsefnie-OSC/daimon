@@ -154,6 +154,63 @@ The last fixture user drains background work, drops the schema and disposes the
 engine. Different databases or schemas retain separate engines; the NullPool
 fixture retains its own pool on the shared schema.
 
+# Pooled committing engine
+
+`db_committing_engine` is a pooled engine (pool 5 plus 10 overflow, as in
+production) on the worker schema, for tests whose sessions really `COMMIT` or
+that need several independent connections. It replaces `db_nullpool_engine`,
+which opens a new connection, about 20 ms, for every checkout. Statements stay
+prepared on a warm connection, and code that gates on its pool
+(`session_preparation_gate.pool_headroom`) takes the production path. The
+pool is session-scoped (`db_committing_pool`); the per-test fixture adds the
+checks below. `DAIMON_TEST_NULLPOOL=1` makes the pool a NullPool again, which
+restores the old behaviour.
+
+Keep `db_nullpool_engine` for a test that:
+
+- runs `asyncio.run` per call, such as a Typer command under `CliRunner`:
+  asyncpg connections belong to the loop that opened them;
+- takes a session-level advisory lock on purpose, or kills a backend with
+  `pg_terminate_backend`: only closing the connection ends either.
+
+Code that disposes the engine it is handed would replace the shared pool, and the
+teardown fails the test for it. Give that code
+`sibling_nullpool_engine(db_committing_engine)`, a throwaway NullPool engine on
+the same schema.
+
+## What a test can and cannot leak
+
+Pooled connections outlive the test, so the fixture enforces the isolation a
+fresh connection used to give. The pool rolls every connection back when it is
+returned (`pool_reset_on_return="rollback"`), and refuses to hand out one that
+is still inside a transaction. Every connection starts a session at the worker
+schema's `search_path` with a 60 s `lock_timeout`.
+
+Rolled back by the pool, so a test cannot leak it: uncommitted rows, an open
+transaction on a connection it returned, `SET LOCAL`.
+
+Detected at teardown, which then fails the test and resets the connection so
+the next test is not hit as well. For every connection the test touched:
+
+- `search_path` other than the worker schema;
+- a session-level `SET` of `statement_timeout`, `lock_timeout`,
+  `idle_in_transaction_session_timeout`, `TimeZone`, `DateStyle`, `role`, the
+  default transaction isolation or read-only mode, `synchronous_commit`,
+  `work_mem`, `client_min_messages` or `application_name`, compared with what a
+  brand-new connection of the pool reports (the list is `_WATCHED_GUCS` in
+  `daimon/testing/db.py`; add a setting there if a test needs another);
+- a temp table or other temp object;
+- a `LISTEN` channel;
+- a session-level advisory lock;
+- a connection still checked out, with or without a transaction;
+- a session fence (`pool_headroom`) permit that was never released, or a
+  replaced pool.
+
+Not checked: a `SET` of a setting outside that list, prepared statements a test
+creates with SQL `PREPARE`, and changes
+a test commits to `public` or to another schema. A test that needs any of these
+should use `db_nullpool_engine`, whose connections close with the test.
+
 # Isolated provider SDK clients
 
 `daimon.testing.isolated_sdk` supplies `build_async_openai`,

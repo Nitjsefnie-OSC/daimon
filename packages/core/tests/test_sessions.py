@@ -2508,7 +2508,7 @@ async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
     "warm,read_only", [(False, False), (False, True), (True, False), (True, True)]
 )
 async def test_read_only_source_projection_keeps_implicit_memory_without_provisioning(
-    db_preflight, db_nullpool_engine, warm, read_only, monkeypatch
+    db_preflight, db_committing_engine, warm, read_only, monkeypatch
 ):
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.ma_identity import derive_agent_uuid
@@ -2519,7 +2519,7 @@ async def test_read_only_source_projection_keeps_implicit_memory_without_provisi
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.ma_transport import ScriptedTransport
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
@@ -2570,7 +2570,7 @@ async def test_read_only_source_projection_keeps_implicit_memory_without_provisi
 
 
 async def test_source_projection_requires_app_vault_only_for_a_live_grant(
-    db_preflight, db_nullpool_engine
+    db_preflight, db_committing_engine
 ):
     from daimon.core._models import TenantGitHubRepo
     from daimon.core.channel_backend import load_backend_agent
@@ -2581,7 +2581,7 @@ async def test_source_projection_requires_app_vault_only_for_a_live_grant(
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.ma_transport import ScriptedTransport
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
@@ -2695,7 +2695,7 @@ async def test_source_projection_refuses_changed_source_before_database_or_nativ
 
 
 async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
-    db_preflight, db_nullpool_engine, monkeypatch
+    db_preflight, db_committing_engine, monkeypatch
 ):
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.ma_identity import derive_agent_uuid
@@ -2705,7 +2705,7 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.ma_transport import ScriptedTransport
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
@@ -2770,7 +2770,7 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
 
 
 async def worker_source_context(
-    db_nullpool_engine,
+    db_committing_engine,
     *,
     original_tools=(),
     granted_tools=(),
@@ -2796,7 +2796,7 @@ async def worker_source_context(
 
     from .test_fleet_permissions import POLICY, parent
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
@@ -2934,7 +2934,7 @@ async def worker_source_context(
     ],
 )
 async def test_worker_source_context_refuses_before_resources_or_native_io(
-    db_preflight, db_nullpool_engine, changed
+    db_preflight, db_committing_engine, changed
 ):
     from dataclasses import replace
 
@@ -2949,7 +2949,7 @@ async def test_worker_source_context_refuses_before_resources_or_native_io(
         environment,
         worker,
         source,
-    ) = await worker_source_context(db_nullpool_engine)
+    ) = await worker_source_context(db_committing_engine)
     executing = ma_agent(id="actual-worker", tenant_id=str(tenant_id), name="worker")
     source_uuid = source.agent_id
 
@@ -3032,7 +3032,7 @@ async def test_worker_source_context_refuses_before_resources_or_native_io(
     ],
 )
 async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
-    db_preflight, db_nullpool_engine, fault
+    db_preflight, db_committing_engine, fault
 ):
     from dataclasses import replace
 
@@ -3040,7 +3040,7 @@ async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
     from mux.errors import ScopeViolation, UnsupportedCapability
 
     sessions, tenant, account, _, environment, worker, source = await worker_source_context(
-        db_nullpool_engine, warm=fault != "cold"
+        db_committing_engine, warm=fault != "cold"
     )
     if fault != "cold":
         binding = worker.resources[0]
@@ -3103,7 +3103,7 @@ async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
     "failure", ["namespace", "model_option", "version", "tools", "memory", "sandbox"]
 )
 async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
-    db_preflight, db_nullpool_engine, failure
+    db_preflight, db_committing_engine, failure
 ):
     from dataclasses import replace
 
@@ -3121,7 +3121,7 @@ async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
         input_schema={"type": "object"},
     )
     _, _, _, _, _, worker, captured = await worker_source_context(
-        db_nullpool_engine, original_tools=(tool_payload(tool),), granted_tools=(tool,)
+        db_committing_engine, original_tools=(tool_payload(tool),), granted_tools=(tool,)
     )
     root = replace(
         worker.permissions,

@@ -40,7 +40,7 @@ def source_read_only(request):
 
 
 @pytest.fixture
-async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_only, request):
+async def native_worker(db_preflight, db_committing_engine, db_clean, source_read_only, request):
     from mux.contracts.ids import SkillRef
     from mux.contracts.resources import AgentPatch, ToolSpec
 
@@ -95,7 +95,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             original_tools=capture["tools"], environment_config=capture["environment"]["config"]
         )
     sm, tenant, account, source, env, old, captured = await worker_source_context(
-        db_nullpool_engine, warm=True, **kwargs
+        db_committing_engine, warm=True, **kwargs
     )
     if live:
         from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsModelConfig

@@ -93,9 +93,9 @@ class _Workspace:
 
 @pytest.fixture
 async def sm(
-    db_nullpool_engine: AsyncEngine, db_clean: None
+    db_committing_engine: AsyncEngine, db_clean: None
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    yield async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    yield async_sessionmaker(db_committing_engine, expire_on_commit=False)
 
 
 async def _tenant(sm: async_sessionmaker[AsyncSession]) -> TenantRow:

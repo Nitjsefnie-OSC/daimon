@@ -1722,7 +1722,7 @@ def test_output_cap_omission_preserves_existing_plan_serialization(
 
 @pytest.mark.parametrize("host", ["discord", "mcp"])
 async def test_normal_fleet_factories_load_real_installed_native_tariffs(
-    db_nullpool_engine, db_schema, monkeypatch, host
+    db_committing_engine, db_schema, monkeypatch, host
 ):
     from daimon.adapters.discord import runtime as discord_runtime
     from daimon.adapters.mcp.server import create_mcp_app
@@ -1738,7 +1738,7 @@ async def test_normal_fleet_factories_load_real_installed_native_tariffs(
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1795,7 +1795,7 @@ async def test_normal_fleet_factories_load_real_installed_native_tariffs(
         async with client:
             app = create_mcp_app(
                 settings=settings,
-                sessionmaker=async_sessionmaker(db_nullpool_engine, expire_on_commit=False),
+                sessionmaker=async_sessionmaker(db_committing_engine, expire_on_commit=False),
                 auth=StaticTokenVerifier(tokens={}),
                 anthropic=client,
             )
@@ -1811,7 +1811,7 @@ async def test_normal_fleet_factories_load_real_installed_native_tariffs(
 )
 @pytest.mark.parametrize("priced", [False, True])
 async def test_real_financial_admission_requires_the_owner_native_model_row(
-    db_nullpool_engine, db_clean, provider, model, priced
+    db_committing_engine, db_clean, provider, model, priced
 ):
     from daimon.core.stores import fleet
     from mux.profiles import backend_selection
@@ -1819,7 +1819,7 @@ async def test_real_financial_admission_requires_the_owner_native_model_row(
 
     from ..test_fleet_budget import add, reserve, root, setup
 
-    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     original = root(provider)
     choice = backend_selection(provider).model_copy(update={"model": model})
     ref = ModelRef(provider=provider, id=model)

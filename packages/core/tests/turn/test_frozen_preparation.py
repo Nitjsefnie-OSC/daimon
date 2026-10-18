@@ -895,10 +895,10 @@ async def test_default_grant_duration_and_turn_count_bound_the_frozen_run(root_t
 
 
 @pytest.fixture
-async def retained_budget_root_turn(db_preflight, db_nullpool_engine, request):
+async def retained_budget_root_turn(db_preflight, db_committing_engine, request):
     async for value in root_turn.__wrapped__(
         db_preflight,
-        db_nullpool_engine,
+        db_committing_engine,
         live_root=getattr(request, "param", None)
         in ("recorded_i7", "recorded_i7_null_description"),
         null_environment_description=getattr(request, "param", None)

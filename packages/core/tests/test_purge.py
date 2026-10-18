@@ -707,13 +707,13 @@ async def test_privacy_sweep_continues_after_repeated_item_exception(
 @pytest.mark.parametrize("crash_at", ["remove_pending", "finish_work"])
 async def test_privacy_delete_recovers_after_upstream_success_crash(
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
     crash_at: str,
 ) -> None:
     # Independent connections preserve committed pending IDs when the injected
     # failure rolls back the acknowledgement transaction.
-    db_session_factory = async_sessionmaker(bind=db_nullpool_engine, expire_on_commit=False)
+    db_session_factory = async_sessionmaker(bind=db_committing_engine, expire_on_commit=False)
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await make_cli_principal(

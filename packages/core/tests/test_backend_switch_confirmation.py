@@ -145,7 +145,7 @@ def test_preview_is_a_read_but_confirm_is_never_unattended() -> None:
 
 
 @pytest.fixture
-async def owned_preview(db_preflight, db_nullpool_engine):
+async def owned_preview(db_preflight, db_committing_engine):
     from daimon.core.authz import Subject
     from daimon.core.channel_backend import BackendActor, load_backend_agent, make_backend_service
     from daimon.core.config import TurnSettings
@@ -156,7 +156,7 @@ async def owned_preview(db_preflight, db_nullpool_engine):
     from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     try:
         require_owned_sessionmaker(sessions)
     except ValueError:
