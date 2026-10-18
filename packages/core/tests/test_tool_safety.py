@@ -476,3 +476,11 @@ async def test_another_daimons_agent_ask_still_needs_approval(attended: bool) ->
     assert not result.allow
     if attended:
         card.assert_awaited_once()
+
+
+def test_an_empty_trusted_annotations_is_left_out_of_the_dump() -> None:
+    """Session snapshots and the MA goldens dump the policy; an empty list
+    must not appear there, a non-empty one must."""
+    assert "trusted_annotations" not in ToolSafetyPolicy(enabled=True).model_dump(mode="json")
+    dumped = ToolSafetyPolicy(enabled=True, trusted_annotations=("bridge",)).model_dump(mode="json")
+    assert dumped["trusted_annotations"] == ["bridge"]

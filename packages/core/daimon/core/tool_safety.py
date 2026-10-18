@@ -328,6 +328,7 @@ class ToolSafetyPolicy(BaseModel):
     )
     trusted_annotations: tuple[str, ...] = Field(
         default=(),
+        exclude_if=lambda value: not value,
         description=(
             'MCP server names whose own tool annotations count, e.g. ["bridge"]. For a listed '
             "server Daimon lists its tools once per turn and runs a tool marked readOnlyHint "
