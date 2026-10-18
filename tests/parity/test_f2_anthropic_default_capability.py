@@ -11,6 +11,7 @@ import importlib.util
 import json
 import logging
 import os
+import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -31,9 +32,9 @@ from daimon.testing.conformance.runner import replay_default_capability, run_def
 from daimon.testing.qa_mcp_host import (
     QA_SESSION_ID,
     Manifest,
-    build_host,
-    cleanup,
-    schema_exists,
+    SharedQaHost,
+    build_run,
+    end_run,
     serve,
 )
 from mux.contracts.actions import UserMessage
@@ -45,6 +46,7 @@ from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
 from mux.errors import ScopeViolation
+from sqlalchemy import text as sql_text
 
 ROOT = Path(__file__).resolve().parents[2]
 F1_SPEC = importlib.util.spec_from_file_location(
@@ -216,11 +218,12 @@ def _driver(
 
 @pytest.mark.parametrize("auth_state", ["valid", "revoked", "wrong"])
 async def test_f2_anthropic_default_capability_through_loopback(
-    auth_state: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    auth_state: str,
+    qa_shared_host: SharedQaHost,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    database_url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    assert database_url, "the parity lane must provide its own isolated database"
-    qa = await build_host(database_url=database_url, port=0, root=tmp_path)
+    qa = await build_run(qa_shared_host, port=0, root=tmp_path)
     manifest_path = qa.manifest.path(tmp_path)
     authored = F1.manifest()
     expected = replace(authored, mcp=authored.mcp.model_copy(update={"url": MCP_URL}))
@@ -316,12 +319,16 @@ async def test_f2_anthropic_default_capability_through_loopback(
         assert "offline-invalid-bearer" not in caplog.text
         assert any(record.name.startswith("anthropic") for record in caplog.records)
     finally:
-        await qa.engine.dispose()
-        cleaned = await cleanup(manifest_path, database_url=database_url)
+        cleaned = await end_run(qa)
         assert cleaned.status == Manifest.load(manifest_path).status == "cleaned"
         assert qa.bearer.revoked_marker.exists()
-        assert not await schema_exists(qa.engine, qa.manifest.schema)
-        await qa.engine.dispose()
+        # The run's Daimon token is revoked; the shared schema stays for the next test.
+        async with qa_shared_host.sessions() as session:
+            revoked_at = await session.scalar(
+                sql_text("SELECT revoked_at FROM mcp_tokens WHERE jti = :jti"),
+                {"jti": uuid.UUID(str(cleaned.token_jti))},
+            )
+        assert revoked_at is not None
 
 
 @pytest.mark.parametrize("field", ["tenant_id", "account_id", "authorization_id"])

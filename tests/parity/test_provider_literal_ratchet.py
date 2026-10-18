@@ -26,7 +26,15 @@ def _is_provider_literal(node: ast.AST) -> bool:
     )
 
 
+_PROVIDER_WORDS = ("anthropic", "openai", "gemini")
+
+
 def _provider_literals(source: str) -> int:
+    # A literal equal to or starting with one of these words contains it in the source, so a
+    # file without any needs no parse. (Escapes or implicit concatenation that only build the
+    # word at parse time are not counted; no such literal exists.)
+    if not any(word in source for word in _PROVIDER_WORDS):
+        return 0
     return sum(_is_provider_literal(node) for node in ast.walk(ast.parse(source)))
 
 
