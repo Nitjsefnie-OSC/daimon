@@ -608,3 +608,29 @@ def test_manual_login_requires_tty_before_prompt_or_msal(
         value not in output.out + output.err + str(error.value)
         for value in ("PASTED_CODE", "PASTED_STATE")
     )
+
+
+def _jwt(claims: dict[str, str]) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{payload}.signature"
+
+
+def test_silent_refresh_checks_access_token_identity(
+    config: TeamsQaConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cached refresh has no ID-token claims; the access token's own claims decide."""
+    store = TokenStore(config)
+    upn = "admin@example.onmicrosoft.com"
+    good = _jwt({"tid": config.tenant_id, "upn": upn})
+    client = FakeClient(upn, config.tenant_id, {"access_token": good})
+    monkeypatch.setattr(store, "_client", lambda _persona: (client, FakeCache()))
+    assert store.acquire("admin", ["User.Read"]).value == good
+    for claims in (
+        {"tid": config.tenant_id, "upn": "member@example.onmicrosoft.com"},
+        {"tid": "wrong", "upn": upn},
+        {},
+    ):
+        client.result = {"access_token": _jwt(claims) if claims else "opaque"}
+        with pytest.raises(ReauthRequired) as error:
+            store.acquire("admin", ["User.Read"])
+        assert "header." not in str(error.value)

@@ -16,15 +16,20 @@ import msal
 from qa.live.teams.config import TeamsQaConfig
 
 
-def access_scopes(token: str) -> set[str]:
-    """Decode the local access-token scope claim without emitting the token."""
+def token_claims(token: str) -> dict[str, Any]:
+    """Decode a JWT payload locally, without verifying it; never log the result."""
     try:
         payload = token.split(".")[1]
         decoded = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
         claims = json.loads(decoded)
-        return set(str(claims.get("scp", "")).split())
     except (IndexError, ValueError, UnicodeDecodeError):
-        return set()
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def access_scopes(token: str) -> set[str]:
+    """The delegated scopes an access token carries."""
+    return set(str(token_claims(token).get("scp", "")).split())
 
 
 class Secret:
@@ -101,22 +106,31 @@ class TokenStore:
             Path(temp).unlink(missing_ok=True)
 
     def validate(self, persona: str, result: dict[str, Any]) -> Secret:
-        """Check tenant, account, and optional object identity before storing."""
-        identity = self.config.personas[persona]
-        claim = result.get("id_token_claims")
-        if not isinstance(claim, dict):
-            raise ReauthRequired(persona, "identity claims missing")
-        if claim.get("tid") != self.config.tenant_id:
-            raise ReauthRequired(persona, "tenant mismatch")
-        upn = claim.get("preferred_username") or claim.get("upn") or ""
-        if str(upn).casefold() != identity.upn.casefold():
-            raise ReauthRequired(persona, "account mismatch")
-        if identity.expected_oid and claim.get("oid") != identity.expected_oid:
-            raise ReauthRequired(persona, "object mismatch")
+        """Check the token belongs to this persona before it is stored or used.
+
+        Interactive results carry ID-token claims; silent refreshes do not, so
+        those are checked against the Graph access token's own claims.
+        """
         token = result.get("access_token")
         if not isinstance(token, str):
             raise ReauthRequired(persona, "access token missing")
+        claims = result.get("id_token_claims")
+        if not isinstance(claims, dict):
+            claims = token_claims(token)
+        self._check_identity(persona, claims)
         return Secret(token)
+
+    def _check_identity(self, persona: str, claims: dict[str, Any]) -> None:
+        identity = self.config.personas[persona]
+        if not claims:
+            raise ReauthRequired(persona, "identity claims missing")
+        if claims.get("tid") != self.config.tenant_id:
+            raise ReauthRequired(persona, "tenant mismatch")
+        upn = claims.get("preferred_username") or claims.get("upn") or ""
+        if str(upn).casefold() != identity.upn.casefold():
+            raise ReauthRequired(persona, "account mismatch")
+        if identity.expected_oid and claims.get("oid") != identity.expected_oid:
+            raise ReauthRequired(persona, "object mismatch")
 
     def acquire(self, persona: str, scopes: list[str]) -> Secret:
         """Acquire silently from exactly one matching persona account."""
