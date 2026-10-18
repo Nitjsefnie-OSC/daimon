@@ -457,3 +457,37 @@ Observer fingerprints include components so component-only edits remain visible.
 This card-only extraction does not add component footer text to answer matching:
 anchored answers still match the whole content after removing only a recorded
 QA-agent subtext header.
+
+## Teams persona driver
+
+The separate operator driver lives in `qa/live/teams`. Copy
+`qa/live/teams/config.example.json` to a private location outside the repository,
+replace only its synthetic values. The built-in `routines-admin`,
+`routines-member`, and optional `billing-member` journeys select the sole
+persona with the required role. Additional named `journeys` use `persona`,
+`command`, `expected` (`allow` or `refuse`), `refusal_phrases`, and `reply_in`
+(`channel` or `chat`). The JSON is strict; unknown fields fail validation.
+Point `--config` or `DAIMON_TEAMS_QA_CONFIG` to that private file. `token_dir`
+must be outside the checkout and is mode 0700; each persona cache is mode 0600.
+
+```bash
+uv run python -m qa.live.teams login --config /private/teams-qa.json --persona admin --manual
+uv run python -m qa.live.teams status --config /private/teams-qa.json --persona admin
+uv run python -m qa.live.teams verify-target --config /private/teams-qa.json --persona admin
+uv run python -m qa.live.teams smoke --config /private/teams-qa.json \
+  --journey routines-admin --max-turns 1 --results /private/results --go
+uv run python -m qa.live.teams logout --config /private/teams-qa.json --persona admin
+```
+
+`login` defaults to manual paste and requires a terminal. Open the printed URL in
+a private window, sign in as the named persona, then paste the full address bar
+URL at the hidden prompt. The localhost page failing to load is expected. The
+optional `--access-flow` path uses a one-shot localhost listener; install its
+saved flow first with `install-flow`. Normal operations acquire tokens silently;
+an expired or invalid grant requires another explicit login. `status` prints
+metadata only. `logout` deletes the local cache;
+also revoke the session in My Sign-ins or delete the app grant to revoke remote
+access. `smoke` is live and requires `--go`; offline tests use fake MSAL and
+`httpx.MockTransport`. Results are private JSON records. The driver does not
+delete messages or change team membership, so clean up messages manually if
+needed.

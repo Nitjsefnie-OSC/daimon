@@ -1,0 +1,18 @@
+{
+  "tenant_id": "00000000-0000-0000-0000-000000000001",
+  "client_id": "00000000-0000-0000-0000-000000000002",
+  "redirect_host": "localhost",
+  "team_id": "00000000-0000-0000-0000-000000000003",
+  "channel_id": "19:synthetic@example.onmicrosoft.com",
+  "team_display_name": "Example QA Team",
+  "channel_display_name": "Example QA Channel",
+  "bot_app_id": "00000000-0000-0000-0000-000000000004",
+  "bot_display_name": "Example Bot",
+  "token_dir": "/tmp/example-teams-qa-private-tokens",
+  "company": "teams-qa",
+  "personas": {
+    "admin": {"upn": "admin@example.onmicrosoft.com", "role": "admin", "vault_item": "synthetic-admin"},
+    "member": {"upn": "member@example.onmicrosoft.com", "role": "member", "vault_item": "synthetic-member"}
+  },
+  "journeys": {}
+}
