@@ -1948,3 +1948,279 @@ async def test_dm_writes_rejected_on_unsupported_platform(platform):
         await _routines_mod._check_destination(  # pyright: ignore[reportPrivateUsage]
             MagicMock(), auth, kind="dm", destination_id=None
         )
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+async def test_mcp_thread_to_dm_checks_and_retains_original_thread(
+    committing_sessionmaker, db_session, monkeypatch, restricted
+):
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.discord_membership import verify_discord_source
+    from daimon.core.errors import StoreError
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="ag_resolved",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        destination_kind="thread",
+        destination_id="789",
+        channel_id="456",
+    )
+    if restricted:
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
+        )
+    await db_session.commit()
+    requests = []
+
+    def channel(request):
+        requests.append(request.url.path)
+        key = request.url.path.rsplit("/", 1)[1]
+        return httpx.Response(
+            200,
+            json={
+                "id": key,
+                "guild_id": "424242",
+                "type": 11 if key == "789" else 0,
+                "parent_id": "456",
+            },
+        )
+
+    async def verify(token, **kwargs):
+        return await verify_discord_source(
+            "offline", **kwargs, transport=httpx.MockTransport(channel)
+        )
+
+    monkeypatch.setattr(_routines_mod, "verify_discord_source", verify)
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(tenant_id=tenant.id, platform_user_id="123", external_id="424242")
+    try:
+        if restricted:
+            with pytest.raises(StoreError, match="restricted source"):
+                await _update_routine_impl(runtime, auth, routine_id=row.id, destination_kind="dm")
+        else:
+            converted = await _update_routine_impl(
+                runtime, auth, routine_id=row.id, destination_kind="dm"
+            )
+            assert (converted.channel_id, converted.source_thread_id) == ("456", "789")
+            async with committing_sessionmaker.begin() as session:
+                await set_access_policy(
+                    session,
+                    tenant_id=tenant.id,
+                    policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
+                )
+            with pytest.raises(StoreError, match="restricted source"):
+                await _update_routine_impl(
+                    runtime, auth, routine_id=row.id, trigger_message="edited"
+                )
+        async with committing_sessionmaker() as session:
+            saved = await get_routine(session, row.id, tenant_id=tenant.id)
+        assert saved is not None
+        assert saved.destination_kind == ("thread" if restricted else "dm")
+        assert requests == ["/api/v10/channels/789", "/api/v10/channels/456"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("restricted", [None, "456", "789"])
+async def test_mcp_dm_creation_verifies_and_retains_thread_origin(
+    committing_sessionmaker, db_session, monkeypatch, restricted
+):
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.discord_membership import verify_discord_source
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
+    account = await make_account(db_session, tenant=tenant)
+    now = datetime.now(UTC)
+    origin = await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="456",
+        thread_id="789",
+        responder_ma_agent_id="ag_resolved",
+        responder_name="daimon",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        expires_at=now + timedelta(minutes=10),
+        now=now,
+    )
+    if restricted:
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(channel_rules={restricted: ChannelRule(readers="inside")}),
+        )
+    await db_session.commit()
+    requests = []
+
+    def channel(request):
+        key = request.url.path.rsplit("/", 1)[1]
+        requests.append(key)
+        return httpx.Response(
+            200,
+            json={
+                "id": key,
+                "guild_id": "424242",
+                "type": 11 if key == "789" else 0,
+                "parent_id": "456",
+            },
+        )
+
+    async def verify(token, **kwargs):
+        return await verify_discord_source(
+            "offline", **kwargs, transport=httpx.MockTransport(channel)
+        )
+
+    monkeypatch.setattr(_routines_mod, "verify_discord_source", verify)
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = dataclasses.replace(
+        _auth_identity(tenant_id=tenant.id, platform_user_id="123", external_id="424242"),
+        account_id=account.id,
+    )
+    try:
+
+        async def create():
+            return await _create_routine_impl(
+                runtime,
+                auth,
+                agent_name="daimon",
+                cron_expr="0 9 * * *",
+                timezone="UTC",
+                trigger_message="summary",
+                destination_kind="dm",
+                origin_context_id=str(origin.id),
+            )
+
+        if restricted:
+            with pytest.raises(ToolError, match="restricted source"):
+                await create()
+        else:
+            row = await create()
+            assert (row.channel_id, row.source_thread_id) == ("456", "789")
+        async with committing_sessionmaker() as session:
+            rows = await list_routines_for_tenant(session, tenant_id=tenant.id)
+        assert len(rows) == (0 if restricted else 1)
+        assert requests == ["789", "456"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("sealed_before", [False, True])
+async def test_authenticated_mcp_dm_conversion_enforces_thread_seal(
+    committing_sessionmaker, db_session, monkeypatch, sealed_before
+):
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.config import DiscordSettings
+    from daimon.core.discord_membership import verify_discord_source
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
+    from daimon.core.stores.accounts import set_role
+
+    account = await make_account(db_session, tenant=tenant)
+    await set_role(db_session, account.id, Role.ADMIN)
+    await make_platform_principal(
+        db_session, platform="discord", external_id="123", tenant=tenant, account=account
+    )
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="ag_resolved",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        destination_kind="thread",
+        destination_id="789",
+        channel_id="456",
+    )
+    seal = TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")})
+    if sealed_before:
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=seal)
+    await db_session.commit()
+
+    def channel(request):
+        key = request.url.path.rsplit("/", 1)[1]
+        return httpx.Response(
+            200,
+            json={
+                "id": key,
+                "guild_id": "424242",
+                "type": 11 if key == "789" else 0,
+                "parent_id": "456",
+            },
+        )
+
+    async def verify(token, **kwargs):
+        return await verify_discord_source(
+            "offline", **kwargs, transport=httpx.MockTransport(channel)
+        )
+
+    monkeypatch.setattr(_routines_mod, "verify_discord_source", verify)
+    secret = b"synthetic-routine-test-signing-key"
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    app = create_mcp_app(
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://unused/db")),
+            anthropic=AnthropicSettings(api_key=SecretStr("offline")),
+            discord=DiscordSettings(bot_token=SecretStr("offline")),
+            mcp=McpSettings(
+                jwt_secret=SecretStr(secret.decode()),
+                public_url=HttpUrl("https://mcp.test.invalid/mcp"),
+            ),
+            _env_file=None,
+        ),  # type: ignore[call-arg]
+        sessionmaker=committing_sessionmaker,
+        anthropic=client,
+    )
+    async with committing_sessionmaker.begin() as session:
+        token = await mint_panel_mcp_token(
+            session, account_id=account.id, secret=secret, now=datetime.now(UTC)
+        )
+    try:
+        response = await call_mcp_tool(
+            app,
+            token=token,
+            name="update_routine",
+            arguments={"routine_id": str(row.id), "destination_kind": "dm"},
+        )
+        assert bool(response["result"].get("isError")) == sealed_before
+        async with committing_sessionmaker() as session:
+            saved = await get_routine(session, row.id, tenant_id=tenant.id)
+        assert saved is not None
+        assert saved.destination_kind == ("thread" if sealed_before else "dm")
+        if not sealed_before:
+            assert (saved.channel_id, saved.source_thread_id) == ("456", "789")
+            async with committing_sessionmaker.begin() as session:
+                await set_access_policy(session, tenant_id=tenant.id, policy=seal)
+            response = await call_mcp_tool(
+                app,
+                token=token,
+                name="update_routine",
+                arguments={"routine_id": str(row.id), "trigger_message": "admin edit"},
+            )
+            assert response["result"]["isError"] is True
+            async with committing_sessionmaker() as session:
+                saved = await get_routine(session, row.id, tenant_id=tenant.id)
+            assert saved is not None and saved.trigger_message == "summary"
+    finally:
+        await client.close()

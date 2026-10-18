@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Discord routines can deliver privately to their owner through MCP, the routines panel, or `daimon routines create --destination dm`. Delivery rechecks live access, respects tenant DM controls, and exposes failures without public fallback or automatic retries.
+- Discord routines can deliver privately to their owner through MCP, the routines panel, or `daimon routines create --destination dm`. Delivery rechecks live access, respects tenant DM controls, and exposes failures without public fallback or automatic retries. DM routine runs mount no personal memory; tenant memory stays read-only and tool authority stays the same as for channel routines. Source threads retain their parent and thread restrictions through conversion, fire, and each send. CLI source IDs are verified against the selected tenant's guild, including in dry-run.
 - Private Discord replies recheck the answering agent's current pin and isolation rules before delivery. Unavailable bound agents and unreadable private policies are silent, and superseded server-switch controls are retired.
 
 - Discord can answer a first DM using an explicitly configured tenant agent, with a private server chooser when several servers qualify. Cold starts copy no channel history. Ineligible senders and revoked private access receive no reply; server switches reset the private scope.

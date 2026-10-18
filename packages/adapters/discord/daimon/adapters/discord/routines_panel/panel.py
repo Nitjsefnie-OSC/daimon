@@ -27,6 +27,7 @@ from daimon.adapters.discord.routines_panel.write import (
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.discord_membership import verify_discord_source
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import any_agent_rules
@@ -162,12 +163,28 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                         "This agent cannot run a private routine.", ephemeral=True
                     )
                     return
+                source_channel_id = None
+                source_id = (
+                    row.destination_id
+                    if row.destination_kind in ("channel", "thread")
+                    else row.source_thread_id or row.channel_id
+                )
+                if self.values[0] == "dm" and source_id is not None:
+                    tenant = await get_tenant(session, row.tenant_id)
+                    if tenant is None or self.view.runtime.settings.discord is None:
+                        raise UserFacingError("The source channel could not be verified.")
+                    source_channel_id, _ = await verify_discord_source(
+                        self.view.runtime.settings.discord.bot_token.get_secret_value(),
+                        guild_id=tenant.external_id,
+                        channel_id=source_id,
+                    )
                 await update_routine(
                     session,
                     row.id,
                     tenant_id=row.tenant_id,
                     destination_kind="dm" if self.values[0] == "dm" else None,
                     clear_destination=self.values[0] == "none",
+                    channel_id=source_channel_id,
                 )
             await _rerender(interaction, self.view)
         except DaimonError as exc:

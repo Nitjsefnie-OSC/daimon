@@ -550,7 +550,7 @@ async def clear_creator(
             return "access_policy_unreadable"
         if row.destination_kind == "dm":
             if row.channel_id is not None and limiting_ids_at(
-                policy, channel_id=row.channel_id, thread_id=None
+                policy, channel_id=row.channel_id, thread_id=row.source_thread_id
             ):
                 return "restricted_source"
             if not authorize(

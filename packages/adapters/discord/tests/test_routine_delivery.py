@@ -781,7 +781,9 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
         assert "Run " in dms.sent[0][2]
 
 
-@pytest.mark.parametrize("stop", ["partial_failure", "revoked", "destination_changed"])
+@pytest.mark.parametrize(
+    "stop", ["partial_failure", "revoked", "destination_changed", "thread_sealed"]
+)
 async def test_dm_partial_delivery_is_never_retried(db_session_factory, stop):
     from datetime import UTC, datetime
 
@@ -792,6 +794,16 @@ async def test_dm_partial_delivery_is_never_retried(db_session_factory, stop):
     async with db_session_factory() as session:
         row = await _routine(session)
     async with db_session_factory.begin() as session:
+        if stop == "thread_sealed":
+            row = await update_routine(
+                session,
+                row.id,
+                tenant_id=row.tenant_id,
+                destination_kind="thread",
+                destination_id="789",
+                channel_id="456",
+            )
+            assert row is not None
         row = await update_routine(session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
         assert row is not None
         await record_result(session, row.id, tail="private " * 900, error=None, delivery="pending")
@@ -807,6 +819,17 @@ async def test_dm_partial_delivery_is_never_retried(db_session_factory, stop):
             if sends and stop == "partial_failure":
                 raise discord.HTTPException(MagicMock(status=500, reason="failed"), "uncertain")
             sends.append(content)
+            if stop == "thread_sealed":
+                from daimon.core.access_policy import ChannelRule
+
+                async with db_session_factory.begin() as session:
+                    await set_access_policy(
+                        session,
+                        tenant_id=row.tenant_id,
+                        policy=TenantAccessPolicy(
+                            channel_rules={"789": ChannelRule(readers="inside")}
+                        ),
+                    )
             if stop == "destination_changed":
                 async with db_session_factory.begin() as session:
                     await update_routine(

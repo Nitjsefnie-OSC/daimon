@@ -518,6 +518,8 @@ class Routine(Base):
     # Channel the routine's spend is attributed to and budget-gated by: its
     # destination's parent channel, resolved when the destination is set.
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Original thread retained when delivery moves to the owner DM.
+    source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

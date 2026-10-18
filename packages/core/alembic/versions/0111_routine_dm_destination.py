@@ -13,6 +13,7 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    op.add_column("routines", sa.Column("source_thread_id", sa.Text(), nullable=True))
     op.drop_constraint("ck_routines_destination_kind", "routines", type_="check")
     op.create_check_constraint(
         "ck_routines_destination_kind",
@@ -32,6 +33,7 @@ def downgrade() -> None:
         sa.text("SELECT EXISTS (SELECT 1 FROM routines WHERE destination_kind = 'dm')")
     ):
         raise RuntimeError("convert or remove DM routines before downgrade")
+    op.drop_column("routines", "source_thread_id")
     op.drop_constraint("ck_routines_dm_owner", "routines", type_="check")
     op.drop_constraint("ck_routines_destination_kind", "routines", type_="check")
     op.create_check_constraint(

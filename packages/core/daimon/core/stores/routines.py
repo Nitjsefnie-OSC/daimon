@@ -63,6 +63,7 @@ async def create_routine(
     destination_kind: RoutineDestinationKind | None = None,
     destination_id: str | None = None,
     channel_id: str | None = None,
+    source_thread_id: str | None = None,
 ) -> RoutineRow:
     """`channel_id` is the channel the routine's spend counts against (see `Routine`)."""
     if catch_up_policy not in ("skip", "run-once"):
@@ -71,7 +72,7 @@ async def create_routine(
         session, tenant_id, destination_kind, destination_id, created_by_user_id
     )
     if destination_kind == "dm":
-        await _check_dm_source(session, tenant_id, channel_id)
+        await validate_dm_source(session, tenant_id, channel_id, source_thread_id)
     orm = Routine(
         tenant_id=tenant_id,
         created_by_user_id=created_by_user_id,
@@ -86,6 +87,7 @@ async def create_routine(
         destination_kind=destination_kind,
         destination_id=destination_id,
         channel_id=channel_id,
+        source_thread_id=source_thread_id,
     )
     session.add(orm)
     await session.flush()
@@ -244,7 +246,10 @@ async def update_routine(
         destination_id = await _resolve_destination(
             session, tenant_id, destination_kind, destination_id, current.created_by_user_id
         )
-        dm_source = current.channel_id
+        dm_source = channel_id or current.channel_id
+        dm_thread = current.source_thread_id
+        if current.destination_kind == "thread":
+            dm_thread = current.destination_id
         if destination_kind == "dm":
             if dm_source is None and current.destination_kind == "channel":
                 dm_source = current.destination_id
@@ -254,11 +259,12 @@ async def update_routine(
                     raise StoreError(
                         "resolve the source thread's parent before selecting DM delivery"
                     )
-            await _check_dm_source(session, tenant_id, dm_source)
+            await validate_dm_source(session, tenant_id, dm_source, dm_thread)
         values.update(
             destination_kind=destination_kind,
             destination_id=destination_id,
             channel_id=dm_source if destination_kind == "dm" else channel_id,
+            source_thread_id=dm_thread if destination_kind == "dm" else None,
         )
         if current.destination_kind == "dm" and destination_kind != "dm":
             # A private preview must not survive a move to a shared destination.
@@ -274,6 +280,15 @@ async def update_routine(
                 delivery_note="destination_changed",
                 delivery_payload=None,
             )
+    # Metadata-only edits must also respect a seal added after conversion.
+    current = await get_routine(session, routine_id, tenant_id=tenant_id)
+    if (
+        current is not None
+        and current.destination_kind == "dm"
+        and not clear_destination
+        and destination_kind is None
+    ):
+        await validate_dm_source(session, tenant_id, current.channel_id, current.source_thread_id)
     if catch_up_policy is not None:
         if catch_up_policy not in ("skip", "run-once"):
             raise StoreError("catch_up_policy must be skip or run-once")
@@ -560,11 +575,19 @@ async def routine_platform(session: AsyncSession, routine_id: _uuid.UUID) -> str
     )
 
 
-async def _check_dm_source(
-    session: AsyncSession, tenant_id: _uuid.UUID, channel_id: str | None
+async def validate_dm_source(
+    session: AsyncSession,
+    tenant_id: _uuid.UUID,
+    channel_id: str | None,
+    thread_id: str | None = None,
 ) -> None:
+    """Shared save/dry-run source sealing check, including the original thread."""
+    if thread_id is not None and channel_id is None:
+        raise StoreError("a source thread requires its parent channel")
     policy = await load_access_policy(session, tenant_id=tenant_id)
-    if channel_id is not None and limiting_ids_at(policy, channel_id=channel_id, thread_id=None):
+    if channel_id is not None and limiting_ids_at(
+        policy, channel_id=channel_id, thread_id=thread_id
+    ):
         raise StoreError("a routine from a restricted source cannot deliver by DM")
 
 

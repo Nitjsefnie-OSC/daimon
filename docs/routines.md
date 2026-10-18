@@ -31,8 +31,10 @@ Both the tenant's inbound DM enablement and outbound recipient policy apply.
 Daimon checks current owner membership and invoker permissions at fire and
 again before each delivery chunk. Restricted sources cannot be converted to
 DM delivery; source restrictions and agent rules are checked again at fire
-and delivery. Explicit owner-DM routines can read their owner's personal
-memory; all routine memory mounts remain read-only.
+and delivery, including the original source thread and its parent. DM routine
+runs mount no personal memory. Tenant memory remains read-only, and tool
+authority stays the same as for channel routines; selecting DM delivery does
+not restrict tools to private output.
 
 The host queues the final reply through the outbox and sends chunks of at
 most 2,000 characters with mentions disabled. The notification includes the
@@ -55,8 +57,10 @@ daimon routines create --tenant TENANT_UUID --owner DISCORD_USER_ID \
 
 Remove `--dry-run` to write it. Dry-run still verifies the live owner and
 agent, and prints the resolved recipient and budget source. An optional
-`--source-channel` preserves a channel budget. There is no independent
-recipient option. Use MCP or the owner-only delivery choice in `/routines`
+`--source-channel` must resolve to a supported channel or thread in the selected
+tenant's Discord guild. Threads retain their parent for budgeting and their own
+ID for source restriction checks. Dry-run performs the same source verification
+and sealing checks as a save. There is no independent recipient option. Use MCP or the owner-only delivery choice in `/routines`
 for interactive edits; list/get include the resolved owner ID and delivery
 status. `clear_destination=true` retains its existing meaning.
 
@@ -513,11 +517,11 @@ it with `context_fragments.routine` in their YAML spec; see [architecture](archi
 Routine sessions always mount persistent agent memory read-only, regardless of the
 tenant's chat or DM policy. They can use saved memory but cannot change it. A routine
 with a channel/thread destination mounts only shared memory, since others may
-read its answer. An explicit owner-DM routine also mounts the owner's personal
-memory read-only, as does a legacy routine with neither destination nor channel.
-This is decided at every fire; changing to a public destination stops the
-personal mount. Admins can manage DM routine metadata but do not receive its
-private output previews.
+read its answer. Explicit owner-DM routines mount no personal memory and retain
+the same tool authority as channel routines. Only a legacy routine with neither
+destination nor channel may mount the owner's personal memory read-only.
+This is decided at every fire. Admins can manage DM routine metadata but do not
+receive its private output previews.
 
 A routine session is stamped like a turn in the channel it fires into: the
 destination's channel (a thread's parent), the thread, and the readers limits

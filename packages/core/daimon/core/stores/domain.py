@@ -256,6 +256,7 @@ class RoutineRow(BaseModel):
     delivery_payload: str | None = None
     delivered_at: datetime | None = None
     channel_id: str | None = None
+    source_thread_id: str | None = None
     created_at: datetime
     updated_at: datetime
 

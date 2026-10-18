@@ -55,6 +55,8 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
+from daimon.core.discord_membership import verify_discord_source
+from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import any_agent_rules, any_own_readers, home_of, limiting_ids_at
 from daimon.core.routine_delivery import destination_shape_error
@@ -539,6 +541,16 @@ async def _create_routine_impl(
         )
 
     origin = await get_verified_origin(runtime, auth, origin_context_id)
+    source_thread_id = None
+    if destination_kind == "dm" and budget_channel_id is not None:
+        try:
+            budget_channel_id, source_thread_id = await verify_discord_source(
+                _require_bot_token(runtime),
+                guild_id=_require_guild_id(auth),
+                channel_id=origin.thread_id if origin is not None else budget_channel_id,
+            )
+        except StoreError as exc:
+            raise ToolError(str(exc)) from exc
     caller = await load_isolation_view(runtime, auth, location_channel_id=origin_channel_id(origin))
     match = await find_agent_by_daimon_tag(
         runtime.client,
@@ -582,6 +594,7 @@ async def _create_routine_impl(
             destination_kind=destination_kind,
             destination_id=destination_id,
             channel_id=budget_channel_id,
+            source_thread_id=source_thread_id,
         )
 
 
@@ -655,12 +668,20 @@ async def _update_routine_impl(
             if row.created_by_user_id != auth.platform_user_id or row.created_by_user_id is None:
                 raise ToolError("only the authenticated owner can select DM delivery")
             destination_id = row.created_by_user_id
-            if row.destination_kind == "thread" and row.channel_id is None and row.destination_id:
-                new_destination_channel_id, _ = await _resolve_discord_destination(
-                    runtime, auth, kind="thread", destination_id=row.destination_id
-                )
-                if new_destination_channel_id is None:
-                    raise ToolError("The source thread's parent could not be resolved.")
+            source_id = (
+                row.destination_id
+                if row.destination_kind in ("channel", "thread")
+                else row.source_thread_id or row.channel_id
+            )
+            if source_id is not None:
+                try:
+                    new_destination_channel_id, _ = await verify_discord_source(
+                        _require_bot_token(runtime),
+                        guild_id=_require_guild_id(auth),
+                        channel_id=source_id,
+                    )
+                except StoreError as exc:
+                    raise ToolError(str(exc)) from exc
         if clear_destination:
             destination_channel_id = None
         elif destination_id is not None:
@@ -794,6 +815,10 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str | None = None,
     ) -> RoutineRow:
         """Create a recurring routine with optional channel, thread or owner-DM delivery.
+
+        DM runs mount no personal memory and retain ordinary channel-routine tool
+        authority. Sources must be supported channels/threads in this tenant's guild;
+        the original thread and parent remain subject to reader restrictions.
 
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
 

@@ -3053,7 +3053,7 @@ async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) 
 
 
 @pytest.mark.parametrize("explicit_dm", [False, True])
-async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_memory(
+async def test_explicit_dm_never_reads_personal_memory_and_legacy_owner_only_can(
     explicit_dm: bool,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -3118,7 +3118,7 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
         await fire(posting)
     await fake_client.close()
 
-    assert [call["personal_memory"] for call in calls] == [True, False]
+    assert [call["personal_memory"] for call in calls] == [not explicit_dm, False]
     assert calls[0]["account_id"] is not None, "the owner's account selects the store"
 
 
@@ -3205,7 +3205,8 @@ async def test_role_gated_fire_fetches_fresh_creator_facts(
 
 
 @pytest.mark.parametrize(
-    "mode", ["tenant_disabled", "outbound_disabled", "revoked", "unknown", "sealed"]
+    "mode",
+    ["tenant_disabled", "outbound_disabled", "revoked", "unknown", "sealed", "thread_sealed"],
 )
 async def test_dm_fire_refuses_disabled_or_unverified_private_access(
     db_session, db_session_factory, monkeypatch, mode
@@ -3228,13 +3229,18 @@ async def test_dm_fire_refuses_disabled_or_unverified_private_access(
         trigger_message="summary",
         destination_kind="dm",
         channel_id="456",
+        source_thread_id="789",
     )
     await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=mode != "tenant_disabled")
-    if mode == "sealed":
+    if mode in ("sealed", "thread_sealed"):
         await set_access_policy(
             db_session,
             tenant_id=tenant.id,
-            policy=TenantAccessPolicy(channel_rules={"456": ChannelRule(readers="inside")}),
+            policy=TenantAccessPolicy(
+                channel_rules={
+                    "789" if mode == "thread_sealed" else "456": ChannelRule(readers="inside")
+                }
+            ),
         )
     await db_session.commit()
     settings = _make_test_settings(monkeypatch).model_copy(

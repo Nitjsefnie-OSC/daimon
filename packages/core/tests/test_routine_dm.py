@@ -154,3 +154,27 @@ async def test_legacy_thread_needs_a_resolved_source_before_dm_conversion(db_ses
         db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm", channel_id="456"
     )
     assert converted is not None and converted.channel_id == "456"
+
+
+async def test_thread_conversion_preserves_source_and_checks_later_seals(db_session):
+    from daimon.core.rule_views import keeps_routine_inside
+
+    row = await _create(
+        db_session, destination_kind="thread", destination_id="789", channel_id="456"
+    )
+    policy = TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")})
+    await set_access_policy(db_session, tenant_id=row.tenant_id, policy=policy)
+    with pytest.raises(StoreError, match="restricted source"):
+        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+    await set_access_policy(db_session, tenant_id=row.tenant_id, policy=TenantAccessPolicy())
+    converted = await update_routine(
+        db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm"
+    )
+    assert converted is not None
+    assert (converted.channel_id, converted.source_thread_id) == ("456", "789")
+    await set_access_policy(db_session, tenant_id=row.tenant_id, policy=policy)
+    assert keeps_routine_inside(policy, converted), "the fire-time gate retains thread provenance"
+    with pytest.raises(StoreError, match="restricted source"):
+        await update_routine(
+            db_session, row.id, tenant_id=row.tenant_id, trigger_message="admin edit"
+        )

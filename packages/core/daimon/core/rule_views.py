@@ -131,13 +131,24 @@ def routine_answers_only_owner(row: RoutineRow) -> bool:
 
     Explicit DM delivery reaches only the owner, even with a saved source
     channel. A legacy routine with neither destination nor channel also keeps
-    its result private. Both may read the owner's personal memory read-only.
+    its result private. Only the legacy owner-only case may read personal
+    memory; explicit DM routines retain ordinary tool authority and never
+    mount personal memory.
     A channel/thread routine may fall back to a DM, but cannot read personal
     memory because public delivery remains possible. Decided at every fire.
     """
     return row.destination_kind == "dm" or (
         row.destination_kind is None and row.destination_id is None and row.channel_id is None
     )
+
+
+def routine_mounts_personal_memory(row: RoutineRow) -> bool:
+    """Only legacy owner-only runs mount personal memory.
+
+    Explicit DM delivery retains ordinary tool authority, so its execution
+    must never load the owner's personal store.
+    """
+    return row.destination_kind != "dm" and routine_answers_only_owner(row)
 
 
 def is_routine_parent_unknown(row: RoutineRow) -> bool:
@@ -235,7 +246,7 @@ def keeps_routine_inside(
     if (
         row.destination_kind == "dm"
         and row.channel_id is not None
-        and limiting_ids_at(policy, channel_id=row.channel_id, thread_id=None)
+        and limiting_ids_at(policy, channel_id=row.channel_id, thread_id=row.source_thread_id)
     ):
         return True
     if channel_permissions(policy, channel_id=parent_channel_id).keeps_content:

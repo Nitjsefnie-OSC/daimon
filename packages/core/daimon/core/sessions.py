@@ -616,10 +616,11 @@ async def create_session(
     handling. Only a caller whose session belongs to one verified person
     passes it: an interactive chat turn (keyed on the caller's account), a hub
     `ask`/`start_turn` (platform sign-in, owner-only handles) and a routine
-    whose result reaches only its owner (`rule_views.routine_answers_only_owner`,
-    read-only). Every other caller (agent keys, operator and CLI tokens, routines
-    with a destination) leaves it off and mounts the shared store alone, with
-    instructions that forbid recording personal facts.
+    with neither destination nor channel (`rule_views.routine_mounts_personal_memory`,
+    read-only). Explicit DM routines never enable this mount. Every other caller
+    (agent keys, operator and CLI tokens, routines with a destination) leaves it
+    off and mounts the shared store alone, with instructions that forbid
+    recording personal facts.
 
     GitHub repository resources and credentials come from the agent's usable
     GitHub App grants. ``prepare_app_access`` mints installation tokens and

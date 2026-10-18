@@ -17,6 +17,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
+import httpx
 import structlog
 import typer
 from anthropic import APIStatusError
@@ -26,19 +27,19 @@ from daimon.core.config import DirectMessagePolicy, load_settings
 from daimon.core.cron import validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.discord_membership import DiscordRestMembershipResolver
-from daimon.core.errors import UserFacingError
+from daimon.core.discord_membership import DiscordRestMembershipResolver, verify_discord_source
+from daimon.core.errors import StoreError, UserFacingError
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
-from daimon.core.permissions import limiting_ids_at
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.routines import (
     create_routine,
     list_routines_missing_agent_name,
     update_routine,
+    validate_dm_source,
 )
 from daimon.core.stores.tenants import get_tenant
 from rich.console import Console
@@ -184,6 +185,7 @@ async def run_create_dm_routine(
     source_channel: str | None,
     dry_run: bool,
     resolver: MembershipResolver,
+    source_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     """Verify the selected owner and source before writing, including in dry-run."""
     next_fire = validated_next_slot(schedule, timezone, datetime.now(UTC))
@@ -202,10 +204,20 @@ async def run_create_dm_routine(
             owner
         ):
             raise UserFacingError("Routine DMs are disabled or the owner is not allowed.")
-        if source_channel is not None and limiting_ids_at(
-            policy, channel_id=source_channel, thread_id=None
-        ):
-            raise UserFacingError("A restricted source cannot deliver by DM.")
+        source_thread_id = None
+        if source_channel is not None:
+            if rt.settings.discord is None:
+                raise UserFacingError("Discord bot credentials are required to verify the source.")
+            try:
+                source_channel, source_thread_id = await verify_discord_source(
+                    rt.settings.discord.bot_token.get_secret_value(),
+                    guild_id=tenant.external_id,
+                    channel_id=source_channel,
+                    transport=source_transport,
+                )
+                await validate_dm_source(session, tenant_id, source_channel, source_thread_id)
+            except StoreError as exc:
+                raise UserFacingError(str(exc)) from exc
     subject = await resolve_subject(
         rt.sessionmaker, resolver, tenant_id=tenant_id, user_id=owner, require_fresh=True
     )
@@ -241,6 +253,7 @@ async def run_create_dm_routine(
             trigger_message=trigger,
             destination_kind="dm",
             channel_id=source_channel,
+            source_thread_id=source_thread_id,
             next_fire_at=next_fire,
         )
     console.print(f"Created routine {row.id}.")

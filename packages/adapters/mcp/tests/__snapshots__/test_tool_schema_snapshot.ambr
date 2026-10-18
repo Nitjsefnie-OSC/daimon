@@ -1957,6 +1957,10 @@
       'description': '''
         Create a recurring routine with optional channel, thread or owner-DM delivery.
         <blank line>
+        DM runs mount no personal memory and retain ordinary channel-routine tool
+        authority. Sources must be supported channels/threads in this tenant's guild;
+        the original thread and parent remain subject to reader restrictions.
+        <blank line>
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
         <blank line>
         ``destination_kind`` (``channel``, ``thread`` or ``dm``) and ``destination_id``
