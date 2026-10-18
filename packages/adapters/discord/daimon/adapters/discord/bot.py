@@ -1208,6 +1208,7 @@ class DaimonBot(commands.Bot):
                             row.tenant_id, DirectMessagePolicy()
                         ),
                         client=self,
+                        output_client=self.runtime.anthropic,
                         membership_resolver=self.membership_resolver,
                         resolve_agent_names=self._routine_agent_names,
                         resolve_identity=lambda row, guild_id: resolve_routine_identity(

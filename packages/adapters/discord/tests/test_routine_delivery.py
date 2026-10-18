@@ -917,3 +917,164 @@ async def test_dm_delivery_rechecks_all_live_agent_names(db_session_factory, age
     result = await poster(row.model_copy(update={"delivery_payload": "private"}))
     assert result.status == ("delivered" if agent_state == "unrelated_rule" else "skipped")
     assert bool(dms.sent) == (agent_state == "unrelated_rule")
+
+
+@pytest.mark.parametrize("destination", ["channel", "dm"])
+@pytest.mark.parametrize("scenario", ["success", "failure", "oversize"])
+async def test_generated_files_share_the_at_most_once_outbox(
+    db_session, db_session_factory, destination, scenario
+):
+    from datetime import UTC, datetime
+
+    import httpx
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.routine_delivery import poll_deliveries_once
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+    from daimon.core.stores.routines import get_routine, update_routine
+    from daimon.testing.ma import MARouter, build_fake_anthropic
+
+    row = await _routine(db_session)
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="Report",
+            files=[
+                RoutineFile(
+                    file_id="file_report",
+                    filename="report.csv",
+                    mime_type="text/csv",
+                    size_bytes=11 * 1024 * 1024 if scenario == "oversize" else 4,
+                )
+            ],
+        ).model_dump_json()
+    )
+    async with db_session_factory.begin() as session:
+        if destination == "dm":
+            await update_routine(session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+        await record_result(
+            session, row.id, tail="Report", error=None, delivery="pending", delivery_payload=payload
+        )
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/files/([^/]+)/content", lambda r, m: httpx.Response(200, content=b"data")
+    )
+    channel = _text_channel()
+    channel.guild.filesize_limit = 10 * 1024 * 1024
+    dm = MagicMock(spec=discord.DMChannel)
+    dm.guild = None
+    dm.send = AsyncMock()
+    destination_transport = dm if destination == "dm" else channel
+    uploaded = []
+
+    async def send(**kwargs):
+        if "file" in kwargs:
+            uploaded.append(kwargs)
+            if scenario == "failure":
+                raise RuntimeError("uncertain upload")
+        return SimpleNamespace(id=123)
+
+    destination_transport.send = AsyncMock(side_effect=send)
+
+    async def membership(*args):
+        return Membership(is_member=True)
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(return_value=channel),
+        open_dm=AsyncMock(return_value=dm),
+        dm_policy=lambda _: DirectMessagePolicy(mode="members"),
+        membership_resolver=CachedMembershipResolver(membership),
+        output_client=build_fake_anthropic(router.dispatch),
+    )
+    for _ in range(2):
+        await poll_deliveries_once(
+            db_session_factory, platform="discord", post=poster, now=datetime.now(UTC)
+        )
+    if scenario == "oversize":
+        assert not uploaded
+        notices = [
+            call.kwargs.get("content", "") for call in destination_transport.send.await_args_list
+        ]
+        assert any("upload limit" in text for text in notices)
+    else:
+        assert len(uploaded) == 1
+        assert uploaded[0]["file"].fp.read() == b"data"
+        assert uploaded[0]["allowed_mentions"].everyone is False
+    if destination == "dm":
+        channel.send.assert_not_awaited()
+    else:
+        dm.send.assert_not_awaited()
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert after.delivery_status == ("skipped" if scenario == "failure" else "delivered")
+
+
+async def test_destination_change_between_text_and_file_cancels_payload(
+    db_session, db_session_factory
+):
+    from datetime import UTC, datetime
+
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.routine_delivery import poll_deliveries_once
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+    from daimon.core.stores.routines import get_routine, update_routine
+    from daimon.testing.ma import build_fake_anthropic
+
+    row = await _routine(db_session)
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="Report",
+            files=[
+                RoutineFile(
+                    file_id="file_report", filename="report.csv", mime_type="text/csv", size_bytes=4
+                )
+            ],
+        ).model_dump_json()
+    )
+    async with db_session_factory.begin() as session:
+        await record_result(
+            session, row.id, tail="Report", error=None, delivery="pending", delivery_payload=payload
+        )
+    channel = _text_channel()
+    channel.guild.filesize_limit = 10 * 1024 * 1024
+
+    async def send(**kwargs):
+        assert "file" not in kwargs
+        async with db_session_factory.begin() as session:
+            await update_routine(
+                session,
+                row.id,
+                tenant_id=row.tenant_id,
+                destination_kind="channel",
+                destination_id="777",
+            )
+        return SimpleNamespace(id=123)
+
+    channel.send = AsyncMock(side_effect=send)
+    reads = []
+
+    def no_reads(request):
+        reads.append(request)
+        raise AssertionError("a cancelled payload must not download files")
+
+    async def membership(*args):
+        return Membership(is_member=True)
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(return_value=channel),
+        open_dm=AsyncMock(side_effect=AssertionError("no fallback after changing destination")),
+        dm_policy=lambda _: DirectMessagePolicy(mode="members"),
+        membership_resolver=CachedMembershipResolver(membership),
+        output_client=build_fake_anthropic(no_reads),
+    )
+    await poll_deliveries_once(
+        db_session_factory, platform="discord", post=poster, now=datetime.now(UTC)
+    )
+    assert not reads
+    channel.send.assert_awaited_once()
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert after.destination_id == "777"
+    assert after.delivery_payload is None

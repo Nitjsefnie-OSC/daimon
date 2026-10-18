@@ -96,7 +96,7 @@ through `packages/core/daimon/core/stores/routines.py`:
 | `destination_kind` / `destination_id` | optional: `channel`, `thread` or `dm` and its id, set together or not at all. On Slack a thread is `<channel id>:<thread ts>`, on Teams `<channel id>;messageid=<root id>` |
 | `channel_id` | the channel whose budget a run's spend counts against: the destination's parent channel, set when the destination is; without a destination, the channel the routine was made in (MCP `origin_context_id`, or the Slack panel's channel); `NULL` from a DM or with no origin. Clearing the destination keeps it |
 | `delivery_status`, `delivery_note`, `delivered_at` | the outbox for the last result: `pending` → `claimed` → `delivered` or `skipped` (with why); `NULL` for a routine without a destination |
-| `delivery_payload` | the text a pending post carries: that fire's result, copied so a writer that only knows `last_result_tail` (an older scheduler) cannot change what gets posted |
+| `delivery_payload` | versioned full reply and generated file references (legacy rows contain plain text): that fire's result, copied so a writer that only knows `last_result_tail` (an older scheduler) cannot change what gets posted |
 | `delivery_lease_owner` / `delivery_lease_expires_at` | the poster holding a `claimed` row |
 
 Slot arithmetic lives in `packages/core/daimon/core/cron.py`, whose
@@ -286,7 +286,9 @@ non-error `send_message` on Daimon's own server — called directly or through
 the MCP search interface's `call_tool(name="send_message", arguments=…)` —
 whose `channel_id` is exactly the destination (a Slack thread counts only as
 `<channel>:<ts>`; a top-level post in its channel is not the thread). If the
-agent posted there, the outbox is `skipped` with note `agent_posted`.
+agent posted there and left no generated files to deliver, the outbox is
+`skipped` with note `agent_posted`. Remaining files are queued without
+repeating the final reply.
 Otherwise it is `pending`, with the complete reply copied into `delivery_payload`.
 Discord, Slack and Teams split long results across messages at word or line
 boundaries and preserve code fences. Creator fallback messages also keep the
@@ -613,3 +615,25 @@ a private fallback. A departed creator, revoked role, or unavailable lookup
 refuses the result; no destination post or private fallback is authorized
 by stale evidence. User exceptions and current server admins retain their
 invoker-policy bypass; destination and agent restrictions remain separate.
+
+### Generated files
+
+After a successful run, Daimon collects its downloadable session outputs with
+the same settled-listing collector used by interactive turns. The delivery
+outbox stores the full reply and file references, never file bytes. Discord
+channels, threads and owner DMs receive attachments; Slack uses its existing
+file uploader for channels, threads and creator fallback DMs. Teams routine
+posts include a plain notice that files are not supported there.
+
+A delivery includes at most ten files. Files above Daimon's 200 MB ceiling,
+or the destination's upload limit (Discord's guild limit, 10 MB in DMs;
+200 MB on Slack), are reported in text and remain in the workspace. Files
+beyond the count limit are reported too. Internal workspace handoff bundles
+and empty files are excluded. Provider copies remain subject to normal
+workspace retention; an unavailable reference stops delivery with a failure.
+
+Files share the result's at-most-once outbox claim. A partial or uncertain
+send is not retried automatically. Changing the destination cancels pending
+payloads, including their files. Each file send rechecks the saved destination
+and live owner access; owner DM delivery retains the same privacy and
+no-personal-memory rules as text. Run-failure notices never carry files.

@@ -444,8 +444,21 @@ async def test_protected_thread_posts_nothing_and_keeps_file() -> None:
 
 
 async def test_tool_turn_sweeps_detached_and_same_session_sweeps_chain() -> None:
-    runtime = MagicMock()
-    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    from daimon.core.ma_resolver import new_resolver_cache
+    from daimon.core.scope import DeploymentDefault
+    from daimon.testing.turn_fakes import deps_for
+
+    runtime = DiscordRuntime(
+        settings=MagicMock(),
+        anthropic=MagicMock(),
+        sessionmaker=MagicMock(),
+        notebook_rate_limiter=MagicMock(),
+        billing_config=None,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        turn_deps=deps_for(),
+    )
+    bot = DaimonBot(runtime=runtime, intents=discord.Intents.default())
     thread = _thread()
     tenant_id = uuid.uuid4()
     text_outcome = RunOutcome(
@@ -659,7 +672,8 @@ async def test_a_failed_answer_edit_posts_the_file_and_never_reposts_the_answer(
     transport_send.assert_not_awaited()
     thread.send.assert_awaited_once()
     sent = thread.send.await_args.kwargs
-    assert set(sent) == {"file"}, "the fallback is the file alone, not the answer's text"
+    assert set(sent) == {"file", "allowed_mentions"}
+    assert sent["allowed_mentions"].everyone is False
     assert sent["file"].filename == "brief_short.pdf"
     assert deleted == ["file_a"]
 

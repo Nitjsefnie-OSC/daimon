@@ -162,7 +162,7 @@ class NoticedFiles:
             self._ids.popitem(last=False)
 
 
-async def _poll_until_settled(
+async def poll_output_files(
     anthropic_client: AsyncAnthropic,
     *,
     session_id: str,
@@ -179,7 +179,7 @@ async def _poll_until_settled(
     written before then. The schedule then polls at once, then at the minimum.
     """
     seen: dict[str, FileMetadata] = {}
-    scope = scope or Scope.legacy_host_authorized(call_site="output_delivery:_poll_until_settled")
+    scope = scope or Scope.legacy_host_authorized(call_site="output_delivery:poll_output_files")
     elapsed = quiet_s or 0.0
     delays = _POLL_DELAYS_S
     if quiet_s is not None:
@@ -289,7 +289,7 @@ async def sweep_session_outputs(
     file no larger than it is deleted after its notice, as before, while a
     larger one, which no destination could take, is still kept.
     """
-    settled = await _poll_until_settled(
+    settled = await poll_output_files(
         anthropic_client, session_id=session_id, sleep=sleep, scope=scope, quiet_s=quiet_s
     )
 

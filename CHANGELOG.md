@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; interrupted deliveries are never automatically retried.
+
 - Discord routines can deliver privately to their owner through MCP, the routines panel, or `daimon routines create --destination dm`. Delivery rechecks live access, respects tenant DM controls, and exposes failures without public fallback or automatic retries. DM routine runs mount no personal memory; tenant memory stays read-only and tool authority stays the same as for channel routines. Creation-time source channels, threads and provenance status are immutable across retargeting, clearing and DM conversion. Legacy unknown-source routines retain ordinary edits and firing, but must be recreated from their source to get DM delivery. Routines created from a private conversation verify its saved guild source; cold conversations remain source-free, and unknown provenance refuses DM delivery. CLI source IDs are verified against the selected tenant's guild, including in dry-run.
 - Private Discord replies recheck the answering agent's current pin and isolation rules before delivery. Unavailable bound agents and unreadable private policies are silent, and superseded server-switch controls are retired.
 

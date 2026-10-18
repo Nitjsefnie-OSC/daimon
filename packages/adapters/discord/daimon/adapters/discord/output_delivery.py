@@ -113,7 +113,7 @@ async def deliver_session_outputs(
         if await target.attach(file.content, name):
             return
         try:
-            await thread.send(file=discord.File(io.BytesIO(file.content), filename=name))
+            await upload_output_file(thread, file)
         except discord.Forbidden as exc:
             raise OutputPostingUnavailable("attach_files_forbidden") from exc
 
@@ -162,6 +162,16 @@ async def deliver_session_outputs(
         notice_thread_ids.add(thread.id)
 
 
+async def upload_output_file(destination: discord.abc.Messageable, file: DeliverableFile) -> None:
+    """Upload one output with the same filename normalization as interactive turns."""
+    await destination.send(
+        file=discord.File(
+            io.BytesIO(file.content), filename=display_filename_for(file.filename, file.mime_type)
+        ),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 async def deliver_provider_output(
     file: DeliverableFile,
     thread: discord.Thread,
@@ -185,7 +195,7 @@ async def deliver_provider_output(
     name = display_filename_for(file.filename, file.mime_type)
     target = _AnswerTarget(thread, answer, session_id=session_id)
     if not await target.attach(file.content, name):
-        await thread.send(file=discord.File(io.BytesIO(file.content), filename=name))
+        await upload_output_file(thread, file)
     return True
 
 

@@ -2151,3 +2151,11 @@ owner's DM and before each chunk. Recipient IDs are never channel targets or
 budget sources. Notifications do not alter the selected cold-DM conversation
 or its model history. Delivery uses the existing at-most-once claim/settle
 leases, with no public fallback or automatic retry after an uncertain send.
+
+Routine result delivery collects settled session outputs after the successful
+headless turn and stores a versioned text-and-file-reference envelope in the
+existing outbox payload. Adapters download and upload those references inside
+the claim/settle lease, rechecking destination and owner access before each
+file. Discord and Slack reuse their interactive upload paths; Teams routine
+posts explain that attachments are unsupported. Failure notices remain text
+only, and an uncertain send is settled without an automatic retry.

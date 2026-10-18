@@ -152,8 +152,8 @@ def _uploader(web_client: AsyncWebClient, *, size_bytes: int) -> AsyncWebClient:
     )
 
 
-def _build_poster(
-    web_client: AsyncWebClient, *, channel_id: str, thread_ts: str
+def build_output_poster(
+    web_client: AsyncWebClient, *, channel_id: str, thread_ts: str | None
 ) -> Callable[[DeliverableFile], Awaitable[None]]:
     async def post(file: DeliverableFile) -> None:
         display_name = display_filename_for(file.filename, file.mime_type)
@@ -211,7 +211,7 @@ async def deliver_session_outputs(
     ``noticed_files`` records the kept oversize outputs already announced, so
     a file over the limit gets one notice rather than one per sweep.
     """
-    post = _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)
+    post = build_output_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)
     on_skip = _build_skip_notice(
         web_client,
         channel_id=channel_id,
@@ -269,5 +269,5 @@ async def deliver_provider_output(
         or file.size_bytes > SLACK_MAX_BYTES_PER_FILE
     ):
         return False
-    await _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)(file)
+    await build_output_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)(file)
     return True

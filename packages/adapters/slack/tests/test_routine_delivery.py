@@ -278,6 +278,7 @@ async def test_no_dm_for_a_creator_the_dm_policy_excludes(
         SlackRuntime,
         SimpleNamespace(
             sessionmaker=db_session_factory,
+            anthropic=MagicMock(),
             settings=SimpleNamespace(
                 direct_message_policies={row.tenant_id: DirectMessagePolicy(mode="disabled")}
             ),
@@ -427,3 +428,53 @@ async def test_dm_row_is_explicitly_refused_without_channel_or_dm_io(
     assert result.status == "skipped" and "only on Discord" in result.note
     client.chat_postMessage.assert_not_awaited()
     client.conversations_open.assert_not_awaited()
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_generated_files_use_existing_slack_upload_path(
+    db_session, db_session_factory, monkeypatch, fallback
+):
+    import httpx
+    from daimon.core.routine_files import OUTBOX_FILES, PREFIX, RoutineFile, RoutinePayload
+    from daimon.testing.ma import MARouter, build_fake_anthropic
+
+    row = await _routine(db_session, kind="thread", destination_id="C1:1717.5")
+    row = row.model_copy(
+        update={
+            "delivery_note": OUTBOX_FILES,
+            "delivery_payload": PREFIX
+            + RoutinePayload(
+                text="Report",
+                files=[
+                    RoutineFile(
+                        file_id="file_report",
+                        filename="report.csv",
+                        mime_type="text/csv",
+                        size_bytes=4,
+                    )
+                ],
+            ).model_dump_json(),
+        }
+    )
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/files/([^/]+)/content", lambda r, m: httpx.Response(200, content=b"data")
+    )
+    provider = build_fake_anthropic(router.dispatch)
+    original = poster_mod.deliver_routine_files
+
+    async def deliver(_client, *args, **kwargs):
+        await original(provider, *args, **kwargs)
+
+    monkeypatch.setattr(poster_mod, "deliver_routine_files", deliver)
+    post, client = _poster(db_session_factory, monkeypatch)
+    client.files_upload_v2 = AsyncMock()
+    if fallback:
+        client.conversations_replies = AsyncMock(return_value={"messages": []})
+    outcome = await post(row)
+    assert outcome.status == "delivered"
+    client.files_upload_v2.assert_awaited_once()
+    upload = client.files_upload_v2.await_args.kwargs
+    assert upload["content"] == b"data"
+    assert upload["channel"] == ("D_CREATOR" if fallback else "C1")
+    assert upload["thread_ts"] == (None if fallback else "1717.5")

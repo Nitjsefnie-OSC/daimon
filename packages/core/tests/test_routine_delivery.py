@@ -483,10 +483,26 @@ async def test_claims_are_per_platform(db_session: AsyncSession) -> None:
 
 async def test_clearing_the_destination_drops_a_pending_post(db_session: AsyncSession) -> None:
     row = await _routine(db_session)
-    await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="t",
+            files=[
+                RoutineFile(
+                    file_id="file_report", filename="report.csv", mime_type="text/csv", size_bytes=4
+                )
+            ],
+        ).model_dump_json()
+    )
+    await record_result(
+        db_session, row.id, tail="t", error=None, delivery="pending", delivery_payload=payload
+    )
     await update_routine(db_session, row.id, tenant_id=row.tenant_id, clear_destination=True)
     after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
     assert after is not None
+    assert after.delivery_payload is None
     assert (after.destination_kind, after.destination_id, after.delivery_status) == (
         None,
         None,
