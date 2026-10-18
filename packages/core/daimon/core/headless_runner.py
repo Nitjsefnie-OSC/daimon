@@ -544,21 +544,21 @@ async def commit_worker_transition(
             if latest.status in TERMINAL:
                 updated = latest  # Preserve a concurrent completion/sweep's terminal result.
             else:
-                if failure_code == "preparation_refused":
-                    changed = (
-                        (worker.status, worker.binding_id, worker.turns_used)
-                        != ("starting", None, 0)
-                        or latest.error_code not in (None, "stop_requested")
-                        or replace(latest, version=worker.version, error_code=worker.error_code)
-                        != worker
-                    )
-                else:
-                    changed = (
-                        latest.status not in ("starting", "running")
-                        or latest.attempts != worker.attempts
-                        or latest.version < worker.version
-                    )
-                if changed:
+                dispatch_changed = (
+                    latest.status not in ("starting", "running")
+                    or latest.attempts != worker.attempts
+                    or latest.version < worker.version
+                )
+                if failure_code == "preparation_refused" and (
+                    (worker.status, worker.binding_id, worker.turns_used) != ("starting", None, 0)
+                    or latest.error_code not in (None, "stop_requested")
+                    or replace(latest, version=worker.version, error_code=worker.error_code)
+                    != worker
+                ):
+                    # The claim moved on (e.g. funded) but is still this attempt's:
+                    # end it as a dispatch refusal rather than leave it running.
+                    failure_code = "dispatch_refused"
+                if dispatch_changed:
                     raise FleetConflict("worker preparation claim changed", reason="claim_changed")
                 updated = await fleet_store.finish(
                     db,
@@ -968,11 +968,7 @@ async def run_worker(
     except BaseException as error:
         if not native_started:
             with contextlib.suppress(FleetConflict):
-                await asyncio.shield(
-                    commit_worker_transition(
-                        request, parent, claim, failure_code="dispatch_refused"
-                    )
-                )
+                await asyncio.shield(commit_worker_transition(request, parent, claim))
         if isinstance(error, TimeoutError):
             raise ceiling_error() from error
         raise

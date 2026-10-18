@@ -860,7 +860,7 @@ class HostFleetPorts:
                         "fleet.worker_task_failed",
                         run_id=str(worker.run_id),
                         worker_id=str(worker.id),
-                        error_class=causes[0]["type"],
+                        error_class=type(error).__name__,
                         causes=causes,
                     )
 

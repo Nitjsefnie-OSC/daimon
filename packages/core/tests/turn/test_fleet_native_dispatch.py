@@ -906,7 +906,7 @@ async def test_run_worker_prelude_refusal_ends_claim_and_publishes_completion(
                     await asyncio.sleep(0.01)
         release.set()
         ended = await _settled(ports, root, reply["worker_id"])
-        assert ended.status == "failed" and ended.error_code == "dispatch_refused"
+        assert ended.status == "failed" and ended.error_code == "preparation_refused"
         assert ended.binding_id is None and ended.attempts == ended.turns_used == 0
         assert ended.reserved_usd == claimed.reserved_usd > 0 and not calls
         await _assert_completion_offered(request, wake_key)
