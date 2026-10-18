@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import anthropic
@@ -15,14 +15,18 @@ from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
 )
+from daimon.core.authz import Action, Place, Surface, authorize
 from daimon.core.config import load_turn_settings
 from daimon.core.errors import UserFacingError
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.ma import interrupt_orphaned_session
+from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.permissions import dm_source_limited, limited_ids
 from daimon.core.scope import ChannelScopeRef
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.setup_conversations import BoundAgentUnavailable
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.direct_messages import (
     COLD_DM_ORIGIN,
     DirectMessageRow,
@@ -45,7 +49,7 @@ from daimon.core.stores.slack_turn_contexts import (
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.thread_sessions import get_live_thread_session, mark_dead
-from daimon.core.turn.admission import Admission, DmSource, admit
+from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit
 from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError
@@ -56,6 +60,7 @@ from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 _log = structlog.get_logger(__name__)
 
@@ -66,6 +71,82 @@ class DirectMessageAccessRevoked(UserFacingError):
     def __init__(self, reason: str, *, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+@dataclass(frozen=True)
+class DirectMessageReply:
+    """Text and the exact agent authority used for this private model turn."""
+
+    text: str
+    conversation: DirectMessageRow
+    grant: AdmissionGrant
+
+
+async def load_dm_access_policy(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> TenantAccessPolicy:
+    """Private-route policy failures are typed denials, never setup instructions."""
+    try:
+        return await load_access_policy(session, tenant_id=tenant_id)
+    except AccessPolicyUnreadable as error:
+        raise DirectMessageAccessRevoked("policy_unreadable", message=str(error)) from error
+
+
+async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None:
+    """Recheck recipient and exact answering agent immediately before private output.
+
+    Agent pins and isolation apply without an admin exemption. A move's source
+    provenance still seals its context independently of the answering identity.
+    """
+    conversation = reply.conversation
+    subject = await resolve_subject(
+        deps.sessionmaker,
+        deps.membership_resolver,
+        tenant_id=conversation.tenant_id,
+        user_id=conversation.external_user_id,
+        require_fresh=True,
+    )
+    async with deps.sessionmaker() as session:
+        policy = await load_dm_access_policy(session, tenant_id=conversation.tenant_id)
+        tenant = await get_tenant(session, conversation.tenant_id)
+        enabled = await dm_enabled(session, tenant_id=conversation.tenant_id)
+        current = await get_conversation(
+            session,
+            platform=conversation.platform,
+            route_key=conversation.route_key,
+            external_user_id=conversation.external_user_id,
+        )
+    if (
+        not enabled
+        or tenant is None
+        or tenant.archived_at is not None
+        or tenant.provision_status != "ready"
+        or current is None
+        or current.scope_id != conversation.scope_id
+        or current.account_id != conversation.account_id
+        or subject.verified_membership is not True
+        or not authorize(policy, subject=subject, action=Action.START_TURN)
+    ):
+        raise DirectMessageAccessRevoked(
+            "delivery_access_revoked", message="Private access revoked."
+        )
+    if _source_is_sealed(policy, conversation):
+        await _quarantine(deps, conversation)
+    agent_subject = replace(subject, is_admin=False)
+    for action in (Action.DIRECT_MESSAGE, Action.RUN_AGENT):
+        decision = authorize(
+            policy,
+            subject=agent_subject,
+            action=action,
+            surface=Surface.DM,
+            agent=reply.grant.agent,
+            place=Place(),
+            recipient_id=conversation.external_user_id,
+        )
+        if not decision:
+            raise DirectMessageAccessRevoked(
+                f"delivery_{decision.reason}", message="Private agent access revoked."
+            )
 
 
 def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:
@@ -413,6 +494,37 @@ async def reply_to_dm(
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
 ) -> str | None:
+    """Compatibility text API for adapters that do not consume a delivery grant."""
+    reply = await reply_to_dm_result(
+        deps,
+        platform=platform,
+        route_key=route_key,
+        external_user_id=external_user_id,
+        message_id=message_id,
+        expected_scope_id=expected_scope_id,
+        text=text,
+        role=role,
+        role_ids=role_ids,
+        verified_membership=verified_membership,
+        on_agent=on_agent,
+    )
+    return reply.text if reply is not None else None
+
+
+async def reply_to_dm_result(
+    deps: TurnDeps,
+    *,
+    platform: str,
+    route_key: str,
+    external_user_id: str,
+    message_id: str,
+    expected_scope_id: str,
+    text: str,
+    role: Role,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
+    on_agent: Callable[[str], Awaitable[None]] | None = None,
+) -> DirectMessageReply | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
     A duplicate delivery returns None. The adapter verifies live membership
@@ -579,7 +691,19 @@ async def reply_to_dm(
             ]
         )
         history = [{"role": turn.role, "text": turn.text} for turn in turns]
-        return answer
+        grant = prepared.admission.grant
+        if grant is None:
+            raise DirectMessageAccessRevoked(
+                "authorization_missing", message="Private authority unavailable."
+            )
+        return DirectMessageReply(text=answer, conversation=conversation, grant=grant)
+    except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
+        reason = (
+            "policy_unreadable"
+            if isinstance(error, AccessPolicyUnreadable)
+            else "agent_unavailable"
+        )
+        raise DirectMessageAccessRevoked(reason, message=str(error)) from error
     except asyncio.CancelledError:
         if bound and deps.running_turns.is_drain_cancel():
             await _settle_shutdown_cancelled_dm(deps, conversation)

@@ -28,7 +28,9 @@ from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
     DirectMessageAccessRevoked,
     admit_cold_dm,
-    reply_to_dm,
+    load_dm_access_policy,
+    reply_to_dm_result,
+    require_dm_delivery,
     require_dm_enabled,
     require_unsealed_source,
     start_cold_dm,
@@ -84,6 +86,7 @@ class _PendingSelection:
     expected_scope_id: str | None
     expires_at: float
     selector_id: int | None = None
+    view: ServerSelector | None = None
 
 
 def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
@@ -96,11 +99,24 @@ def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
 class DirectMessageCog(commands.Cog):
     def __init__(self, bot: DaimonBot) -> None:
         self.bot = bot
+        self._unloaded = False
         self._locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValueDictionary()
         self._pending: dict[tuple[int, int], _PendingSelection] = {}
+        self._switch_views: dict[tuple[int, int], ServerSwitch] = {}
         self._buckets: TTLCache[int, tuple[float, float]] = TTLCache[int, tuple[float, float]](
             10_000, 300
         )
+
+    async def cog_unload(self) -> None:
+        self._unloaded = True
+        for view in self._switch_views.values():
+            view.stop()
+        self._switch_views.clear()
+        for pending in self._pending.values():
+            if pending.view is not None:
+                pending.view.complete()
+        self._pending.clear()
+        self._buckets.clear()
 
     def _lock(self, key: tuple[int, int]) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -188,7 +204,7 @@ class DirectMessageCog(commands.Cog):
         *,
         expected_scope_id: str | None = None,
     ) -> DirectMessageRow | None:
-        if not self._claim_discovery(message.author.id):
+        if self._unloaded or not self._claim_discovery(message.author.id):
             return None
         tenants = await list_tenants_by_platform(self.bot.runtime.sessionmaker, platform="discord")
         candidates: list[tuple[TenantRow, Admission]] = []
@@ -198,6 +214,8 @@ class DirectMessageCog(commands.Cog):
             unknown |= uncertain
             if admission is not None:
                 candidates.append((tenant, admission))
+        if self._unloaded:
+            return None
         if unknown:
             await message.channel.send(
                 "Server membership is temporarily unavailable. Please retry.",
@@ -277,6 +295,7 @@ class DirectMessageCog(commands.Cog):
         view = ServerSelector(
             user_id=key[0], route_id=key[1], servers=servers, choose=choose, expire=expire
         )
+        pending.view = view
         try:
             sent = await message.channel.send(
                 "Choose a server for this private conversation.",
@@ -336,6 +355,8 @@ class DirectMessageCog(commands.Cog):
                         external_user_id=str(key[0]),
                     )
                 if current is None or current.scope_id != scope_id:
+                    view.stop()
+                    expire()
                     await interaction.response.send_message(
                         "This conversation changed. Use its latest switch control.", ephemeral=True
                     )
@@ -357,7 +378,21 @@ class DirectMessageCog(commands.Cog):
                     )
                     await self._discover(request, expected_scope_id=scope_id)
 
-        return ServerSwitch(user_id=user_id, route_id=route_id, switch=switch)
+        key = (user_id, route_id)
+        previous = self._switch_views.pop(key, None)
+        if previous is not None:
+            previous.stop()
+
+        def expire() -> None:
+            if self._switch_views.get(key) is view:
+                del self._switch_views[key]
+
+        view = ServerSwitch(user_id=user_id, route_id=route_id, switch=switch, expire=expire)
+        if self._unloaded:
+            view.stop()
+        else:
+            self._switch_views[key] = view
+        return view
 
     @app_commands.command(name="dm-me", description="Continue privately (an admin turns it on)")
     @app_commands.guild_only()
@@ -481,7 +516,8 @@ class DirectMessageCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if (
-            self.bot.draining
+            self._unloaded
+            or self.bot.draining
             or message.author.bot
             or not isinstance(message.channel, discord.DMChannel)
         ):
@@ -538,7 +574,7 @@ class DirectMessageCog(commands.Cog):
             subject = await self._subject(conversation.tenant_id, message.author.id)
             async with runtime.sessionmaker() as session:
                 tenant = await get_tenant(session, conversation.tenant_id)
-                policy = await load_access_policy(session, tenant_id=conversation.tenant_id)
+                policy = await load_dm_access_policy(session, tenant_id=conversation.tenant_id)
                 enabled = await dm_enabled(session, tenant_id=conversation.tenant_id)
             recipient_policy = runtime.settings.direct_message_policies.get(
                 conversation.tenant_id, DirectMessagePolicy()
@@ -587,7 +623,7 @@ class DirectMessageCog(commands.Cog):
                             QUEUE_TIMED_OUT_TEXT, allowed_mentions=discord.AllowedMentions.none()
                         )
                         return
-                    answer = await reply_to_dm(
+                    reply = await reply_to_dm_result(
                         runtime.turn_deps,
                         platform="discord",
                         route_key=str(message.channel.id),
@@ -601,32 +637,16 @@ class DirectMessageCog(commands.Cog):
                     )
             finally:
                 ticket.release()
-            if answer is not None:
-                subject = await resolve_subject(
-                    runtime.sessionmaker,
-                    runtime.turn_deps.membership_resolver,
-                    tenant_id=conversation.tenant_id,
-                    user_id=str(message.author.id),
-                    require_fresh=True,
-                )
-                async with runtime.sessionmaker() as session:
-                    policy = await load_access_policy(session, tenant_id=conversation.tenant_id)
-                    tenant = await get_tenant(session, conversation.tenant_id)
-                    enabled = await dm_enabled(session, tenant_id=conversation.tenant_id)
-                if (
-                    not enabled
-                    or tenant is None
-                    or tenant.archived_at is not None
-                    or tenant.provision_status != "ready"
-                    or not runtime.settings.direct_message_policies.get(
-                        conversation.tenant_id, DirectMessagePolicy()
-                    ).allows(str(message.author.id))
-                    or subject.verified_membership is not True
-                    or not authorize(policy, subject=subject, action=Action.START_TURN)
-                ):
-                    self._suppress(message, "delivery_access_revoked")
-                    return
+            if reply is not None:
+                answer = reply.text
                 for start in range(0, len(answer), 1900):
+                    # Each transport await is another opportunity for revocation.
+                    await require_dm_delivery(runtime.turn_deps, reply)
+                    if not runtime.settings.direct_message_policies.get(
+                        conversation.tenant_id, DirectMessagePolicy()
+                    ).allows(str(message.author.id)):
+                        self._suppress(message, "delivery_recipient_revoked")
+                        return
                     chunk = answer[start : start + 1900]
                     if start + 1900 >= len(answer):
                         await message.channel.send(
@@ -640,8 +660,7 @@ class DirectMessageCog(commands.Cog):
                         )
                     else:
                         await message.channel.send(
-                            chunk,
-                            allowed_mentions=discord.AllowedMentions.none(),
+                            chunk, allowed_mentions=discord.AllowedMentions.none()
                         )
         except (
             DaimonError,

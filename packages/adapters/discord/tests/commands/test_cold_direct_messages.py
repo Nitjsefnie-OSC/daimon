@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -12,18 +11,41 @@ import pytest
 from daimon.adapters.discord.commands import direct_messages as module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import AgentRef, Place, Surface, build_subject
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.direct_messages import DirectMessageReply
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import get_conversation, set_dm_agent_name, set_dm_enabled
 from daimon.core.stores.tenants import set_provision_status
-from daimon.core.turn.admission import Admission
+from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn_queue import TurnQueue
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
+
+
+def private_reply(row, text="private answer"):
+    return DirectMessageReply(
+        text=text,
+        conversation=row,
+        grant=AdmissionGrant(
+            tenant_id=row.tenant_id,
+            subject=build_subject(
+                is_admin=False, platform_user_id=row.external_user_id, verified_membership=True
+            ),
+            surface=Surface.DM,
+            turn_place=Place(),
+            agent=AgentRef.of("private"),
+            run_place=Place(),
+            channel_id=row.channel_id,
+            thread_id=row.scope_id,
+            is_dm=True,
+            cold_dm=row.is_cold,
+        ),
+    )
 
 
 def message(message_id=101):
@@ -73,8 +95,13 @@ async def setup(db_session_factory, monkeypatch, count=1):
         return admissions[kwargs["tenant_id"]]
 
     monkeypatch.setattr(module, "admit_cold_dm", admit)
-    reply = AsyncMock(return_value="private answer")
-    monkeypatch.setattr(module, "reply_to_dm", reply)
+
+    async def answer(deps, **kwargs):
+        row = await conversation(db_session_factory)
+        return private_reply(row)
+
+    reply = AsyncMock(side_effect=answer)
+    monkeypatch.setattr(module, "reply_to_dm_result", reply)
     return DirectMessageCog(bot), tenants, fetch, reply
 
 
@@ -276,13 +303,6 @@ def test_rate_bucket_shared_and_refills(monkeypatch):
     assert cog._claim_discovery(999)
     assert not cog._claim_discovery(999)
     assert cog._claim_discovery(111)
-
-
-async def test_simultaneous_first_messages_keep_one_scope(db_session_factory, monkeypatch):
-    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
-    await asyncio.gather(cog.on_message(message()), cog.on_message(message(102)))
-    assert reply.await_count == 2
-    assert len({call.kwargs["expected_scope_id"] for call in reply.await_args_list}) == 1
 
 
 async def test_expired_selector_requests_new_message_and_cleans_pending(

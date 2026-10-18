@@ -2000,12 +2000,24 @@ A cold scope binds its own agent without changing the physical DM channel's conf
 Its context and history start empty, its source channel/thread are absent, and its
 origin label is `Private conversation`. This explicit provenance is distinct from
 old moved conversations that lack recorded sources. The opening notice names the
-server and agent and offers **Switch server**. Switching creates a fresh scope,
-retires the previous session mapping and never replays the previous prompt or history.
+server and agent and offers **Switch server**. Only the latest switch control for
+each user/DM route remains active; a later reply or switch stops its predecessor.
+Controls expire absolutely after fifteen minutes, and adapter unload stops all
+controls and pending selectors. Send another message to renew an expired switch
+control. Switching creates a fresh scope, retires the previous session mapping and
+never replays the previous prompt or history.
 An active conversation always wins over discovery, even if access to its tenant is
 revoked; revoked access is silent and never reroutes the message to another server.
 Route writes serialize even before a conversation exists, and message claims deduplicate
-turns. Routine notifications deliver through their transport without calling
+turns. Distinct simultaneous first messages may each run once as successive turns
+in the same newly created scope; duplicate gateway events and concurrent selector
+clicks never answer a message twice. The reply result carries the exact admitted
+agent grant. Immediately before each private output chunk, delivery rechecks fresh
+membership, current tenant/invoker policy, recipient restrictions, the answering
+agent's `RUN_AGENT` and `DIRECT_MESSAGE` permissions without an admin exemption,
+and moved-source sealing. Unavailable bound identities and unreadable private
+policies are typed core denials that Discord logs without sending a reply.
+Routine notifications deliver through their transport without calling
 `start_dm`, `start_cold_dm` or `start_conversation`. The active route is exposed by
 `stores.direct_messages.get_conversation(platform, route_key, external_user_id)`;
 routine delivery neither replaces it nor appends to its private model history.

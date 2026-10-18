@@ -55,6 +55,10 @@ def shared_keys_sentence(agent_name: str) -> str:
     return f"Anyone who talks to {agent_name} can use these."
 
 
+class BoundAgentUnavailable(UserFacingError):
+    """The exact bound identity is gone or no longer belongs to the tenant."""
+
+
 async def get_setup_agent(
     anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, ma_agent_id: str
 ) -> BetaManagedAgentsAgent:
@@ -64,18 +68,18 @@ async def get_setup_agent(
         agent = await retrieve_agent(anthropic, ma_agent_id, scope=backend_scope)
     except APIStatusError as error:
         if error.status_code in (400, 404):
-            raise UserFacingError(
+            raise BoundAgentUnavailable(
                 "That agent no longer exists. Choose another agent for setup."
             ) from error
         raise
     except ScopeViolation:
-        raise UserFacingError(
+        raise BoundAgentUnavailable(
             "That agent is no longer available in this workspace. Choose another agent."
         ) from None
     if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(
         tenant_id
     ):
-        raise UserFacingError(
+        raise BoundAgentUnavailable(
             "That agent is no longer available in this workspace. Choose another agent."
         )
     return agent

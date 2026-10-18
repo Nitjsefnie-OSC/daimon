@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +14,16 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.membership import Membership
 
 
+@dataclass
+class _Role:
+    id: int
+    default: bool = False
+    name: str = ""
+
+    def is_default(self) -> bool:
+        return self.default
+
+
 def _member():  # type: ignore[no-untyped-def]
     member = MagicMock(spec=discord.Member)
     member.id = 2
@@ -21,8 +32,8 @@ def _member():  # type: ignore[no-untyped-def]
     member.guild.unavailable = False
     member.guild_permissions.administrator = False
     member.guild_permissions.manage_guild = False
-    everyone = SimpleNamespace(id=1, is_default=lambda: True)
-    role = SimpleNamespace(id=123, is_default=lambda: False)
+    everyone = _Role(id=1, default=True)
+    role = _Role(id=123)
     member.roles = [everyone, role]
     return member
 
