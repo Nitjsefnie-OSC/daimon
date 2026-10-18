@@ -45,6 +45,17 @@ if TYPE_CHECKING:
     from daimon.core.github_app_session import AppSessionAccess
 
 
+async def live_effective_config_for_ma_session(
+    session: AsyncSession, *, ma_session_id: str
+) -> dict[str, Any] | None:
+    """The stored snapshot of the live row mapped to `ma_session_id`, or None."""
+    return await session.scalar(
+        select(ThreadSession.effective_config)
+        .where(ThreadSession.ma_session_id == ma_session_id, ThreadSession.status == "live")
+        .limit(1)
+    )
+
+
 async def get_live_thread_session(
     session: AsyncSession,
     *,

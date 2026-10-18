@@ -18,7 +18,6 @@ from anthropic.types.beta.vaults.beta_managed_agents_static_bearer_auth_response
     BetaManagedAgentsStaticBearerAuthResponse,
 )
 from cryptography.fernet import InvalidToken, MultiFernet
-from daimon.core._models import ThreadSession
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     PERMISSION_PROFILES,
@@ -74,11 +73,13 @@ from daimon.core.stores.github_issued_tokens import (
     store_token,
 )
 from daimon.core.stores.security_audit import append_github_token_event
-from daimon.core.stores.thread_sessions import record_app_token_refresh
+from daimon.core.stores.thread_sessions import (
+    live_effective_config_for_ma_session,
+    record_app_token_refresh,
+)
 from daimon.core.turn_origin import current_origin_id
 from mux.contracts.ids import Scope
 from mux.contracts.resources import WorkspaceSource
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = logging.getLogger(__name__)
@@ -1050,14 +1051,12 @@ async def _current_app_access(
         repos = {repo.repo_id: repo for repo in repo_rows}
         grants = {grant.repo_id: grant for grant in current_grants}
         working_ids = {grant.repo_id for grant in current_grants if grant.is_working_repo}
-        mapped = await session.scalar(
-            select(ThreadSession)
-            .where(ThreadSession.ma_session_id == session_id, ThreadSession.status == "live")
-            .limit(1)
+        effective_config = await live_effective_config_for_ma_session(
+            session, ma_session_id=session_id
         )
         recorded_scopes = (
-            SessionSnapshot.model_validate(mapped.effective_config).token_scopes
-            if mapped is not None and mapped.effective_config is not None
+            SessionSnapshot.model_validate(effective_config).token_scopes
+            if effective_config is not None
             else ()
         )
     # Reconstruct the delivered mode. New grants may already describe the
