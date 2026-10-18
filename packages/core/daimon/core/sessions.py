@@ -277,14 +277,19 @@ async def project_session_resources(
     if caller_vault and account_id is None:
         raise ScopeViolation("source-preparation", "caller vault has no authorized account")
     async with session_factory() as session:
-        keys = await agent_files.list_agent_file_revisions(
-            session, tenant_id=tenant_id, agent_id=agent_uuid
+        keys = (
+            ()
+            if is_external
+            else await agent_files.list_agent_file_revisions(
+                session, tenant_id=tenant_id, agent_id=agent_uuid
+            )
         )
         credentials = (
             await credential_store.list_credential_revisions(
                 session, tenant_id=tenant_id, agent_id=agent_uuid
             )
-            if _agent_mcp_mirror_required(
+            if not is_external
+            and _agent_mcp_mirror_required(
                 vault_available=caller_vault,
                 account_id=account_id,
                 tenant_id=tenant_id,
@@ -306,6 +311,7 @@ async def project_session_resources(
             agent_id=agent_uuid,
             account_id=hiding_for,
             server_urls={server.name: server.url for server in agent.mcp_servers},
+            is_external=is_external,
         )
     public_url = (
         str(mcp_settings.public_url)
@@ -585,6 +591,11 @@ async def create_session(
     secrets; otherwise it is omitted entirely. ``resources`` composes
     alongside ``vault_ids`` — it never replaces the vault branch.
 
+    ``is_external`` (a person from another organisation) gets neither: no
+    ``.env`` and no agent-wide MCP token in their vault, and the servers only
+    such a token authenticates are left off their session like another
+    person's OAuth server. Their own sign-ins still reach them.
+
     The same gate (``tenant_id`` + ``agent_uuid`` + ``session_factory``) also
     attaches the agent's per-agent memory store via
     ``ensure_memory_store_and_mount`` (lazily provisioned on first use). This
@@ -642,6 +653,7 @@ async def create_session(
         tenant_id=tenant_id, account_id=account_id, call_site="sessions:create_session"
     )
     resource_agent = agent
+    source_channel_skills = channel_skills
     if resource_source is not None or worker is not None:
         from daimon.core.turn.runtime_manifest import worker_source_ceiling
 
@@ -666,8 +678,10 @@ async def create_session(
             raise ScopeViolation(
                 "worker-resources", "captured source and owned preparation required"
             )
-        if worker.declared_drops:
-            raise UnsupportedCapability(("native_worker_resource_drop",), worker.backend.profile)
+        # Channel additions are source authority, not permission to undo a
+        # worker's declared loss when constructing agent_with_overrides.
+        if "skills" in worker.spec.declared_drops:
+            channel_skills = ()
         resource_agent = sdk_agent(resource_source.source)
         scope = resource_source.resource_scope
         _check_resource_source(
@@ -795,9 +809,10 @@ async def create_session(
         # stored credentials in on every session create (same shape as the Copilot
         # mirror above) or callers who did not personally attach a server fail the
         # whole turn at MCP init. Not degrade-not-block: see
-        # mirror_credentials_into_vault.
+        # mirror_credentials_into_vault. Never for a person from another
+        # organisation: those servers come off their session instead.
         credential_vault_id = caller_vault_id if app_mode else vault_id
-        if _agent_mcp_mirror_required(
+        if not is_external and _agent_mcp_mirror_required(
             vault_available=credential_vault_id is not None,
             account_id=account_id,
             tenant_id=tenant_id,
@@ -836,12 +851,16 @@ async def create_session(
         app_access: AppSessionAccess | None = None
         provisional_session_id = f"pending:{uuid.uuid4()}"
         if tenant_id is not None and agent_uuid is not None and session_factory is not None:
-            mount = await upload_env_and_mount(
-                anthropic,
-                session_factory,
-                tenant_id=tenant_id,
-                agent_id=agent_uuid,
-                exclude_github=app_mode,
+            mount = (
+                None
+                if is_external
+                else await upload_env_and_mount(
+                    anthropic,
+                    session_factory,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    exclude_github=app_mode,
+                )
             )
             if mount is not None:
                 resources.append(mount)
@@ -924,6 +943,7 @@ async def create_session(
                 agent_id=agent_uuid,
                 account_id=hiding_for,
                 server_urls={server.name: server.url for server in agent.mcp_servers},
+                is_external=is_external,
             )
             if hidden:
                 _log.info(
@@ -1210,7 +1230,8 @@ async def create_session(
                     resource_scope=scope,
                     memory_read_only=resource_source.memory_read_only,
                     fernet=fernet,
-                    channel_skills=channel_skills,
+                    # Recheck source authority, including additions excluded from execution.
+                    channel_skills=source_channel_skills,
                     tool_safety=tool_safety,
                     asks_before_publishing=asks_before_publishing,
                     mcp_settings=mcp_settings,
@@ -1250,6 +1271,7 @@ async def create_session(
                         vault_id=vault_id,
                         sent_skills=session_skills(agent, channel_skills),
                         github_mode="app",
+                        is_external=is_external,
                     )
                     if app_session_unmapped
                     else None

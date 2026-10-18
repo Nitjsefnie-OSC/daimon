@@ -90,7 +90,7 @@ class TestBuildHelpView:
         )
         assert len(commands.splitlines()) == 10
         assert all(line.startswith("/") for line in commands.splitlines())
-        assert "/dm" in content
+        assert "/dm-me" in content
         assert "## 📖 Commands\n\n-# Only you can see this." in content
         assert "@Daimon help me set up" in content
 

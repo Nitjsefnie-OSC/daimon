@@ -226,6 +226,9 @@ config). The order is load-bearing and documented as such in the module:
    that turn alone (`turn_origins.is_external`, which the MCP verifier reads)
    and keeps the stored role. An external account's stored role is always
    `user`, and it administers no channel. `reauthorize` checks it again.
+   Their sessions mount no agent keys and get no agent-wide MCP token
+   (`SessionSnapshot.is_external`, identity, so a member's session is
+   replaced for them, never reused or carried over).
 5. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
@@ -241,7 +244,7 @@ config). The order is load-bearing and documented as such in the module:
 8. Balance gate — `tenant_balance.is_over_balance`.
 9. Monthly cap gate — `billing.is_over_cap`.
 10. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
-   parent channel, or for a DM the channel it was moved from with `/dm`
+   parent channel, or for a DM the channel it was moved from with `/dm-me`
    (`dm_source_channel_id`); skipped in an older DM or where the channel has
    no budget. A channel's own agent counts toward its home channel wherever an
    exempt caller runs it (`AgentPermissions.budget_channel`). The channel is
@@ -1252,7 +1255,7 @@ requester's DM, and sends no direct messages.
 C's own agents run, post and read; a caller with no executing agent, such as
 an operator token or the CLI, may still post into C. That is input, not a
 leak: the readers rule keeps C's messages readable only from inside it. A
-session that ran in a DM (a Slack IM, a Teams personal chat, or a `/dm`
+session that ran in a DM (a Slack IM, a Teams personal chat, or a `/dm-me`
 conversation) is private: admins never read it from the hub.
 
 Continuing a limited channel conversation from the hub stays refused for
@@ -1959,19 +1962,19 @@ no `admin` tag and a server baseline hides them from everyone else. A later
 ### Opt-in DM conversations
 
 DM conversations are disabled unless the tenant's separate `direct_message_policies`
-row enables them. Admins use `/dm enable` or `/dm disable`; the invoker allowlist
+row enables them. Admins use `/dm-me enable` or `/dm-me disable`; the invoker allowlist
 still applies through `admit(is_dm=True)` on every move and every private turn.
 Discord uses a live guild-member lookup and Slack checks the current workspace
 membership and role. No stored admin role grants access.
 
-`/dm` in a server/channel moves recent text context into a new private scope. This
+`/dm-me` in a server/channel moves recent text context into a new private scope. This
 selects the workspace explicitly; unselected DMs remain ignored. The scope uses a
 normal thread-agent binding, config cascade and per-account session mapping. Each
 new selection resets the scope, so a physical Discord DM shared across servers
 never contributes the previous server's private history. The live membership check
 is bound to that scope to prevent a concurrent selection from changing its authority.
 The context is escaped with the existing handoff builder and includes a source link.
-`/dm` refuses in a channel with limited readers or a Discord thread that has
+`/dm-me` refuses in a channel with limited readers or a Discord thread that has
 or sits under one, before any history is read: the DM sits outside the rule
 and can reach open channels. Admission reports this as `source_sealed`, and
 `start_dm` refuses it too. Slack's slash command carries no thread, so a Slack
@@ -1982,7 +1985,7 @@ row records its source channel and thread and, on Slack, the `channel:thread_ts`
 of every copied message. Every private turn re-checks them against the current
 rules. Once any of them has limited readers the DM is quarantined: the turn is refused,
 the conversation row (copied context and private history) is deleted, and the
-scope's provider sessions are retired and archived, so a fresh `/dm` is needed.
+scope's provider sessions are retired and archived, so a fresh `/dm-me` is needed.
 Rows from before provenance was recorded cannot prove their source open and
 are quarantined as soon as the tenant limits any readers.
 
@@ -2011,7 +2014,7 @@ The provenance thread ID remains the private scope ID, matching session mapping.
 
 The first version delivers text replies after completion. Attachments, streaming
 cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
-slash command carries recent channel messages. Run `/dm` again to reset or select
+slash command carries recent channel messages. Run `/dm-me` again to reset or select
 another channel. Disabling DMs prevents new turns, without cancelling a running turn.
 
 Slack consumes the same optional neutral-event tap for alternate-provider drafts. Its render task retains debounce and Cancel registration, and terminal callbacks replace the progress card and deregister Cancel. Foreign provider observations never become Anthropic display meters.

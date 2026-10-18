@@ -478,7 +478,7 @@ async def _mint_and_post(
                 runtime,
                 auth,
                 channel_id=channel_id,
-                # A /dm conversation's thread is its private scope ("dm:<uuid>"),
+                # A /dm-me conversation's thread is its private scope ("dm:<uuid>"),
                 # not a Slack ts: the card goes to the top of the DM.
                 thread_ts=None
                 if origin.thread_id.startswith(DM_SCOPE_PREFIX)

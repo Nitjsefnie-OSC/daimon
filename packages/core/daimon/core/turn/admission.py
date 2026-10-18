@@ -194,7 +194,7 @@ class Admission:
     # session's publish tools wait for the requester's Approve on a card.
     asks_before_publishing: bool = False
     # The channel or thread itself is sealed (DM memory policy aside). Callers
-    # that copy content out of the channel, such as /dm, must refuse.
+    # that copy content out of the channel, such as /dm-me, must refuse.
     source_sealed: bool = False
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
@@ -962,7 +962,7 @@ async def admit_impl(
         origin_thread_id=thread_id,
         origin_seal_ids=seal_ids,
         # Every DM-admitted session is private: the transcript tools never open
-        # it to anyone but its own execution grant, admins included. /dm
+        # it to anyone but its own execution grant, admins included. /dm-me
         # replaces this with its execution-specific grant.
         private_dm_id=(thread_id or channel_id) if is_dm else None,
         account_id=principal.account_id,

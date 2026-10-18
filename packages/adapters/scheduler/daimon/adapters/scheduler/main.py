@@ -560,6 +560,16 @@ async def _build_fire(
     return _fire
 
 
+async def _sweep_fleet_deadlines(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Release expired fleet slots; failures retry on the next scheduler tick."""
+    from daimon.core.stores.fleet import sweep_expired
+
+    try:
+        await sweep_expired(sm)
+    except Exception:
+        log.exception("scheduler.fleet_deadline_sweep.failed")
+
+
 async def _sweep_pending_files(
     client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -1324,6 +1334,7 @@ async def run(
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 wait_for_completion=True,
             )
+            await _sweep_fleet_deadlines(sm)
             await _sweep_pending_files(client, sm)
             await _sweep_privacy_deletes(client, sm)
             await _usage_sweep_once(
@@ -1364,6 +1375,7 @@ async def run(
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 dispatcher=dispatcher,
             )
+            await _sweep_fleet_deadlines(sm)
             await _sweep_pending_files(client, sm)
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)

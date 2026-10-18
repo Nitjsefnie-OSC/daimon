@@ -1,4 +1,4 @@
-"""/dm: a sealed source is refused before any history is read; the notices read plainly."""
+"""/dm-me: a sealed source is refused before any history is read; the notices read plainly."""
 
 from __future__ import annotations
 
@@ -64,7 +64,8 @@ async def test_the_dm_opens_with_the_two_line_continue_notice(
     )
 
     assert client.chat_postMessage.await_args.kwargs["text"] == (
-        "Continuing from <#C020>.\n\nSend your next message here."
+        "Continuing from <#C020>.\n\nSend your next message here. "
+        "To start a new private conversation, run /dm-me in a channel."
     )
 
 
@@ -78,7 +79,9 @@ async def test_an_unknown_action_shows_the_usage_lines(monkeypatch: pytest.Monke
     )
 
     assert client.chat_postEphemeral.await_args.kwargs["text"] == (
-        "Run `/dm` in a channel to carry on in private.\n\nAdmins: `/dm enable` or `/dm disable`."
+        "That option isn't recognized.\n\n"
+        "Run `/dm-me` in a channel to continue privately. "
+        "Admins: `/dm-me enable` or `/dm-me disable`."
     )
 
 

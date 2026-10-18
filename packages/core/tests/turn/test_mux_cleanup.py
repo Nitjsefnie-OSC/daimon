@@ -84,7 +84,7 @@ async def test_sealed_dm_retirement_uses_conversation_owner_scope_only_on_mux(
             deps_for(client, maker), turn_path=path, backend=backend, backend_session_ref=resolver
         )
         conversation = cast(DirectMessageRow, SimpleNamespace(tenant_id=TENANT, account_id=ACCOUNT))
-        with pytest.raises(DaimonError, match="This DM was started"):
+        with pytest.raises(DaimonError, match="This DM was closed because its channel"):
             await direct_messages._quarantine(deps, conversation)  # pyright: ignore[reportPrivateUsage]
     transport.assert_consumed()
     quarantine.assert_awaited_once()
