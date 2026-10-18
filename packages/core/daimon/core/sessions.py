@@ -519,6 +519,7 @@ async def create_session(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    daimon_rule_tools: frozenset[str] = frozenset(),
     slack_turn_context_id: uuid.UUID | None = None,
     private_dm_id: str | None = None,
     budget_channel_id: str | None = None,
@@ -977,6 +978,7 @@ async def create_session(
             public_url=public_url,
             asks_before_publishing=asks_before_publishing,
             confirmed_tools=confirmed_tools,
+            daimon_rule_tools=daimon_rule_tools,
         )
         servers = session_mcp_servers(
             agent,

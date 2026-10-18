@@ -1118,6 +1118,7 @@ class SourceRepresentation(_Facts):
     target: AgentSpec
     credential_refs: tuple[str, ...] = ()
     unavailable_mcp_tools: tuple[str, ...] = ()
+    unavailable_builtin_tools: tuple[str, ...] = ()
     environment: EnvironmentSpec | None = None
 
 

@@ -83,6 +83,9 @@ _ADMISSION_FACTS = {
     not in ("agent", "environment", "observation", "backend_counterpart", "backend_agent_revision")
 }
 
+#: Admission facts a root retained before they existed read as their default.
+_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools", "daimon_rules_need_driver"})
+
 log = structlog.get_logger(__name__)
 
 
@@ -1083,8 +1086,10 @@ async def read_frozen_preparation(
         try:
             facts = root.preparation
             admission_facts = facts["admission"]
-            if not isinstance(admission_facts, dict) or set(admission_facts) != set(
-                _ADMISSION_FACTS
+            if not isinstance(admission_facts, dict) or not (
+                set(_ADMISSION_FACTS) - _LEGACY_ADMISSION_FACTS
+                <= set(admission_facts)
+                <= set(_ADMISSION_FACTS)
             ):
                 raise WorkerSpecRefused("origin", "unbound")
             retained_source = Agent.model_validate_json(json.dumps(facts["source"]))
@@ -1103,6 +1108,7 @@ async def read_frozen_preparation(
                 **{
                     name: adapter.validate_json(json.dumps(admission_facts[name]))
                     for name, adapter in _ADMISSION_FACTS.items()
+                    if name in admission_facts
                 },
             )
             request = ProviderPreparationRequest(
@@ -1586,8 +1592,27 @@ async def _capture_source_capabilities(
                 raise ValueError("source has no enabled daimon-mcp toolset")
             if not any(permission == "auto" for permission in permissions.values()):
                 raise ValueError("source has no automatically executable MCP tools")
+            # URL fetching has no native hosted-Agents tool. Keep the exact
+            # source capability visible as a consented loss instead of silently
+            # treating shell HTTP execution as the provider's fetch tool.
+            unavailable_builtin_tools = (
+                ("builtin_tool:web_fetch",)
+                if profile.provider == "openai"
+                and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
+                else ()
+            )
             mapped_tools = represented_execution_tools(
-                profile, tuple(tool for tool in tools if tool.kind != "mcp_toolset")
+                profile,
+                tuple(
+                    tool
+                    for tool in tools
+                    if tool.kind != "mcp_toolset"
+                    and not (
+                        unavailable_builtin_tools
+                        and tool.kind == "builtin"
+                        and tool.name == "web_fetch"
+                    )
+                ),
             )
             if any(
                 tool.kind == "mcp_toolset"
@@ -1727,6 +1752,7 @@ async def _capture_source_capabilities(
                     target=target,
                     credential_refs=(reference,),
                     unavailable_mcp_tools=unavailable_mcp_tools,
+                    unavailable_builtin_tools=unavailable_builtin_tools,
                     environment=inputs.environment,
                 )
             )
@@ -1958,6 +1984,7 @@ def classify_source_obligations(
     missing: set[str] = set()
     if represented is not None:
         missing.update(set(represented.unavailable_mcp_tools) - set(drops))
+        missing.update(set(represented.unavailable_builtin_tools) - set(drops))
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
     source_tools = tuple(spec.tools or ())

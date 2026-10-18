@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
@@ -52,6 +52,9 @@ from mux.drivers.gemini.skill_deployment import GCSBundleDeployment, file_manife
 from mux.drivers.gemini.transport import Object, SDKTransport, object_value
 from mux.state.memory import MemoryStateStore
 from pydantic import JsonValue, TypeAdapter
+
+if TYPE_CHECKING:
+    from daimon.testing.qa_mcp_host import SharedQaHost
 
 ROOT = Path(__file__).resolve().parents[2]
 SCOPE = Scope(
@@ -257,16 +260,15 @@ class Evidence:
 @pytest.mark.parametrize("mode", ["valid", "wrong-bearer", "revoked-before-send"])
 async def test_f2_gemini_default_capabilities_through_real_loopback(
     mode: str,
+    qa_shared_host: SharedQaHost,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, parse_jsonrpc_response
-    from daimon.testing.qa_mcp_host import QA_SESSION_ID, build_host, cleanup, serve
+    from daimon.testing.qa_mcp_host import QA_SESSION_ID, build_run, end_run, serve
 
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    assert url, "the parity lane provides an isolated test database"
     authored = manifest()
-    qa = await build_host(database_url=url, port=0, root=tmp_path)
+    qa = await build_run(qa_shared_host, port=0, root=tmp_path)
     path = qa.manifest.path(tmp_path)
     publisher, storage = Publisher(), MemoryStorage()
     evidence = Evidence(storage, publisher)
@@ -446,6 +448,5 @@ async def test_f2_gemini_default_capabilities_through_real_loopback(
                 finally:
                     await client.aio.aclose()
     finally:
-        await qa.engine.dispose()
-        cleaned = await cleanup(path, database_url=url)
+        cleaned = await end_run(qa)
     assert cleaned.status == "cleaned"
