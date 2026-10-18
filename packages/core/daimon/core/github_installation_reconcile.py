@@ -15,6 +15,7 @@ from daimon.core.github_app_auth import (
     list_installation_repositories,
     mint_installation_listing_token,
 )
+from daimon.core.stores import github_app_installations as installation_store
 from daimon.core.stores import github_installation_reconciliation as reconciliation_store
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,6 +23,7 @@ _log = structlog.get_logger(__name__)
 _LEASE_FOR = timedelta(minutes=2)
 _LEASE_RENEW_INTERVAL_S = 30
 _MAX_JOBS_PER_TICK = 5
+_MAX_BACKFILL_PER_TICK = 50
 _MAX_RETRY_DELAY = timedelta(minutes=5)
 
 
@@ -40,6 +42,15 @@ async def drain_github_installation_reconciliations(
     """Refresh due installations; each refresh writes only its claimed generation."""
     if github_app.app_id is None or github_app.private_key is None:
         return 0
+
+    # Heal installations whose migration-time refresh was consumed without a
+    # snapshot by a scheduler still on the previous image during the deploy.
+    async with sessionmaker.begin() as session:
+        queued = await reconciliation_store.enqueue_never_refreshed(
+            session, now=now or datetime.now(UTC), limit=_MAX_BACKFILL_PER_TICK
+        )
+    if queued:
+        _log.info("github.installation_reconciliation.backfill_queued", count=queued)
 
     jobs_processed = 0
     for _ in range(_MAX_JOBS_PER_TICK):
@@ -70,22 +81,30 @@ async def drain_github_installation_reconciliations(
                 github_app.app_id,
                 now=int(current_time.timestamp()),
             )
-            account_login = await get_app_installation_account(
+            installation_state = await get_app_installation_account(
                 http_client,
                 jwt=app_jwt,
                 installation_id=job.installation_id,
             )
-            if account_login is None:
+            if installation_state is None:
                 repositories = None
             else:
-                listing_token = await mint_installation_listing_token(
-                    http_client,
-                    jwt=app_jwt,
-                    installation_id=job.installation_id,
-                )
-                repositories = await list_installation_repositories(
-                    http_client, token=listing_token
-                )
+                async with sessionmaker() as session:
+                    existing = await installation_store.get(
+                        session, installation_id=job.installation_id
+                    )
+                    is_github_app = existing is not None and existing.app == "github_app"
+                if is_github_app and installation_state.suspended_at is not None:
+                    repositories = None
+                else:
+                    listing_token = await mint_installation_listing_token(
+                        http_client,
+                        jwt=app_jwt,
+                        installation_id=job.installation_id,
+                    )
+                    repositories = await list_installation_repositories(
+                        http_client, token=listing_token
+                    )
 
             finished_at = datetime.now(UTC)
             async with sessionmaker.begin() as session:
@@ -93,8 +112,13 @@ async def drain_github_installation_reconciliations(
                     session,
                     job=job,
                     lease_owner=lease_owner,
-                    account_login=account_login,
+                    account_login=(
+                        installation_state.account_login if installation_state is not None else None
+                    ),
                     repos=repositories,
+                    suspended_at=(
+                        installation_state.suspended_at if installation_state is not None else None
+                    ),
                     now=finished_at,
                 )
             _log.info(

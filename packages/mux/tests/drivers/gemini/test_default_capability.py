@@ -50,6 +50,8 @@ from mux.drivers.gemini.transport import Object
 from mux.errors import UnsupportedCapability
 from pydantic import BaseModel, JsonValue
 
+pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
+
 ROOT = Path(__file__).resolve().parents[5]
 
 

@@ -1,37 +1,29 @@
 """Channel files for one deployment: whether they work per channel, uploads, shared-file links.
 
-The shell around `sharepoint.SharePoint`. Each channel's folder is found once:
-the one stored when an admin turned files on there, else the team site's.
-What it learns per channel is kept: a folder lookup or upload that succeeds
-marks the channel's files available; a failed lookup, or an upload refused
-(401/403), marks them unavailable for `RECHECK_S`, so a grant an admin adds
-later is picked up without a restart. Per channel, not per team: a private or
-shared channel's folder is on a site of its own, used only once stored.
-The turn context shows the agent that answer.
+The shell around `sharepoint.SharePoint`. Each channel's folder is found once,
+through `filesFolder`. What it learns per channel is kept: a folder lookup or
+upload that succeeds marks the channel's files available; a failed lookup, or
+an upload refused (401/403), marks them unavailable for `RECHECK_S`, so a
+permission an admin consents to later is picked up without a restart. Per
+channel, not per team: a private or shared channel's folder is on a site of
+its own. The turn context shows the agent that answer.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import functools
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable
 
 import structlog
 from daimon.adapters.teams.attachments import ChannelMedia, SharedFile
-from daimon.adapters.teams.identity import GENERAL_CHANNEL, TeamsInbound
-from daimon.core.stores.domain import TeamsChannelSiteRow
+from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.teams_graph import GraphUnavailable, TeamGroups
 from daimon.core.teams_sharepoint import DriveFolder, DriveItem, SharePoint
 
 log = structlog.get_logger(__name__)
 
 RECHECK_S = 600.0
-
-# Bot Framework team id -> {channel id: name}; the General channel's name is None.
-ChannelNames = Callable[[str], Awaitable[Mapping[str, str | None]]]
-# Channel id -> the Files folder stored when an admin turned files on there.
-StoredSite = Callable[[str], Awaitable[TeamsChannelSiteRow | None]]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -47,15 +39,11 @@ class ChannelFiles:
         self,
         sharepoint: SharePoint,
         teams: TeamGroups,
-        channel_names: ChannelNames,
         *,
-        stored_site: StoredSite,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._sharepoint = sharepoint
         self._teams = teams
-        self._channel_names = channel_names
-        self._stored_site = stored_site
         self._clock = clock
         self._folders: dict[tuple[str, str], DriveFolder] = {}
         # (group, channel id) -> what the last folder lookup or upload there learned.
@@ -68,11 +56,6 @@ class ChannelFiles:
         ):
             return None
         return access.is_available
-
-    def forget(self, group: str) -> None:
-        """Drop what was learned about a team's channels: a site of theirs was just granted."""
-        self._access = {k: v for k, v in self._access.items() if k[0].lower() != group}
-        self._folders = {k: v for k, v in self._folders.items() if k[0].lower() != group}
 
     def _record(self, group: str, inbound: TeamsInbound, *, is_available: bool) -> None:
         self._access[group, inbound.channel_id] = _Access(is_available, self._clock())
@@ -92,7 +75,7 @@ class ChannelFiles:
         if (known := self._known(group, inbound)) is not None:
             return known
         try:
-            await self._folder(inbound, group)
+            await self._folder(group, inbound.channel_id)
         except GraphUnavailable as err:
             log.info("teams.channel_files.unavailable", status=err.status, reason=err.reason)
             self._record(group, inbound, is_available=False)
@@ -106,7 +89,9 @@ class ChannelFiles:
         if self._known(group, inbound) is False:
             raise GraphUnavailable("no SharePoint access", status=403)
         try:
-            item = await self._sharepoint.upload(await self._folder(inbound, group), name, content)
+            item = await self._sharepoint.upload(
+                await self._folder(group, inbound.channel_id), name, content
+            )
         except GraphUnavailable as err:
             if err.status in (401, 403):
                 self._record(group, inbound, is_available=False)
@@ -120,50 +105,37 @@ class ChannelFiles:
         return await self._sharepoint.thumbnail_url(item)
 
     async def resolve(self, media: ChannelMedia, *, group_id: str, channel_id: str) -> ChannelMedia:
-        """`media` with a download URL on each shared file Graph can reach in the channel's site."""
-        files: list[SharedFile] = []
-        stored: TeamsChannelSiteRow | None = None
-        if any(file.content_url and not file.download_url for file in media.files):
-            stored = await self._stored_site(channel_id)
+        """`media` with a download URL on each shared file inside the channel's Files folder."""
+        if not any(file.content_url and not file.download_url for file in media.files):
+            return media
+        try:
+            folder = await self._folder(group_id, channel_id)
+        except GraphUnavailable as err:
+            log.warning("teams.channel_file.unreachable", status=err.status, reason=err.reason)
+            refused = err.status == 403
+            files = tuple(
+                dataclasses.replace(f, refused=refused)
+                if f.content_url and not f.download_url
+                else f
+                for f in media.files
+            )
+            return dataclasses.replace(media, files=files)
+        resolved: list[SharedFile] = []
         for file in media.files:
             if file.content_url and not file.download_url:
                 try:
-                    url = await self._sharepoint.download_url(
-                        file.content_url,
-                        group_id=group_id,
-                        site_id=None if stored is None else stored.site_id,
-                    )
+                    url = await self._sharepoint.download_url(file.content_url, folder=folder)
                     file = dataclasses.replace(file, download_url=url)
                 except GraphUnavailable as err:
                     log.warning(
                         "teams.channel_file.unreachable", status=err.status, reason=err.reason
                     )
                     file = dataclasses.replace(file, refused=err.status == 403)
-            files.append(file)
-        return dataclasses.replace(media, files=tuple(files))
+            resolved.append(file)
+        return dataclasses.replace(media, files=tuple(resolved))
 
-    async def _folder(self, inbound: TeamsInbound, group: str) -> DriveFolder:
-        key = (group, inbound.channel_id)
+    async def _folder(self, group: str, channel_id: str) -> DriveFolder:
+        key = (group, channel_id)
         if (folder := self._folders.get(key)) is None:
-            if (stored := await self._stored_site(inbound.channel_id)) is not None:
-                folder = await self._sharepoint.stored_folder(stored.drive_id, stored.folder_id)
-            elif (inbound.channel_type or "standard").strip().lower() != "standard":
-                # Its files live in a site of its own; the team site's same-named folder is not it.
-                raise GraphUnavailable("channel site not granted", status=403)
-            else:
-                name = functools.partial(self._channel_name, inbound)
-                folder = await self._sharepoint.channel_folder(
-                    group, inbound.channel_id, channel_name=name
-                )
-            self._folders[key] = folder
+            folder = self._folders[key] = await self._sharepoint.channel_folder(group, channel_id)
         return folder
-
-    async def _channel_name(self, inbound: TeamsInbound) -> str:
-        team = inbound.team_id
-        if team is None:
-            raise GraphUnavailable("no team")
-        if inbound.channel_id == team:
-            return GENERAL_CHANNEL
-        if not (name := (await self._channel_names(team)).get(inbound.channel_id)):
-            raise GraphUnavailable("channel not found")
-        return name

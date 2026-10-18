@@ -22,10 +22,10 @@ from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.externals import Membership
 from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_external, set_role
 from daimon.core.stores.domain import Role, TurnCardIntentRow
@@ -295,6 +295,93 @@ async def test_a_reaction_in_flight_does_not_hold_up_a_drain(
     async with asyncio.timeout(2):
         await teams.drain(timeout=30)
     assert teams._reactions._running == set(), "the unanswered reaction was cancelled"
+
+
+async def test_a_drain_waits_for_an_output_sweep_spawned_while_it_runs(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A turn ending mid-drain spawns its sweep then: it gets the drain's deadline too.
+
+    Regression: a restart soon after a turn ended lost the file its sweep was delivering.
+    """
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+    )
+    delivered = asyncio.Event()
+
+    async def sweep() -> None:
+        await asyncio.sleep(0.05)
+        delivered.set()
+
+    async def turn() -> None:
+        await asyncio.sleep(0.05)
+        teams.spawn(sweep(), name="teams.output-sweep")
+
+    teams.spawn(turn(), name="turn")
+    async with asyncio.timeout(5):
+        await teams.drain(timeout=app_module.DRAIN_GRACE_S)
+    assert delivered.is_set(), "the sweep spawned during the drain ran to the end"
+
+
+async def test_the_controls_follow_the_sweep_or_its_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finished, failed or overdue, the sweep is followed by the controls; never cut short."""
+    monkeypatch.setattr(app_module, "CONTROLS_WAIT_S", 0.05)
+    events: list[str] = []
+    lifecycle: Any = SimpleNamespace(
+        release_controls=AsyncMock(side_effect=lambda: events.append("controls"))
+    )
+
+    async def sweep(outcome: str, delay: float) -> None:
+        await asyncio.sleep(delay)
+        events.append(outcome)
+        if outcome == "failed":
+            raise RuntimeError("Graph is down")
+
+    for outcome, delay in (("swept", 0.0), ("failed", 0.0)):
+        task = asyncio.create_task(sweep(outcome, delay))
+        await app_module._controls_after(task, lifecycle)
+    slow = asyncio.create_task(sweep("late", 0.1))
+    await app_module._controls_after(slow, lifecycle)
+    await slow
+    assert events == ["swept", "controls", "failed", "controls", "controls", "late"]
+
+    monkeypatch.setattr(app_module, "CONTROLS_WAIT_S", 30.0)
+    stuck = asyncio.create_task(sweep("never", 3600))
+    waiting = asyncio.create_task(app_module._controls_after(stuck, lifecycle))
+    await asyncio.sleep(0)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    stuck.cancel()
+    assert events[-1] == "controls", "a drain's cancel still posts them"
+
+
+async def test_the_next_turn_in_a_chat_posts_the_held_controls_first(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A follow-up's card never lands above the last turn's controls."""
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+    )
+    events: list[str] = []
+    held: Any = SimpleNamespace(
+        release_controls=AsyncMock(side_effect=lambda: events.append("controls"))
+    )
+    teams._held_controls[CONVERSATION_ID] = held
+    with patch.object(
+        teams, "_run_turn_observed", AsyncMock(side_effect=lambda *a, **k: events.append("turn"))
+    ):
+        await teams._run_turn(make_inbound(), TENANT)
+        await teams._run_turn(make_inbound(), TENANT)
+    assert events == ["controls", "turn", "turn"], "posted once, before the next turn"
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

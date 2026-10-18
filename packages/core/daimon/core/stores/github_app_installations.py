@@ -14,7 +14,8 @@ from typing import Literal
 
 from daimon.core._models import GitHubAppInstallation, TenantGitHubRepo
 from daimon.core.stores.domain import GitHubAppInstallationRow
-from sqlalchemy import any_, func, select
+from daimon.core.stores.github_installation_coverage import installation_covers_repo_sql
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,7 +85,9 @@ async def upsert_github_app(
         .values(installation_id=installation_id, **values)
         .on_conflict_do_update(
             index_elements=["installation_id"],
-            set_={**values, "updated_at": func.now()},
+            # Reconciliation alone owns suspension after the first insert.
+            set_={k: v for k, v in values.items() if k != "suspended_at"}
+            | {"updated_at": func.now()},
         )
         .returning(GitHubAppInstallation)
     )
@@ -116,11 +119,12 @@ async def get_for_repo(
     a given repo (credential priority: App token -> PAT -> anon).
     Returns the first matching row or None.
     """
-    stmt = select(GitHubAppInstallation).where(
-        GitHubAppInstallation.app == "legacy",
-        any_(GitHubAppInstallation.repo_full_names) == repo_full_name,
+    stmt = (
+        select(GitHubAppInstallation)
+        .where(text(installation_covers_repo_sql(":repo_full_name", "github_app_installations")))
+        .limit(1)
     )
-    result = await session.execute(stmt)
+    result = await session.execute(stmt, {"repo_full_name": repo_full_name})
     orm = result.scalar_one_or_none()
     if orm is None:
         return None

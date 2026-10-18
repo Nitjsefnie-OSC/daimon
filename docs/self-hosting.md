@@ -74,7 +74,9 @@ original HTTP error; the original ten-minute expiry remains its upper bound.
   needs BuildKit) with Compose.
 - An Anthropic API key **in a workspace dedicated to this deployment**.
   Daimon manages the workspace's Managed Agents resources as its own, so
-  sharing the workspace with anything else causes collisions.
+  sharing the workspace with anything else causes collisions. Skip this if
+  you're self-hosting on OpenAI only — see
+  [Self-host on OpenAI](#self-host-on-openai).
 
 ## 1. Configure the environment
 
@@ -84,7 +86,8 @@ cp .env.example .env
 
 Open `.env`, then uncomment and fill in:
 
-- `DAIMON_ANTHROPIC__API_KEY`: your Anthropic API key.
+- `DAIMON_ANTHROPIC__API_KEY`: your Anthropic API key. Leave unset if you're
+  self-hosting on OpenAI only — see [Self-host on OpenAI](#self-host-on-openai).
 - `DAIMON_MCP__JWT_SECRET`: any random string, e.g. `openssl rand -hex 32`.
 - `DAIMON_MCP__PUBLIC_URL`: `http://localhost:8765/mcp` is fine for local use.
 - `POSTGRES_PASSWORD`: a strong, URL-safe value (avoid `@ : / % #`).
@@ -97,9 +100,11 @@ Open `.env`, then uncomment and fill in:
   [Agent environment encryption](#agent-environment-encryption)). Back it up
   separately from the database.
 
-The first four must be set before the first `docker compose` command:
-`docker-compose.yml` interpolates them for every service with fail-fast
-`${VAR:?...}` guards. Set `DAIMON_CRYPTO__KEYS` at the same time; after the
+`DAIMON_MCP__JWT_SECRET`, `DAIMON_MCP__PUBLIC_URL` and `POSTGRES_PASSWORD`
+must be set before the first `docker compose` command: `docker-compose.yml`
+interpolates them for every service with fail-fast `${VAR:?...}` guards.
+`DAIMON_ANTHROPIC__API_KEY` has no such guard — an OpenAI-only deployment
+needs it left unset. Set `DAIMON_CRYPTO__KEYS` at the same time; after the
 stack is up, `docker compose run --rm init "daimon crypto verify"` confirms it
 is set and that no agent key is stored in plaintext. `.env` is gitignored, so secrets never get committed.
 `.env.example` documents every other setting.
@@ -153,7 +158,11 @@ docker compose up --build -d
 
 This brings up Postgres, runs migrations and seeds the default agents,
 environments and skills (the `init` service does both), then starts the
-`mcp`, `discord` and `scheduler` services.
+`mcp`, `discord` and `scheduler` services. `docker compose up -d` doesn't
+show `init`'s output; if you meant to run on Anthropic and forgot
+`DAIMON_ANTHROPIC__API_KEY`, the stack still starts (an OpenAI-only
+deployment needs it unset), so check `docker compose logs init` once —
+it prints plainly whether it seeded Anthropic defaults or skipped them.
 
 Set `DAIMON_DATABASE__POOL_SIZE`, `DAIMON_DATABASE__MAX_OVERFLOW` and
 `DAIMON_DATABASE__POOL_TIMEOUT` per process when sizing Postgres for more
@@ -228,6 +237,120 @@ balancer, and a redeploy does not strand connected clients. The hourly limits
 on notebook publishes and bundle uploads are kept in memory, so each replica
 counts its own.
 
+## Self-host on OpenAI
+
+Daimon can run on just your own OpenAI key — no Anthropic account needed at
+all. The OpenAI driver (`daimon-mux[openai]`) ships in the default install
+already, so there is no separate install step. Leave
+`DAIMON_ANTHROPIC__API_KEY` unset in `.env`: `init` detects there's no
+Anthropic key and skips the Anthropic default-agent/skill reconciliation
+step instead of failing, and every service starts without one. This section
+covers the OpenAI-only setup: provisioning resources and routing channels to
+them.
+
+### What's different on OpenAI
+
+- **No multi-agent delegation.** OpenAI's hosted-workspace profile doesn't
+  support it at all — not a config gap, a capability the driver doesn't have.
+- **No mid-session resource changes.** A session's initial file mounts (the
+  main case: a GitHub-connected working copy) work; swapping them after the
+  session starts doesn't.
+- **No workspace export/import** — there's no way to export a live OpenAI
+  session's workspace or restore one from a saved export.
+- **No memory across turns.** Every OpenAI-routed turn starts fresh.
+- **No Daimon model knobs.** The OpenAI driver fixes its own model and
+  container defaults (see `docs/mux.md`'s "OpenAI deployment runtime" and
+  "Preserving source capabilities in an OpenAI hosted workspace" sections).
+
+Everything else — the chat platforms, the default skill set, scheduled
+routines — works the same regardless of provider.
+
+### 1. Get an OpenAI API key and project
+
+Create (or choose) an OpenAI project and an API key scoped to it. Add it to
+`.env` under its own name, never the reserved `OPENAI_*` namespace Daimon
+refuses to read credentials from:
+
+```bash
+DAIMON_CHANNEL_OPENAI_KEY=sk-...
+```
+
+`DAIMON_CHANNEL_OPENAI_KEY` is the default name both `daimon openai init` and
+the runtime file expect; pass `--api-key-env` to `init` if you'd rather name
+it something else. The name is all the runtime file ever records — never the
+key itself.
+
+### 2. Provision the agent, environment and default skills
+
+```bash
+docker compose run --rm init "daimon openai init --tenant-id <your-tenant-uuid> --project <openai-project-id> --model <openai-model-id>"
+```
+
+This creates (or reuses, if you run it again) one OpenAI agent, one hosted
+environment, and uploads every skill under `defaults/skills/` onto that
+agent — the same default skill set an Anthropic deployment gets from `daimon
+defaults apply` — then writes one row for them into the provider runtime
+file. It's idempotent: an identical tenant/platform/channel/account selector
+prints the existing IDs instead of provisioning (or re-seeding skills)
+twice. Pass `--skip-default-skills` for a bare agent instead. It prints only
+the created IDs — never the API key.
+
+Find your tenant UUID with `daimon tenants list` once the stack has
+auto-discovered it from a first message on another channel, or pick any
+UUID you control if this is a fresh, OpenAI-only deployment from the start.
+
+### 3. Point channels at it
+
+The one-command way: route your existing default agent's new threads to
+OpenAI entirely —
+
+```bash
+docker compose run --rm init "daimon agents backend set <agent-name-or-id> openai"
+```
+
+— after which every channel using that agent goes to OpenAI, with no
+per-channel setup. This is the same command any backend switch uses; nothing
+OpenAI-specific about it.
+
+If you'd rather route only specific channels and leave the rest on
+Anthropic, use `daimon channels rule set` per channel instead, scoped with
+`--platform`/`--channel-id`/`--account-id` on `daimon openai init` (its
+default is `*` — every platform, channel and account under your tenant, the
+single-entry default most self-hosters want, so the runtime file never needs
+one entry per channel).
+
+The wildcard is scoped to your tenant and nothing wider: `tenant_id` is
+never wildcardable, by construction — the loader refuses a manifest row that
+tries (see `docs/mux.md`'s "OpenAI deployment runtime"). One deployment's
+OpenAI resources can never serve a different tenant through this entry, even
+with every other field left as `*`; an exact, narrower row always wins over
+a coexisting wildcard default for the same tenant.
+
+Either way, add to `.env` (the `init`/`mcp`/`discord`/`slack`/`teams`/
+`scheduler` services already share `./runtime` as `/app/runtime`, see
+`docker-compose.yml`):
+
+```bash
+DAIMON_TURN__PATH=mux
+DAIMON_TURN__CHANNEL_BACKENDS=true
+DAIMON_TURN__PROVIDER_RUNTIME_FILE=/app/runtime/openai.json
+```
+
+and point step 2's `init` command at the same path with
+`--manifest /app/runtime/openai.json` (or rely on the env var above, which
+`daimon openai init` reads by default).
+
+### 4. Verify it
+
+```bash
+docker compose run --rm init "daimon openai smoke --project <openai-project-id> --model <openai-model-id>"
+```
+
+This provisions its own small dedicated agent, environment and skill
+(separate from your real one), runs one chat turn that must make one tool
+call, and exits nonzero with a clear reason unless it completed. It's
+billed — a single cheap turn, same as `daimon smoke` for Anthropic.
+
 ## Slack (optional)
 
 Slack needs a publicly reachable `DAIMON_MCP__PUBLIC_URL`. The bot token is
@@ -266,8 +389,7 @@ The scheduler removes expired connection flows, including their encrypted
 tokens. Run it alongside the MCP service.
 
 Ask an agent to connect GitHub, or run `/github connect` in Discord or Slack.
-A server admin, or a channel admin of the channels an agent is limited to,
-gets a private link bound to that agent; the selected repos are for that agent
+A server admin gets a private link bound to that agent; the selected repos are for that agent
 only and activate for it when confirmed. The migration retires any saved
 GitHub key. An
 operator can issue an agent-bound link with `daimon github connect-link --tenant <workspace-uuid>
@@ -448,7 +570,7 @@ You need:
 | Register the app in Entra | Anyone, if your organisation lets users register apps; otherwise the Application Developer role |
 | Create the Azure Bot | Contributor (or Owner) on the subscription or a resource group |
 | Upload the app to Teams | A Teams administrator, or anyone if custom app uploads are allowed |
-| Turn on channel files (optional) | A global administrator (or Privileged Role Administrator) to consent once, then a SharePoint or global admin who is a member of the channel |
+| Turn on channel files (optional) | A global administrator (or Privileged Role Administrator) to consent once |
 
 ### 1. Register the app in Entra
 
@@ -471,7 +593,7 @@ You don't need to add any API permissions here. The bot reads channels
 through a team-level permission that a team owner grants when they add the
 app (more on that in step 7), and group chats through a chat-level one
 (`ChatMessage.Read.Chat`) granted when the app is added to the chat. Only two optional features need a Graph
-application permission: channel files (`Sites.Selected`) and private and
+application permission: channel files (`Files.ReadWrite.All`) and private and
 shared channel messages (`ChannelMessage.Read.All`, which is tenant-wide; see
 [below](#private-and-shared-channels-optional)).
 The same team-level consent covers activity feed notices
@@ -554,7 +676,7 @@ over HTTPS. Any reverse proxy or tunnel works. With
 
 ```text
 teams.example.com {
-	@teams path /api/messages /healthz /readyz /oauth/teams/files/callback
+	@teams path /api/messages /healthz /readyz
 	handle @teams {
 		reverse_proxy 127.0.0.1:3978
 	}
@@ -719,26 +841,14 @@ those files and save its own outputs to the channel's Files tab:
 
 1. Entra → **App registrations** → your app → **API permissions** → **Add a
    permission** → **Microsoft Graph** → **Application permissions** →
-   `Sites.Selected` → **Grant admin consent**. This permission reaches only
-   the sites you grant one by one, not every site in the organisation.
-2. Same app → **Authentication** → **Add a platform** → **Web**, with the
-   redirect URI `https://teams.example.com/oauth/teams/files/callback`.
-3. Set `DAIMON_TEAMS__PUBLIC_URL=https://teams.example.com` in `.env` (your
-   hostname, without `/api/messages`) and run
-   `docker compose --profile teams up -d` so the service picks it up.
-4. In the channel, a Daimon admin asks the bot to turn files on ("enable
-   files in this channel"), or shares a file it can't open, and the bot posts
-   an **Enable files** card. Click it and sign in as a SharePoint or global
-   admin who is a member of that channel. The first sign-in in your
-   organisation must be a global admin, who approves this for everyone.
-   Daimon then grants itself access to that channel's site, and the next
-   message can read the file.
+   `Files.ReadWrite.All` → **Grant admin consent**. No restart is needed:
+   each channel's files turn on within 10 minutes.
 
-One sign-in covers a team's standard channels, which share its site; each
-private or shared channel is turned on from inside it. Open a new channel's
-Files tab once first. A shared channel hosted by another organisation keeps
-its files there, out of reach. [`teams.md`](teams.md#channel-files-optional)
-also shows how to grant a team's site by hand.
+This one permission covers every channel, private and shared ones included.
+It reaches every file in your organisation, so Daimon only opens a shared
+file inside the channel's own Files folder and only saves there. Open a new
+channel's Files tab once first. A shared channel hosted by another
+organisation keeps its files there, out of reach.
 
 ### Private and shared channels (optional)
 

@@ -26,6 +26,7 @@ typo is silent — check the spelling here.
 - [MCP Server](#mcp-server)
 - [Hub](#hub)
 - [Agent Identity](#agent-identity)
+- [Environment](#environment)
 - [Discord](#discord)
 - [Thread Participation](#thread-participation)
 - [Slack](#slack)
@@ -84,9 +85,9 @@ a JSON object.
 `dict[UUID, bool]` · optional · default `{}`
 
 Per-tenant switch for the channel budget notice, keyed by tenant UUID. When a channel's
-budget is used up, its channel admins (else the server admins) get one DM per budget
-window on Discord, Slack and Teams. Missing/true sends it; false turns it off. Configure
-DAIMON_BUDGET_NOTICES as a JSON object.
+budget is used up, the server admins get one DM per budget window on Discord, Slack and
+Teams. Missing/true sends it; false turns it off. Configure DAIMON_BUDGET_NOTICES as a
+JSON object.
 
 ### `DAIMON_DIRECT_MESSAGE_POLICIES`
 
@@ -181,9 +182,11 @@ Read from `daimon.core.config.AnthropicSettings`. Prefix `DAIMON_ANTHROPIC__`.
 
 ### `DAIMON_ANTHROPIC__API_KEY`
 
-`SecretStr` · **required** · secret
+`SecretStr | None` · optional · default unset · secret
 
-Anthropic API key used to authenticate all Managed Agents SDK calls. Required.
+Anthropic API key used to authenticate all Managed Agents SDK calls. Required unless
+this deployment is OpenAI-only (see docs/self-hosting.md's 'Self-host on OpenAI'), in
+which case leave it unset.
 
 ### `DAIMON_ANTHROPIC__BASE_URL`
 
@@ -429,6 +432,23 @@ Slack workspace team IDs where agent identity stays off when enabled globally. S
 DAIMON_AGENT_IDENTITY__EXCLUDED_SLACK_TEAM_IDS to a JSON array of IDs. Default: [] (no
 workspaces excluded).
 
+## Environment
+
+Read from `daimon.core.config.EnvironmentSettings`. Prefix `DAIMON_ENVIRONMENT__`.
+
+### `DAIMON_ENVIRONMENT__NAME`
+
+`str` · optional · default unset
+
+Deployment name. Empty selects production Discord command behavior.
+
+### `DAIMON_ENVIRONMENT__LABEL`
+
+`str` · optional · default unset
+
+Environment chip text on MCP web pages, such as Staging. Empty falls back to the
+deployment name; both empty shows no chip. Does not affect Discord command sync.
+
 ## Discord
 
 Read from `daimon.core.config.DiscordSettings`. Prefix `DAIMON_DISCORD__`.
@@ -446,6 +466,13 @@ and the features that read it are inactive while it is.
 `SecretStr` · **required** · secret
 
 Discord bot token. Required to run the Discord adapter.
+
+### `DAIMON_DISCORD__COMMAND_GUILD_IDS`
+
+`list[int]` · optional · default unset
+
+Guilds allowed to receive commands and events when the environment name is set. An empty
+list disables all Discord ingress, including DMs, in non-production.
 
 ### `DAIMON_DISCORD__STARTUP_REPLAY_MINUTES`
 
@@ -778,9 +805,8 @@ keeps running so ingress can be re-enabled without a redeploy.
 `HttpUrl | None` · optional · default unset
 
 Externally reachable base URL of the Teams service (the Bot Framework messaging endpoint
-without /api/messages). Enables the admin sign-in that grants Daimon a team's SharePoint
-site; its callback is &lt;public_url&gt;/oauth/teams/files/callback, which must be a Web
-redirect URI on the app registration.
+without /api/messages). Graph's change notifications for private and shared channels
+post to it.
 
 ### `DAIMON_TEAMS__ADMIN_TEAM_ID`
 

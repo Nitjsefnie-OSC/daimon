@@ -43,7 +43,7 @@ MISS_TTL_S = 600.0
 
 TeamChannels = Callable[[str], Awaitable[Mapping[str, str]]]
 ListTeams = Callable[[], Awaitable[Sequence[TeamsInstallationRow]]]
-# The Entra group recorded for a channel (its Files site or its message subscription).
+# The Entra group recorded for a channel (its message subscription).
 StoredGroup = Callable[[str], Awaitable[str | None]]
 
 

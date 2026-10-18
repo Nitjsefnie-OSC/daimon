@@ -29,6 +29,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import set_external, set_role
 from daimon.core.stores.domain import Role
+from daimon.core.stores.github_installation_reconciliation import get as get_reconciliation
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -44,6 +45,12 @@ _INSTALLATION_WRITE = {
     "issues": "write",
     "pull_requests": "write",
 }
+
+
+@pytest.fixture(autouse=True)
+def _existing_live_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing route scenarios exercise GitHub; live platform cases override this stub."""
+    monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=True))
 
 
 def _settings(key: str, *, configured: bool = True) -> Settings:
@@ -409,14 +416,21 @@ async def test_cancel_after_oauth_revokes_user_token(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["discord", "slack"])
 async def test_requested_repo_picker_posts_only_selected_repo(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    platform: str,
 ) -> None:
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     async with committing_sessionmaker.begin() as session:
-        tenant = await make_tenant(session, id=tenant_id, workspace_id="workspace")
-        await make_account(session, tenant=tenant, id=account_id)
+        tenant = await make_tenant(
+            session, id=tenant_id, workspace_id="workspace", platform=platform
+        )
+        account = await make_account(session, tenant=tenant, id=account_id)
+        await make_platform_principal(
+            session, platform=platform, external_id="123", tenant=tenant, account=account
+        )
         await set_role(session, account_id, Role.ADMIN)
         invitation_token = await github_connect.mint_invitation(
             session,
@@ -424,6 +438,7 @@ async def test_requested_repo_picker_posts_only_selected_repo(
             requester_account_id=account_id,
             requester_platform_user_id="123",
             requested_repo="EXAMPLE/TWO",
+            origin_platform=platform,
         )
 
     def github_handler(request: httpx.Request) -> httpx.Response:
@@ -510,10 +525,22 @@ async def test_requested_repo_picker_posts_only_selected_repo(
         assert 'name="access" value="write" checked' in picker.text
         async with committing_sessionmaker() as session:
             assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
+        live = AsyncMock(
+            side_effect=[False, oauth_github.AdminAttestationUnavailable("lookup failed"), True]
+        )
+        monkeypatch.setattr(oauth_github, "_attest_native_admin", live)
+        for expected_status in (403, 503):
+            refused = await browser.post(
+                "/oauth/github/confirm", data={"state": state, "repo": "102", "access": "read"}
+            )
+            assert refused.status_code == expected_status
+            async with committing_sessionmaker() as session:
+                assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
         submitted = await browser.post(
             "/oauth/github/confirm", data={"state": state, "repo": "102", "access": "read"}
         )
         assert submitted.status_code == 200
+        assert live.await_count == 3
         async with committing_sessionmaker() as session:
             repos = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
             assert [(repo.repo_id, repo.max_access) for repo in repos] == [(102, "write")]
@@ -528,7 +555,10 @@ async def test_connection_happy_path_and_rechecks(
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session, id=tenant_id, workspace_id="workspace")
-        await make_account(session, tenant=tenant, id=account_id)
+        account = await make_account(session, tenant=tenant, id=account_id)
+        await make_platform_principal(
+            session, platform="discord", external_id="123", tenant=tenant, account=account
+        )
         await set_role(session, account_id, Role.ADMIN)
         invitation_token = await github_connect.mint_invitation(
             session,
@@ -823,10 +853,12 @@ async def test_connection_happy_path_and_rechecks(
             assert installation.account_type == "Organization"
             assert installation.repository_selection == "selected"
             assert set(installation.repo_full_names) == {"example/one", "example/two"}
+            refresh = await get_reconciliation(session, installation_id=77)
+            assert refresh is not None and refresh.generation == 1
             assert (
                 await github_app_installations.get_for_repo(session, repo_full_name="example/one")
-                is None
-            )
+                is not None
+            ), "the confirmed set applies until the first GitHub refresh"
             events = await list_events(session, tenant_id=tenant_id)
             assert len(events) == 1
             assert events[0].operation == "github_connect"
@@ -1119,193 +1151,6 @@ def test_agent_done_page_says_connected_and_close_tab() -> None:
     assert "2 repos connected to ResearchBot." in body
     assert "You can close this tab." in body
     assert "old GitHub token" not in body
-
-
-@pytest.mark.parametrize("still_channel_admin", [True, False])
-async def test_channel_admin_completes_connect_for_their_agent(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-    still_channel_admin: bool,
-) -> None:
-    """A channel admin's link for the agent pinned to their channel adds repos for it only."""
-    from types import SimpleNamespace
-
-    from daimon.core.access_policy import TenantAccessPolicy
-    from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.scope import DeploymentDefault
-    from daimon.core.stores.access_policy import set_access_policy
-    from daimon.core.stores.channel_admins import delete_channel_admins, set_channel_admins
-
-    sessionmaker = committing_sessionmaker
-    tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
-    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_bot")
-    async with sessionmaker.begin() as session:
-        tenant = await make_tenant(session, id=tenant_id, workspace_id="workspace")
-        account = await make_account(session, tenant=tenant, id=account_id)
-        await set_role(session, account_id, Role.USER)
-        await make_platform_principal(
-            session, platform="discord", external_id="u1", tenant=tenant, account=account
-        )
-        await set_channel_admins(
-            session,
-            tenant_id=tenant_id,
-            platform="discord",
-            channel_id="team-a",
-            role_ids=[],
-            user_ids=["u1"],
-            actor_account_id=None,
-        )
-        await set_access_policy(
-            session,
-            tenant_id=tenant_id,
-            policy=TenantAccessPolicy(agent_channel_pins={"Bot": ("team-a",)}),
-        )
-        invitation_token = await github_connect.mint_invitation(
-            session,
-            tenant_id=tenant_id,
-            requester_account_id=account_id,
-            requester_label="Ana",
-            requester_platform_user_id="u1",
-            agent_id=agent_id,
-            agent_name="Bot",
-            agent_ma_id="ag_bot",
-            agent_manager_verified=True,
-            origin_platform="discord",
-        )
-
-    def github_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/login/oauth/access_token":
-            return httpx.Response(200, json={"access_token": "user-token"})
-        if request.url.path == "/applications/client/token":
-            return httpx.Response(204)
-        if request.url.path == "/app/installations/77":
-            return httpx.Response(
-                200,
-                json={
-                    "id": 77,
-                    "account": {"id": 55, "login": "ana", "type": "User"},
-                    "repository_selection": "selected",
-                    "suspended_at": None,
-                    "permissions": _INSTALLATION_WRITE,
-                },
-            )
-        if request.url.path == "/user":
-            return httpx.Response(200, json={"id": 17})
-        if request.url.path == "/user/installations":
-            return httpx.Response(
-                200,
-                json={
-                    "installations": [
-                        {
-                            "id": 77,
-                            "account": {"id": 55, "login": "ana", "type": "User"},
-                            "repository_selection": "selected",
-                        }
-                    ]
-                },
-            )
-        if request.url.path == "/user/installations/77/repositories":
-            return httpx.Response(
-                200,
-                json={
-                    "repositories": [
-                        {
-                            "id": 101,
-                            "owner": {"id": 55},
-                            "full_name": "ana/thesis",
-                            "permissions": {"admin": True},
-                        }
-                    ]
-                },
-            )
-        raise AssertionError(f"unexpected GitHub path {request.url.path}")
-
-    looked_up: list[uuid.UUID] = []
-
-    async def find_agent(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object:
-        looked_up.append(agent_id)
-        return SimpleNamespace(name="Bot", metadata={})
-
-    monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
-    monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
-    key = Fernet.generate_key().decode()
-    connect, callback, setup, confirm = build_oauth_github_routes(
-        settings=_settings(key),
-        sessionmaker=sessionmaker,
-        fernet=build_multifernet((key,)),
-        client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(github_handler)),
-        deployment_default=DeploymentDefault(),
-        anthropic=object(),  # type: ignore[arg-type]
-        group_members=lambda _platform, _workspace: None,
-    )
-    app = Starlette(
-        routes=[
-            Route("/oauth/github/connect/{token}", connect),
-            Route("/oauth/github/callback", callback),
-            Route("/oauth/github/setup", setup),
-            Route("/oauth/github/confirm", confirm, methods=["GET", "POST"]),
-        ]
-    )
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
-    ) as browser:
-        start = await browser.get(f"/oauth/github/connect/{invitation_token}")
-        state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
-        await browser.get("/oauth/github/callback", params={"state": state, "code": "code"})
-        picker = await browser.get("/oauth/github/confirm", params={"state": state})
-        assert "Bot&#x27;s GitHub repos" in picker.text
-        assert "Repos for this agent" in picker.text
-        assert "Save changes" in picker.text
-        fields = dict(
-            re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', picker.text)
-        )
-        if not still_channel_admin:
-            async with sessionmaker.begin() as session:
-                await delete_channel_admins(
-                    session,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    channel_id="team-a",
-                )
-        done = await browser.post(
-            "/oauth/github/confirm",
-            data={
-                **{key: html.unescape(value) for key, value in fields.items()},
-                "repo": "101",
-                "access": "read",
-                "working": "keep",
-            },
-        )
-        if still_channel_admin:
-            used_link = await browser.get(f"/oauth/github/connect/{invitation_token}")
-            assert used_link.status_code == 200
-            assert "ana/thesis" not in used_link.text
-            async with sessionmaker.begin() as session:
-                await delete_channel_admins(
-                    session,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    channel_id="team-a",
-                )
-            revoked_receipt = await browser.get("/oauth/github/confirm", params={"state": state})
-            assert revoked_receipt.status_code == 403
-            assert "ana/thesis" not in revoked_receipt.text
-    assert looked_up and set(looked_up) == {agent_id}
-    async with sessionmaker() as session:
-        own = await github_access.list_authorized_repos(
-            session, tenant_id=tenant_id, agent_id=agent_id
-        )
-        shared = await github_access.list_authorized_repos(session, tenant_id=tenant_id)
-    assert shared == []
-    if still_channel_admin:
-        assert done.status_code == 200
-        assert "Repos saved" in done.text
-        assert [(repo.repo_id, repo.scope_agent_id, repo.max_access) for repo in own] == [
-            (101, agent_id, "write")
-        ]
-    else:
-        assert "Added" not in done.text
-        assert own == []
 
 
 @pytest.mark.asyncio
@@ -1605,7 +1450,12 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         # current tenant admin and still open this editor.
         _state, hidden, rendered = await page(operator=True)
         assert "Editor&#x27;s GitHub repos" in rendered
+        operator_live = AsyncMock(
+            side_effect=AssertionError("operator invitation requested live admin lookup")
+        )
+        monkeypatch.setattr(oauth_github, "_attest_native_admin", operator_live)
         assert (await save(hidden, repo="101")).status_code == 200
+        operator_live.assert_not_awaited()
 
         async with sessionmaker.begin() as session:
             operator_token = await github_connect.mint_invitation(

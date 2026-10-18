@@ -7,11 +7,8 @@ whose text changed, comes back as the form with a preview and the previewed
 hash; an unchanged one adds. The skill becomes the agent's own copy; the
 shared library and the built-in agents are never touched.
 
-Who may: Discord's rule (`skill_change_refusal`). A server admin may add to
-any agent they could edit, a channel admin to one that answers only in their
-channels, anyone to one that nobody else uses. The panel lives in the 1:1
-chat, outside every channel, so a pinned agent takes an add only from a
-server admin or an admin of every channel it is pinned to. Opening the form,
+Who may: Discord's rule (`skill_change_refusal`). The panel lives in the 1:1
+chat, outside every channel, so a pinned agent requires a server admin. Opening the form,
 each submit and the add itself re-check live, the last on the re-read agent
 right before the upload and the attach.
 """
@@ -23,13 +20,12 @@ from typing import Final
 
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.teams.admin_caller import admin_caller
 from daimon.adapters.teams.card_actions import Actor
-from daimon.adapters.teams.channel_admin_groups import channel_admin_caller
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.authz import Place, Subject
-from daimon.core.channel_admins import load_live_subject
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
@@ -37,6 +33,7 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.native_admins import load_live_subject
 from daimon.core.operation_policy import decide_operation
 from daimon.core.roster import RosterAgent
 from daimon.core.skills.add import SkillAddResult, add_agent_skill
@@ -52,11 +49,7 @@ BUILT_IN: Final = (
 
 
 def needs_admin(agent_name: str) -> str:
-    return (
-        f"Others use {agent_name} (a default, a thread, or someone else's routine or "
-        "conversation), so adding a skill needs an admin or an admin of every channel "
-        "it answers in."
-    )
+    return f"Adding a skill to {agent_name} needs a server admin."
 
 
 class SkillAddRefused(Exception):
@@ -82,7 +75,7 @@ async def skill_change_refusal(
     """
     if agent.is_built_in:
         return BUILT_IN
-    caller = await channel_admin_caller(
+    caller = await admin_caller(
         runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
     )
     names = (agent.name, *(agent_pin_names(ma_agent.name, ma_agent.metadata) if ma_agent else ()))

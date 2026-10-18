@@ -38,14 +38,12 @@ from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
     NOT_OFFERED_NOTE,
     EnvironmentPicker,
-    save_scope_environment,
 )
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.testing import ma_environment
 from daimon.testing.factories import make_account, make_tenant
@@ -161,21 +159,6 @@ def _select(view: Any) -> discord.ui.Select[Any] | None:
     return selects[0] if selects else None
 
 
-async def _grant_channel(
-    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *, channel_id: int = CHANNEL_ID
-) -> None:
-    async with factory() as session, session.begin():
-        await set_channel_admins(
-            session,
-            tenant_id=tenant_id,
-            platform="discord",
-            channel_id=str(channel_id),
-            role_ids=[],
-            user_ids=[str(USER_ID)],
-            actor_account_id=None,
-        )
-
-
 # ---------------------------------------------------------------------------
 # What the screen shows
 # ---------------------------------------------------------------------------
@@ -275,32 +258,6 @@ async def test_members_get_no_picker_and_no_environment_listing(
 
     assert picker is None, "a member with no grant for this channel cannot pick"
     assert calls == [], "a member costs one grant read and no environment listing"
-
-
-async def test_server_and_channel_admins_get_the_picker(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant_id, account_id = await _seed(db_session_factory)
-    runtime = _runtime(db_session_factory, _anthropic(tenant_id, "science", "Beta", "alpha"))
-    answering_map = AnsweringMap(tenant_environment="shared", deployment_environment="default")
-
-    admin = await load_environment_picker(
-        _interaction(admin=True),
-        runtime=runtime,
-        state=_state(account_id, is_admin=True, answering_map=answering_map),
-    )
-    await _grant_channel(db_session_factory, tenant_id)
-    channel_admin = await load_environment_picker(
-        _interaction(admin=False),
-        runtime=runtime,
-        state=_state(account_id, is_admin=False, answering_map=answering_map),
-    )
-
-    assert admin is not None and admin.names == ("alpha", "Beta", "science"), (
-        "a server admin picks from the server's environments, sorted case-insensitively"
-    )
-    assert admin.inherited == "shared", "the default names what the channel falls to"
-    assert channel_admin == admin, "an admin of this channel gets the same picker"
 
 
 async def test_a_failed_listing_hides_only_the_picker(
@@ -458,74 +415,6 @@ async def test_a_forged_value_is_answered_and_writes_nothing(
     ), "a forged value writes nothing"
 
 
-async def test_an_admin_of_another_channel_is_refused_by_the_select(
-    db_session_factory: async_sessionmaker[AsyncSession], db_session: AsyncSession
-) -> None:
-    tenant_id, account_id = await _seed(db_session_factory)
-    await _grant_channel(db_session_factory, tenant_id, channel_id=CHANNEL_ID + 1)
-    runtime = _runtime(db_session_factory, _anthropic(tenant_id, "science"))
-    state = _state(account_id, is_admin=False, answering_map=AnsweringMap())
-    view = RoutingView(
-        state,
-        runtime=runtime,
-        allowed_user_id=USER_ID,
-        environment_picker=EnvironmentPicker(
-            channel_id=str(CHANNEL_ID), own=None, inherited=None, names=("science",)
-        ),
-    )
-    select = _select(view)
-    assert select is not None, "the rendered picker offers the select"
-    select._values = ["env:science"]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
-    interaction = _interaction(admin=False)
-
-    picker = await load_environment_picker(interaction, runtime=runtime, state=state)
-    await select.callback(interaction)
-
-    assert picker is None, "another channel's grant draws no picker here"
-    interaction.response.send_message.assert_awaited_once_with(REFUSED_MESSAGE, ephemeral=True)
-    assert (
-        await get_scope(
-            db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=str(CHANNEL_ID))
-        )
-        is None
-    ), "a grant on another channel writes nothing here"
-
-
-async def test_a_channel_admin_of_a_sealed_channel_is_refused_an_open_network(
-    db_session_factory: async_sessionmaker[AsyncSession], db_session: AsyncSession
-) -> None:
-    """In a sealed channel the select keeps unrestricted networking for server admins."""
-    tenant_id, account_id = await _seed(db_session_factory)
-    await _grant_channel(db_session_factory, tenant_id)
-    async with db_session_factory() as session, session.begin():
-        await set_access_policy(
-            session,
-            tenant_id=tenant_id,
-            policy=TenantAccessPolicy(sealed_channel_ids=(str(CHANNEL_ID),)),
-        )
-    runtime = _runtime(db_session_factory, _anthropic(tenant_id, "science"))
-    state = _state(account_id, is_admin=False, answering_map=AnsweringMap())
-    interaction = _interaction(admin=False)
-    view = await build_routing_view(
-        interaction, runtime=runtime, state=state, allowed_user_id=USER_ID
-    )
-    select = _select(view)
-    assert select is not None, "the channel admin still gets the select"
-
-    select._values = ["env:science"]  # pyright: ignore[reportPrivateUsage]  # a real dispatch sets this
-    await select.callback(interaction)
-
-    assert "Only turns inside" in interaction.followup.send.call_args.args[0], (
-        "the refusal names the rule"
-    )
-    assert (
-        await get_scope(
-            db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=str(CHANNEL_ID))
-        )
-        is None
-    ), "the refused pick writes nothing"
-
-
 async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network_in_a_sealed_channel(
     db_session_factory: async_sessionmaker[AsyncSession], db_session: AsyncSession
 ) -> None:
@@ -558,43 +447,6 @@ async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network_in_a_se
         )
         is None
     ), "the unconfirmed pick writes nothing"
-
-
-async def test_a_channel_admin_never_sees_another_isolated_channels_own_environment(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Its name could name that channel's client; a server admin still sees every name."""
-    tenant_id, account_id = await _seed(db_session_factory)
-    await _grant_channel(db_session_factory, tenant_id)
-    isolated = str(CHANNEL_ID + 1)
-    async with db_session_factory() as session, session.begin():
-        await set_access_policy(
-            session,
-            tenant_id=tenant_id,
-            policy=TenantAccessPolicy(
-                sealed_channel_ids=(isolated,), isolated_channel_ids=(isolated,)
-            ),
-        )
-        await save_scope_environment(
-            session,
-            tenant_id=tenant_id,
-            channel_id=isolated,
-            environment_name="acme",
-            actor_account_id=None,
-        )
-    runtime = _runtime(db_session_factory, _anthropic(tenant_id, "acme", "science"))
-
-    async def names(*, admin: bool) -> tuple[str, ...]:
-        picker = await load_environment_picker(
-            _interaction(admin=admin),
-            runtime=runtime,
-            state=_state(account_id, is_admin=admin, answering_map=AnsweringMap()),
-        )
-        assert picker is not None, "both get the picker"
-        return picker.names
-
-    assert await names(admin=False) == ("science",), "the isolated channel's own name is hidden"
-    assert await names(admin=True) == ("acme", "science"), "a server admin sees every name"
 
 
 # ---------------------------------------------------------------------------

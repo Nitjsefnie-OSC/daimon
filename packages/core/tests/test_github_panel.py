@@ -318,7 +318,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         PlatformPrincipal(
             tenant_id=tenant_id,
             platform="discord",
-            external_id="channel-admin",
+            external_id="former-holder",
             account_id=member_id,
         )
     )
@@ -329,7 +329,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
             settings=settings,
             tenant_id=tenant_id,
             platform="discord",
-            platform_user_id="channel-admin",
+            platform_user_id="former-holder",
             verified_tenant_admin=False,
         )
     account = await db_session.get(Account, member_id)
@@ -340,7 +340,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
             db_session,
             tenant_id=tenant_id,
             platform="discord",
-            platform_user_id="channel-admin",
+            platform_user_id="former-holder",
             verified_tenant_admin=False,
         )
     account = await db_session.get(Account, member_id)
@@ -350,7 +350,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         db_session,
         tenant_id=tenant_id,
         platform="discord",
-        platform_user_id="channel-admin",
+        platform_user_id="former-holder",
         verified_tenant_admin=True,
     )
     account = await db_session.get(Account, member_id)
@@ -362,7 +362,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         settings=settings,
         tenant_id=tenant_id,
         platform="discord",
-        platform_user_id="channel-admin",
+        platform_user_id="former-holder",
         verified_tenant_admin=True,
     )
     with pytest.raises(ValueError, match="workspace admin"):

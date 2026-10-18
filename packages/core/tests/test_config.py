@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 from cryptography.fernet import Fernet
 from daimon.core.config import (
+    ANTHROPIC_UNCONFIGURED_PLACEHOLDER,
     AnthropicSettings,
     ArtifactsSettings,
     DatabaseSettings,
@@ -115,6 +116,23 @@ def test_load_settings_parses_nested_delimiter_when_env_provided(
     assert settings.anthropic.api_key.get_secret_value() == "sk-test"
     assert settings.cli.local_user == "alice"
     assert settings.log.level == "DEBUG"
+
+
+def test_settings_load_with_no_anthropic_key_for_an_openai_only_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.delenv("DAIMON_ANTHROPIC__API_KEY", raising=False)
+
+    settings = load_settings(_env_file=None)
+
+    assert settings.anthropic.api_key is None
+    assert settings.anthropic.resolved_api_key() == ANTHROPIC_UNCONFIGURED_PLACEHOLDER
+
+
+def test_resolved_api_key_prefers_a_configured_real_key() -> None:
+    configured = AnthropicSettings(api_key=SecretStr("sk-real"))
+    assert configured.resolved_api_key() == "sk-real"
 
 
 def test_database_pool_settings_parse_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

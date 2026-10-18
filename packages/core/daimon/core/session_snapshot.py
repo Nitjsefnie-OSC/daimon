@@ -29,7 +29,8 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Collection, Sequence
-from typing import Literal, cast
+from datetime import datetime
+from typing import Any, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -52,6 +53,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
     BetaManagedAgentsGitHubRepositoryResource,
 )
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
+from daimon.core.model_presets import model_choice_id
 from daimon.core.tool_safety import (
     OPEN_TOOL_SAFETY,
     ToolSafetyPolicy,
@@ -59,7 +61,15 @@ from daimon.core.tool_safety import (
     session_tools_for_policy,
     trusted_servers_for,
 )
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializationInfo,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    model_serializer,
+)
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type MaSkill = BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill
@@ -79,6 +89,7 @@ _IDENTITY_FIELDS = (
     "schema_version",
     "ma_agent_id",
     "model_id",
+    "model_speed",
     "system_sha256",
     "skills_sha256",
     "environment_id",
@@ -96,11 +107,34 @@ class SessionSnapshot(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    @model_serializer(mode="wrap")
+    def _omit_empty_refusal_state(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> dict[str, Any]:
+        # Refusal fields and `is_external` are absent from every snapshot written
+        # before them; keep stored and compared JSON unchanged while they are empty.
+        data: dict[str, Any] = handler(self)
+        for name in (
+            "unavailable_repos",
+            "unavailable_notice_pending",
+            "unavailable_notice_sent",
+            "is_external",
+        ):
+            if not data.get(name):
+                data.pop(name, None)
+        return data
+
     schema_version: Literal[1] = 1
 
     # Identity axis — a difference here can only be applied by replacing the session.
     ma_agent_id: str
     model_id: str
+    model_speed: Literal["standard", "fast"] = "standard"
+
+    @property
+    def pricing_id(self) -> str:
+        return model_choice_id({"id": self.model_id, "speed": self.model_speed})
+
     system_sha256: str | None
     skills_sha256: str
     environment_id: str
@@ -109,6 +143,9 @@ class SessionSnapshot(BaseModel):
     # Every repo the session's App tokens cover, mounted or not. A new grant
     # changes this set, and the session must be replaced to receive the token.
     token_repo_urls: tuple[str, ...] = ()
+    unavailable_repos: tuple[tuple[str, datetime], ...] = ()
+    unavailable_notice_pending: tuple[str, ...] = ()
+    unavailable_notice_sent: tuple[str, ...] = ()
     repo_url: str | None
     repo_branch: str | None
     memory_store_id: str | None
@@ -119,6 +156,10 @@ class SessionSnapshot(BaseModel):
     # session only to add it.
     personal_memory_store_id: str | None = None
     vault_id: str | None
+    # Created for a person from another organisation: no `.env`, no agent-wide
+    # MCP tokens. A session created for anyone else may hold copies of both in
+    # its workspace, so it is replaced rather than stripped in place.
+    is_external: bool = False
 
     # Mutable axis — a difference here can be applied to the live session.
     tools_sha256: str
@@ -137,6 +178,31 @@ class SessionSnapshot(BaseModel):
     # is not a configuration change to the session that already froze it.
     agent_version: int
     agent_name: str
+
+
+def refreshed_unavailable_state(
+    previous: SessionSnapshot,
+    refused_urls: tuple[str, ...],
+    *,
+    now: datetime,
+) -> dict[str, tuple[tuple[str, datetime], ...] | tuple[str, ...]]:
+    """Keep first refusal times and deliver each continuous refusal once."""
+    previous_times = dict(previous.unavailable_repos)
+    refused = set(refused_urls)
+    sent = tuple(url for url in previous.unavailable_notice_sent if url in refused)
+    pending = tuple(
+        dict.fromkeys(
+            (
+                *previous.unavailable_notice_pending,
+                *(url for url in refused_urls if url not in sent),
+            )
+        )
+    )
+    return {
+        "unavailable_repos": tuple((url, previous_times.get(url, now)) for url in refused_urls),
+        "unavailable_notice_pending": pending,
+        "unavailable_notice_sent": sent,
+    }
 
 
 def canonical_json(obj: JsonValue) -> str:
@@ -189,6 +255,8 @@ def fingerprint_identity(snapshot: SessionSnapshot) -> str:
         # Only when set, so every snapshot without one keeps the fingerprint
         # it was recorded with.
         fields = (*fields, "personal_memory_store_id")
+    if snapshot.is_external:
+        fields = (*fields, "is_external")
     return _fingerprint(snapshot, fields)
 
 
@@ -211,6 +279,7 @@ def snapshot_from_created_session(
     sent_skills: Sequence[MaSkill],
     github_mode: Literal["legacy", "app"] = "app",
     personal_memory_store_ids: Collection[str] = (),
+    is_external: bool = False,
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
 
@@ -236,6 +305,7 @@ def snapshot_from_created_session(
         vault_id=vault_id,
         github_mode=github_mode,
         personal_memory_store_ids=personal_memory_store_ids,
+        is_external=is_external,
     )
 
 
@@ -274,6 +344,7 @@ def _snapshot_from_session(
     vault_id: str | None,
     github_mode: Literal["legacy", "app"] = "app",
     personal_memory_store_ids: Collection[str] = (),
+    is_external: bool = False,
 ) -> SessionSnapshot:
     env_resource_id: str | None = None
     resolved_env_file_id = env_file_id
@@ -318,6 +389,7 @@ def _snapshot_from_session(
     return SessionSnapshot(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
+        model_speed=getattr(agent.model, "speed", None) or "standard",
         system_sha256=hash_system(agent.system),
         skills_sha256=skills_sha256,
         environment_id=session.environment_id,
@@ -329,6 +401,7 @@ def _snapshot_from_session(
         memory_read_only=memory_read_only,
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
+        is_external=is_external,
         tools_sha256=hash_tools(agent.tools),
         mcp_servers_sha256=hash_mcp_servers(agent.mcp_servers),
         env_sha256=env_sha256,
@@ -425,6 +498,7 @@ def desired_snapshot(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     public_url: str | None = None,
     channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
+    is_external: bool = False,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would be running.
 
@@ -444,6 +518,7 @@ def desired_snapshot(
     return SessionSnapshot(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
+        model_speed=getattr(agent.model, "speed", None) or "standard",
         system_sha256=hash_system(agent.system),
         skills_sha256=hash_skills(session_skills(agent, channel_skills)),
         environment_id=environment_id,
@@ -461,6 +536,7 @@ def desired_snapshot(
         and (memory_store_id is not None or personal_memory_store_id is not None),
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id,
+        is_external=is_external,
         tools_sha256=hash_tools(
             session_tools(
                 agent,

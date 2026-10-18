@@ -22,9 +22,9 @@ import structlog
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.provisioning import demote_former_admins
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.channel_admins import GroupLookupFailed, GroupMembers, ServerAdminIds
 from daimon.core.config import TeamsSettings
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.native_admins import GroupLookupFailed, GroupMembers, ServerAdminIds
 from daimon.core.stores.domain import Role
 
 log = structlog.get_logger()
@@ -36,9 +36,8 @@ STALE_OWNERS_S = 3600.0
 class AdminTeamReads:
     """The Graph owner read, keeping the admin team's last owners and telling `after_read`.
 
-    It wraps the read the shared cache makes, so a read made first for a
-    channel grant naming the same team counts too, and each read counts once:
-    a failure is logged here, and a cached one re-raises without a read.
+    It wraps the shared cache read, counting each admin-team owner fetch once.
+    A failure is logged here, and a cached one re-raises without a read.
     """
 
     def __init__(

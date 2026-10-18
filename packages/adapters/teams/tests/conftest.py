@@ -22,7 +22,6 @@ from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.http_service import TeamsHttpService, create_teams_http_service
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.channel_admins import GroupLookupFailed, GroupMembers
 from daimon.core.config import (
     PrivateChannelMessagesSettings,
     SupportSettings,
@@ -32,6 +31,7 @@ from daimon.core.config import (
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.native_admins import GroupLookupFailed, GroupMembers
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
@@ -256,14 +256,10 @@ async def bot_token() -> str:
 def teams_update_error(body: dict[str, Any]) -> str | None:
     """Why Teams refuses this edit, in its words; None when it takes it.
 
-    An edit replaces one Teams message, and text beside a card is two; inline
-    images are taken to stay in the text's message.
+    An edit replaces one Teams message, and text beside any attachment, a card
+    or an image, is two. A new post of both is split into two messages.
     """
-    attachments = cast("list[dict[str, Any]]", body.get("attachments") or [])
-    if body.get("text") and any(
-        str(a.get("contentType", "")).startswith("application/vnd.microsoft.card.")
-        for a in attachments
-    ):
+    if body.get("text") and body.get("attachments"):
         return "Activity resulted into multiple skype activities"
     return None
 
@@ -404,7 +400,7 @@ def assert_teams_accepts(request: SentRequest) -> None:
     if request.method == "PUT":
         edited = re.search(r"/activities/([^/]+)$", httpx.URL(request.url).path)
         assert edited and request.body.get("id") == edited.group(1), "an edit names its activity"
-        assert teams_update_error(request.body) is None, "an edit stays one Teams message"
+    assert teams_update_error(request.body) is None, "an activity stays one Teams message"
 
 
 def build_teams_client(fake: TeamsApiFake) -> Client:
@@ -418,7 +414,7 @@ class FakeSender:
     """A `TeamsSender` recording every send. Indices in `fail_on` raise; in
     `refuse_on` they answer `refuse_status`; in `timeout_on` they time out after landing
     (odd: httpx, even: asyncio). An edit Teams would refuse answers 400, as
-    Teams does."""
+    Teams does; a new post of text and attachments fails the test."""
 
     sent: list[tuple[str, MessageActivityInput, str | None]] = dataclasses.field(
         default_factory=list[tuple[str, MessageActivityInput, str | None]]
@@ -446,6 +442,7 @@ class FakeSender:
             request = httpx.Request("PUT", f"https://teams.test/activities/{activity.id}")
             response = httpx.Response(400, json={"error": {"message": refused}}, request=request)
             raise httpx.HTTPStatusError(refused, request=request, response=response)
+        assert teams_update_error(body) is None, "Teams splits text and attachments in two"
         return SentActivity(id=activity.id or f"m-{index + 1}", activity_params=activity)
 
     @property

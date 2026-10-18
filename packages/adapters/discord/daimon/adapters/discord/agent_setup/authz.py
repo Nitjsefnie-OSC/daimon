@@ -48,7 +48,7 @@ from __future__ import annotations
 import structlog
 from daimon.adapters.discord.agent_setup.state import RosterEntry
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
-from daimon.adapters.discord.checks import ADMIN_NOUN, channel_admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import ADMIN_NOUN, admin_caller, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.operation_policy import (
@@ -84,11 +84,10 @@ async def _target_facts(
     operation: OperationKind,
     is_admin: bool,
 ) -> TargetFacts:
-    """The live facts `operation` turns on, channel admin locality included, as Slack reads them."""
     if not needs_reachability_read(operation, is_admin=is_admin, is_daimon_managed=entry.is_system):
         return TargetFacts(is_daimon_managed=entry.is_system, is_reachable_in_tenant=False)
     tenant_id = await resolve_tenant_for_panel(runtime, interaction)
-    caller = channel_admin_caller(interaction.user).model_copy(update={"is_server_admin": is_admin})
+    caller = admin_caller(interaction.user).model_copy(update={"is_server_admin": is_admin})
     async with runtime.sessionmaker() as session:
         return await load_target_facts(
             session,

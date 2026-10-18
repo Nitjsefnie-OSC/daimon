@@ -4,7 +4,6 @@ The environment resolves over the same tiers as the agent (channel, then the
 tenant default, then the deployment default; see `daimon.core.scope`) but on
 its own, so a channel can keep the agent it has and run it with the packages
 one team needs. Server admins set any channel's environment or the tenant
-default; a channel admin sets the channels they run, except an environment
 with unrestricted networking in a sealed channel (`authorize`'s
 SET_CHANNEL_ENVIRONMENT): any network beyond package managers and the
 agent's MCP servers (`has_open_network`). A server admin confirms any change
@@ -110,7 +109,6 @@ def build_clear_environment_note(*, channel: str | None, cleared: bool) -> str:
 
 
 def build_limited_network_refusal(*, environment_name: str | None) -> str:
-    """Why a channel admin's pick in a channel with limited readers was refused; None is a clear."""
     what = (
         f"the {environment_name} environment has"
         if environment_name is not None
@@ -161,7 +159,7 @@ def build_environment_resolution_note(
     if environment_name is None:
         return (
             f"No environment resolves for channel {channel_id}, so a mention there cannot "
-            "start. A server admin, or an admin of that channel, can pick one."
+            "start. A server admin can pick one."
         )
     where = {
         "channel": "this channel's own setting",

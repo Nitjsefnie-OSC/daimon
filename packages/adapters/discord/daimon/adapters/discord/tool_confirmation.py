@@ -23,13 +23,13 @@ from typing import TYPE_CHECKING
 import structlog
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
 from daimon.core.authz import Subject
-from daimon.core.channel_admins import ChannelAdminCaller, load_live_subject
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
     ConfirmationHook,
     ConfirmationPrompt,
 )
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.posted_controls.confirmation import (
     NO_LONGER_PENDING_MESSAGE,
     NOT_YOURS_MESSAGE,
@@ -367,15 +367,14 @@ def discord_confirmation_hook(
             or not isinstance(channel, (discord.Thread, discord.TextChannel))
         ):
             return Subject()
-        role, roles = await requester_role(channel.guild, clicker)
+        role, _roles = await requester_role(channel.guild, clicker)
         async with rule_factory() as session:
             return await load_live_subject(
                 session,
                 tenant_id=tenant_id,
                 platform="discord",
-                caller=ChannelAdminCaller(
+                caller=AdminCaller(
                     platform_user_id=clicker,
-                    role_ids=frozenset(roles),
                     is_server_admin=role is Role.ADMIN,
                 ),
             )

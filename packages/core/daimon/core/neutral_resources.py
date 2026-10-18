@@ -1817,9 +1817,7 @@ def resolve_worker_spec(
     child = replace(
         parent,
         fleet=replace(fleet, scope=child_scope, depth=1),
-        subject=replace(
-            parent.subject, is_admin=False, via_agent_key=True, administered_channel_ids=frozenset()
-        ),
+        subject=replace(parent.subject, is_admin=False, via_agent_key=True),
         spec=resolved,
         backend_grants=(selected,),
         models=(resolved.model,),

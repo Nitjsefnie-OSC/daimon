@@ -1,4 +1,4 @@
-"""daimon channels ... sub-app: per-channel budgets, admins, skills and rules."""
+"""daimon channels ... sub-app: per-channel budgets, skills and rules."""
 
 from __future__ import annotations
 
@@ -25,7 +25,6 @@ from daimon.adapters.cli.runtime import (
 )
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.authz import Action, Subject
-from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_backend import channel_ref, current_backend
 from daimon.core.channel_budget import (
     BUDGET_WINDOWS,
@@ -34,6 +33,7 @@ from daimon.core.channel_budget import (
     load_budget_status,
     parse_budget_spec,
 )
+from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.channel_rules import (
     READERS_LABELS,
     WRITERS_LABELS,
@@ -53,12 +53,6 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.permissions import RuleRefused, thread_rule_key
 from daimon.core.stores import channel_budgets
-from daimon.core.stores.channel_admins import (
-    delete_channel_admins,
-    get_channel_admins,
-    list_channel_admins,
-    set_channel_admins,
-)
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.security_audit import append_event
@@ -71,17 +65,11 @@ from rich.console import Console
 from rich.markup import escape
 from sqlalchemy.ext.asyncio import AsyncSession
 
-channels_app = typer.Typer(
-    help="Channels: a summary, spend budgets, channel admins, skills and rules."
-)
+channels_app = typer.Typer(help="Channels: a summary, spend budgets, skills and rules.")
 budget_app = typer.Typer(
     help="A channel's spend budget: new turns there stop once its spend reaches the limit."
 )
 channels_app.add_typer(budget_app, name="budget")
-admins_app = typer.Typer(
-    help="A channel's admins: groups and members who run it on top of the server admins."
-)
-channels_app.add_typer(admins_app, name="admins")
 skills_app = typer.Typer(
     help="A channel's extra skills: added to whatever agent answers there, there only."
 )
@@ -407,19 +395,16 @@ class ChannelListing(BaseModel):
     agent: str | None
     environment: str | None
     own_agents_only: bool
-    admins: str
     budget: str
 
 
 def _listing(channel: ChannelSummary) -> ChannelListing:
-    admins = [*(f"group {r}" for r in channel.admins.role_ids), *channel.admins.user_ids]
     budget = channel.budget
     return ChannelListing(
         channel_id=channel.channel_id,
         agent=channel.agent_name,
         environment=channel.environment_name,
         own_agents_only=channel.own_agents_only,
-        admins=", ".join(admins),
         budget=f"${budget.spent_usd} of ${budget.limit_usd} ({budget.window})" if budget else "",
     )
 
@@ -475,9 +460,6 @@ async def channels_list(
         columns=tuple(ChannelListing.model_fields),
         as_json=False,
     )
-
-
-_ADMIN_COLUMNS = ("channel_id", "role_ids", "user_ids", "updated_at")
 
 
 async def _copy_resource_host(
@@ -554,158 +536,6 @@ async def _copy_resource_host(
     except ResourceHostMismatch as exc:
         raise ChannelRuleRefused("invalid", message=str(exc)) from exc
     return host, account_id
-
-
-def _ids(
-    platform: str, channel_id: str, *, roles: list[str], users: list[str]
-) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
-    try:
-        return normalize_channel_admin_ids(
-            platform, channel_id=_channel(platform, channel_id), role_ids=roles, user_ids=users
-        )
-    except InvalidChannelAdminIds as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-
-@admins_app.command("get")
-def channels_admins_get_command(
-    platform: str,
-    workspace_id: str,
-    channel_id: Annotated[str | None, typer.Argument(help="One channel; omit for all.")] = None,
-    as_json: Annotated[bool, JSON_OPTION] = False,
-) -> None:
-    """Show channel admins. A channel with none is run by the server admins alone."""
-    console = Console(highlight=False)
-
-    async def _run() -> None:
-        async with build_runtime(load_settings()) as rt:
-            await channels_admins_get(
-                rt=rt,
-                console=console,
-                platform=platform,
-                workspace_id=workspace_id,
-                channel_id=channel_id,
-                as_json=as_json,
-            )
-
-    run_cli(_run(), console=console)
-
-
-async def channels_admins_get(
-    *,
-    rt: CliRuntime,
-    console: Console,
-    platform: str,
-    workspace_id: str,
-    channel_id: str | None,
-    as_json: bool,
-) -> None:
-    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    async with rt.sessionmaker() as session:
-        if channel_id is None:
-            rows = await list_channel_admins(session, tenant_id=tenant_id, platform=platform)
-        else:
-            channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
-            row = await get_channel_admins(
-                session, tenant_id=tenant_id, platform=platform, channel_id=channel
-            )
-            rows = [row] if row is not None else []
-    emit_rows(console, rows, columns=_ADMIN_COLUMNS, as_json=as_json)
-
-
-@admins_app.command("set")
-def channels_admins_set_command(
-    platform: str,
-    workspace_id: str,
-    channel_id: str,
-    role: Annotated[
-        list[str] | None,
-        typer.Option(
-            help="Group id (repeatable): a Discord role, a Slack user group, or a Teams "
-            "team's Entra group id, which admits its owners."
-        ),
-    ] = None,
-    user: Annotated[
-        list[str] | None,
-        typer.Option(help="Platform user id; on Teams the Entra object id (repeatable)."),
-    ] = None,
-    as_json: Annotated[bool, JSON_OPTION] = False,
-) -> None:
-    """Replace one channel's admins with the given roles and users."""
-    console = Console(highlight=False)
-
-    async def _run() -> None:
-        async with build_runtime(load_settings()) as rt:
-            await channels_admins_set(
-                rt=rt,
-                console=console,
-                platform=platform,
-                workspace_id=workspace_id,
-                channel_id=channel_id,
-                roles=role or [],
-                users=user or [],
-                as_json=as_json,
-            )
-
-    run_cli(_run(), console=console)
-
-
-async def channels_admins_set(
-    *,
-    rt: CliRuntime,
-    console: Console,
-    platform: str,
-    workspace_id: str,
-    channel_id: str,
-    roles: list[str],
-    users: list[str],
-    as_json: bool,
-) -> None:
-    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    channel, role_ids, user_ids = _ids(platform, channel_id, roles=roles, users=users)
-    if not role_ids and not user_ids:
-        raise typer.BadParameter("pass --role or --user; use clear to remove a channel's admins")
-    async with rt.sessionmaker() as session, session.begin():
-        row = await set_channel_admins(
-            session,
-            tenant_id=tenant_id,
-            platform=platform,
-            channel_id=channel,
-            role_ids=role_ids,
-            user_ids=user_ids,
-            actor_account_id=None,
-        )
-    emit_rows(console, [row], columns=_ADMIN_COLUMNS, as_json=as_json)
-
-
-@admins_app.command("clear")
-def channels_admins_clear_command(platform: str, workspace_id: str, channel_id: str) -> None:
-    """Remove one channel's admins, leaving it to the server admins."""
-    console = Console(highlight=False)
-
-    async def _run() -> None:
-        async with build_runtime(load_settings()) as rt:
-            await channels_admins_clear(
-                rt=rt,
-                console=console,
-                platform=platform,
-                workspace_id=workspace_id,
-                channel_id=channel_id,
-            )
-
-    run_cli(_run(), console=console)
-
-
-async def channels_admins_clear(
-    *, rt: CliRuntime, console: Console, platform: str, workspace_id: str, channel_id: str
-) -> None:
-    tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    channel, _, _ = _ids(platform, channel_id, roles=[], users=[])
-    async with rt.sessionmaker() as session, session.begin():
-        removed = await delete_channel_admins(
-            session, tenant_id=tenant_id, platform=platform, channel_id=channel
-        )
-    console.print("cleared" if removed else "no channel admins to clear")
 
 
 _SKILL_COLUMNS = ("channel_id", "name", "skill_id", "version", "owner_agent_name")
@@ -1080,9 +910,9 @@ async def channels_rule_set(
         channel = (
             thread_rule_key(platform, channel_id)
             if thread
-            else _ids(platform, channel_id, roles=[], users=[])[0]
+            else normalize_channel_id(platform, channel_id)
         )
-    except RuleRefused as exc:
+    except (RuleRefused, InvalidChannelId) as exc:
         raise typer.BadParameter(str(exc)) from exc
     label = (
         await _channel_label(
@@ -1191,7 +1021,7 @@ async def agents_rule_set(
         raise typer.BadParameter("pass --runs-in, --anywhere or --nowhere")
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     channels = (
-        [_ids(platform, channel, roles=[], users=[])[0] for channel in runs_in]
+        [normalize_channel_id(platform, channel) for channel in runs_in]
         if runs_in is not None
         else None
         if anywhere

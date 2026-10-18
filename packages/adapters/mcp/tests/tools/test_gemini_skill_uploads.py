@@ -31,7 +31,6 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.turn_origins import create_origin
@@ -232,6 +231,64 @@ class Case:
             return int(await session.scalar(text("SELECT count(*) FROM pending_skill_adds")) or 0)
 
 
+@pytest.mark.parametrize("present", [False, True])
+async def test_default_capability_needs_no_runtime_or_origin_access(present: bool) -> None:
+    from daimon.adapters.mcp.runtime import McpResourceHostFactory
+    from daimon.adapters.mcp.tools._gemini_resources import gemini_skill_host
+    from daimon.core.stores.domain import TurnOriginRow
+
+    # Accessing any property of these inert sentinels would fail; default-off
+    # admission must return before reading identities or allocating anything.
+    capability = (
+        GeminiSkillCapability(cast(McpResourceHostFactory, object()), ()) if present else None
+    )
+    assert (
+        await gemini_skill_host(
+            cast(McpRuntime, object()),
+            cast(AuthIdentity, object()),
+            cast(TurnOriginRow, object()),
+            capability=capability,
+            operation="proof",
+        )
+        is None
+    )
+
+
+def test_operator_capability_refuses_truthy_non_boolean() -> None:
+    from daimon.adapters.mcp.runtime import McpResourceHostFactory
+
+    with pytest.raises(ValueError, match="explicit bool"):
+        GeminiSkillCapability(cast(McpResourceHostFactory, object()), (), enabled=cast(bool, 1))
+
+
+async def test_capability_for_another_channel_adds_no_configuration_read() -> None:
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.runtime import McpResourceHostFactory
+    from daimon.adapters.mcp.tools._gemini_resources import gemini_skill_host
+    from daimon.core.stores.domain import TurnOriginRow
+
+    tenant, account = uuid.uuid4(), uuid.uuid4()
+    auth = AuthIdentity(tenant_id=tenant, account_id=account, role=Role.USER, platform="discord")
+    origin = cast(
+        TurnOriginRow,
+        SimpleNamespace(
+            tenant_id=tenant, account_id=account, platform="discord", parent_channel_id=ROOM
+        ),
+    )
+    capability = GeminiSkillCapability(
+        cast(McpResourceHostFactory, object()),
+        (GeminiSkillGrant(tenant, account, "discord", "another", "digest", WORKSPACE),),
+        enabled=True,
+    )
+    assert (
+        await gemini_skill_host(
+            cast(McpRuntime, object()), auth, origin, capability=capability, operation="proof"
+        )
+        is None
+    )
+
+
 @pytest_asyncio.fixture
 async def case(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[Case]:
     require_owned_sessionmaker(db_session_factory)
@@ -276,27 +333,17 @@ async def case(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIte
         )
         auth = dataclasses.replace(
             auth,
-            administered_channel_ids=frozenset({ROOM}),
+            role=Role.ADMIN,
+            is_admin=True,
             chat_agent_id=derive_agent_uuid(
                 tenant_id=world.tenant_id, ma_agent_id=row.agent.ref.id
             ),
         )
         async with db_session_factory.begin() as session:
-            # Main's shared-agent policy requires actual channel ownership,
-            # including for a native catalog agent; keep this caller a member.
             await set_access_policy(
                 session,
                 tenant_id=world.tenant_id,
                 policy=TenantAccessPolicy(agent_rules={"helper": AgentRule(runs_in=(ROOM,))}),
-            )
-            await set_channel_admins(
-                session,
-                tenant_id=world.tenant_id,
-                platform="discord",
-                channel_id=ROOM,
-                role_ids=[],
-                user_ids=[USER],
-                actor_account_id=world.account_id,
             )
             await set_fields(
                 session,
@@ -423,57 +470,6 @@ async def test_chat_identity_refuses_before_bundle_preview_or_native_write(
     assert not case.wire.requests and await case.pending() == 0
 
 
-@pytest.mark.parametrize("missing", ["agent_rule", "channel_admin"])
-async def test_real_channel_ownership_precedes_bundle_preview(
-    case: Case, missing: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async with case.world.runtime.session_factory.begin() as session:
-        if missing == "agent_rule":
-            await set_access_policy(
-                session, tenant_id=case.world.tenant_id, policy=TenantAccessPolicy()
-            )
-        else:
-            await set_channel_admins(
-                session,
-                tenant_id=case.world.tenant_id,
-                platform="discord",
-                channel_id=ROOM,
-                role_ids=[],
-                user_ids=[],
-                actor_account_id=case.world.account_id,
-            )
-
-    def forbidden_bundle(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("ownership must precede source loading")
-
-    monkeypatch.setattr(skill_uploads, "_load_bundle", forbidden_bundle)
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
-        await case.call()
-    assert not case.wire.requests and not case.world.created and await case.pending() == 0
-
-
-async def test_actual_own_reader_policy_hides_unruled_helper_before_preview(
-    case: Case, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async with case.world.runtime.session_factory.begin() as session:
-        await set_access_policy(
-            session,
-            tenant_id=case.world.tenant_id,
-            policy=TenantAccessPolicy(
-                channel_rules={ROOM: ChannelRule(readers="own", writers="own")},
-                agent_rules={"other": AgentRule(runs_in=(ROOM,))},
-            ),
-        )
-
-    def forbidden_bundle(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("caller isolation must precede source loading")
-
-    monkeypatch.setattr(skill_uploads, "_load_bundle", forbidden_bundle)
-    with pytest.raises(ToolError, match="missing or changed"):
-        await case.call()
-    assert not case.wire.requests and await case.pending() == 0
-
-
 @pytest.mark.parametrize("field", ["tenant_id", "account_id", "principal_id", "authorization_id"])
 async def test_returned_foreign_host_refuses_before_catalog_read_or_write(
     case: Case, field: str, monkeypatch: pytest.MonkeyPatch
@@ -487,35 +483,6 @@ async def test_returned_foreign_host_refuses_before_catalog_read_or_write(
     with pytest.raises(ToolError, match="different tenant, account or workspace"):
         await case.call()
     assert not case.wire.requests and await case.pending() == 0
-
-
-@pytest.mark.parametrize(
-    "change", ["tenant", "account", "channel", "digest", "workspace", "duplicate"]
-)
-async def test_stale_or_foreign_grant_refuses_before_factory_allocation(
-    case: Case, change: str
-) -> None:
-    capability = case.world.runtime.gemini_skill_capability
-    assert capability is not None
-    grant = capability.grants[0]
-    if change == "duplicate":
-        grants = (grant, grant)
-    elif change == "tenant":
-        grants = (dataclasses.replace(grant, tenant_id=uuid.uuid4()),)
-    elif change == "account":
-        grants = (dataclasses.replace(grant, account_id=uuid.uuid4()),)
-    elif change == "channel":
-        grants = (dataclasses.replace(grant, channel_id="different"),)
-    elif change == "workspace":
-        grants = (dataclasses.replace(grant, account_scope_id="different"),)
-    else:
-        grants = (dataclasses.replace(grant, config_digest="different"),)
-    case.world.runtime = dataclasses.replace(
-        case.world.runtime, gemini_skill_capability=dataclasses.replace(capability, grants=grants)
-    )
-    with pytest.raises(ToolError, match="not authorized|missing or changed"):
-        await case.call()
-    assert not case.factory.calls and not case.wire.requests and await case.pending() == 0
 
 
 @pytest.mark.parametrize("setting", ["absent", "disabled"])
@@ -549,59 +516,53 @@ async def test_native_drift_during_confirm_keeps_retained_revision_and_refuses(c
         )
 
 
-@pytest.mark.parametrize("present", [False, True])
-async def test_default_capability_needs_no_runtime_or_origin_access(present: bool) -> None:
-    from daimon.adapters.mcp.runtime import McpResourceHostFactory
-    from daimon.adapters.mcp.tools._gemini_resources import gemini_skill_host
-    from daimon.core.stores.domain import TurnOriginRow
-
-    # Accessing any property of these inert sentinels would fail; default-off
-    # admission must return before reading identities or allocating anything.
-    capability = (
-        GeminiSkillCapability(cast(McpResourceHostFactory, object()), ()) if present else None
-    )
-    assert (
-        await gemini_skill_host(
-            cast(McpRuntime, object()),
-            cast(AuthIdentity, object()),
-            cast(TurnOriginRow, object()),
-            capability=capability,
-            operation="proof",
+async def test_actual_own_reader_policy_hides_unruled_helper_before_preview(
+    case: Case, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case.auth = dataclasses.replace(case.auth, role=Role.USER, is_admin=False)
+    async with case.world.runtime.session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=case.world.tenant_id,
+            policy=TenantAccessPolicy(
+                channel_rules={ROOM: ChannelRule(readers="own", writers="own")},
+                agent_rules={"other": AgentRule(runs_in=(ROOM,))},
+            ),
         )
-        is None
+
+    def forbidden_bundle(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("caller isolation must precede source loading")
+
+    monkeypatch.setattr(skill_uploads, "_load_bundle", forbidden_bundle)
+    with pytest.raises(ToolError, match="missing or changed"):
+        await case.call()
+    assert not case.wire.requests and await case.pending() == 0
+
+
+@pytest.mark.parametrize(
+    "change", ["tenant", "account", "channel", "digest", "workspace", "duplicate"]
+)
+async def test_stale_or_foreign_grant_refuses_before_factory_allocation(
+    case: Case, change: str
+) -> None:
+    capability = case.world.runtime.gemini_skill_capability
+    assert capability is not None
+    grant = capability.grants[0]
+    if change == "duplicate":
+        grants = (grant, grant)
+    elif change == "tenant":
+        grants = (dataclasses.replace(grant, tenant_id=uuid.uuid4()),)
+    elif change == "account":
+        grants = (dataclasses.replace(grant, account_id=uuid.uuid4()),)
+    elif change == "channel":
+        grants = (dataclasses.replace(grant, channel_id="different"),)
+    elif change == "workspace":
+        grants = (dataclasses.replace(grant, account_scope_id="different"),)
+    else:
+        grants = (dataclasses.replace(grant, config_digest="different"),)
+    case.world.runtime = dataclasses.replace(
+        case.world.runtime, gemini_skill_capability=dataclasses.replace(capability, grants=grants)
     )
-
-
-def test_operator_capability_refuses_truthy_non_boolean() -> None:
-    from daimon.adapters.mcp.runtime import McpResourceHostFactory
-
-    with pytest.raises(ValueError, match="explicit bool"):
-        GeminiSkillCapability(cast(McpResourceHostFactory, object()), (), enabled=cast(bool, 1))
-
-
-async def test_capability_for_another_channel_adds_no_configuration_read() -> None:
-    from types import SimpleNamespace
-
-    from daimon.adapters.mcp.runtime import McpResourceHostFactory
-    from daimon.adapters.mcp.tools._gemini_resources import gemini_skill_host
-    from daimon.core.stores.domain import TurnOriginRow
-
-    tenant, account = uuid.uuid4(), uuid.uuid4()
-    auth = AuthIdentity(tenant_id=tenant, account_id=account, role=Role.USER, platform="discord")
-    origin = cast(
-        TurnOriginRow,
-        SimpleNamespace(
-            tenant_id=tenant, account_id=account, platform="discord", parent_channel_id=ROOM
-        ),
-    )
-    capability = GeminiSkillCapability(
-        cast(McpResourceHostFactory, object()),
-        (GeminiSkillGrant(tenant, account, "discord", "another", "digest", WORKSPACE),),
-        enabled=True,
-    )
-    assert (
-        await gemini_skill_host(
-            cast(McpRuntime, object()), auth, origin, capability=capability, operation="proof"
-        )
-        is None
-    )
+    with pytest.raises(ToolError, match="not authorized|missing or changed"):
+        await case.call()
+    assert not case.factory.calls and not case.wire.requests and await case.pending() == 0

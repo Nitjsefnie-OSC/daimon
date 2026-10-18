@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **People from another organisation get none of the agent's credentials.**
+  A Teams external participant or guest answered in a `readers: own`
+  channel used to get the agent's keys as a mounted `.env` and its shared
+  MCP tokens in their vault, though their tool calls were already
+  restricted. Their sessions now carry neither: a server only a shared
+  token reaches is left off unless they sign in to it themselves, and their
+  own sign-ins still work. A session that may hold those credentials is
+  replaced, not reused, the next time such a person is answered in it,
+  without carrying its work.
+
+- Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
+- `/dm` is now `/dm-me` on Slack and Discord, including `/dm-me enable` and `/dm-me disable`. Slack reserves `/dm` for its own command, so a Slack app could not offer it. Its replies read as one line for what happened and one for what to do; a DM closed because its channel was sealed now says to keep working in that channel.
+- GitHub connection confirmation now checks the requester's live Discord, Slack, or Teams admin status before saving repository access.
+- Channel admins are removed. Grants no longer give any rights; server and workspace admins are unchanged. Stored grant rows are kept until a later release drops them.
+- Offer “Opus 5.5 fast” as a separate model choice for new Managed Agents sessions, with twice the standard token rates.
+
 - GitHub repository access now uses the GitHub App for every agent. Migration deletes staged grants, keeps live App grants, carries a matching working repo, and retires saved GitHub keys. `daimon github retirement-preview` reports staged rows and saved-key coverage before migration. Private skill imports use an active App grant; missing access posts Connect GitHub. Operators can preview and delete retired Managed Agents vault credentials with `daimon github cleanup-legacy-vault` (`--apply` deletes them).
 
 - **Teams admins are the owners of one team.** Set
@@ -23,14 +39,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owners. Guest owners no longer count for channel-admin team grants
   (`role_ids`) either.
 
+- **Agents no longer narrate file delivery.** The file guidance tells the
+  agent to say what it made and name each file, and to explain where files
+  go only when asked, so answers stop saying files "should be" in the Files
+  tab or asking to be told when one is missing. Teams file links below an
+  answer are a plain list, without the "Saved to this channel's files"
+  heading.
+
+- **The Teams feedback card comes after the files.** After a turn that
+  wrote output files, the 👍/👎 and Ask a person card waits for their
+  links and previews, so it stays the last message. Delivery starts
+  sooner: the listing wait counts from the turn's last tool call, and
+  document thumbnails are requested as each file uploads.
+
 - **Teams output previews show inside the answer.** Image previews and
-  document first pages are added to the answer's last message, beside its
-  text and file links, instead of following it as separate messages; in a
-  1:1 chat they sit above the consent cards. When the answer cannot take
-  them, such as a closing notice card or an edit Teams refuses, they still
-  come in a message of their own. Channels without file access and group
-  chats no longer show image previews: nothing is saved there, so the agent
-  is no longer told an image will still show.
+  document first pages go into the answer's last message as markdown images
+  after its text and file links, instead of following it as separate
+  messages; in a 1:1 chat they sit above the consent cards. Teams refuses an
+  edit with text and an image attachment, so they ride in the text, and the
+  message is sent as plain markdown, whose images Graph reads back. An
+  answer with math, a closing notice card or an edit Teams refuses still
+  gets them in a message of their own. Channels without file access and
+  group chats no longer show image previews: nothing is saved there.
+
+- **Teams channel files need one permission and no card.** Grant the Graph
+  application permission `Files.ReadWrite.All` with admin consent and files
+  work in every channel, private and shared ones included, within 10
+  minutes; the Enable files card, the `enable_channel_files` tool and the
+  sign-in callback are gone. When upgrading, `Sites.Selected` and the app's
+  redirect URI can be removed, and a migration drops `teams_channel_sites`.
+  The permission is tenant-wide, so Daimon opens a shared file and saves its
+  own only inside the channel's Files folder. Uploads take one request.
+
+### Added
+
+- **Self-host on OpenAI, with no Anthropic account at all.** `DAIMON_ANTHROPIC__API_KEY`
+  is now optional; `docker compose up` and `daimon defaults apply` succeed
+  without it. `daimon openai init` creates (or reuses) a project-scoped
+  OpenAI agent and hosted environment, seeds it with the same default skill
+  set an Anthropic deployment gets, and writes one row — optionally a
+  tenant-wide `"*"` default — into the provider runtime file. `daimon
+  agents backend set <agent> openai` routes that agent's channels to it, and
+  `daimon openai smoke` is a post-deploy check: one chat turn, one tool
+  call, one skill, pass/fail. See docs/self-hosting.md's "Self-host on
+  OpenAI" for what's different on OpenAI (no multi-agent delegation, no
+  mid-session resource swap, no workspace export/import, no cross-turn
+  memory, no Daimon model knobs).
 
 ### Removed
 
@@ -39,6 +93,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owner loses the stored admin role at the next owner read or restart.
 
 ### Fixed
+
+- A GitHub App token mint rejected for one repository group now leaves other groups available, queues an installation refresh, and tells the next turn which repositories are unavailable, including after token rotation or reconciliation. Each repository's first refusal starts a 60-minute exclusion; rotation skips fully excluded groups, and a later turn retries with a replacement session after expiry. Notices survive reconciliation and are sent once per continuous refusal. Authentication and transient failures still stop session setup and close pending token rows.
+
+- GitHub App grants stop covering repositories removed from an installation, suspended installations, and installations GitHub confirms deleted. A refreshed GitHub repository snapshot is intersected with the tenant's confirmed Connect set; webhook changes, Connect saves, and existing installations queue a refresh. Connect cannot clear a suspension recorded by reconciliation.
+
+- Installations migrated while an older scheduler was still running no longer stay without a GitHub snapshot: the scheduler queues a refresh for any App installation that has never been refreshed.
+
+- **Teams agents can reopen the files they delivered.** History replay and
+  the MCP Teams read tools resolve the SharePoint links in daimon's own
+  saved-files list to download URLs, inside the channel's folder only, as
+  for shared files, and replay its previews as images. The list itself is
+  left out of replayed text, and the agent guidance says daimon adds it:
+  an agent had copied it from history into its reply and hedged about
+  whether the file was saved.
+
+- **A Teams restart no longer drops a turn's files.** Shutdown gave running
+  work 15 seconds, while an output sweep polls the listing for up to 14
+  seconds before it uploads, and it ignored a sweep that a turn ending
+  during the drain started. It now waits 60 seconds for all of it, within
+  the 90-second stop grace the self-hosting guide asks for.
 
 - Require fleet reviewers to use a different backend from the primary, including retained reviews checked before summary delivery.
 

@@ -7,7 +7,7 @@ import dataclasses
 import io
 import re
 import time
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -426,13 +426,13 @@ async def test_a_channel_without_file_access_previews_nothing(
 
 def _channel_files(
     put: Callable[[httpx.Request], httpx.Response],
-    thumbnails: Callable[[httpx.Request], httpx.Response] | None = None,
+    thumbnails: Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]] | None = None,
 ) -> ChannelFiles:
     """A team whose channel folder Graph finds; `put` answers each simple upload,
     `thumbnails` each thumbnail lookup (404 without it)."""
     folder = {"id": "01FOLDER", "parentReference": {"driveId": "b!drive-1"}}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response | Awaitable[httpx.Response]:
         if request.url.path.endswith("/filesFolder"):
             return httpx.Response(200, json=folder)
         if request.method == "PUT" and request.url.path.endswith(":/content"):
@@ -448,16 +448,7 @@ def _channel_files(
         raise AssertionError("the activity's group id is used")
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    async def nothing_stored(_: str) -> None:
-        return None
-
-    return ChannelFiles(
-        SharePoint(GraphClient(http, token), http),
-        TeamGroups(no_lookup),
-        no_lookup,
-        stored_site=nothing_stored,
-    )
+    return ChannelFiles(SharePoint(GraphClient(http, token)), TeamGroups(no_lookup))
 
 
 def _uploaded(request: httpx.Request) -> httpx.Response:
@@ -475,7 +466,7 @@ def _in_channel() -> Any:
 async def test_channel_outputs_are_uploaded_and_linked_below_the_answer(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """With the site granted, files go to the channel's Files and their links into the answer."""
+    """With the permission granted, files go to the channel's Files and links into the answer."""
     listing = [_csv(), _csv("file_b", filename="b.csv")]
     harness = _harness(db_session_factory, listing, channel_files=_channel_files(_uploaded))
     answer = _Answer()
@@ -485,7 +476,7 @@ async def test_channel_outputs_are_uploaded_and_linked_below_the_answer(
     base = "https://example.sharepoint.com/sites/team/Shared%20Documents/Q3%20%28plan%29"
     assert answer.edits == [
         (
-            f"Saved to this channel's files:\n- [data.csv]({base}/data.csv)\n- [b.csv]({base}/b.csv)",
+            f"- [data.csv]({base}/data.csv)\n- [b.csv]({base}/b.csv)",
             [],
         )
     ], "one block of links, parentheses escaped so the markdown link holds"
@@ -661,7 +652,7 @@ async def test_neutral_graph_upload_preserves_bytes_and_appends_actual_link(
     )
     assert len(puts) == 1 and puts[0].content == b"pdf!"
     assert links == [
-        "Saved to this channel's files:\n- [report.pdf](https://example.sharepoint.com/sites/team/Shared%20Documents/Q3%20%28plan%29/report.pdf)"
+        "- [report.pdf](https://example.sharepoint.com/sites/team/Shared%20Documents/Q3%20%28plan%29/report.pdf)"
     ]
     assert not harness.sender.sent and not harness.deletes
 
@@ -1162,9 +1153,12 @@ async def test_thumbnails_wait_no_longer_than_their_budget(
     """Out of time, the documents are left out; the images went before them regardless."""
     monkeypatch.setattr(output_delivery, "THUMBNAIL_BUDGET_S", 0.0)
     listing, contents = _deck_listing()
-    _, page = _png("page")
-    files = _channel_files(_uploaded, _thumbnail_sets(THUMBNAIL_URL))
-    harness = _harness(db_session_factory, listing, files, contents, served={THUMBNAIL_URL: page})
+
+    async def stalled(_: httpx.Request) -> httpx.Response:
+        await asyncio.Event().wait()
+        raise AssertionError("the lookup is cancelled first")
+
+    harness = _harness(db_session_factory, listing, _channel_files(_uploaded, stalled), contents)
     answer = _Answer()
 
     with structlog.testing.capture_logs() as logs:
@@ -1178,7 +1172,7 @@ async def test_thumbnails_wait_no_longer_than_their_budget(
 async def test_a_group_chat_previews_saves_or_offers_nothing(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """No files there, even with a channel site granted: no preview, no consent card."""
+    """No files there, even with channel files on: no preview, no consent card."""
     chat = "19:group-chat-1@thread.v2"
     image, content = _png("file_png")
     harness = _harness(

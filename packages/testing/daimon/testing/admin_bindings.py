@@ -19,7 +19,6 @@ from typing import Any, Literal, cast
 import httpx
 from anthropic import AsyncAnthropic
 from daimon.core.authz import Subject
-from daimon.core.channel_admins import normalize_channel_admin_ids
 from daimon.core.channel_backend import current_backend, set_channel_backend
 from daimon.core.channel_budget import parse_budget_spec
 from daimon.core.channel_rules import set_channel_rule
@@ -27,7 +26,6 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import (
     accounts,
-    channel_admins,
     channel_budgets,
     routines,
     tenant_ledger,
@@ -170,7 +168,6 @@ def parse_admin(source: Mapping[str, Any], values: Mapping[str, str]) -> AdminCo
         area, verb, platform, workspace, channel = words[2:7]
         allowed: set[str] | None = {
             "rule": {"--readers", "--writers", "--copy-from"},
-            "admins": {"--user"},
             "budget": {"--window"},
             "skills": set[str](),
         }.get(area)
@@ -180,7 +177,6 @@ def parse_admin(source: Mapping[str, Any], values: Mapping[str, str]) -> AdminCo
         operation = f"channel_{area}_{verb}"
         shapes: dict[str, tuple[int, set[str]]] = {
             "channel_rule_set": (0, {"--readers", "--writers", "--copy-from"}),
-            "channel_admins_set": (0, {"--user"}),
             "channel_budget_set": (1, {"--window"}),
             "channel_budget_clear": (0, set[str]()),
             "channel_skills_add": (1, set[str]()),
@@ -319,30 +315,6 @@ class AdminBindings:
         await self._authorize(command)
         tenant_id, actor = uuid.UUID(self.scope.tenant_id), uuid.UUID(self.scope.account_id)
         channel_id = command.channel_id or ""
-        if command.operation == "channel_admins_set":
-            user = command.options.get("--user")
-            if user is None:
-                raise UnboundAdmin("ADMIN_GRANT_USER_UNBOUND")
-            channel, roles, users = normalize_channel_admin_ids(
-                self.platform, channel_id=channel_id, role_ids=(), user_ids=(user,)
-            )
-            async with self.sessions() as session, session.begin():
-                await channel_admins.set_channel_admins(
-                    session,
-                    tenant_id=tenant_id,
-                    platform=self.platform,
-                    channel_id=channel,
-                    role_ids=roles,
-                    user_ids=users,
-                    actor_account_id=actor,
-                )
-            async with self.sessions() as session:
-                row = await channel_admins.get_channel_admins(
-                    session, tenant_id=tenant_id, platform=self.platform, channel_id=channel
-                )
-            if row is None or row.user_ids != tuple(sorted(users)):
-                raise RuntimeError("admin grant readback differs")
-            return self.receipt(command, row.model_dump(mode="json"))
         if command.operation == "channel_rule_set" and "--copy-from" not in command.options:
             readers, writers = command.options.get("--readers"), command.options.get("--writers")
             from daimon.core.channel_rules import as_readers, as_writers

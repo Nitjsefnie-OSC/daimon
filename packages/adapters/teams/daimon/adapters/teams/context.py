@@ -4,7 +4,7 @@ Mirrors the Discord and Slack `context.py`: a first turn replays the thread
 (root plus the newest replies), a continuation only what came after the
 session watermark, and a top-level mention the channel's recent posts with
 their newest replies. The newest replayed images are inlined and shared files
-get a download URL when the team's site is granted. Every replayed message
+in the channel's Files folder get a download URL. Every replayed message
 rides in the shared untrusted envelope, every value escaped.
 Graph bodies are HTML; `teams_graph.html_to_text` keeps the words, names `<at>` mentions
 and marks images. System events, deleted posts and the bot's own cards (the
@@ -13,6 +13,7 @@ status card, notices) are dropped; its answers, plain messages, stay.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from xml.sax.saxutils import escape, quoteattr
@@ -26,9 +27,10 @@ from daimon.core.teams_graph import (
     GraphPage,
     image_sources,
     is_graph_url,
+    linked_files,
     message_text,
 )
-from daimon.core.teams_sharepoint import ENABLE_FILES_TOOL
+from daimon.core.teams_sharepoint import file_link
 from daimon.core.thread_participation import ClassifierMessage
 from daimon.core.untrusted import untrusted_block
 
@@ -41,21 +43,14 @@ HISTORY_IMAGE_LIMIT = 4
 HISTORY_FILE_LIMIT = 10
 # What the agent does, in a channel where files cannot be saved, when asked for one.
 _FILES_HINT = (
-    "Files you make (session outputs, send_message file_handles) cannot be saved in this "
-    "channel yet. When someone asks for a file here, or to turn files on, and they are an "
-    f'admin (is_admin="true"), call {ENABLE_FILES_TOOL} first: an Enable files card follows '
-    "your reply, for an admin who is a member of this channel to sign in with. Tell them to "
-    "ask again once that is done. Anyone else: tell them an admin can ask you to turn files "
-    "on here. Do not swap in an artifact, report or notebook unless they ask for one."
-)
-_FILES_HINT_NO_CARD = (
-    "Files you make cannot be saved in this channel until the deployment's operator grants "
-    "daimon its SharePoint site. Say so when someone asks for a file here; do not swap in "
-    "an artifact, report or notebook unless they ask for one."
+    "Files can't be attached in this channel until a Microsoft 365 admin grants daimon's app "
+    "the Files.ReadWrite.All application permission, with admin consent. Mention it only if "
+    "someone asks for a file here; do not swap in an artifact, report or notebook unless they "
+    "ask for one."
 )
 _GROUP_FILES_HINT = (
-    "Files you make cannot be shared in a group chat. Say so when someone asks for a file "
-    "here; they can ask you for it in their 1:1 chat with you."
+    "Files can't be attached in a group chat. Mention it only if someone asks for a file "
+    "here: they can ask you for it in their 1:1 chat with you."
 )
 # A 1:1 chat has no Graph thumbnails: the agent may picture a document itself
 # (`output_delivery.is_preview_output`). Page one only: typst's PNG export of a multi-page
@@ -112,11 +107,50 @@ def newest_message_id(ids: Iterable[str | None]) -> str | None:
 
 
 def _files(message: GraphMessage) -> list[SharedFile]:
-    return [
+    """Files shared in the message, and the SharePoint files a bot's message links to.
+
+    A link resolves only inside the channel's folder, like any shared file, so
+    the agent can open what it delivered earlier.
+    """
+    shared = [
         SharedFile(a.name or "file", a.content_url)
         for a in message.attachments
         if a.content_type in FILE_ATTACHMENT_TYPES
     ]
+    return shared + [SharedFile(name, url) for name, url in linked_files(message)]
+
+
+# Headed daimon's file links until the list stood alone; older answers still carry it.
+_LEGACY_HEADING = "Saved to this channel's files:"
+
+
+def _without_saved_links(text: str, message: GraphMessage) -> str:
+    """daimon's answer without the file links it added below: replayed, the agent copied them.
+
+    They end the answer, one line per link, among blank lines and its previews'
+    `[image]`. Older answers head them with `_LEGACY_HEADING`, unlinked lines included.
+    """
+    lines = text.split("\n")
+    stripped = [line.strip() for line in lines]
+    dropped: set[int] = set()
+    if _LEGACY_HEADING in stripped:
+        start = len(stripped) - 1 - stripped[::-1].index(_LEGACY_HEADING)
+        tail = range(start + 1, len(lines))
+        if all(stripped[n] in ("", "[image]") or stripped[n].startswith("- ") for n in tail):
+            dropped = {start, *(n for n in tail if stripped[n].startswith("- "))}
+    else:
+        links = [{f"- {name}", file_link(name, url)} for name, url in linked_files(message)]
+        index = len(lines)
+        while index and links:
+            index -= 1
+            if stripped[index] in ("", "[image]"):
+                continue
+            if (link := next((ln for ln in links if stripped[index] in ln), None)) is None:
+                break
+            links.remove(link)
+            dropped.add(index)
+    kept = [line for n, line in enumerate(lines) if n not in dropped]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
 def channel_media(
@@ -188,6 +222,9 @@ def _render(
     author = user or app
     text, files = message_text(message), _files(message)
     is_bot = user is None and app is not None
+    if is_bot and app is not None and app.id == bot_app_id:
+        # Its files are listed as attachments below, not in its words.
+        text = _without_saved_links(text, message)
     attrs = (
         f" author_name={quoteattr((author.display_name if author else None) or 'unknown')}"
         f" user_id={quoteattr((author.id if author else None) or '')}"
@@ -413,7 +450,6 @@ def render_user_message(
     prefix: str,
     history: HistoryBlock | None,
     channel_files: bool | None = None,
-    can_enable_files: bool = False,
 ) -> str:
     """Host facts and any replayed history, then the person's escaped words.
 
@@ -421,8 +457,7 @@ def render_user_message(
     names its thread too, the id thread-scoped settings such as
     `set_thread_participation` key on, and says with `files` whether a file
     saved now reaches the channel (`channel_files`; None in a chat). Where it
-    does not, `files_hint` says what to do when asked for one: offer the
-    Enable files card when the deployment can (`can_enable_files`). In a 1:1
+    does not, `files_hint` says an admin must grant the permission. In a 1:1
     chat `files_hint` says how to picture a document inline.
     `unprompted="true"` marks a message nobody addressed to the bot (organic
     thread participation); `external="true"` a sender from another organisation.
@@ -434,8 +469,7 @@ def render_user_message(
         if channel_files is not None:
             files = f' files="{"available" if channel_files else "unavailable"}"'
         if channel_files is False:
-            hint = _FILES_HINT if can_enable_files else _FILES_HINT_NO_CARD
-            files += f" files_hint={quoteattr(hint)}"
+            files += f" files_hint={quoteattr(_FILES_HINT)}"
         names = "".join(
             f" {attr}={quoteattr(value)}"
             for attr, value in (

@@ -199,7 +199,10 @@ async def test_postgres_state_migration_matches_models_and_refuses_state_loss(db
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert ScriptDirectory(str(directory)).get_heads() == ["0106_gemini_runtime_state"]
+    script = ScriptDirectory(str(directory))
+    [head] = script.get_heads()
+    chain = {revision.revision for revision in script.iterate_revisions(head, "base")}
+    assert "0106_gemini_runtime_state" in chain, "the migration is on the line to the head"
 
     def check(connection):
         GeminiRuntimeState.__table__.drop(connection)

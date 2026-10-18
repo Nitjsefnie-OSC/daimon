@@ -1,9 +1,8 @@
 """Whether a member may change what an agent with a rule reaches, from where they are.
 
 One rule for every path that adds to or edits an agent's configuration (keys,
-connector tokens, MCP servers, prompt, tools, skills): an admin always may, and
-so does a channel admin of every channel the agent's rule runs it in; anyone
-else may only act from a conversation inside those channels. An agent without
+connector tokens, MCP servers, prompt, tools, skills): a server or workspace
+admin always may; other callers must act inside those channels. An agent without
 a rule is unaffected. The request tools,
 the direct configuration tools, the private forms' submit paths and the setup
 panels' Add skill all decide it with `daimon.core.authz.authorize(CONFIGURE)`,
@@ -27,7 +26,7 @@ from daimon.core.authz import (
     authorize,
     build_agent_ref,
 )
-from daimon.core.channel_admins import load_stored_subject
+from daimon.core.native_admins import load_stored_subject
 from daimon.core.permissions import any_agent_rules
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
@@ -40,8 +39,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 PIN_WRITE_REFUSAL = (
     "This agent's rule runs it only in certain channels, so its keys, connections and "
-    "configuration can only be changed from a conversation inside them, by an admin of "
-    "all of them, or by a server or workspace admin. Nothing was changed."
+    "configuration can only be changed from a conversation inside them, or by a "
+    "server or workspace admin. Nothing was changed."
 )
 POLICY_UNREADABLE_REFUSAL = (
     "This workspace's access policy could not be read, so nothing was changed. "
@@ -114,7 +113,6 @@ async def request_pin_refusal(
     added since the card was posted, a rename, or a pin keyed by the config
     name all hold. An unreadable policy refuses. Admin is the requester's
     stored role, the signal the MCP gate reads too; so are the requester's
-    channel admin grants, matched against the roles stored at their last turn.
     A stored Slack group or Teams team counts for nothing here: the check runs
     under the policy lock, so it makes no live lookup (`load_stored_subject`).
     """

@@ -10,7 +10,7 @@ from typing import Any
 
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
 # A routine's session carries the private-DM stamp as "routine:<id>": as with a
-# DM, no admin or channel admin reads it from the hub; its owner still does,
+# DM, no admin reads it from the hub; its owner still does,
 # as any session of theirs (under its channel's seal).
 _PRIVATE_ROUTINE_PREFIX = "routine:"
 

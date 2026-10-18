@@ -89,10 +89,22 @@ class DatabaseSettings(BaseModel):
     )
 
 
+ANTHROPIC_UNCONFIGURED_PLACEHOLDER = "sk-ant-unconfigured-openai-only-deployment"
+"""Never a valid credential. `AnthropicSettings.resolved_api_key()` returns
+this when no real key is configured, so every `AsyncAnthropic` client in the
+app can keep its existing non-optional constructor call: an OpenAI-only
+deployment that never exercises the Anthropic/default path never notices,
+and one that accidentally does gets a clean 401 instead of a crash at
+startup or a scattered `Optional` check at every call site."""
+
+
 class AnthropicSettings(BaseModel):
-    api_key: SecretStr = Field(
+    api_key: SecretStr | None = Field(
+        default=None,
         description=(
-            "Anthropic API key used to authenticate all Managed Agents SDK calls. Required."
+            "Anthropic API key used to authenticate all Managed Agents SDK calls. "
+            "Required unless this deployment is OpenAI-only (see docs/self-hosting.md's "
+            "'Self-host on OpenAI'), in which case leave it unset."
         ),
     )
     base_url: HttpUrl = Field(
@@ -111,6 +123,19 @@ class AnthropicSettings(BaseModel):
             "Other deployments in the same organization share that limit."
         ),
     )
+
+    def resolved_api_key(self) -> str:
+        """The real key, or a placeholder for an OpenAI-only deployment.
+
+        Never falls back to an ambient `ANTHROPIC_API_KEY`-style env var —
+        unset means unset, exactly like every other explicit credential in
+        this settings tree.
+        """
+        return (
+            self.api_key.get_secret_value()
+            if self.api_key is not None
+            else ANTHROPIC_UNCONFIGURED_PLACEHOLDER
+        )
 
 
 class CLISettings(BaseModel):
@@ -420,6 +445,20 @@ class ThreadParticipationSettings(BaseModel):
     )
 
 
+class EnvironmentSettings(BaseModel):
+    name: str = Field(
+        default="",
+        description="Deployment name. Empty selects production Discord command behavior.",
+    )
+    label: str = Field(
+        default="",
+        description=(
+            "Environment chip text on MCP web pages, such as Staging. Empty falls back to the "
+            "deployment name; both empty shows no chip. Does not affect Discord command sync."
+        ),
+    )
+
+
 class DiscordSettings(BaseModel):
     """Discord adapter config.
 
@@ -429,6 +468,13 @@ class DiscordSettings(BaseModel):
 
     bot_token: SecretStr = Field(
         description="Discord bot token. Required to run the Discord adapter.",
+    )
+    command_guild_ids: list[int] = Field(
+        default_factory=list[int],
+        description=(
+            "Guilds allowed to receive commands and events when the environment name is set. "
+            "An empty list disables all Discord ingress, including DMs, in non-production."
+        ),
     )
     startup_replay_minutes: int = Field(
         default=0,
@@ -749,10 +795,8 @@ class TeamsSettings(BaseModel):
         default=None,
         description=(
             "Externally reachable base URL of the Teams service (the Bot "
-            "Framework messaging endpoint without /api/messages). Enables the "
-            "admin sign-in that grants Daimon a team's SharePoint site; its "
-            "callback is <public_url>/oauth/teams/files/callback, which must be "
-            "a Web redirect URI on the app registration."
+            "Framework messaging endpoint without /api/messages). Graph's change "
+            "notifications for private and shared channels post to it."
         ),
     )
     admin_team_id: str | None = Field(
@@ -1545,7 +1589,7 @@ class Settings(BaseSettings):
         default_factory=dict[uuid.UUID, bool],
         description=(
             "Per-tenant switch for the channel budget notice, keyed by tenant UUID. "
-            "When a channel's budget is used up, its channel admins (else the server admins) "
+            "When a channel's budget is used up, the server admins "
             "get one DM per budget window on Discord, Slack and Teams. Missing/true sends it; "
             "false turns it off. Configure DAIMON_BUDGET_NOTICES as a JSON object."
         ),
@@ -1569,7 +1613,7 @@ class Settings(BaseSettings):
         ),
     )
     database: DatabaseSettings
-    anthropic: AnthropicSettings
+    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
     privacy_policy_url: HttpUrl = Field(
         default=HttpUrl("https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"),
         description=(
@@ -1585,6 +1629,7 @@ class Settings(BaseSettings):
     mcp: McpSettings = Field(default_factory=McpSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
+    environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
     discord: DiscordSettings | None = None
     thread_participation: ThreadParticipationSettings = Field(
         default_factory=ThreadParticipationSettings,

@@ -23,7 +23,7 @@ Two entry points, differing only in how the target is named:
   `is_daimon_managed=False` and the reachability read.
 
 Both re-resolve admin status live (never from the rendered view or from
-`private_metadata`) and re-read reachability and channel admin grants from the
+`private_metadata`) and re-read native admin status from the
 database on every call.
 
 `refuse_unless_pin_allows` applies the pin rule (`daimon.core.agent_pins.
@@ -38,14 +38,14 @@ from typing import Final
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
-from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
+from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.authz import Place, Subject
-from daimon.core.channel_admins import ChannelAdminCaller, load_live_subject
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.operation_policy import (
     OperationKind,
     PolicyOutcome,
@@ -87,9 +87,7 @@ NEEDS_ADMIN_SPEC_MESSAGE: Final[str] = (
 
 #: A skill added or removed by a member on an agent someone else also uses.
 NEEDS_ADMIN_SKILL_MESSAGE: Final[str] = (
-    "Others use this agent (a default, a thread, or someone else's routine or "
-    f"conversation), so changing its skills needs {ADMIN_NOUN} or an admin of every "
-    "channel it answers in."
+    f"Others use this agent, so changing its skills needs {ADMIN_NOUN}."
 )
 
 #: An attachment write (repo binding, keys, MCP server) by a member against a
@@ -121,15 +119,12 @@ async def gather_target_facts(
     agent_names: tuple[str | None, ...],
     ma_agent_id: str | None,
     is_daimon_managed: bool,
-    caller: ChannelAdminCaller,
+    caller: AdminCaller,
     caller_account_id: uuid.UUID | None = None,
 ) -> TargetFacts:
     """The policy facts about one target, read fresh and only while the decision turns on them.
 
-    Reachability and channel admin locality are database reads, never cached and
-    never taken from the rendered view. A caller is a channel admin when listed
-    by user id or through a user group (`channel_admin_caller`). A decision that turns on neither
-    opens no session at all.
+    The policy no longer depends on agent reach for non-admin ownership.
     """
     if not needs_reachability_read(
         operation, is_admin=caller.is_server_admin, is_daimon_managed=is_daimon_managed
@@ -199,7 +194,7 @@ async def refuse_unless_allowed(
         agent_names=agent_pin_names(agent.name, agent.metadata),
         ma_agent_id=str(agent.id),
         is_daimon_managed=_is_daimon_managed(agent),
-        caller=await channel_admin_caller(
+        caller=await admin_caller(
             runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
         ),
         caller_account_id=caller_account_id,
@@ -256,7 +251,7 @@ async def refuse_unless_allowed_for_agent_name(
         else (agent_name, *agent_pin_names(agent.name, agent.metadata)),
         ma_agent_id=None if agent is None else str(agent.id),
         is_daimon_managed=agent is not None and _is_daimon_managed(agent),
-        caller=await channel_admin_caller(
+        caller=await admin_caller(
             runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
         ),
         caller_account_id=caller_account_id,
@@ -285,11 +280,10 @@ async def refuse_unless_pin_allows(
 ) -> bool:
     """Refuse a configuration write the agent's pin forbids from the panel in `channel_id`.
 
-    A server admin, or an admin of every channel in the pin, may write from
-    anywhere; anyone else only from inside the pin. Without `agent` the name is
+    A server admin may write from anywhere. Without `agent` the name is
     looked up, and only under a pin. Returns True when refused (posted).
     """
-    caller = await channel_admin_caller(
+    caller = await admin_caller(
         runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
     )
 
@@ -356,7 +350,9 @@ def refusal_message(operation: OperationKind, outcome: PolicyOutcome) -> str:
     if operation == "agent_spec_edit":
         return MANAGED_AGENT_MESSAGE if outcome == "managed_agent" else NEEDS_ADMIN_SPEC_MESSAGE
     if operation in ("skill_add", "skill_remove"):
-        return MANAGED_AGENT_MESSAGE if outcome == "managed_agent" else NEEDS_ADMIN_SKILL_MESSAGE
+        if outcome == "managed_agent":
+            return MANAGED_AGENT_MESSAGE
+        return f"Others use this agent, so changing its skills needs {ADMIN_NOUN}."
     if operation == "skill_repo_connect":
         return SHARED_AGENT_SKILLS_MESSAGE
     return SHARED_AGENT_MESSAGE

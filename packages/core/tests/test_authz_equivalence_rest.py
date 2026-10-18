@@ -1,4 +1,4 @@
-"""The routine, delivery, turn-reply and shared-agent rules decide exactly as before.
+"""The routine, delivery, and turn-reply rules decide exactly as before.
 
 The second half of `test_authz_equivalence`: each `_old_*` below is what a
 caller decided before it was routed through `daimon.core.authz.authorize`,
@@ -12,11 +12,9 @@ from __future__ import annotations
 import itertools
 from typing import get_args
 
-import pytest
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_subject
-from daimon.core.operation_policy import OperationKind, PolicyOutcome, TargetFacts
-from daimon.core.operation_policy import _decide_operation as new_decide_operation
+from daimon.core.operation_policy import OperationKind
 from daimon.core.routine_delivery import DeliveryTarget, creator_refusal_for, delivery_refusal
 from daimon.core.turn.protection import _may_post
 
@@ -89,31 +87,6 @@ def _old_delivery_refusal(
 _OLD_SPEC: frozenset[str] = frozenset({"agent_spec_edit", "skill_add", "skill_remove"})
 _OLD_POSTED_TOKEN: frozenset[str] = frozenset({"key_add", "keys_import", "mcp_connect"})
 _NEW_ADMIN_ONLY: frozenset[str] = frozenset({"github_connect", "github_grant"})
-
-
-def _old_reachable_outcome(target: TargetFacts) -> PolicyOutcome:
-    # Locality counts for a channel admin only on an agent that is theirs.
-    local = target.is_local_to_caller_channels and target.is_held_by_caller
-    if target.is_reachable_in_tenant and not local:
-        return "needs_admin"
-    return "allow"
-
-
-def _old_decide_operation(operation: str, *, is_admin: bool, target: TargetFacts) -> PolicyOutcome:
-    # operation_policy._decide_operation
-    if operation in _OLD_POSTED_TOKEN:
-        return "allow"
-    if operation in _OLD_SPEC:
-        if target.is_daimon_managed:
-            return "managed_agent"
-        if is_admin:
-            return "allow"
-        return _old_reachable_outcome(target)
-    if is_admin:
-        return "allow"
-    if target.is_daimon_managed:
-        return "managed_agent"
-    return _old_reachable_outcome(target)
 
 
 # --- the grid ---------------------------------------------------------------------------------
@@ -227,45 +200,6 @@ def test_no_agent_post_ignores_subject_and_pins() -> None:
                 place=Place(channel_id=channel),
             )
             assert bool(decision) is (channel != "C1")
-
-
-@pytest.mark.parametrize(
-    "operation", [kind for kind in get_args(OperationKind) if kind not in _NEW_ADMIN_ONLY]
-)
-def test_shared_agent_table_matches_except_stricter_mutation_ownership(
-    operation: OperationKind,
-) -> None:
-    for is_admin, managed, reachable, local, held, unattended, unplaced in itertools.product(
-        (False, True), repeat=7
-    ):
-        target = TargetFacts(
-            is_daimon_managed=managed,
-            is_reachable_in_tenant=reachable,
-            is_local_to_caller_channels=local,
-            is_held_by_caller=held,
-            runs_unattended_beyond_caller=unattended,
-            has_unplaced_run=unplaced,
-        )
-        expected = _old_decide_operation(operation, is_admin=is_admin, target=target)
-        # Intentional security change: unreachable is not proof of ownership,
-        # and new MCP names mutate the spec even when the token is personal.
-        if operation == "mcp_connect":
-            expected = (
-                "allow"
-                if is_admin
-                else "managed_agent"
-                if managed
-                else "allow"
-                if local and held
-                else "needs_admin"
-            )
-        elif operation not in _OLD_POSTED_TOKEN and not is_admin and not managed:
-            expected = "allow" if local and held else "needs_admin"
-        assert new_decide_operation(operation, is_admin=is_admin, target=target) == expected, (
-            operation,
-            is_admin,
-            target,
-        )
 
 
 def test_every_operation_kind_is_in_one_old_family() -> None:

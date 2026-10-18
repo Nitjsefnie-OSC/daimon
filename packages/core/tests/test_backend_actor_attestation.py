@@ -7,9 +7,9 @@ from unittest.mock import patch
 import httpx
 import pytest
 from daimon.core._models import Account, Tenant
-from daimon.core.channel_admins import verify_backend_actor
 from daimon.core.channel_backend import AgentBackendRefused
 from daimon.core.config import Settings
+from daimon.core.native_admins import verify_backend_actor
 from daimon.core.stores import accounts, identity
 from daimon.testing.factories import make_platform_principal, make_tenant
 from sqlalchemy import text, update
@@ -93,7 +93,7 @@ async def test_default_producer_is_bounded_and_does_not_inherit_environment(acto
         assert kwargs["verify"].keylog_filename is None
         return real_client(transport=transport(payloads(), calls), **kwargs)
 
-    with patch("daimon.core.channel_admins.httpx.AsyncClient", side_effect=build):
+    with patch("daimon.core.native_admins.httpx.AsyncClient", side_effect=build):
         result = await verify_backend_actor(
             sm, tenant_id=tenant.id, platform_user_id=USER, settings=SETTINGS
         )
@@ -123,7 +123,7 @@ async def test_default_client_refuses_keylogging_before_ssl_or_file_creation(
         return client
 
     with (
-        patch("daimon.core.channel_admins.httpx.AsyncClient", side_effect=build),
+        patch("daimon.core.native_admins.httpx.AsyncClient", side_effect=build),
         pytest.raises(AgentBackendRefused, match="admin attestation unavailable"),
     ):
         await verify_backend_actor(

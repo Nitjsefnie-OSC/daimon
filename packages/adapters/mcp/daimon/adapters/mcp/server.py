@@ -22,7 +22,6 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.mcp.artifacts import build_artifact_store
-from daimon.adapters.mcp.auth.group_members import DiscordMembers, GroupLookups
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
@@ -59,7 +58,6 @@ from daimon.adapters.mcp.tools import (
 )
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
-from daimon.adapters.mcp.tools.channel_admins import register_channel_admin_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channel_copies import register_channel_copy_tools
 from daimon.adapters.mcp.tools.channel_environments import register_channel_environment_tools
@@ -68,7 +66,6 @@ from daimon.adapters.mcp.tools.channel_skills import register_channel_skill_tool
 from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
-from daimon.adapters.mcp.tools.enable_files import register_enable_files_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
 from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_repo_tools
@@ -94,7 +91,7 @@ from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
-from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR
+from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
@@ -284,6 +281,9 @@ def create_mcp_app(
         integrations=[StarletteIntegration()],
     )
     _validate_settings(effective_settings, skip_auth=auth is not None)
+    configure_environment_label(
+        name=effective_settings.environment.name, label=effective_settings.environment.label
+    )
 
     effective_sessionmaker = sessionmaker
     engine = None
@@ -310,20 +310,7 @@ def create_mcp_app(
         if effective_settings.teams is not None
         else None
     )
-    discord = effective_settings.discord
-    # Opened on first use and closed in the lifespan, like the loop it needs.
     slack_http = SlackHttpSession()
-    group_lookups = GroupLookups(
-        sessionmaker=effective_sessionmaker,
-        fernet=fernet,
-        teams_client=teams_client,
-        discord=DiscordMembers(
-            discord.bot_token.get_secret_value(), httpx.AsyncClient(timeout=10.0)
-        )
-        if discord is not None
-        else None,
-        slack_http=slack_http,
-    )
 
     effective_auth = auth
     if effective_auth is None:
@@ -337,7 +324,6 @@ def create_mcp_app(
             allow_legacy_tokens=effective_settings.mcp.allow_legacy_tokens,
             secret=secret_value.get_secret_value().encode(),
             sessionmaker=effective_sessionmaker,
-            group_members=group_lookups.members,
         )
 
     effective_resolver = subject_resolver or production_subject_resolver
@@ -354,7 +340,7 @@ def create_mcp_app(
         # the SDK's own default of 2 is not enough to ride out a sustained
         # provider overage (see MA_MAX_RETRIES's docstring).
         effective_anthropic = AsyncAnthropic(
-            api_key=effective_settings.anthropic.api_key.get_secret_value(),
+            api_key=effective_settings.anthropic.resolved_api_key(),
             max_retries=MA_MAX_RETRIES,
             http_client=DefaultAsyncHttpxClient(
                 transport=SkillsRateLimitedTransport(
@@ -421,8 +407,6 @@ def create_mcp_app(
     # structured ToolError instead of an opaque internal error.
     mcp.add_middleware(MaErrorMiddleware())
 
-    # A tool tagged both "admin" and "channel-admin" is hidden until either tag
-    # is enabled for the session (see IdentityMiddleware).
     mcp.add_transform(Visibility(False, tags={"admin"}))
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     mcp.add_transform(Visibility(False, tags={"discord"}))
@@ -472,7 +456,6 @@ def create_mcp_app(
         fernet=fernet,
         artifact_store=artifact_store,
         teams_client=teams_client,
-        group_lookups=group_lookups,
         slack_http=slack_http,
     )
     agents.register_agent_tools(mcp, runtime)
@@ -549,7 +532,6 @@ def create_mcp_app(
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
         register_channel_tools(mcp, runtime)
-        register_enable_files_tools(mcp)  # tagged `teams`; the Teams adapter posts the card
         if effective_settings.discord is not None or effective_settings.slack is not None:
             register_tidy_tools(mcp, runtime)  # edit/delete the agent's own posts
     else:
@@ -560,7 +542,6 @@ def create_mcp_app(
     register_propagation_tools(mcp, runtime)  # set/clear agent default
     register_here_tools(mcp, runtime)
     register_promo_code_tools(mcp, runtime)  # redeem a promo code for tenant credit
-    register_channel_admin_tools(mcp, runtime)  # who administers a channel
     register_channel_rule_tools(mcp, runtime)  # who reads and posts in a channel; where agents run
     register_channel_copy_tools(mcp, runtime)  # archive a closing channel's copy
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
@@ -722,7 +703,6 @@ def create_mcp_app(
             fernet=fernet,
             deployment_default=deployment_default,
             anthropic=effective_anthropic,
-            group_members=group_lookups.live_members,
         )
         personal_start, personal_platform_callback, personal_github_callback = (
             build_personal_link_routes(

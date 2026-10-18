@@ -12,7 +12,6 @@ from unittest.mock import MagicMock
 import pytest
 import structlog
 from daimon.adapters.teams.budget_notice import with_budget_notifier
-from daimon.adapters.teams.channel_admin_groups import team_owner_lookup
 from daimon.adapters.teams.deployment_admins import (
     STALE_OWNERS_S,
     AdminTeamReads,
@@ -25,9 +24,10 @@ from daimon.adapters.teams.deployment_admins import (
     live_admin_ids,
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.core.channel_admins import GroupLookupFailed, GroupMembersCache
+from daimon.adapters.teams.team_owners import team_owner_lookup
 from daimon.core.config import TeamsSettings
 from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.native_admins import GroupLookupFailed, GroupMembersCache
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -265,7 +265,7 @@ async def test_a_failed_read_is_logged_even_when_a_channel_grant_made_it() -> No
     assert grant is not None
     with structlog.testing.capture_logs() as logs:
         with pytest.raises(GroupLookupFailed):
-            await grant(TEAM)  # a channel-admin grant naming the admin team, read first
+            await grant(TEAM)  # a native team-owner lookup
         assert not await _is_admin(runtime, _settings(), AAD_OBJECT_ID), "fails closed"
     failed = [log for log in logs if log["event"] == "teams.admin_team.lookup_failed"]
     assert len(failed) == 1 and graph.reads == 1, f"one read, logged once: {logs}"

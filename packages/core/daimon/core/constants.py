@@ -20,6 +20,7 @@ ALLOWED_MODEL_IDS: tuple[str, ...] = tuple(AGENT_MODEL_PRICING.keys())
 # any id missing from this map, and `test_models_catalog` asserts none does.
 MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
     "claude-opus-5-5": "Opus 5.5",
+    "claude-opus-5-5-fast": "Opus 5.5 fast",
     "claude-opus-5": "Opus 5",
     "claude-opus-4-8": "Opus 4.8",
     "claude-opus-4-7": "Opus 4.7",

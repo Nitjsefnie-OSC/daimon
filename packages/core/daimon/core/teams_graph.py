@@ -6,7 +6,7 @@ per team) and `GraphClient`, whose requests only ever go to `GRAPH_HOST` and
 never follow a redirect. The app's resource-specific consent
 `ChannelMessage.Read.Group`, granted by a team owner at install, covers the
 message reads here, `TeamMember.Read.Group` the owner list
-(`list_team_owner_ids`, for channel admin grants) and `ChannelMember.Read.Group`
+(`list_team_owner_ids`, for native admin-team owners) and `ChannelMember.Read.Group`
 a channel's members (`list_channel_members`, for who is from another
 organisation); `ChatMessage.Read.Chat`, granted when the app is added to a
 group chat, the chat reads (`list_chat_messages`, `get_chat_message`);
@@ -439,6 +439,8 @@ class _Text(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.images: list[str] = []
+        self.links: list[tuple[str, str]] = []
+        self._link: tuple[str, int] | None = None
         self._skip = 0
         self._pre = 0
 
@@ -452,6 +454,8 @@ class _Text(HTMLParser):
             self._pre += 1
         elif tag == "at":
             self.parts.append("@")
+        elif tag == "a" and (href := values.get("href")):
+            self._link = (href, len(self.parts))
         elif tag == "img" and "emoji" not in (values.get("itemtype") or "").lower():
             self.parts.append("[image]")
             if src := values.get("src"):
@@ -460,6 +464,10 @@ class _Text(HTMLParser):
             self.parts.append(values.get("alt") or "")
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._link is not None:
+            href, start = self._link
+            self.links.append(("".join(self.parts[start:]).strip(), href))
+            self._link = None
         if tag in _SKIPPED_TAGS:
             self._skip = max(0, self._skip - 1)
         elif tag in _BLOCK_TAGS:
@@ -490,6 +498,34 @@ def html_to_text(html: str) -> str:
 def image_sources(html: str) -> list[str]:
     """The `src` of each non-emoji `<img>` in a Teams HTML body."""
     return _parse_html(html).images
+
+
+# A markdown link as `teams_sharepoint.file_link` writes it: `\[`, `\]` and `%28`, `%29`.
+_MARKDOWN_LINK = re.compile(r"\[((?:\\.|[^\\\]])*)\]\((https://[^\s)]+)\)")
+
+
+def linked_files(message: GraphMessage) -> list[tuple[str, str]]:
+    """`(name, url)` of each SharePoint link in an app's message: a bot's saved-file links.
+
+    A bot answer reads back as text (Extended Markdown) or HTML (markdown with
+    images); either way its files are links, not attachments.
+    """
+    sender = message.sender
+    if sender is None or sender.user is not None or sender.application is None:
+        return []
+    content = message.body.content or ""
+    if message.body.content_type == "html":
+        links = _parse_html(content).links
+    else:
+        links = [(re.sub(r"\\(.)", r"\1", m[1]), m[2]) for m in _MARKDOWN_LINK.finditer(content)]
+    found: list[tuple[str, str]] = []
+    for name, url in links:
+        try:
+            if is_sharepoint_host(httpx.URL(url)):
+                found.append((name or "file", url))
+        except httpx.InvalidURL:
+            continue
+    return list(dict.fromkeys(found))
 
 
 def message_references(message: GraphMessage) -> list[GraphMessageReference]:

@@ -31,6 +31,7 @@ from daimon.core.defaults.skills import resolve_custom_skill_titles
 from daimon.core.errors import UserFacingError
 from daimon.core.github_repo_auth import RepoAccess
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.model_presets import model_choice_id
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.rule_views import load_rule_viewer
 from daimon.core.scope import (
@@ -171,8 +172,8 @@ def build_agent_details(
         ma_agent_id=agent.id,
         name=agent.name,
         purpose=agent.description,
-        model_id=agent.model.id,
-        model_display_name=MODEL_DISPLAY_NAMES.get(agent.model.id, agent.model.id),
+        model_id=model_choice_id(agent.model),
+        model_display_name=MODEL_DISPLAY_NAMES.get(model_choice_id(agent.model), agent.model.id),
         daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
         created_by_account_id=created_by_account_id,
         created_by_is_workspace=created_by_account_id == derive_guild_account_uuid(tenant_id),

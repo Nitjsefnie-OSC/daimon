@@ -13,7 +13,6 @@ from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.billing import BillingConfig, load_billing_config
-from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -48,8 +47,6 @@ class SlackRuntime:
     # The MCP token form's live check; None (tests) means "do not probe".
     # Production wires `daimon.core.mcp_oauth.probe_bearer_token`.
     mcp_token_probe: McpTokenProbe | None = None
-    # Channel admin user groups' members, kept briefly (`channel_admin_groups`).
-    group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
     # One connection pool for every workspace's per-event AsyncWebClient; None
     # (tests) lets slack_sdk open a throwaway session per call.
     slack_http: aiohttp.ClientSession | None = None
@@ -147,7 +144,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[SlackRuntime]:
     billing_config = load_billing_config()
     async with (
         AsyncAnthropic(
-            api_key=settings.anthropic.api_key.get_secret_value(),
+            api_key=settings.anthropic.resolved_api_key(),
             base_url=str(settings.anthropic.base_url),
             max_retries=MA_MAX_RETRIES,
             http_client=DefaultAsyncHttpxClient(

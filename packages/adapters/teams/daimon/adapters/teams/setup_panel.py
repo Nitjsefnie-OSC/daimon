@@ -2,12 +2,11 @@
 
 Mirrors Slack's `/agent-setup` and its rules. The panel is open to every
 member; agent changes happen in a setup conversation, where the chat tools own
-authorization, and a channel's environment, isolation and admins in the
+authorization, and a channel's environment and isolation in the
 Channel settings dialog (`channel_settings`). New agent is open to everyone (a
 fresh agent is unrouted, so it puts nothing at risk); Add skill on Details is
 Discord's and Slack's form, with their rule (`add_skill`). Minting a coding-tool
 token is `authorize_coding_token`'s call, as on Discord and Slack: panels live
-in the 1:1 chat, so a channel admin picks one of their channels in the dialog
 and the token is bound there (an unbound token stays with server admins). Only
 its minter may revoke it; token values are never logged. Every click
 re-verifies the clicker and re-reads state, so a stale card grants nothing.
@@ -43,7 +42,6 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
     toast,
 )
-from daimon.adapters.teams.channel_admin_groups import channel_admin_caller
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -57,14 +55,8 @@ from daimon.core.agent_details import GitHubDeploymentFacts, load_agent_details
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
-from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_agent_ref, build_subject
-from daimon.core.channel_admins import (
-    ChannelAdminCaller,
-    load_administered_channel_ids,
-    load_live_subject,
-)
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
@@ -79,6 +71,7 @@ from daimon.core.mcp_auth import (
 from daimon.core.models_catalog import ModelChoice, list_model_choices
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.operator_tokens import OperatorTokenError
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.panel_operator_tokens import (
@@ -108,8 +101,7 @@ log = structlog.get_logger()
 
 GONE = "That agent is no longer available. It may have been deleted."
 NOT_CONFIGURED = "This deployment is not set up for coding-tool access yet. Ask the operator."
-#: Who may mint is an admin, or an admin of every channel the agent's rule runs
-#: it in, binding it to one of them; the refusal names only the way out.
+#: The panel is outside channels, so minting requires a server admin.
 NEEDS_ADMIN = (
     "You can't create this token.\n\n"
     'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
@@ -427,21 +419,12 @@ class SetupPanel:
         unrouted = (r.name for r in roster.rows if r.answering_tier is None and not r.is_built_in)
         request_agent = next(unrouted, roster.answering.name if roster.answering else None)
         window = paginate(answering_map.channel_overrides, page=page, page_size=cards.PAGE_SIZE)
-        administered: frozenset[str] = frozenset()
-        if not actor.is_admin:
-            async with self._runtime.sessionmaker() as session:
-                administered = await load_administered_channel_ids(
-                    session,
-                    tenant_id=actor.tenant_id,
-                    platform="teams",
-                    caller=ChannelAdminCaller(platform_user_id=actor.user_id),
-                )
         return cards.routing_card(
             answering_map,
             window,
             is_admin=actor.is_admin,
             request_agent=request_agent,
-            changes_channels=actor.is_admin or bool(administered),
+            changes_channels=actor.is_admin,
         )
 
     async def _details(
@@ -699,18 +682,6 @@ class SetupPanel:
             metadata=None,  # create_blank_agent is never managed
             default_agent_name=self._runtime.deployment_default.agent_name,
         )
-        caller = await channel_admin_caller(
-            self._runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
-        )
-        async with self._runtime.sessionmaker.begin() as session:
-            await record_created_for_channel(  # One a channel admin makes here is the channel's.
-                session,
-                tenant_id=actor.tenant_id,
-                platform="teams",
-                ma_agent_id=created_id,
-                channel_id=actor.conversation_id.split(";", 1)[0],
-                caller=caller,
-            )
         details = await self._details(actor, name, 0)
         if ctx.activity.reply_to_id and details is not None:
             await edit_origin_card(ctx, details)  # Like Slack, the panel lands on Details.
@@ -724,7 +695,7 @@ class SetupPanel:
         )
 
     async def _mint(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
-        """Mint at once, or first ask a channel admin which of their channels it runs in."""
+        """Mint a coding token for an admin."""
         actor = await card_actor(self._runtime, activity)
         if actor is None:
             return dialog_message(DENIED)
@@ -733,19 +704,7 @@ class SetupPanel:
             self._runtime.settings.mcp.public_url is None
         ):
             return dialog_message(NOT_CONFIGURED)
-        async with self._runtime.sessionmaker() as session:
-            administered = await load_administered_channel_ids(
-                session,
-                tenant_id=actor.tenant_id,
-                platform="teams",
-                caller=ChannelAdminCaller(platform_user_id=actor.user_id),
-            )
-        if not administered:
-            return await self._issue(actor, name, channel_id=None)
-        form = cards.token_channel_form(
-            agent_name=name, channel_ids=sorted(administered), allow_unbound=actor.is_admin
-        )
-        return dialog("Use from your coding tools", form)
+        return await self._issue(actor, name, channel_id=None)
 
     async def _token_submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleInvokeResponse:
         data = submitted_fields(activity.value.data)
@@ -766,8 +725,7 @@ class SetupPanel:
     ) -> TaskModuleInvokeResponse:
         """Mint `name`'s token as `authorize_coding_token` decides, as Discord and Slack do.
 
-        `channel_id` is the channel picked in the dialog; the grants and the
-        pin are re-read here, so a stale or forged pick grants nothing.
+        `channel_id` is checked with the current policy for stale form submissions.
         """
         secret = self._runtime.settings.mcp.jwt_secret
         public_url = self._runtime.settings.mcp.public_url
@@ -782,7 +740,7 @@ class SetupPanel:
                     session,
                     tenant_id=actor.tenant_id,
                     platform="teams",
-                    caller=ChannelAdminCaller(
+                    caller=AdminCaller(
                         platform_user_id=actor.user_id, is_server_admin=actor.is_admin
                     ),
                 )

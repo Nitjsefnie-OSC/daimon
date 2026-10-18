@@ -23,7 +23,6 @@ adapters carry the thread starter's account, so they are invisible to
 everyone else through the hub -- except to a workspace admin (stored role,
 refreshed by their next platform turn), who may list and read every channel
 conversation of the Daimon, sealed ones included, but continue none that is
-sealed, and to a channel admin (stored grants), who may do the same for the
 channels they administer (docs/architecture.md, "Trust model").
 """
 
@@ -31,7 +30,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from typing import Literal
 
 import structlog
@@ -54,7 +52,6 @@ from daimon.adapters.mcp.tools._session_access import (
     load_hub_subject,
     session_belongs_to_caller,
     sessions_outside_seals,
-    stored_group_members,
 )
 from daimon.adapters.mcp.tools.agent_chat import (
     AgentDescription,
@@ -72,10 +69,10 @@ from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Subject
 from daimon.core.billing import BillingConfig
-from daimon.core.channel_admins import confirm_stored_subject, read_stored_admin
 from daimon.core.defaults.ma_index import list_agents_by_tenants
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.native_admins import read_stored_admin
 from daimon.core.permissions import agent_permissions
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -125,8 +122,7 @@ async def _agents_by_tenant(
 
     A hub call runs outside every channel, so an isolated channel's own agents
     are neither listed nor resolvable here, except for an admin of that
-    workspace or of that channel, as their stored role and grants say (the
-    isolation exemption in their own hub). A tenant whose access policy can't
+    workspace (the isolation exemption in their own hub). A tenant whose access policy can't
     be read is left out whole, so one bad workspace doesn't hide the others.
     """
     by_id = await list_agents_by_tenants(
@@ -152,10 +148,7 @@ async def _agents_by_tenant(
         except AccessPolicyUnreadable:
             log.warning("hub.tenant_skipped.policy_unreadable", tenant_id=str(tenant.tenant_id))
             continue
-        # Looked up after the session closes: a slow platform must not hold it.
-        subject = await confirm_stored_subject(
-            stored, stored_group_members(runtime, hub.platform, tenant.workspace_id)
-        )
+        subject = stored.subject()
         agents = by_id[tenant.tenant_id]
         out.append(
             (tenant, [a for a in agents if _hub_sees(policy, subject, a, config.agent_name)])
@@ -171,7 +164,7 @@ def _hub_sees(
 ) -> bool:
     names = agent_pin_names(agent)
     permissions = agent_permissions(policy, names)
-    if subject.is_admin or permissions.home in subject.administered_channel_ids:
+    if subject.is_admin:
         return True
     # A member's hub is outside every channel: only its effective workspace
     # responder answers here, and channel-only agents cannot answer here.
@@ -274,7 +267,6 @@ async def _list_my_sessions_impl(
     legacy = await admin_readable_legacy_sessions(runtime, auth, others)
     owned.extend(s for s in others if s.id in legacy)
     # The hub runs outside every channel: sealed conversations stay hidden,
-    # except to an admin's or channel admin's hub read (`hub_session_access`),
     # which also opens other members' channel conversations, an admin's legacy
     # ones included.
     return [SessionInfo.from_ma(s) for s in await sessions_outside_seals(runtime, auth, owned)]
@@ -294,15 +286,11 @@ def register_hub_tools(
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
         subject = await load_hub_subject(runtime, auth)
-        # The grants ride on the identity for the hub branch of `_admit`.
-        auth = replace(auth, administered_channel_ids=subject.administered_channel_ids)
 
         async def names() -> tuple[str | None, ...]:
             return agent_pin_names(agent)
 
-        # A channel admin's hub turn is judged as one too, so an isolated
-        # channel they administer lends them its own agents here.
-        hub_exempt = subject.is_admin or bool(subject.administered_channel_ids)
+        hub_exempt = subject.is_admin
 
         admitted = await _admit(
             auth,
@@ -427,7 +415,6 @@ def register_hub_tools(
         channel, which can only be read from inside it. A workspace admin also
         sees everyone's channel conversations with this Daimon, sealed ones
         included, and can read them with ``get_session``/``list_events``, but
-        can't continue a sealed one from here. A channel admin sees the same
         for the channels they administer.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)

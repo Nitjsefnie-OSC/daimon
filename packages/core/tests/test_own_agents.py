@@ -116,6 +116,9 @@ def test_binding_refusals_keep_own_agents_in_and_others_out() -> None:
     assert binding_refusal(POLICY, agent_names=("local",), channel_id="c1") is None
     assert binding_refusal(POLICY, agent_names=("local",), channel_id="c2") == "agent_has_home"
     assert binding_refusal(POLICY, agent_names=("local",), channel_id=None) == "agent_has_home"
+    assert binding_refusal(POLICY, agent_names=("roamer",), channel_id="c2") == (
+        "agent_runs_elsewhere"
+    )
     assert binding_refusal(POLICY, agent_names=("shared",), channel_id="c1") == "not_own_agent"
     assert binding_refusal(POLICY, agent_names=("shared",), channel_id="c2") is None
     assert clear_refusal(POLICY, channel_id="c1") == "keeps_own"

@@ -2,7 +2,7 @@
 
 The setup panel lives in the 1:1 chat, so the dialog first asks which
 channel, then shows that channel's environment and, for server admins, its
-permissions, channel admins and channel skills. Every submit names its `op` and the channel.
+permissions and channel skills. Every submit names its `op` and the channel.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ CHANNEL_DIALOG: Final = "channel_settings"
 MAX_CHANNEL_CHOICES: Final = 100
 """Channels the picker lists; a server admin with more types the id instead."""
 
-ChannelOp = Literal["pick", "environment", "rule", "admins", "skills"]
+ChannelOp = Literal["pick", "environment", "rule", "skills"]
 RuleExtra = Literal["none", "copy", "release"]
 RULE_EXTRAS: Final[Mapping[RuleExtra, str]] = {
     "none": "Nothing else",
@@ -48,13 +48,6 @@ PERMISSIONS_NOTE: Final = (
     "and nowhere else. Its default agent becomes one, or a copy of the agent answering now. "
     "Who can post: anyone; only its own agents; or nobody, daimon included. Releasing its "
     "agents lets them run elsewhere, bringing what they remembered here."
-)
-CHANNEL_ADMINS_NOTE: Final = (
-    "Channel admins choose their channels' environment and agent, and edit agents limited to those "
-    "channels.\n\nStarting agents and the server default stay with server admins."
-)
-CHANNEL_ADMIN_IDS_HINT: Final = (
-    "Enter Entra object IDs, separated by commas.\n\nLeave it empty to remove them."
 )
 CHANNEL_SKILLS_NOTE: Final = (
     "These skills apply only here, from the next message.\n\nOnly server admins can change them."
@@ -71,8 +64,6 @@ class ChannelSettings:
     picker: EnvironmentPicker | None
     """None when there is nothing to pick, or the caller may not."""
     rule: ChannelRuleStatus | None
-    """None for a caller who is not a server admin."""
-    admin_user_ids: tuple[str, ...] | None
     """None for a caller who is not a server admin."""
     skills: tuple[ChannelSkillRow, ...] | None = None
     """None for a caller who is not a server admin."""
@@ -195,7 +186,7 @@ def _skills_section(rows: Sequence[ChannelSkillRow]) -> list[CardElement]:
 
 
 def channel_settings_form(settings: ChannelSettings, *, notice: str | None = None) -> AdaptiveCard:
-    """The channel's settings, each with its own save; permissions, admins and skills for
+    """The channel's settings, each with its own save; permissions and skills for
     server admins."""
     body: list[CardElement] = [_text(notice)] if notice else []
     body.append(_text(settings.label, bold=True))
@@ -205,29 +196,11 @@ def channel_settings_form(settings: ChannelSettings, *, notice: str | None = Non
     if settings.rule is not None:
         body += _rule_section(settings.rule)
         actions.append(_submit("Save permissions", "rule", channel))
-    if settings.admin_user_ids is not None:
-        body += [
-            _text("**Channel admins**"),
-            TextInput(
-                id="admins",
-                label="Entra object ids",
-                value=", ".join(settings.admin_user_ids),
-                placeholder="none",
-            ),
-            _text(CHANNEL_ADMINS_NOTE, subtle=True, spaced=True),
-            _text(CHANNEL_ADMIN_IDS_HINT, subtle=True, spaced=True),
-        ]
-        actions.append(_submit("Save channel admins", "admins", channel))
     if settings.skills is not None:
         body += _skills_section(settings.skills)
         actions.append(_submit("Save skills", "skills", channel))
     actions.append(_submit("Another channel", "pick"))
     return AdaptiveCard(body=body, actions=actions, fallback_text=settings.label)
-
-
-def parse_admin_ids(text: str) -> tuple[str, ...]:
-    """The ids typed in the admins field, split on commas and whitespace. Pure."""
-    return tuple(part for part in re.split(r"[\s,;]+", text) if part)
 
 
 def visible_channels(

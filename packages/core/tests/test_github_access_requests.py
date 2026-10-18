@@ -345,45 +345,6 @@ async def test_ability_change_replaces_waiting_request_without_promoting_old_one
 
 
 @pytest.mark.asyncio
-async def test_only_tenant_admin_can_approve_connected_request(db_session: AsyncSession) -> None:
-    tenant_id, asker_id, channel_admin_id, agent_id = (uuid.uuid4() for _ in range(4))
-    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
-    await db_session.flush()
-    db_session.add_all(
-        [
-            Account(id=asker_id, tenant_id=tenant_id, role="user"),
-            Account(id=channel_admin_id, tenant_id=tenant_id, role="user"),
-        ]
-    )
-    await db_session.flush()
-    request = await request_access(
-        db_session,
-        tenant_id=tenant_id,
-        requester_account_id=asker_id,
-        requester_platform_user_id="person",
-        platform="discord",
-        parent_channel_id="channel",
-        thread_id="thread",
-        agent_id=agent_id,
-        ma_agent_id="ag_helper",
-        agent_name="Helper",
-        repo_name="example/repo",
-        requested_work="Continue",
-        is_admin=False,
-    )
-    with pytest.raises(ValueError, match="Only a server or workspace admin"):
-        await approve_connected_request(
-            db_session,
-            tenant_id=tenant_id,
-            request_id=request.id,
-            account_id=channel_admin_id,
-        )
-    assert (
-        await get_request(db_session, tenant_id=tenant_id, request_id=request.id)
-    ).status == "open"
-
-
-@pytest.mark.asyncio
 async def test_expiry_groups_one_thread_and_records_one_notice(db_session: AsyncSession) -> None:
     tenant_id, asker_id, first_agent, second_agent = (uuid.uuid4() for _ in range(4))
     db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
@@ -696,3 +657,42 @@ async def test_expiry_poller_retires_each_unclicked_form_card_once(
         )
 
     assert retired == [("card", "expired")]
+
+
+@pytest.mark.asyncio
+async def test_only_tenant_admin_can_approve_connected_request(db_session: AsyncSession) -> None:
+    tenant_id, asker_id, member_id, agent_id = (uuid.uuid4() for _ in range(4))
+    db_session.add(Tenant(id=tenant_id, platform="discord", external_id=str(tenant_id)))
+    await db_session.flush()
+    db_session.add_all(
+        [
+            Account(id=asker_id, tenant_id=tenant_id, role="user"),
+            Account(id=member_id, tenant_id=tenant_id, role="user"),
+        ]
+    )
+    await db_session.flush()
+    request = await request_access(
+        db_session,
+        tenant_id=tenant_id,
+        requester_account_id=asker_id,
+        requester_platform_user_id="person",
+        platform="discord",
+        parent_channel_id="channel",
+        thread_id="thread",
+        agent_id=agent_id,
+        ma_agent_id="ag_helper",
+        agent_name="Helper",
+        repo_name="example/repo",
+        requested_work="Continue",
+        is_admin=False,
+    )
+    with pytest.raises(ValueError, match="Only a server or workspace admin"):
+        await approve_connected_request(
+            db_session,
+            tenant_id=tenant_id,
+            request_id=request.id,
+            account_id=member_id,
+        )
+    assert (
+        await get_request(db_session, tenant_id=tenant_id, request_id=request.id)
+    ).status == "open"

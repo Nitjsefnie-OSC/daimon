@@ -43,6 +43,8 @@ from .test_native_platform_footer import (
     Surface,
 )
 
+pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
+
 
 @pytest.mark.parametrize("surface", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("enabled", [False, True])

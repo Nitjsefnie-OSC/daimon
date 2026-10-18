@@ -20,7 +20,7 @@
 #    below, which a team owner grants when installing the app in a team
 #    (group chats: a chat member, when adding the app to the chat).
 #    Channel files optionally need the Graph application permission
-#    Sites.Selected plus a grant per team site (docs/teams.md), and
+#    Files.ReadWrite.All with admin consent (docs/teams.md), and
 #    DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED the tenant-wide Graph
 #    application permission ChannelMessage.Read.All with admin consent;
 #    this manifest stays the same either way.
@@ -178,7 +178,6 @@ authorization:
       # Read the channel threads the bot is mentioned in, and their images.
       - name: ChannelMessage.Read.Group
         type: Application
-      # List the team's owners, for channel admin grants that name the team.
       - name: TeamMember.Read.Group
         type: Application
       # List a channel's members and their home tenants, to tell people from

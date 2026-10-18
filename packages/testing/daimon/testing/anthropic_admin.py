@@ -364,7 +364,6 @@ class AnthropicAdminBindings:
             platform=identity.platform,
             external_id=identity.external_id,
             platform_user_id=identity.platform_user_id,
-            platform_role_ids=identity.platform_role_ids,
         )
         runtime = McpRuntime(
             session_factory=self.binding.sessions,

@@ -31,6 +31,7 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
 from daimon.adapters.slack.admin import resolve_is_admin
+from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.agent_policy import (
     AGENT_GONE_MESSAGE,
     gather_target_facts,
@@ -40,7 +41,6 @@ from daimon.adapters.slack.agent_setup.write import (
     load_agent_inline_pat,
     store_inline_pat,
 )
-from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
 from daimon.adapters.slack.credential_forms import refusal_text
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
@@ -269,7 +269,7 @@ async def _replacement_refused_at_submit(
             agent_names=agent_pin_names(agent.name, agent.metadata),
             ma_agent_id=str(agent.id),
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            caller=await channel_admin_caller(
+            caller=await admin_caller(
                 runtime, client, tenant_id=row.tenant_id, user_id=user_id, is_admin=False
             ),
             caller_account_id=row.account_id,
@@ -302,7 +302,7 @@ async def _decide_mcp_connect_at_submit(
         server_name=row.target,
         url=row.mcp_server_url,
         platform="slack",
-        caller=await channel_admin_caller(
+        caller=await admin_caller(
             runtime,
             client,
             tenant_id=row.tenant_id,

@@ -35,12 +35,12 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
 )
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
-from daimon.core.channel_admins import ChannelAdminCaller
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.mux_compat import update_agent
+from daimon.core.native_admins import AdminCaller
 from daimon.core.operation_policy import (
     PolicyOutcome,
     TargetFacts,
@@ -86,7 +86,7 @@ async def decide_mcp_replacement(
     tenant_id: uuid.UUID,
     platform: str,
     agent: BetaManagedAgentsAgent,
-    caller: ChannelAdminCaller,
+    caller: AdminCaller,
     default: DeploymentDefault,
 ) -> PolicyOutcome:
     """Attachment-family decision for replacing one of ``agent``'s MCP servers.
@@ -94,7 +94,6 @@ async def decide_mcp_replacement(
     Admin: allowed. Otherwise refused on a defaults-managed agent or one that
     is shared for key changes (`is_agent_shared_for_key_changes`), unless the
     caller administers every channel it answers and runs in; allowed on a
-    rule-bound agent local to administered channels. Every routine and live
     session counts, the caller's own included. The facts are read only when the
     answer depends on them.
     """
@@ -141,7 +140,7 @@ async def decide_mcp_connect(
     server_name: str,
     url: str,
     platform: str,
-    caller: ChannelAdminCaller,
+    caller: AdminCaller,
     default: DeploymentDefault,
     shares_token: bool,
 ) -> McpConnectDecision:

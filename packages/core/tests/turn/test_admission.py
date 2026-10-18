@@ -1034,39 +1034,6 @@ async def test_admit_treats_a_missing_live_role_as_non_admin_even_for_a_stored_a
     assert exc_info.value.reason == "invoker_not_allowed", "no live role must mean non-admin"
 
 
-async def test_admit_stores_the_live_platform_role_ids_like_the_role(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """Role ids are replaced on each turn that passes them and kept when one does not."""
-    from daimon.core.stores.accounts import get_account_with_tenant
-
-    tenant = await _seed_admittable_tenant(db_session, policy=None)
-    deps = _deps(
-        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
-    )
-
-    async def turn(role_ids: list[str] | None) -> tuple[str, ...]:
-        admission = await admit(
-            deps,
-            tenant_id=tenant.id,
-            platform="discord",
-            external_user_id="member-1",
-            channel_id="chan-1",
-            now=_NOW,
-            platform_role_ids=role_ids,
-        )
-        async with db_session_factory() as session:
-            row = await get_account_with_tenant(session, account_id=admission.account_id)
-        assert row is not None, "the account exists"
-        return row.platform_role_ids
-
-    assert await turn(["r2", "r1"]) == ("r1", "r2"), "role ids are stored sorted"
-    assert await turn(None) == ("r1", "r2"), "a turn with no role ids leaves them alone"
-    assert await turn([]) == (), "a member who lost every role stores none"
-
-
 async def test_admit_gate_order_invoker_refusal_wins_over_missing_config_and_balance(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1728,7 +1695,7 @@ async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
     is_dm: bool,
     expected: bool,
 ) -> None:
-    """/dm needs to know the source itself is sealed, not only that memory is read-only."""
+    """/dm-me needs to know the source itself is sealed, not only that memory is read-only."""
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
@@ -1750,7 +1717,7 @@ async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
 
 
 async def test_start_dm_refuses_a_sealed_source_admission() -> None:
-    """Backstop for any /dm caller: no DM row is written for a sealed source."""
+    """Backstop for any /dm-me caller: no DM row is written for a sealed source."""
     from unittest.mock import MagicMock
 
     from daimon.core.direct_messages import SEALED_SOURCE_MESSAGE
@@ -1935,7 +1902,6 @@ async def _admit_as(
     is_known: bool = True,
     is_dm: bool = False,
     role: Role = Role.USER,
-    platform_role_ids: list[str] | None = None,
 ) -> Admission:
     router = resolved_agent_env_router(
         ma_agent(id="ag_own", name="own", tenant_id=tenant.id),
@@ -1953,7 +1919,6 @@ async def _admit_as(
         role=role,
         is_dm=is_dm,
         external=None if is_external is None else ExternalFinding(is_external, is_known),
-        platform_role_ids=platform_role_ids,
     )
 
 
@@ -2065,7 +2030,6 @@ async def test_a_finding_without_evidence_holds_for_the_turn_and_stores_nothing(
         is_external=True,
         is_known=False,
         role=Role.ADMIN,
-        platform_role_ids=["team-1"],
     )
     assert guessed.is_external and not guessed.grant.subject.is_admin, "external this turn"
     assert await _stored(db_session, first) == (False, Role.ADMIN.value), "nothing stored"
@@ -2111,33 +2075,3 @@ async def test_an_internal_caller_is_admitted_as_before_and_may_be_an_admin(
     )
     assert not admission.is_external and admission.grant.subject.is_admin
     assert await _stored(db_session, admission) == (False, Role.ADMIN.value)
-
-
-async def test_an_external_participant_is_never_a_channel_admin(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """Neither a grant naming them nor one naming a team they own admits them."""
-    from daimon.core.stores.accounts import get_account_with_tenant
-    from daimon.core.stores.channel_admins import set_channel_admins
-
-    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
-    await _answer_in(db_session, tenant, "chan-1", "own")
-    await set_channel_admins(
-        db_session,
-        tenant_id=tenant.id,
-        platform="teams",
-        channel_id="chan-1",
-        role_ids=["team-1"],
-        user_ids=["guest-1"],
-        actor_account_id=None,
-    )
-    await db_session.commit()
-    admission = await _admit_as(
-        db_session_factory, tmp_path, tenant, is_external=True, platform_role_ids=["team-1"]
-    )
-    assert admission.grant.subject.administered_channel_ids == frozenset(), "administers nothing"
-    async with db_session_factory() as session:
-        row = await get_account_with_tenant(session, account_id=admission.account_id)
-    assert row is not None and row.platform_role_ids == (), "no team is stored for MCP calls"

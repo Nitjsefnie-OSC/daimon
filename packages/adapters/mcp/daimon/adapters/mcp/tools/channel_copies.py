@@ -20,8 +20,8 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
-from daimon.core.channel_admins import InvalidChannelAdminIds, normalize_channel_admin_ids
 from daimon.core.channel_copies import ChannelCopyArchiveRefused, archive_channel_copy
+from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from fastmcp import Context, FastMCP
@@ -48,13 +48,10 @@ def _channel(auth: AuthIdentity, channel_id: str) -> str:
     if platform not in ("discord", "slack", "teams"):
         raise ToolError("Channels exist only on Discord, Slack and Teams. Nothing was changed.")
     try:
-        channel, _, _ = normalize_channel_admin_ids(
-            platform,
-            channel_id=parse_channel_target(platform, channel_id).channel_id,
-            role_ids=(),
-            user_ids=(),
+        channel = normalize_channel_id(
+            platform, parse_channel_target(platform, channel_id).channel_id
         )
-    except InvalidChannelAdminIds as exc:
+    except InvalidChannelId as exc:
         raise ToolError(f"{exc}. Nothing was changed.") from exc
     return channel
 

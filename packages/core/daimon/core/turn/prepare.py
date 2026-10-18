@@ -43,6 +43,7 @@ from daimon.core.channel_backend import BackendUnsupported
 from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import backend_switch_tools_for_turn
 from daimon.core.credential_env import assemble_env_bytes
+from daimon.core.github_app_session import AppSessionAccess
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, retrieve_agent, sdk_agent
@@ -400,18 +401,20 @@ __all__ = [
 
 
 async def _env_bytes_sha256(
-    deps: TurnDeps, *, tenant_id: uuid.UUID, agent_uuid: uuid.UUID
+    deps: TurnDeps, *, tenant_id: uuid.UUID, agent_uuid: uuid.UUID, is_external: bool
 ) -> str | None:
     """Hash of the `.env` bytes `create_session` is about to mount, or None.
 
     Mirrors `credential_env.upload_env_and_mount`: the same tenant-scoped rows
     through the same `assemble_env_bytes`, and None for an agent with no
-    secrets (that agent gets no `.env` resource at all). Read BEFORE the
+    secrets or an external caller (neither gets a `.env` resource). Read BEFORE the
     session is created, deliberately — a key written while `create_session`
     runs then records as stale rather than as current, and a stale hash costs
     one redundant refresh, where a falsely-current one would leave the session
     silently running the old secrets.
     """
+    if is_external:
+        return None
     async with deps.sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
@@ -586,10 +589,18 @@ async def create_ma_session(
         else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     )
     github_mode = "app"
-    env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
+    env_sha256 = await _env_bytes_sha256(
+        deps, tenant_id=tenant_id, agent_uuid=agent_uuid, is_external=admission.is_external
+    )
     native_controls: _NativeBudgetArgs = {}
     if preparation is not None and preparation.native_budget_usd is not None:
         native_controls["native_budget_usd"] = preparation.native_budget_usd
+    excluded_repo_urls: tuple[str, ...] = ()
+
+    def capture_app_access(access: AppSessionAccess) -> None:
+        nonlocal excluded_repo_urls
+        excluded_repo_urls = access.excluded_repo_urls
+
     ma_session = await create_session(
         deps.anthropic,
         agent=admission.agent,
@@ -623,6 +634,7 @@ async def create_ma_session(
         origin_thread_id=admission.origin_thread_id,
         origin_seal_ids=frozenset(seal),
         before_create=fence,
+        on_app_access=capture_app_access,
         channel_skills=admission.channel_skills,
         resource_source=preparation.source
         if preparation is not None and preparation.worker is not None
@@ -689,7 +701,16 @@ async def create_ma_session(
         personal_memory_store_ids=(
             () if personal_memory_store_id is None else (personal_memory_store_id,)
         ),
-    ).model_copy(update={"token_repo_urls": token_repo_urls})
+        is_external=admission.is_external,
+    ).model_copy(
+        update={
+            "token_repo_urls": token_repo_urls,
+            "unavailable_repos": tuple(
+                (url, dt.datetime.now(dt.UTC)) for url in excluded_repo_urls
+            ),
+            "unavailable_notice_pending": excluded_repo_urls,
+        }
+    )
     return CreatedSession(
         ma_session_id=ma_session.id,
         snapshot=snapshot,
@@ -1479,7 +1500,7 @@ async def bind_session_impl(
                     tenant_id=tenant_id,
                     external_user_id=external_user_id,
                     ma_session_id=fresh.ma_session_id,
-                    model_id=fresh.snapshot.model_id,
+                    model_id=fresh.snapshot.pricing_id,
                     channel_id=admission.budget_channel_id,
                 ),
                 session_ref=resource_ref(backend, "session", fresh.ma_session_id, scope=scope),

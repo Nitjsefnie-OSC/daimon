@@ -88,27 +88,44 @@ async def _tool_names(app: Starlette, token: str) -> set[str]:
     return {tool["name"] for tool in payload["tools"]}  # type: ignore[index]
 
 
-def _text(result: dict[str, object]) -> str:
-    return str(result.get("result", result.get("error")))
-
-
 async def test_tenant_read_token_lists_exactly_its_tools(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     _tenant_id, _jti, token = await _operator_token(sessionmaker, "tenant:read")
-    app = _make_app(sessionmaker)
-
-    names = await _tool_names(app, token)
-
+    names = await _tool_names(_make_app(sessionmaker), token)
     assert names == {
         "get_tenant_summary",
         "list_channel_budgets",
         "get_channel_budget",
-        "list_channel_admins",
         "list_channel_skills",
         "list_agent_tool_rules",
         "list_environments",
-    }, "an operator token sees only its scopes' tools, without the search collapse"
+    }
+
+
+async def test_channels_write_token_lists_exactly_its_tools(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _tenant_id, _jti, token = await _operator_token(sessionmaker, "channels:write")
+    names = await _tool_names(_make_app(sessionmaker), token)
+    assert names == {
+        "set_channel_budget",
+        "clear_channel_budget",
+        "set_agent_default",
+        "clear_agent_default",
+        "set_channel_rule",
+        "set_agent_rule",
+        "set_channel_environment",
+        "clear_channel_environment",
+        "add_channel_skill",
+        "remove_channel_skill",
+        "set_agent_tool_rule",
+        "clear_agent_tool_rule",
+    }
+
+
+def _text(result: dict[str, object]) -> str:
+    return str(result.get("result", result.get("error")))
 
 
 async def test_tenant_read_token_lists_only_its_tenants_environments(
@@ -139,32 +156,6 @@ async def test_agents_archive_token_lists_exactly_its_tool(
     assert names == {"archive_channel_copy"}, "agents:archive opens only the copy archive"
 
 
-async def test_channels_write_token_lists_exactly_its_tools(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    _tenant_id, _jti, token = await _operator_token(sessionmaker, "channels:write")
-    names = await _tool_names(_make_app(sessionmaker), token)
-    assert names == {
-        "set_channel_budget",
-        "clear_channel_budget",
-        "set_agent_default",
-        "clear_agent_default",
-        "set_channel_admins",
-        "clear_channel_admins",
-        "set_channel_rule",
-        "set_agent_rule",
-        "set_channel_environment",
-        "clear_channel_environment",
-        "add_channel_skill",
-        "remove_channel_skill",
-        "set_agent_tool_rule",
-        "clear_agent_tool_rule",
-    }, (
-        "channels:write covers the channel budget, agent, admin, channel and agent rule, "
-        "environment and skill tools"
-    )
-
-
 async def test_operator_token_cannot_call_a_tool_outside_its_scopes(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -179,35 +170,6 @@ async def test_operator_token_cannot_call_a_tool_outside_its_scopes(
     )
 
     assert "Unknown tool" in _text(result), f"the tool is hidden from this token: {result}"
-
-
-async def test_channel_admin_tools_follow_the_tokens_scopes(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """channels:write sets a channel's admins and tenant:read lists them; neither does both."""
-    async with sessionmaker() as s, s.begin():
-        tenant_id, account_id = await seed_server_admin(s)
-    writer = await _mint(sessionmaker, tenant_id, account_id, "channels:write")
-    reader = await _mint(sessionmaker, tenant_id, account_id, "tenant:read")
-    app = _make_app(sessionmaker)
-    channel, role = "111111111111111111", "333333333333333333"
-
-    set_by_writer = await call_mcp_tool(
-        app,
-        token=writer,
-        name="set_channel_admins",
-        arguments={"channel_id": channel, "role_ids": [role], "user_ids": []},
-    )
-    listed_by_reader = await call_mcp_tool(app, token=reader, name="list_channel_admins")
-    listed_by_writer = await call_mcp_tool(app, token=writer, name="list_channel_admins")
-    cleared_by_reader = await call_mcp_tool(
-        app, token=reader, name="clear_channel_admins", arguments={"channel_id": channel}
-    )
-
-    assert "'changed': True" in _text(set_by_writer), f"channels:write sets them: {set_by_writer}"
-    assert role in _text(listed_by_reader), f"tenant:read lists them: {listed_by_reader}"
-    assert "Unknown tool" in _text(listed_by_writer), f"listing is hidden: {listed_by_writer}"
-    assert "Unknown tool" in _text(cleared_by_reader), f"clearing is hidden: {cleared_by_reader}"
 
 
 async def test_narrowing_a_tokens_scopes_applies_to_the_next_request(

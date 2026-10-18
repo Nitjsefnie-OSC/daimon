@@ -59,14 +59,7 @@ gets one notice naming it and offering a smaller version or parts under
 file near the cap gets several minutes. 0-byte files are skipped silently, logged and
 removed. Delivery requires the
 `files:write` bot scope; adding a scope to an existing install requires
-re-running the install flow. Channel admin grants that name a user group need
-the `usergroups:read` bot scope; without it the form can't list groups and a
-group grant admits nobody. A user group grant makes anyone who can join or edit
-that group a channel admin, and by default every Slack member can edit user
-groups, so limit user group management to admins in the workspace settings
-before naming one. Outside a chat turn (MCP calls, the hub, channel admin
-DMs) a group counts only while a fresh lookup, cached for a minute, still lists
-the person. A workspace that has hit its Slack file-storage
+re-running the install flow. A workspace that has hit its Slack file-storage
 limit gets one in-thread notice and no deliveries until space is freed.
 
 ### Files in message tools
@@ -320,11 +313,11 @@ tells the person their note leaves the channel, and the post says to answer ther
 
 ### Private conversations
 
-Workspace admins opt in with `/dm enable` (and disable with `/dm disable`). Then use
-`/dm` in a channel to continue privately with its recent text context and a back-link.
-Send later messages directly to the app. Run `/dm` again to reset the private scope.
+Workspace admins opt in with `/dm-me enable` (and disable with `/dm-me disable`). Then use
+`/dm-me` in a channel to continue privately with its recent text context and a back-link.
+Send later messages directly to the app. Run `/dm-me` again to reset the private scope.
 Only current workspace members allowed by the tenant access policy can invoke it.
-`/dm` refuses in a channel with limited readers and leaves threads with their own
+`/dm-me` refuses in a channel with limited readers and leaves threads with their own
 rule out of the copied history, so their content never moves into a DM.
 
 Update the app from `docs/slack-app-manifest.yaml` and reinstall it to grant the new
@@ -332,7 +325,7 @@ bot scopes `im:history` and `im:write`, subscribe to `message.im`, and enable th
 Home messages tab. Existing installations remain DM-disabled until an admin opts in.
 This version moves recent channel text, not Slack thread replies or attachments.
 
-Before `/dm` moves a conversation or `/dm enable` changes policy, Daimon checks the
+Before `/dm-me` moves a conversation or `/dm-me enable` changes policy, Daimon checks the
 granted `x-oauth-scopes` for both IM scopes. Missing or unreadable grants refuse
 without saving a route. The person sees "Daimon can't use DMs in this workspace
 yet." and "Ask a workspace admin to finish Daimon's DM setup."; the steps below are
@@ -346,7 +339,7 @@ manifest's `message.im` subscription and enable the Messages tab.
    `im:write` bot scopes.
 2. Subscribe the app to the `message.im` bot event.
 3. Turn on the Messages tab under App Home.
-4. Run `/dm enable` as a workspace admin.
+4. Run `/dm-me enable` as a workspace admin.
 
 `docs/slack-app-manifest.yaml` already carries steps 1 to 3; applying it and
 reinstalling covers them.

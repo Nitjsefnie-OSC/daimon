@@ -253,7 +253,7 @@ def cleanup_legacy_vault(
                 return
             scope = Scope.legacy_host_authorized(call_site="cli.github.cleanup_legacy_vault")
             async with AsyncAnthropic(
-                api_key=settings.anthropic.api_key.get_secret_value(),
+                api_key=settings.anthropic.resolved_api_key(),
                 base_url=str(settings.anthropic.base_url),
             ) as anthropic:
                 vaults = [vault async for vault in list_vaults(anthropic, scope=scope)]
@@ -396,7 +396,7 @@ def _run_grant_command(
                     fernet = build_multifernet(keys) if keys else None
                     async with (
                         AsyncAnthropic(
-                            api_key=settings.anthropic.api_key.get_secret_value(),
+                            api_key=settings.anthropic.resolved_api_key(),
                             base_url=str(settings.anthropic.base_url),
                         ) as anthropic,
                         httpx.AsyncClient() as github,
@@ -448,6 +448,11 @@ def _run_grant_command(
                                                 resource_ids=snapshot.repo_resource_ids,
                                                 config=settings.github_app,
                                                 fernet=fernet,
+                                                unavailable_repos=(
+                                                    current.effective_config.unavailable_repos
+                                                    if current.effective_config is not None
+                                                    else ()
+                                                ),
                                                 active_turn=current.active_turn_message_id
                                                 is not None,
                                             )
@@ -558,7 +563,7 @@ def connect_link(
                 raise ValueError("agent id and name must be supplied together")
             if agent is not None and agent_name is not None:
                 async with AsyncAnthropic(
-                    api_key=settings.anthropic.api_key.get_secret_value(),
+                    api_key=settings.anthropic.resolved_api_key(),
                     base_url=str(settings.anthropic.base_url),
                 ) as anthropic:
                     await _require_tenant_agent(

@@ -49,6 +49,7 @@ from daimon.core.stores.github_connect import (
     revoke_invitation,
     set_invitation_encrypted_token,
 )
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.security_audit import append_event
 from daimon.core.teams_threads import conversation_of
 from fastmcp import Context, FastMCP
@@ -218,9 +219,6 @@ async def _github_connect_impl(
         if account is None or account.tenant_id != auth.tenant_id or account.is_external:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = account.role == Role.ADMIN and auth.is_admin
-        # A channel admin may connect their own repos for an agent they manage,
-        # by their groups as the platform reports them now, not as cached.
-        lookups = runtime.group_lookups
         manages = is_admin or await requester_manages_agent(
             session,
             tenant_id=auth.tenant_id,
@@ -232,11 +230,6 @@ async def _github_connect_impl(
             ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
             is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-            members=(
-                lookups.live_members(auth.platform, auth.external_id)
-                if lookups is not None and auth.external_id is not None
-                else None
-            ),
         )
         if not manages:
             await record_connect_request(
@@ -289,8 +282,7 @@ async def _github_connect_impl(
                 )
                 grantable = (
                     installation is not None
-                    and installation.suspended_at is None
-                    and repo.repo_full_name in installation.repo_full_names
+                    and installation_covers_repo(installation, repo.repo_full_name)
                     and (is_admin or repo.scope_agent_id == agent_id)
                 )
                 if grantable:
@@ -376,10 +368,7 @@ async def _github_connect_impl(
             tool_name="github_connect",
             operation="github_connect",
             outcome="allowed",
-            reason=(
-                ("admin" if is_admin else "channel admin")
-                + (" connect button posted" if intent_id else " link minted")
-            ),
+            reason=("admin" + (" connect button posted" if intent_id else " link minted")),
         )
     try:
         if auth.platform == "discord":
@@ -473,8 +462,9 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ConnectResult:
         """Give this agent token access to more repos, such as a private GitHub repo.
 
-        Show a single-use connection button bound to the selected agent to a
-        server admin, or to a channel admin who manages that agent; repos
+        Use this when someone asks to let an agent read a private repository
+        at github.com/owner/repo. Show a single-use
+        connection button bound to the selected agent to a server admin; repos
         connected this way are for that agent only. Other members get Ask an
         admin and a recorded request. On Teams the card goes to the requester's
         1:1 chat. Never repeat a private link in a shared reply. For a setup

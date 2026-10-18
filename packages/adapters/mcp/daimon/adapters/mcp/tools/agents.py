@@ -21,7 +21,6 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
 from anthropic.types.beta.agent_create_params import Tool
 from anthropic.types.beta.beta_managed_agents_agent import Tool as MATool
-from anthropic.types.beta.beta_managed_agents_model_param import BetaManagedAgentsModelParam
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
@@ -47,13 +46,11 @@ from daimon.adapters.mcp.tools.setup_target import (
     resolve_setup_agent,
 )
 from daimon.core import channel_backend
-from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
-from daimon.core.agent_reach import record_created_for_channel
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -82,6 +79,7 @@ from daimon.core.mcp_attach import (
     replaced_server_url,
 )
 from daimon.core.memory_resource import archive_memory_store_for_agent
+from daimon.core.model_presets import ModelSelection, model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent, update_agent
 from daimon.core.routing_facts import build_unrouted_note
@@ -161,7 +159,7 @@ class AgentInfo(BaseModel):
             name=agent.name,
             id=agent.id,
             description=agent.description,
-            model=agent.model.id,
+            model=model_choice_id(agent.model),
             created_at=agent.created_at,
             mcp_servers=[AgentMcpServerInfo(name=s.name, url=s.url) for s in agent.mcp_servers],
             skills=[
@@ -345,22 +343,8 @@ def _system_agent_rejection(agent: BetaManagedAgentsAgent) -> str | None:
 async def _may_see_setup(
     runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
 ) -> bool:
-    """Whether a non-admin caller may see how `agent` is set up.
-
-    A channel admin may, for an agent they could edit from chat: not a managed
-    or system agent, and one a channel rule or their own creation keeps inside
-    the channels they administer (`reachability.require_admin_for_reachable_agent`,
-    the gate the setup tools use). Anyone else sees capabilities only.
-    """
-    if not auth.is_channel_admin or _system_agent_rejection(agent) is not None:
-        return False
-    try:
-        await reachability.require_admin_for_reachable_agent(
-            runtime, auth, agent_name=agent.name, agent=agent
-        )
-    except ToolError:
-        return False
-    return True
+    """Members see capabilities; native admins see setup details."""
+    return auth.is_admin
 
 
 async def _reject_guild_name_collision(
@@ -428,7 +412,6 @@ async def _get_agent_impl(
     )
     info = await _build_agent_info(runtime.client, agent, tenant_id=auth.tenant_id)
     # The prompt is readable only by callers who could replace it: admins, and
-    # channel admins on an agent that stays in their channels, on agents chat
     # tools may edit at all. A defaults-managed or system
     # agent's prompt stays withheld even from admins — the edit path is a fork,
     # and the fork's own prompt is then readable.
@@ -440,7 +423,7 @@ async def _get_agent_impl(
     return info
 
 
-def _reject_unknown_model(model: str) -> None:
+def _reject_unknown_model(model: ModelSelection) -> None:
     """Raise unless ``model`` is one this deployment meters and allows.
 
     The panel paths have validated free-text model input against
@@ -450,15 +433,16 @@ def _reject_unknown_model(model: str) -> None:
     ``pricing.cost_of`` returns None for a model it has no rates for, so the
     turn is billed by Anthropic and recorded as free by us.
     """
-    if model not in ALLOWED_MODEL_IDS:
+    choice_id = model_choice_id(model)
+    if choice_id not in ALLOWED_MODEL_IDS:
         allowed = ", ".join(ALLOWED_MODEL_IDS)
-        raise ToolError(f"Model '{model}' is not available. Choose one of: {allowed}")
+        raise ToolError(f"Model '{choice_id}' is not available. Choose one of: {allowed}")
 
 
 def _build_create_spec(
     *,
     name: str,
-    model: BetaManagedAgentsModelParam,
+    model: ModelSelection,
     description: str | None,
     system: str | None,
     tools: list[Tool] | None,
@@ -491,24 +475,6 @@ def _build_create_spec(
             "create_agent: invalid agent configuration; check the supplied fields "
             "and ensure every MCP server has a matching mcp_toolset entry. Nothing was saved."
         ) from exc
-
-
-async def _record_creation_channel(
-    runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str, origin: TurnOriginRow | None
-) -> None:
-    """Make the new agent its channel admins' when one made it from their channel or its
-    setup thread (`daimon.core.agent_reach.record_created_for_channel`). Never a DM."""
-    if origin is None or origin.thread_id.startswith(DM_SCOPE_PREFIX):
-        return
-    async with runtime.session_factory.begin() as session:
-        await record_created_for_channel(
-            session,
-            tenant_id=auth.tenant_id,
-            platform=origin.platform,
-            ma_agent_id=ma_agent_id,
-            channel_id=origin_channel_id(origin),
-            caller=reachability.channel_admin_caller(auth),
-        )
 
 
 async def _create_agent_impl(
@@ -556,7 +522,6 @@ async def _create_agent_impl(
         metadata=None,  # managed=False above: only the default name can make it built-in
         default_agent_name=runtime.deployment_default.agent_name,
     )
-    await _record_creation_channel(runtime, auth, outcome.anthropic_id, origin)
     ma_agent = await retrieve_agent(
         runtime.client,
         outcome.anthropic_id,
@@ -623,7 +588,7 @@ async def _update_agent_impl(
     auth: AuthIdentity,
     name: str,
     *,
-    model: BetaManagedAgentsModelParam | None,
+    model: ModelSelection | None,
     description: str | None,
     system: str | None,
     tools: list[Tool] | None,
@@ -844,7 +809,7 @@ async def _require_mcp_replace_allowed(
         tenant_id=auth.tenant_id,
         platform=auth.platform or "",
         agent=agent,
-        caller=reachability.channel_admin_caller(auth),
+        caller=reachability.admin_caller(auth),
         default=runtime.deployment_default,
     )
     if outcome != "allow":
@@ -1304,8 +1269,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """List agents visible here, including their attached ``mcp_servers`` and ``skills``.
 
         ``mcp_servers`` and ``created_at`` are null for a caller who is neither an
-        admin nor an admin of a channel the agent is limited to: setup details are
-        for them, capabilities (name, description, model, skills) are not. Members
+        admin: setup details are
+        for admins, capabilities (name, description, model, skills) are not. Members
         see the channel/thread responders and agents explicitly allowed to run
         here; unrouted agents and other channels' agents are hidden.
         Pass this turn's ``origin_context_id`` to verify its location. Without
@@ -1342,7 +1307,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def create_agent(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         name: str,
-        model: BetaManagedAgentsModelParam,
+        model: ModelSelection,
         *,
         description: str | None = None,
         system: str | None = None,
@@ -1368,7 +1333,6 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         A returned ``answering`` field says the new agent is routed nowhere yet:
         post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn
         without it is refused while a channel in the workspace is confidential, and with
-        it a channel admin creating the agent for their channel may set it up there.
         """
         spec = _build_create_spec(
             name=name,
@@ -1386,7 +1350,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         name: str,
         *,
-        model: BetaManagedAgentsModelParam | None = None,
+        model: ModelSelection | None = None,
         description: str | None = None,
         system: str | None = None,
         tools: list[Tool] | None = None,

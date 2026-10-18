@@ -354,7 +354,7 @@ def test_a_group_chat_turn_is_one_place_without_files() -> None:
     assert f'<channel platform="teams" id="{chat}" role="group_chat" name="Launch &amp; co"' in (
         message
     )
-    assert 'files="unavailable"' in message and "cannot be shared in a group chat" in message
+    assert 'files="unavailable"' in message and "can't be attached in a group chat" in message
     assert "offer" not in message, "no tool can send a group chat's file to a 1:1 chat"
     assert "shows inline" not in message, "no image output previews there"
     assert "<thread " not in message and "read_thread" not in message
@@ -369,3 +369,83 @@ def test_chat_media_reads_only_this_messages_hosted_images() -> None:
     assert chat_media(message, chat_id="19:g@thread.v2").image_urls == (own,)
     images, _ = history_media([message], chat_id="19:g@thread.v2")
     assert images == {"7": (own,)}
+
+
+def test_daimon_answers_replay_with_their_previews_and_saved_files_readable() -> None:
+    """An answer's hosted previews, an image-only preview and saved-file links all read back.
+
+    The footer itself is dropped from the text: replayed, the agent copied it.
+    """
+
+    def hosted(message_id: str) -> str:
+        path = f"/v1.0/teams/g/channels/c/messages/{message_id}/hostedContents"
+        return f"https://graph.microsoft.com{path}/aWQ9eA==/$value"
+
+    chart = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/chart.png"
+    deck = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/a%5Db%281%29.pdf"
+    markdown = _bot(
+        "301",
+        f'<p>Here it is.</p><ul><li><a href="{chart}">chart.png</a></li></ul>'
+        f'<p><img src="{hosted("301")}"></p>',
+    )
+    extended = _bot(
+        "302",
+        body={
+            "contentType": "text",
+            "content": f"Done.\n\nSaved to this channel's files:\n- [a\\]b(1).pdf]({deck})",
+        },
+    )
+    image_only = _bot("303", f'<img src="{hosted("303")}">')
+    messages = [markdown, extended, image_only]
+
+    images, files = history_media(messages, group_id="g", channel_id="c")
+    assert sorted(images) == ["301", "303"], "the answer's preview and the preview message"
+    assert [(f.name, f.content_url) for f in files] == [("a]b(1).pdf", deck), ("chart.png", chart)]
+    block = channel_block(
+        GraphPage(value=messages),
+        skip_ids=frozenset(),
+        bot_app_id=BOT,
+        channel_id="c",
+        attached=Attached(
+            images={"301": 1, "303": 1},
+            downloads={chart: "https://dl.example/chart", deck: "https://dl.example/deck"},
+        ),
+    )
+    text = "\n".join(block.lines)
+    assert "Saved to this channel" not in text, "an older answer's heading goes too"
+    assert "- chart.png" not in text and "- [" not in text, "daimon's links are not its words"
+    assert "Here it is." in text and "Done." in text, "the answers themselves stay"
+    assert 'url="https://dl.example/chart"' in text and 'url="https://dl.example/deck"' in text
+    assert text.count('images_attached="1"') == 2, "both previews ride along as images"
+
+
+def test_only_daimons_own_links_leave_its_replayed_answer() -> None:
+    """One line per saved link, from the bottom; the agent's own bullets and an old list stay or go whole."""
+    chart = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/chart.png"
+    listed = _bot(
+        "501",
+        f'<p>Files:</p><ul><li>chart.png</li></ul><ul><li><a href="{chart}">chart.png</a></li></ul>',
+    )
+    legacy = _bot(
+        "502",
+        body={"contentType": "text", "content": "Done.\n\nSaved to this channel's files:\n- r.pdf"},
+    )
+    block = channel_block(
+        GraphPage(value=[listed, legacy]), skip_ids=frozenset(), bot_app_id=BOT, channel_id="c"
+    )
+    text = "\n".join(block.lines)
+    assert "Files:\n\n- chart.png\n<attachments>" in text, "the agent's bullet stays, daimon's goes"
+    assert 'messageid=502">Done.</message>' in text, "an old heading goes with its unlinked lines"
+
+
+def test_another_bots_footer_stays_in_its_text() -> None:
+    """Only daimon's own footer is stripped; another app's words replay as written."""
+    link = "https://contoso.sharepoint.com/sites/T/Shared%20Documents/General/x.csv"
+    other = _bot(
+        "401", f'<p>Saved to this channel\'s files:</p><a href="{link}">x.csv</a>', app_id="other"
+    )
+    block = channel_block(
+        GraphPage(value=[other]), skip_ids=frozenset(), bot_app_id=BOT, channel_id="c"
+    )
+    assert "Saved to this channel" in "\n".join(block.lines), "not daimon's: kept"
+    assert '<attachment name="x.csv" fetchable="false"/>' in block.lines, "its link is listed"

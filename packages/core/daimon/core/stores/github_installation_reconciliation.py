@@ -18,7 +18,7 @@ from daimon.core.stores.github_removal_notices import (
     confirm_removal,
     queue_removal,
 )
-from sqlalchemy import CursorResult, and_, case, delete, or_, select, update
+from sqlalchemy import CursorResult, DateTime, and_, case, delete, literal, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -102,6 +102,58 @@ async def enqueue(
     return True
 
 
+async def enqueue_never_refreshed(session: AsyncSession, *, now: datetime, limit: int) -> int:
+    """Queue a refresh for each live App installation GitHub has never been read for.
+
+    Migration 0108 queues these once, but a scheduler still running the previous
+    image can complete those jobs without writing the snapshot. This statement
+    heals that: it selects only installations with no snapshot, not removed, and
+    with no queue row or a ``done`` one, so a pending (including backing-off) or
+    running job already counts as queued. The conflict clause re-checks ``done``
+    so a job claimed between the select and the write is left alone.
+    """
+    installation = GitHubAppInstallation
+    queue = GitHubInstallationReconciliation
+    candidates = (
+        select(
+            installation.installation_id,
+            literal(1),
+            literal("pending"),
+            literal(0),
+            literal(now, type_=DateTime(timezone=True)),
+        )
+        .outerjoin(queue, queue.installation_id == installation.installation_id)
+        .where(
+            installation.app == "github_app",
+            installation.github_refreshed_at.is_(None),
+            installation.github_removed_at.is_(None),
+            or_(queue.installation_id.is_(None), queue.state == "done"),
+        )
+        .order_by(installation.installation_id)
+        .limit(limit)
+    )
+    stmt = (
+        pg_insert(queue)
+        .from_select(
+            ["installation_id", "generation", "state", "attempts", "available_at"], candidates
+        )
+        .on_conflict_do_update(
+            index_elements=["installation_id"],
+            set_={
+                "generation": queue.generation + 1,
+                "attempts": 0,
+                "state": "pending",
+                "available_at": now,
+                "last_error": None,
+                "updated_at": now,
+            },
+            where=queue.state == "done",
+        )
+        .returning(queue.installation_id)
+    )
+    return len((await session.execute(stmt)).all())
+
+
 async def get(
     session: AsyncSession, *, installation_id: int
 ) -> GitHubInstallationReconciliationRow | None:
@@ -152,6 +204,7 @@ async def claim_due(
     row.attempts += 1
     row.updated_at = now
     await session.flush()
+    await session.refresh(row)
     return GitHubInstallationReconciliationRow.model_validate(row)
 
 
@@ -184,6 +237,7 @@ async def finish(
     account_login: str | None,
     repos: list[str] | None,
     now: datetime,
+    suspended_at: datetime | None = None,
 ) -> bool:
     """Write a complete snapshot only for the current claim and generation.
 
@@ -227,6 +281,9 @@ async def finish(
                 confirmed=True,
             )
         await confirm_removal(session, installation_id=job.installation_id, now=now)
+        if previous is not None and previous.app == "github_app":
+            previous.github_removed_at = now
+            previous.github_refreshed_at = now
         await session.execute(
             delete(GitHubAppInstallation).where(
                 GitHubAppInstallation.installation_id == job.installation_id,
@@ -235,10 +292,19 @@ async def finish(
         )
     else:
         await cancel_unconfirmed_removal(session, installation_id=job.installation_id)
-        if repos is None:
-            raise ValueError("a live installation requires a complete repository snapshot")
         previous = await session.get(GitHubAppInstallation, job.installation_id)
-        if previous is not None and previous.app == "legacy":
+        if previous is not None and previous.app == "github_app":
+            if repos is None and suspended_at is None:
+                raise ValueError("a live installation requires a complete repository snapshot")
+            if repos is not None:
+                previous.github_repo_full_names = repos
+            previous.github_refreshed_at = now
+            previous.github_removed_at = None
+            previous.suspended_at = suspended_at
+        else:
+            if repos is None:
+                raise ValueError("a live installation requires a complete repository snapshot")
+        if previous is not None and previous.app == "legacy" and repos is not None:
             await queue_new_repos(
                 session,
                 installation_id=job.installation_id,
@@ -246,24 +312,25 @@ async def finish(
                 new_names=set(repos),
                 now=now,
             )
-        stmt = (
-            pg_insert(GitHubAppInstallation)
-            .values(
-                installation_id=job.installation_id,
-                account_login=account_login,
-                repo_full_names=repos,
+        if repos is not None:
+            stmt = (
+                pg_insert(GitHubAppInstallation)
+                .values(
+                    installation_id=job.installation_id,
+                    account_login=account_login,
+                    repo_full_names=repos,
+                )
+                .on_conflict_do_update(
+                    index_elements=["installation_id"],
+                    set_={
+                        "account_login": account_login,
+                        "repo_full_names": repos,
+                        "updated_at": now,
+                    },
+                    where=GitHubAppInstallation.app == "legacy",
+                )
             )
-            .on_conflict_do_update(
-                index_elements=["installation_id"],
-                set_={
-                    "account_login": account_login,
-                    "repo_full_names": repos,
-                    "updated_at": now,
-                },
-                where=GitHubAppInstallation.app == "legacy",
-            )
-        )
-        await session.execute(stmt)
+            await session.execute(stmt)
 
     row.state = "done"
     row.claimed_generation = None

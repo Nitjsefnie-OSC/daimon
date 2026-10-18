@@ -1,13 +1,11 @@
-"""One channel's state as one viewer may see it: its rule, budget, environment
-and admins.
+"""One channel's state as one viewer may see it: its rule, budget, and environment.
 
 A fact is shown only to a viewer who can already learn it through another
 read, and otherwise omitted (None, and missing from `ChannelOverview.shown`),
 never reported as false:
 
-- whether only its own agents run there, and admins: server admins and
-  operator tokens reading the tenant (`get_tenant_summary`,
-  `list_channel_admins`), and the deployment operator;
+- whether only its own agents run there: server admins, operator tokens
+  reading the tenant (`get_tenant_summary`), and the deployment operator;
 - its readers and writers: the deployment operator, who reads the whole
   access policy (`daimon channels list`);
 - budget: those, and anyone the platform shows the channel to
@@ -30,12 +28,10 @@ from daimon.core.channel_budget import ChannelBudgetStatus, get_channel_budget_s
 from daimon.core.permissions import channel_rule, home_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.channel_admins import get_channel_admins
-from daimon.core.stores.domain import ChannelAdminsRow
 from daimon.core.stores.scoped_config_read import resolve
 from sqlalchemy.ext.asyncio import AsyncSession
 
-OverviewFact = Literal["own_agents", "rule", "budget", "environment", "admins"]
+OverviewFact = Literal["own_agents", "rule", "budget", "environment"]
 
 
 @dataclass(frozen=True)
@@ -53,13 +49,6 @@ class ChannelViewer:
 
 
 @dataclass(frozen=True)
-class ChannelAdminSet:
-    role_ids: tuple[str, ...] = ()
-    """Group ids: Discord roles, Slack user groups, or Teams teams (their owners)."""
-    user_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class ChannelOverview:
     """A fact not in `shown` is omitted; a shown `budget` or `environment_name`
     of None means there is none."""
@@ -71,7 +60,6 @@ class ChannelOverview:
     writers: ChannelWriters | None = None
     budget: ChannelBudgetStatus | None = None
     environment_name: str | None = None
-    admins: ChannelAdminSet | None = None
 
 
 def shown_facts(
@@ -81,7 +69,7 @@ def shown_facts(
     wide = viewer.is_server_admin or viewer.reads_access_policy
     facts: set[OverviewFact] = set()
     if wide:
-        facts |= {"own_agents", "admins", "budget", "environment"}
+        facts |= {"own_agents", "budget", "environment"}
     if viewer.reads_access_policy:
         facts.add("rule")
     if viewer.sees_channel:
@@ -98,9 +86,8 @@ def build_channel_overview(
     policy: TenantAccessPolicy,
     environment_name: str | None,
     budget: ChannelBudgetStatus | None,
-    admins: ChannelAdminsRow | None,
 ) -> ChannelOverview:
-    """`environment_name` is the one resolved for the channel; `admins` its grant row."""
+    """`environment_name` is the one resolved for the channel."""
     shown = shown_facts(viewer, policy=policy, channel_id=channel_id)
     rule = channel_rule(policy, channel_id)
     return ChannelOverview(
@@ -111,13 +98,6 @@ def build_channel_overview(
         writers=rule.writers if "rule" in shown else None,
         budget=budget if "budget" in shown else None,
         environment_name=environment_name if "environment" in shown else None,
-        admins=(
-            ChannelAdminSet(admins.role_ids, admins.user_ids)
-            if admins is not None
-            else ChannelAdminSet()
-        )
-        if "admins" in shown
-        else None,
     )
 
 
@@ -155,25 +135,16 @@ async def load_channel_overview(
         if "budget" in shown
         else None
     )
-    admins = (
-        await get_channel_admins(
-            session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
-        )
-        if "admins" in shown
-        else None
-    )
     return build_channel_overview(
         channel_id,
         viewer=viewer,
         policy=policy,
         environment_name=environment_name,
         budget=budget,
-        admins=admins,
     )
 
 
 __all__ = [
-    "ChannelAdminSet",
     "ChannelOverview",
     "ChannelViewer",
     "OverviewFact",

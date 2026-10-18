@@ -698,74 +698,6 @@ def reviewed_ports(verdict="approved"):
     return owner, target, reviewer
 
 
-@pytest.mark.parametrize("operation", ("kill", "resume", "collect"))
-@pytest.mark.parametrize(
-    "subject,allowed",
-    (
-        (Subject(platform_user_id="person"), True),
-        (Subject(platform_user_id="unrelated-person"), False),
-        (Subject(platform_user_id="unrelated-person", is_admin=True), True),
-        (Subject(platform_user_id="unrelated-person", is_admin=True, via_agent_key=True), False),
-        (
-            Subject(
-                platform_user_id="unrelated-person",
-                administered_channel_ids=frozenset({"channel"}),
-            ),
-            False,
-        ),
-        (Subject(), False),
-    ),
-)
-async def test_shared_fleet_control_requires_the_original_principal_or_tenant_admin(
-    operation, subject, allowed
-):
-    parent = replace(permissions(), subject=subject)
-    assert parent.fleet.scope.principal_id == "person"
-    owner = reviewed_ports()[0] if operation == "collect" else ports(worker(status="pending"))
-    service = FleetOrchestrator(owner)
-
-    async def act():
-        if operation == "collect":
-            return await service.collect(parent, POLICY, run_id=RUN)
-        return await service.control(
-            parent,
-            POLICY,
-            run_id=RUN,
-            worker_id=WORKER,
-            action=operation,
-            expected_version=3,
-            operation_key="fixture-control",
-            now=NOW,
-        )
-
-    if allowed:
-        with capture_decision() as decision:
-            result = await act()
-        assert not decision.denied
-        if operation == "collect":
-            assert result["status"] == "ready"
-            owner.validate_contract.assert_called_once()
-        else:
-            assert result["accepted"] is True
-            owner.control.assert_awaited_once()
-    else:
-        with (
-            capture_decision() as decision,
-            pytest.raises(FleetRefused, match="controller_required"),
-        ):
-            await act()
-        assert (decision.operation, decision.denied, decision.reason) == (
-            "fleet_control",
-            True,
-            "authz:controller_required",
-        )
-        owner.retained_control.assert_not_awaited()
-        owner.control.assert_not_awaited()
-        owner.wait.assert_not_awaited()
-        owner.read_result.assert_not_awaited()
-        owner.validate_contract.assert_not_called()
-
-
 async def test_nonowner_cannot_install_a_collection_wake():
     parent = replace(permissions(), subject=Subject(platform_user_id="unrelated-person"))
     owner = ports(worker(status="running", result=None))
@@ -1218,3 +1150,68 @@ async def test_explicit_pending_control_keeps_the_card_unaccepted():
     )
     assert reply["accepted"] is False
     assert reply["status"] == "waiting"
+
+
+@pytest.mark.parametrize("operation", ("kill", "resume", "collect"))
+@pytest.mark.parametrize(
+    "subject,allowed",
+    (
+        (Subject(platform_user_id="person"), True),
+        (Subject(platform_user_id="unrelated-person"), False),
+        (Subject(platform_user_id="unrelated-person", is_admin=True), True),
+        (Subject(platform_user_id="unrelated-person", is_admin=True, via_agent_key=True), False),
+        (
+            Subject(platform_user_id="unrelated-person"),
+            False,
+        ),
+        (Subject(), False),
+    ),
+)
+async def test_shared_fleet_control_requires_the_original_principal_or_tenant_admin(
+    operation, subject, allowed
+):
+    parent = replace(permissions(), subject=subject)
+    assert parent.fleet.scope.principal_id == "person"
+    owner = reviewed_ports()[0] if operation == "collect" else ports(worker(status="pending"))
+    service = FleetOrchestrator(owner)
+
+    async def act():
+        if operation == "collect":
+            return await service.collect(parent, POLICY, run_id=RUN)
+        return await service.control(
+            parent,
+            POLICY,
+            run_id=RUN,
+            worker_id=WORKER,
+            action=operation,
+            expected_version=3,
+            operation_key="fixture-control",
+            now=NOW,
+        )
+
+    if allowed:
+        with capture_decision() as decision:
+            result = await act()
+        assert not decision.denied
+        if operation == "collect":
+            assert result["status"] == "ready"
+            owner.validate_contract.assert_called_once()
+        else:
+            assert result["accepted"] is True
+            owner.control.assert_awaited_once()
+    else:
+        with (
+            capture_decision() as decision,
+            pytest.raises(FleetRefused, match="controller_required"),
+        ):
+            await act()
+        assert (decision.operation, decision.denied, decision.reason) == (
+            "fleet_control",
+            True,
+            "authz:controller_required",
+        )
+        owner.retained_control.assert_not_awaited()
+        owner.control.assert_not_awaited()
+        owner.wait.assert_not_awaited()
+        owner.read_result.assert_not_awaited()
+        owner.validate_contract.assert_not_called()

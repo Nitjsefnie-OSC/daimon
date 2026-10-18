@@ -1,4 +1,4 @@
-"""/dm: a sealed source is refused before any history is read; the notices read plainly."""
+"""/dm-me: a sealed source is refused before any history is read; the notices read plainly."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ async def test_dm_move_from_a_sealed_channel_refuses_before_history(
     monkeypatch.setattr(direct_messages, "require_dm_enabled", AsyncMock())
     admission = MagicMock(source_sealed=True, memory_read_only=True)
     monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
-    monkeypatch.setattr(direct_messages, "user_group_ids", AsyncMock(return_value=frozenset()))
     start_dm = AsyncMock()
     monkeypatch.setattr(direct_messages, "start_dm", start_dm)
 
@@ -58,7 +57,6 @@ async def test_the_dm_opens_with_the_two_line_continue_notice(
     monkeypatch.setattr(
         direct_messages, "admit", AsyncMock(return_value=MagicMock(source_sealed=False))
     )
-    monkeypatch.setattr(direct_messages, "user_group_ids", AsyncMock(return_value=frozenset()))
     monkeypatch.setattr(direct_messages, "start_dm", AsyncMock())
 
     await direct_messages.handle_dm_command(
@@ -66,7 +64,8 @@ async def test_the_dm_opens_with_the_two_line_continue_notice(
     )
 
     assert client.chat_postMessage.await_args.kwargs["text"] == (
-        "Continuing from <#C020>.\n\nSend your next message here."
+        "Continuing from <#C020>.\n\nSend your next message here. "
+        "To start a new private conversation, run /dm-me in a channel."
     )
 
 
@@ -80,7 +79,9 @@ async def test_an_unknown_action_shows_the_usage_lines(monkeypatch: pytest.Monke
     )
 
     assert client.chat_postEphemeral.await_args.kwargs["text"] == (
-        "Run `/dm` in a channel to carry on in private.\n\nAdmins: `/dm enable` or `/dm disable`."
+        "That option isn't recognized.\n\n"
+        "Run `/dm-me` in a channel to continue privately. "
+        "Admins: `/dm-me enable` or `/dm-me disable`."
     )
 
 

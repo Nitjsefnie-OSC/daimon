@@ -50,6 +50,7 @@ from daimon.core.teams_graph import (
     GraphMessage,
     GraphUnavailable,
     image_sources,
+    linked_files,
     message_text,
     skiptoken_of,
 )
@@ -81,7 +82,8 @@ def _row(
 ) -> TeamsReadMessage | None:
     """The message as a row; None for a system event or a deleted message.
 
-    `links` maps a shared file's content URL to its download URL (`file_links`).
+    `links` maps a shared file's content URL, or a bot's file link, to its download URL
+    (`file_links`).
     """
     if message.message_type != "message" or message.deleted_date_time is not None:
         return None
@@ -102,9 +104,12 @@ def _row(
         timestamp=message.created_date_time,
         subject=message.subject or None,
         files=[
-            TeamsFileRow(name=a.name or "file", url=links.get(a.content_url or ""))
-            for a in message.attachments
-            if a.content_type in _FILES
+            *(
+                TeamsFileRow(name=a.name or "file", url=links.get(a.content_url or ""))
+                for a in message.attachments
+                if a.content_type in _FILES
+            ),
+            *(TeamsFileRow(name=name, url=links.get(url)) for name, url in linked_files(message)),
         ],
         images=len(image_sources(html)) if html else 0,
         web_url=message.web_url,
@@ -216,7 +221,7 @@ async def _teams_read_channel_impl(  # pyright: ignore[reportUnusedFunction]  # 
     kept = [
         m for m in page.value if read_policy.allows(thread_id(ref.channel_id, m.id), ref.channel_id)
     ]
-    links = await file_links(runtime, auth, client, ref, (x for m in kept for x in (m, *m.replies)))
+    links = await file_links(client, ref, (x for m in kept for x in (m, *m.replies)))
     posts = [p for m in kept if (p := _post(m, channel_id=ref.channel_id, links=links)) is not None]
     posts.reverse()
     next_cursor = skiptoken_of(page.next_link)
@@ -261,7 +266,7 @@ async def _teams_read_thread_impl(  # pyright: ignore[reportUnusedFunction]  # r
             messages.insert(0, await graph.get_message(ref.group_id, ref.channel_id, root))
     except GraphUnavailable as err:
         raise _graph_refused(err) from err
-    links = await file_links(runtime, auth, client, ref, messages)
+    links = await file_links(client, ref, messages)
     rows = [
         row
         for message in messages
@@ -300,7 +305,7 @@ async def _teams_get_message_impl(  # pyright: ignore[reportUnusedFunction]  # r
                 "channel_id=<channel>;messageid=<root>"
             ) from err
         raise _graph_refused(err) from err
-    links = await file_links(runtime, auth, client, ref, [message])
+    links = await file_links(client, ref, [message])
     row = _row(message, channel_id=ref.channel_id, root_id=root or message.id, links=links)
     if row is None:
         raise ToolError("that message was deleted, or is a system event")
@@ -467,7 +472,7 @@ async def _teams_search_messages_impl(  # pyright: ignore[reportUnusedFunction] 
     links: dict[str, dict[str, str]] = {}
     for ref in refs[:_SEARCH_CHANNELS]:
         if mine := [m for r, _, m in found if r is ref]:
-            links[ref.channel_id] = await file_links(runtime, auth, client, ref, mine)
+            links[ref.channel_id] = await file_links(client, ref, mine)
     matches = [
         TeamsSearchMatch(channel_id=ref.channel_id, channel_name=ref.channel_name, message=row)
         for ref, root, message in found

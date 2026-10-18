@@ -31,7 +31,6 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.session_seal import origin_stamp
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
-from daimon.core.stores.channel_admins import delete_channel_admins, set_channel_admins
 from daimon.core.stores.domain import Role, RoutineDestinationKind, RoutineRow
 from daimon.testing import ma_agent, ma_session
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
@@ -324,128 +323,6 @@ async def test_an_admin_never_reads_another_members_teams_personal_chat(hub: _Hu
     assert hub.sent == []
 
 
-async def _grant(hub: _Hub, channel_id: str) -> None:
-    await set_channel_admins(
-        hub.db,
-        tenant_id=hub.tenant_id,
-        platform="discord",
-        channel_id=channel_id,
-        role_ids=[],
-        user_ids=["u1"],
-        actor_account_id=None,
-    )
-    await hub.db.commit()
-
-
-async def test_a_channel_admin_reads_sealed_conversations_of_their_channels_only(
-    hub: _Hub,
-) -> None:
-    """Anyone's sealed conversation in a channel they administer; never another channel's, a
-    private DM, or once the grant is gone."""
-    await set_access_policy(
-        hub.db,
-        tenant_id=hub.tenant_id,
-        policy=TenantAccessPolicy(sealed_channel_ids=(_SEALED, "chan-ops")),
-    )
-    await _grant(hub, _SEALED)
-    someone_else = uuid.uuid4()
-    hub.add_session("ses_mine", daimon_channel=_SEALED, daimon_thread="thr-1")
-    hub.add_session("ses_theirs", account=someone_else, daimon_channel=_SEALED)
-    hub.add_session("ses_mine_ops", daimon_channel="chan-ops")
-    hub.add_session("ses_theirs_ops", account=someone_else, daimon_channel="chan-ops")
-    hub.add_session(
-        "ses_theirs_dm", account=someone_else, daimon_channel=_SEALED, daimon_private_dm="x"
-    )
-    hub.add_session("ses_legacy", account=someone_else)
-    await _map_thread(hub, "ses_legacy", _SEALED)
-
-    listed = str(await hub.call("list_my_sessions"))
-    assert "ses_mine" in listed and "ses_theirs" in listed, "their channel's are listed"
-    for handle in ("ses_mine", "ses_theirs"):
-        events = await hub.call("list_events", handle=handle)
-        assert not events.get("isError") and _TOPIC in str(events), (handle, events)
-    for handle in ("ses_mine_ops", "ses_theirs_ops", "ses_theirs_dm", "ses_legacy"):
-        assert handle not in listed, f"{handle} is outside the channels they administer"
-        events = await hub.call("list_events", handle=handle)
-        assert events.get("isError") and _TOPIC not in str(events), (handle, events)
-
-    await delete_channel_admins(
-        hub.db, tenant_id=hub.tenant_id, platform="discord", channel_id=_SEALED
-    )
-    await hub.db.commit()
-    events = await hub.call("list_events", handle="ses_theirs")
-    assert events.get("isError") and _TOPIC not in str(events), "the stored grant decides"
-    assert hub.sent == []
-
-
-@pytest.mark.parametrize("tool", ["continue_turn", "ask"])
-async def test_a_channel_admin_never_continues_a_sealed_conversation_from_the_hub(
-    hub: _Hub, tool: str
-) -> None:
-    await _grant(hub, _SEALED)
-    hub.add_session("ses_sealed", daimon_channel=_SEALED, daimon_thread="thr-1")
-
-    result = await hub.call(tool, handle="ses_sealed", message="private personnel note")
-
-    assert result.get("isError") and "continue it in its channel" in str(result), result
-    assert hub.sent == [], "a refused follow-up must never reach the session"
-
-
-async def test_a_channel_admin_reads_only_sessions_sealed_inside_their_channels(
-    hub: _Hub,
-) -> None:
-    """Every seal on the session must lie in an administered channel: the channel itself,
-    its thread sealed on its own, or a Slack-style channel:ts. A seal inherited from
-    another channel keeps it closed."""
-    await set_access_policy(
-        hub.db,
-        tenant_id=hub.tenant_id,
-        policy=TenantAccessPolicy(sealed_channel_ids=(_SEALED, "chan-ops", "thr-own")),
-    )
-    await _grant(hub, _SEALED)
-    await _grant(hub, "chan-open")
-    theirs = uuid.uuid4()
-    hub.add_session(
-        "ses_thread_sealed",
-        account=theirs,
-        daimon_channel="chan-open",
-        daimon_thread="thr-own",
-        daimon_sealed="thr-own",
-    )
-    hub.add_session(
-        "ses_mixed",
-        account=theirs,
-        daimon_channel=_SEALED,
-        daimon_thread="thr-1",
-        daimon_sealed=f"{_SEALED},thr-1,{_SEALED}:171.2",
-    )
-    hub.add_session(
-        "ses_inherited",
-        account=theirs,
-        daimon_channel=_SEALED,
-        daimon_thread="thr-1",
-        daimon_sealed=f"{_SEALED},chan-ops",
-    )
-    hub.add_session(
-        "ses_inherited_thread",
-        account=theirs,
-        daimon_channel="chan-open",
-        daimon_thread="thr-2",
-        daimon_sealed="thr-own",
-    )
-
-    listed = str(await hub.call("list_my_sessions"))
-    for handle in ("ses_thread_sealed", "ses_mixed"):
-        assert handle in listed, handle
-        events = await hub.call("list_events", handle=handle)
-        assert not events.get("isError") and _TOPIC in str(events), (handle, events)
-    for handle in ("ses_inherited", "ses_inherited_thread"):
-        assert handle not in listed, f"{handle} carries a seal from outside their channels"
-        events = await hub.call("list_events", handle=handle)
-        assert events.get("isError") and _TOPIC not in str(events), (handle, events)
-    assert hub.sent == []
-
-
 _ROUTINE_CHANNEL = "chan-routine"
 
 
@@ -498,28 +375,22 @@ def _routine_stamp(row: RoutineRow) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("shape", list(_ROUTINE_SHAPES))
-@pytest.mark.parametrize("caller", ["owner", "server-admin", "channel-admin", "outsider"])
+@pytest.mark.parametrize("caller", ["owner", "server-admin", "outsider"])
 async def test_a_routine_transcript_reads_only_for_its_owner_from_the_hub(
     hub: _Hub, shape: str, caller: str
 ) -> None:
-    """As before routine sessions carried a channel: the owner reads every shape,
-    and no server admin, channel admin of its channel or other member reads one."""
     if caller == "server-admin":
         await _as(hub, Role.ADMIN)
-    if caller == "channel-admin":
-        for channel in (_ROUTINE_CHANNEL, "thr-legacy"):
-            await _grant(hub, channel)
     account = hub.account_id if caller == "owner" else uuid.uuid4()
     hub.add_session("ses_routine", account=account, **_routine_stamp(_ROUTINE_SHAPES[shape]))
 
     listed = str(await hub.call("list_my_sessions"))
     events = await hub.call("list_events", handle="ses_routine")
-
     if caller == "owner":
-        assert "ses_routine" in listed, "the owner lists their routine's session"
+        assert "ses_routine" in listed
         assert not events.get("isError") and _TOPIC in str(events), events
     else:
-        assert "ses_routine" not in listed, f"a {caller} never lists another's routine"
+        assert "ses_routine" not in listed
         assert events.get("isError") and _TOPIC not in str(events), (caller, events)
     assert hub.sent == []
 

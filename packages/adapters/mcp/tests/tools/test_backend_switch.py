@@ -14,40 +14,6 @@ from daimon.testing.db import db_nullpool_engine  # noqa: F401
 from fastmcp.exceptions import ToolError
 
 
-@pytest.mark.parametrize("caller", ["member", "channel_admin", "agent_key", "headless"])
-async def test_non_chat_admins_never_resolve_an_agent_or_preview(
-    caller: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    auth = AuthIdentity(
-        tenant_id=uuid4(),
-        account_id=uuid4(),
-        role=Role.ADMIN,
-        is_admin=True,
-        platform="discord",
-        platform_user_id="123",
-    )
-    if caller == "member":
-        auth = replace(auth, role=Role.USER, is_admin=False)
-    elif caller == "channel_admin":
-        auth = replace(
-            auth, role=Role.USER, is_admin=False, administered_channel_ids=frozenset({"456"})
-        )
-    elif caller == "agent_key":
-        auth = replace(auth, agent_id=uuid4())
-    else:
-        auth = replace(auth, platform_user_id=None)
-    runtime = MagicMock()
-    origin = AsyncMock()
-    monkeypatch.setattr("daimon.adapters.mcp.tools.agents.get_chat_origin", origin)
-    with pytest.raises(ToolError):
-        await _request_agent_backend_switch_impl(
-            cast(McpRuntime, runtime), auth, agent_name="Researcher", target_backend="openai"
-        )
-    origin.assert_not_awaited()
-    runtime.client.assert_not_called()
-    runtime.session_factory.assert_not_called()
-
-
 async def test_a_missing_active_origin_never_resolves_or_previews(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

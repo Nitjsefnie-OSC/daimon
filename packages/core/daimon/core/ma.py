@@ -349,6 +349,16 @@ WORKSPACE_NOT_DISPOSABLE_MESSAGE = (
 )
 
 
+def _workspace_admin_port(client: AsyncAnthropic, scope: Scope) -> CoreAdmin:
+    """The workspace-wide admin port. Each caller builds and audits its own platform scope."""
+    backend = managed_agents(client, scope=scope)
+    return backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+
+
+_SENTINEL_REASON = "sentinel cleanup: explicit destructive opt-in, enumerates all tenants"
+_LANE_REASON = "dev lane ownership: explicit operator opt-in, enumerates all tenants"
+
+
 async def find_workspace_disposable_sentinel(
     client: AsyncAnthropic,
 ) -> BetaManagedAgentsAgent | None:
@@ -362,16 +372,47 @@ async def find_workspace_disposable_sentinel(
         MA_METADATA_VALUE_WORKSPACE_DISPOSABLE,
     )
 
-    scope = Scope.platform(
-        reason="sentinel cleanup: explicit destructive opt-in, enumerates all tenants"
-    )
-    backend = managed_agents(client, scope=scope)
-    port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+    scope = Scope.platform(reason=_SENTINEL_REASON)
+    port = _workspace_admin_port(client, scope)
     async for record in legacy_iter(port.workspace_agents(scope)):
         agent = construct_type_unchecked(value=record, type_=BetaManagedAgentsAgent)
         if agent.metadata.get(MA_METADATA_KEY_WORKSPACE) == MA_METADATA_VALUE_WORKSPACE_DISPOSABLE:
             return agent
     return None
+
+
+async def list_workspace_agents_for_lane(
+    client: AsyncAnthropic, *, include_archived: bool = False
+) -> list[BetaManagedAgentsAgent]:
+    """Every agent in the workspace behind this key, for the lane ownership check."""
+    scope = Scope.platform(reason=_LANE_REASON)
+    port = _workspace_admin_port(client, scope)
+    return [
+        construct_type_unchecked(value=record, type_=BetaManagedAgentsAgent)
+        async for record in legacy_iter(
+            port.workspace_agents(scope, include_archived=include_archived)
+        )
+    ]
+
+
+async def workspace_has_resources_for_lane(client: AsyncAnthropic) -> bool:
+    """True when the workspace holds any environment, vault or memory store, archived included."""
+    scope = Scope.platform(reason=_LANE_REASON)
+    port = _workspace_admin_port(client, scope)
+    return await legacy_call(port.workspace_has_resources(scope))
+
+
+async def create_lane_marker_agent(
+    client: AsyncAnthropic, *, name: str, description: str, model: str, metadata: dict[str, str]
+) -> None:
+    """Create the idle agent that marks a workspace as owned by one dev lane."""
+    scope = Scope.platform(reason=_LANE_REASON)
+    port = _workspace_admin_port(client, scope)
+    await legacy_call(
+        port.create_workspace_agent(
+            scope, name=name, description=description, model=model, metadata=metadata
+        )
+    )
 
 
 async def delete_entire_workspace_for_testing(
@@ -404,11 +445,9 @@ async def delete_entire_workspace_for_testing(
     sentinel = await find_workspace_disposable_sentinel(client)
     if sentinel is None:
         raise DaimonError(WORKSPACE_NOT_DISPOSABLE_MESSAGE)
-    scope = Scope.platform(
-        reason="sentinel cleanup: explicit destructive opt-in, enumerates all tenants"
-    )
+    scope = Scope.platform(reason=_SENTINEL_REASON)
+    port = _workspace_admin_port(client, scope)
     backend = managed_agents(client, scope=scope)
-    port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
     errors: list[Exception] = []
 
     # Skills: versions first (MA requires this), then skill.

@@ -523,7 +523,7 @@ async def transfer_workspace(
                 tenant_id=tenant_id,
                 external_user_id=external_user_id,
                 ma_session_id=old_session_id,
-                model_id=old_snapshot.model_id,
+                model_id=old_snapshot.pricing_id,
                 markup=markup,
                 channel_id=channel_id,
             )

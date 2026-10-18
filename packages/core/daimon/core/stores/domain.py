@@ -99,20 +99,6 @@ class AccountIdentityRow(BaseModel):
     is_external: bool = False
 
 
-class ChannelAdminsRow(BaseModel):
-    """One channel's admins beyond the server admins: role ids and user ids."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    platform: str
-    channel_id: str
-    role_ids: tuple[str, ...]
-    user_ids: tuple[str, ...]
-    updated_by_account_id: uuid.UUID | None
-    updated_at: datetime
-
-
 class ChannelSkillRow(BaseModel):
     """One extra skill a channel's sessions run with, at the version it was added at."""
 
@@ -430,17 +416,6 @@ class TeamsInstallationRow(BaseModel):
     team_id: str
     group_id: str
     name: str | None = None
-
-
-class TeamsChannelSiteRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    channel_id: str
-    group_id: str
-    site_id: str
-    drive_id: str
-    folder_id: str
 
 
 class TeamsChannelSubscriptionRow(BaseModel):
@@ -818,6 +793,9 @@ class GitHubAppInstallationRow(BaseModel):
     installation_id: int
     account_login: str
     repo_full_names: tuple[str, ...]
+    github_repo_full_names: tuple[str, ...] | None = None
+    github_refreshed_at: datetime | None = None
+    github_removed_at: datetime | None = None
     app: Literal["legacy", "github_app"] = "legacy"
     account_id: int | None = None
     account_type: str | None = None
