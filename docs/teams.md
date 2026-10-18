@@ -403,9 +403,9 @@ setting off the routes answer 404 and nothing is subscribed.
   notebook.
 - **Office skills.** A Teams turn of the default agent adds Anthropic's
   built-in `docx`, `pptx` and `xlsx` skills to its session (Anthropic backend
-  only; see `platforms` in [Defaults](defaults.md)). They and the
-  `microsoft-365` skill count toward the 20-skill session limit, so such a
-  channel adds at most 5 skills of its own.
+  only; see `platforms` in [Defaults](defaults.md)). They count toward the
+  20-skill session limit, so such a channel adds at most 6 skills of its
+  own, or 5 where Microsoft accounts add the `microsoft-365` skill.
 - **Updating a channel file.** A file in the channel's Files folder reaches
   the agent with its SharePoint link and version (its eTag) beside the
   download link. `replace_channel_file` saves an edited file over it as a new
@@ -572,10 +572,17 @@ Each person can connect their own Microsoft 365, so the agent reads and
 changes their files, mail, calendar and notes as them, with exactly their
 permissions. Set `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID`, `__CLIENT_SECRET` and
 `__TENANT_ID` (and `__AUTHORITY` for a national cloud), plus
-`DAIMON_CRYPTO__KEYS` and `DAIMON_MCP__PUBLIC_URL`. With none of them set
-nothing changes. With only some set the tools stay absent and the MCP server
-logs one `microsoft_accounts.disabled` warning naming what is missing; a
-tenant ID that is not a UUID stops startup with an error naming the variable.
+`DAIMON_CRYPTO__KEYS` and `DAIMON_MCP__PUBLIC_URL`. Set the
+`DAIMON_MICROSOFT_ACCOUNTS__*` values identically on every service that runs
+turns and on the MCP server:
+turn services decide from them which tools ask and whether the skill is
+added, and the MCP server checks the session against the same decision.
+With none of them set the tools and the skill are absent and sessions are
+unchanged; the privacy card still offers **Disconnect Microsoft** to anyone
+whose account was saved earlier. With only some set the tools stay absent
+and the MCP server logs one `microsoft_accounts.disabled` warning naming
+what is missing; a tenant ID that is not a UUID stops startup with an error
+naming the variable, and a blank `__AUTHORITY` means the default.
 
 Register a single-tenant app in the same Entra tenant.
 
@@ -600,13 +607,15 @@ device), the saved account is dropped and the agent asks them to connect
 again.
 
 Microsoft outages and throttling never drop a saved account: the tool says
-so, with any `Retry-After` wait, and nothing retries on its own. A client
+so, with the `Retry-After` wait when Graph sends one (sign-in outages give
+none), and nothing retries on its own. A client
 secret Entra refuses (`invalid_client`, for example once it expires) is
 reported as a setup problem for an administrator and logged as
 `microsoft_accounts.app_rejected`.
 
-A Teams turn of the default agent adds the `microsoft-365` skill, which
-tells the agent when and how to use these tools (Anthropic backend only, like
+Where these settings are configured, a Teams turn of the default agent adds
+the `microsoft-365` skill, which tells the agent when and how to use these
+tools (Anthropic backend only, like
 the Office skills); Slack and Discord sessions never get it.
 
 The tools, all Teams-only and limited to an allowlist of Graph v1.0 paths:
@@ -619,11 +628,13 @@ The tools, all Teams-only and limited to an allowlist of Graph v1.0 paths:
 - **`microsoft_write`** uploads or replaces files, edits workbooks and
   creates or updates OneNote pages. It has no delete or move call, but
   replacing a file or a workbook call (clearing or deleting a range or sheet)
-  can still destroy data.
+  can still destroy data. With tool safety on, each call waits for the
+  person's Approve.
 - **`microsoft_send`** sends an email or a calendar invite, each time only
   after the person presses Approve on a card showing every recipient, the
-  subject, time, location and the start of the message, whether or not tool
-  safety is on.
+  subject, time and time zone, location and the start of the message, with
+  the whole message under **Details**, whether or not tool safety is on. A
+  message over 8,000 characters is refused.
 
 Mail, calendar and OneNote are reachable only from the person's 1:1 chat
 with Daimon, never from a channel or group chat. The chat is the one recorded
