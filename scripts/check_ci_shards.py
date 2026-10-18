@@ -1,15 +1,17 @@
 """Prove the CI pytest shards cover each suite exactly once.
 
-Reads the ``pytest-db`` matrix in ``.github/workflows/ci.yml``. For every suite
-it collects the matrix paths once, unsharded and with ``--collect-only`` (no
-database, nothing runs), then places each collected test file with
-``daimon.testing.ci_shard.file_shard`` -- the function the plugin applies in CI,
-which depends only on a file's path, the shard count and the suite -- and fails
-when
+Reads the matrix of every job in ``.github/workflows/ci.yml`` whose pytest step
+loads the plugin (``-p daimon.testing.ci_shard``: today ``pytest-db`` and
+``pytest-discord``). For every suite it collects the matrix paths once,
+unsharded and with ``--collect-only`` (no database, nothing runs), then places
+each collected test file with ``daimon.testing.ci_shard.file_shard`` -- the
+function the plugin applies in CI, which depends only on a file's path, the
+shard count and the suite -- and fails when
 
 * the legs are not shards ``0..N-1`` of one ``shards`` count over the same
-  paths, or the pytest command does not pass the shard options the check
-  assumes (``--ci-shard-by=file`` and the matrix's suite, index and count),
+  paths, a suite has legs in more than one job, or a job's pytest command does
+  not pass the shard options the check assumes (``--ci-shard-by=file`` and the
+  matrix's suite, index and count),
 * a shard would receive no test file (pytest exits 5 on it and the job fails),
 * the shards do not hold exactly the collected tests, or a file is placed
   outside ``0..N-1``.
@@ -37,10 +39,10 @@ import yaml
 from daimon.testing.ci_shard import DURATIONS, file_shard, projected_loads
 
 _WORKFLOW = Path(".github/workflows/ci.yml")
-_JOB = "pytest-db"
+_PLUGIN = "-p daimon.testing.ci_shard"
 _NODEID = re.compile(r"^(.+?\.py)::")
 _REQUIRED_OPTIONS = (
-    "-p daimon.testing.ci_shard",
+    _PLUGIN,
     "--ci-shard-by=file",
     "--ci-shard-suite=${{ matrix.suite }}",
     "--ci-shard-index=${{ matrix.shard }}",
@@ -48,29 +50,45 @@ _REQUIRED_OPTIONS = (
 )
 
 
-def _job(workflow: Path) -> dict[str, Any]:
-    document = cast("dict[str, Any]", yaml.safe_load(workflow.read_text()))
-    return cast("dict[str, Any]", document["jobs"][_JOB])
-
-
-def _legs(job: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    """Matrix legs of the Postgres-backed job, grouped by suite."""
-    suites: dict[str, list[dict[str, Any]]] = {}
-    for leg in cast("list[dict[str, Any]]", job["strategy"]["matrix"]["include"]):
-        suites.setdefault(str(leg["suite"]), []).append(leg)
-    return suites
-
-
-def _command_problems(job: dict[str, Any]) -> list[str]:
-    commands = [
+def _pytest_commands(job: dict[str, Any]) -> list[str]:
+    return [
         " ".join(step["run"].split())
-        for step in cast("list[dict[str, Any]]", job["steps"])
+        for step in cast("list[dict[str, Any]]", job.get("steps", []))
         if "uv run pytest" in step.get("run", "")
     ]
+
+
+def sharded_jobs(workflow: Path) -> dict[str, dict[str, Any]]:
+    """The jobs whose pytest step loads the shard plugin, by job id."""
+    document = cast("dict[str, Any]", yaml.safe_load(workflow.read_text()))
+    jobs = cast("dict[str, dict[str, Any]]", document["jobs"])
+    return {
+        name: job
+        for name, job in jobs.items()
+        if any(_PLUGIN in command for command in _pytest_commands(job))
+    }
+
+
+def _legs(jobs: dict[str, dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    """Matrix legs of the sharded jobs grouped by suite, and suites split across jobs."""
+    suites: dict[str, list[dict[str, Any]]] = {}
+    owner: dict[str, str] = {}
+    problems: list[str] = []
+    for name, job in jobs.items():
+        for leg in cast("list[dict[str, Any]]", job["strategy"]["matrix"]["include"]):
+            suite = str(leg["suite"])
+            if owner.setdefault(suite, name) != name:
+                problems.append(f"{suite}: legs in both {owner[suite]} and {name}")
+            suites.setdefault(suite, []).append(leg)
+    return suites, sorted(set(problems))
+
+
+def _command_problems(name: str, job: dict[str, Any]) -> list[str]:
+    commands = _pytest_commands(job)
     if len(commands) != 1:
-        return [f"{_JOB} must have exactly one pytest step, found {len(commands)}"]
+        return [f"{name} must have exactly one pytest step, found {len(commands)}"]
     return [
-        f"the {_JOB} pytest command lacks `{option}`"
+        f"the {name} pytest command lacks `{option}`"
         for option in _REQUIRED_OPTIONS
         if option not in commands[0]
     ]
@@ -163,13 +181,15 @@ def main() -> int:
     parser.add_argument("suites", nargs="*", help="check only these suites (default: all)")
     args = parser.parse_args()
 
-    job = _job(args.workflow)
-    suites = _legs(job)
+    jobs = sharded_jobs(args.workflow)
+    if not jobs:
+        raise SystemExit(f"no job in {args.workflow} loads the shard plugin ({_PLUGIN})")
+    suites, problems = _legs(jobs)
     selected = args.suites or list(suites)
     unknown = [name for name in selected if name not in suites]
     if unknown:
-        raise SystemExit(f"unknown suite(s) {unknown}; the matrix has {list(suites)}")
-    problems = _command_problems(job)
+        raise SystemExit(f"unknown suite(s) {unknown}; the matrices have {list(suites)}")
+    problems += [problem for name, job in jobs.items() for problem in _command_problems(name, job)]
     problems += [problem for name in selected for problem in check_suite(name, suites[name])]
     stale = _stale_entries(selected)
     if stale:

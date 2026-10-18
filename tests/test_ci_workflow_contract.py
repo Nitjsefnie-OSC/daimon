@@ -63,24 +63,29 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     jobs = _workflow("ci.yml")["jobs"]
     deploy = jobs["deploy-gcp"]
     legs = jobs["pytest-db"]["strategy"]["matrix"]["include"]
-    for suite, count in (("core", 4), ("mcp", 2)):
-        shards = [leg["shard"] for leg in legs if leg["suite"] == suite]
+    discord_legs = jobs["pytest-discord"]["strategy"]["matrix"]["include"]
+    for suite, count in (("core", 6), ("mcp", 2), ("discord", 2)):
+        suite_legs = [leg for leg in legs + discord_legs if leg["suite"] == suite]
+        shards = [leg["shard"] for leg in suite_legs]
         assert shards == list(range(count)), f"{suite} must run every shard exactly once"
-        assert {leg["shards"] for leg in legs if leg["suite"] == suite} == {count}
+        assert {leg["shards"] for leg in suite_legs} == {count}
     # The sharded legs of one suite select the same paths, or a shard would skip tests.
-    for suite in {leg["suite"] for leg in legs}:
-        assert len({leg["paths"] for leg in legs if leg["suite"] == suite}) == 1
+    for suite in {leg["suite"] for leg in legs + discord_legs}:
+        assert len({leg["paths"] for leg in legs + discord_legs if leg["suite"] == suite}) == 1
     assert {leg["suite"] for leg in legs} == {"core", "mcp", "slack", "teams", "parity"}
-    shard_options = [
-        " ".join(step["run"].split())
-        for step in jobs["pytest-db"]["steps"]
-        if "uv run pytest" in step.get("run", "")
-    ]
-    assert len(shard_options) == 1
-    assert "--ci-shard-index=${{ matrix.shard }}" in shard_options[0]
-    assert "--ci-shard-count=${{ matrix.shards }}" in shard_options[0]
-    assert "--ci-shard-by=file" in shard_options[0]
-    assert "--ci-shard-suite=${{ matrix.suite }}" in shard_options[0]
+    assert {leg["suite"] for leg in discord_legs} == {"discord"}
+    for name in ("pytest-db", "pytest-discord"):
+        shard_options = [
+            " ".join(step["run"].split())
+            for step in jobs[name]["steps"]
+            if "uv run pytest" in step.get("run", "")
+        ]
+        assert len(shard_options) == 1
+        assert "-p daimon.testing.ci_shard" in shard_options[0]
+        assert "--ci-shard-index=${{ matrix.shard }}" in shard_options[0]
+        assert "--ci-shard-count=${{ matrix.shards }}" in shard_options[0]
+        assert "--ci-shard-by=file" in shard_options[0]
+        assert "--ci-shard-suite=${{ matrix.suite }}" in shard_options[0]
     assert set(deploy["needs"]) == {
         "lint",
         "shard-check",
@@ -134,7 +139,7 @@ def test_core_legs_check_out_full_history() -> None:
     assert checkout["with"]["fetch-depth"] == "${{ matrix.fetch-depth }}"
     legs = job["strategy"]["matrix"]["include"]
     core = [leg for leg in legs if leg["suite"] == "core"]
-    assert len(core) == 4
+    assert len(core) == 6
     assert all(leg["fetch-depth"] == 0 for leg in core), "core must fetch every branch and commit"
     assert all(isinstance(leg["fetch-depth"], int) for leg in legs)
 
@@ -149,6 +154,38 @@ def test_no_fetch_depth_uses_a_falsy_zero_in_an_expression(name: str) -> None:
 def test_shard_check_runs_the_checker_against_the_matrix() -> None:
     steps = _workflow("ci.yml")["jobs"]["shard-check"]["steps"]
     assert any(step.get("run") == "uv run python scripts/check_ci_shards.py" for step in steps)
+
+
+def test_every_sharded_job_loads_the_plugin_the_checker_discovers() -> None:
+    """check_ci_shards.py proves the jobs whose pytest loads the plugin; a matrix
+    with `shards` but no plugin would run every test on every leg, unchecked."""
+    jobs = _workflow("ci.yml")["jobs"]
+    with_plugin = {
+        name
+        for name, job in jobs.items()
+        if any("-p daimon.testing.ci_shard" in command for command in _pytest_commands(job))
+    }
+    with_shards = {
+        name
+        for name, job in jobs.items()
+        if any(
+            "shards" in leg for leg in job.get("strategy", {}).get("matrix", {}).get("include", [])
+        )
+    }
+    assert with_plugin == with_shards == {"pytest-db", "pytest-discord"}
+
+
+def test_every_discord_leg_keeps_the_hang_diagnostics() -> None:
+    job = _workflow("ci.yml")["jobs"]["pytest-discord"]
+    assert job["strategy"]["fail-fast"] is False
+    pytest_step = next(step for step in job["steps"] if step.get("id") == "discord-pytest")
+    assert pytest_step["env"]["DAIMON_PYTEST_HANG_DIR"] == "${{ runner.temp }}"
+    assert "-o faulthandler_timeout=300" in pytest_step["run"]
+    assert "discord-postgres-diagnostics.sh" in pytest_step["run"]
+    diagnostics = next(
+        step for step in job["steps"] if step.get("name") == "Discord hang diagnostics"
+    )
+    assert diagnostics["if"] == "always() && steps.discord-pytest.outcome != 'success'"
 
 
 @pytest.mark.parametrize("name", ["ci.yml", "contract.yml", "docs.yml", "formal-models.yml"])
