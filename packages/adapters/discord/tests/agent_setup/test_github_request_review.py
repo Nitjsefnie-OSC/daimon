@@ -58,7 +58,14 @@ async def test_shared_review_requires_live_admin_and_returns_ephemeral_detail(
     monkeypatch.setattr(
         module,
         "get_app_installation",
-        AsyncMock(return_value=SimpleNamespace(repo_full_names=["private/connected"])),
+        AsyncMock(
+            return_value=SimpleNamespace(
+                repo_full_names=["private/connected"],
+                github_repo_full_names=None,
+                github_removed_at=None,
+                suspended_at=None,
+            )
+        ),
     )
     admin = MagicMock(return_value=False)
     monkeypatch.setattr(module, "is_member_guild_admin", admin)

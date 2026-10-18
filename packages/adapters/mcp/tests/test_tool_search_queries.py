@@ -343,8 +343,8 @@ async def test_member_default_agent_edit_refuses_with_admin_handoff(
         },
     )
     text = _result_text(called)
-    assert "research-bot" in text and "admin" in text and "channel-restricted" in text, (
-        f"handoff must preserve the target and the channel ownership requirement: {text}"
+    assert "research-bot" in text and "admin" in text and "workspace or server admin" in text, (
+        f"handoff must preserve the target and the server or workspace admin requirement: {text}"
     )
     assert "/agent-setup" not in text and "DAIMON_" not in text, (
         "refusal must not disclose deployment internals"

@@ -6,14 +6,12 @@ request tools with the turn origin they were called from, and the direct
 configuration tools (`update_agent`, `attach_mcp_server`, `detach_mcp_server`,
 `remove_agent_key`) with none: their `origin_context_id` only finds the agent. With no origin a
 member is outside every rule's channels, so the direct configuration of an
-agent with a rule is an admin's, or a channel admin's who runs every channel
-its rule names; a member inside those channels uses the request tools instead.
+agent with a rule needs an admin; a member inside its channels uses request tools.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -40,9 +38,8 @@ def _trusted_credential(auth: AuthIdentity) -> bool:
     """A credential whose stored roles this guard trusts to configure an agent with a rule.
 
     - A chat turn's credential (``chat_agent_id``): minted for one turn whose
-      admission recorded the adapter's live platform role (and role ids) as
-      the account's stored ones, which ``is_admin`` and the channel admin
-      grants read -- current as of that turn. The same vault token is reused
+      admission recorded the adapter's live platform role as the account's
+      stored one, which ``is_admin`` reads as of that turn. The same vault token is reused
       by that person's later hub and routine sessions, so there it is as
       current as their last platform turn.
     - The deployment operator's own token (no agent, no chat turn, no
@@ -71,9 +68,7 @@ async def require_pin_write_access(
     ``ma_agent`` may be a resolver, called only when the tenant has agent rules,
     for paths that don't otherwise look the agent up.
 
-    A trusted credential (`_trusted_credential`) of an admin, or of a
-    channel admin of every channel its rule names, may write from anywhere; agent
-    keys never are trusted.
+    A trusted admin credential may write from anywhere; agent keys never are trusted.
     """
     trusted = _trusted_credential(auth)
     if trusted and auth.is_admin:
@@ -88,8 +83,6 @@ async def require_pin_write_access(
     if callable(ma_agent):
         ma_agent = await ma_agent()
     subject = mcp_subject(auth)
-    if not trusted:
-        subject = replace(subject, administered_channel_ids=frozenset())
     if not authorize(
         policy,
         subject=subject,

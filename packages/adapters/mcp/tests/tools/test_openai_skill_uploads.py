@@ -360,8 +360,8 @@ async def test_an_agent_another_channel_keeps_to_itself_is_refused_alike_from_he
     for backend in ("anthropic", "openai"):
         world = await _world(db_session_factory)
         elsewhere = "222222222222222222"
-        # After the member's own grant, which would otherwise pin "helper" to ROOM.
-        auth, origin = await _cards_off_turn(world)
+        auth, origin = await _cards_off_turn(world, owned=False)
+        assert not auth.is_admin
         async with db_session_factory.begin() as session:
             await set_access_policy(
                 session,

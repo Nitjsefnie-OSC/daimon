@@ -11,7 +11,7 @@ re-derives no precedence: an unrouted agent is unrouted because
 `AgentDetails.answers_in` is empty, and the sentence about it is the one
 `daimon.core.routing_facts` wrote. Admin and member see identical blocks; the
 role changes which admin controls are offered, including avatar changes and
-the channel admins form.
+the channel settings controls.
 
 Pure — no I/O, no clock, no slack_sdk.
 """
@@ -38,7 +38,6 @@ from daimon.core import channel_backend
 from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap, ChannelAnswer
-from daimon.core.channel_admins import MAX_CHANNEL_ADMIN_IDS, fit_lines, fold_mentions
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
     EnvironmentPicker,
@@ -62,15 +61,14 @@ from daimon.core.setup_conversations import (
 )
 from daimon.core.skills.ingest import SkillPreview
 from daimon.core.stores.domain import (
-    ChannelAdminsRow,
     ChannelSkillRow,
     CompatibilityPreview,
     McpTokenRow,
 )
+from daimon.core.text_layout import fit_lines
 from mux.contracts.ids import Provider
 
 __all__ = [
-    "ACTION_CHANNEL_ADMINS",
     "ACTION_CHANNEL_SKILLS",
     "ACTION_CODING_TOOLS",
     "ACTION_DETAILS",
@@ -95,7 +93,6 @@ __all__ = [
     "ACTION_RULE_RELEASE",
     "ACTION_RULE_WRITERS",
     "CALLBACK_AGENTS",
-    "CALLBACK_CHANNEL_ADMINS",
     "CALLBACK_CHANNEL_SKILLS",
     "CHANNEL_SKILLS_ADD_INPUT_ID",
     "CHANNEL_SKILLS_REMOVE_INPUT_ID",
@@ -105,10 +102,7 @@ __all__ = [
     "CALLBACK_OPERATOR_MINT",
     "CALLBACK_ROUTING",
     "LEGACY_ACTION_IDS",
-    "CHANNEL_ADMINS_GROUPS_INPUT_ID",
-    "CHANNEL_ADMINS_INPUT_ID",
     "build_agents_view",
-    "build_channel_admins_form",
     "build_channel_skills_form",
     "build_created_view",
     "build_creating_view",
@@ -198,7 +192,6 @@ def build_github_home_view(
     )
 
 
-ACTION_CHANNEL_ADMINS: Final = "agent_setup__channel_admins"
 ACTION_CHANNEL_SKILLS: Final = "agent_setup__channel_skills"
 """Open the form naming this channel's admins. Workspace admins only."""
 ACTION_ENVIRONMENT: Final = "agent_setup__environment"
@@ -237,13 +230,9 @@ CALLBACK_DETAILS: Final = "agent_setup__details_view"
 CALLBACK_ROUTING: Final = "agent_setup__routing_view"
 CALLBACK_NEW_AGENT: Final = "agent_setup__new_agent"
 CALLBACK_CREATING: Final = "agent_setup__creating"
-CALLBACK_CHANNEL_ADMINS: Final = "agent_setup__channel_admins_form"
 CALLBACK_CHANNEL_SKILLS: Final = "agent_setup__channel_skills_form"
 CHANNEL_SKILLS_ADD_INPUT_ID: Final = "channel_skills__add"
 CHANNEL_SKILLS_REMOVE_INPUT_ID: Final = "channel_skills__remove"
-CHANNEL_ADMINS_INPUT_ID: Final = "channel_admins__users"
-CHANNEL_ADMINS_GROUPS_INPUT_ID: Final = "channel_admins__groups"
-"""Block and action id of the form's member select; the submission reads it."""
 CALLBACK_OPERATOR_MINT: Final = "agent_setup__operator_token_form"
 OPERATOR_SCOPES_INPUT_ID: Final = "operator_token__scopes"
 OPERATOR_LABEL_INPUT_ID: Final = "operator_token__label"
@@ -298,20 +287,10 @@ NEW_AGENT_LABEL: Final = "➕ New agent"
 ROUTING_LABEL: Final = "📍 Who answers where"
 CODING_TOOLS_LABEL: Final = "🧰 Use from your coding tools"
 ADD_SKILL_LABEL: Final = "➕ Add skill"
-CHANNEL_ADMINS_LABEL: Final = "Channel admins"
-MAX_CHANNEL_ADMIN_LINES: Final = 15
 MAX_ENVIRONMENT_LINES: Final = 10
 MAX_SHOWN_ENVIRONMENT_NAME: Final = 200
-"""Characters of an environment name shown before escaping, so the defaults stay bounded."""
 _MORE_LINE_RESERVE: Final = len("\n_and 9999 more_")
 _MAX_OPTION_TEXT: Final = 75
-CHANNEL_ADMINS_LISTING_MAX_CHARS: Final = 2_800
-"""Room for the listing, its heading and "and N more" in one section's 3000 characters."""
-CHANNEL_ADMINS_NOTE: Final = (
-    "Channel admins choose their channels' environment and agent, and edit agents limited to those "
-    "channels.\n\n"
-    "Starting agents and the workspace default stay with workspace admins."
-)
 CHANNEL_SKILLS_LABEL: Final = "Channel skills"
 CHANNEL_SKILLS_HEADER: Final = "Extra skills"
 CHANNEL_SKILLS_NOTE: Final = (
@@ -837,7 +816,6 @@ def build_routing_view(
     setup_links: Sequence[str],
     channel_id: str,
     unrouted_agent_name: str | None,
-    channel_admins: Sequence[ChannelAdminsRow] | None = None,
     environment_picker: EnvironmentPicker | None = None,
     rule_status: ChannelRuleStatus | None = None,
     operator_tokens: Sequence[McpTokenRow] | None = None,
@@ -847,9 +825,8 @@ def build_routing_view(
 
     No setup button: this view answers where mentions go, and the change it
     describes is a sentence to say to Daimon rather than a control here.
-    `channel_admins` is passed for workspace admins only, who also see every
-    channel's admins and a button to edit this channel's. `rule_status` is too,
-    when the panel has a channel, not a DM: it adds that channel's permissions.
+    `rule_status` is passed when the panel has a channel, not a DM: it adds
+    that channel's permissions.
     `operator_tokens` is too: the workspace's live operator tokens, with Mint and Revoke.
     `channel_skills` is too, with a channel: its extra skills, with Edit.
     The environment each channel runs in resolves on its own and gets its own
@@ -899,8 +876,6 @@ def build_routing_view(
     listing = "\n".join(links) if links else "_none open_"
     blocks.append(_section(f"*Setup conversations*\n{listing}"))
     blocks.append({"type": "divider"})
-    if channel_admins is not None:
-        blocks.extend(_channel_admins_blocks(channel_admins, channel_id=channel_id))
     if rule_status is not None and _is_channel(channel_id):
         blocks.extend(_permissions_blocks(channel_id=channel_id, status=rule_status))
     if channel_skills is not None and _is_channel(channel_id):
@@ -996,37 +971,8 @@ def _environment_select(picker: EnvironmentPicker) -> dict[str, Any]:
 
 
 def _is_channel(channel_id: str) -> bool:
-    """A DM (`D…`) has no channel admins and takes no channel rule."""
+    """A DM (`D…`) takes no channel rule."""
     return bool(channel_id) and not channel_id.startswith("D")
-
-
-def _admin_mentions(row: ChannelAdminsRow) -> list[str]:
-    """User groups first, then members, as Discord lists roles before members."""
-    return [f"<!subteam^{group_id}>" for group_id in row.role_ids] + [
-        f"<@{uid}>" for uid in row.user_ids
-    ]
-
-
-def _channel_admins_blocks(
-    grants: Sequence[ChannelAdminsRow], *, channel_id: str
-) -> list[dict[str, Any]]:
-    lines = fit_lines(
-        (
-            f"<#{row.channel_id}> → {fold_mentions(_admin_mentions(row))}"
-            for row in grants[:MAX_CHANNEL_ADMIN_LINES]
-        ),
-        max_chars=CHANNEL_ADMINS_LISTING_MAX_CHARS,
-    )
-    if len(lines) < len(grants):
-        lines.append(f"_and {len(grants) - len(lines)} more_")
-    listing = "\n".join(lines) or "_No channel admins yet._"
-    editable = _is_channel(channel_id)
-    edit = _button(action_id=ACTION_CHANNEL_ADMINS, label="Edit this channel") if editable else None
-    return [
-        _section(f"*{CHANNEL_ADMINS_LABEL}*\n\n{listing}", accessory=edit),
-        _context(CHANNEL_ADMINS_NOTE),
-        {"type": "divider"},
-    ]
 
 
 def _channel_skills_blocks(
@@ -1147,63 +1093,6 @@ def build_operator_token_form(*, meta: PanelMetadata) -> dict[str, Any]:
     )
 
 
-GROUP_GRANT_WARNING: Final = (
-    "Anyone who can join or edit a user group picked here becomes this channel's admin. "
-    "Slack lets every member edit user groups by default, so limit user group management "
-    "to admins in the workspace settings first."
-)
-GROUPS_UNLISTED_NOTE: Final = (
-    "User groups couldn't be listed (the app needs the usergroups:read scope), so saving "
-    "keeps this channel's groups as they are."
-)
-
-
-def build_channel_admins_form(
-    *,
-    meta: PanelMetadata,
-    user_ids: Sequence[str],
-    group_ids: Sequence[str] = (),
-    groups: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
-    """Name who runs `meta.channel_id` besides the workspace admins; empty clears it.
-
-    Members, and user groups whose members all count. `groups` labels the
-    workspace's user groups; None when they couldn't be listed, which leaves
-    the groups out of the form and the stored ones untouched on save.
-    """
-    element: dict[str, Any] = {
-        "type": "multi_users_select",
-        "action_id": CHANNEL_ADMINS_INPUT_ID,
-        "max_selected_items": MAX_CHANNEL_ADMIN_IDS,
-        "placeholder": {"type": "plain_text", "text": "Pick members"},
-    }
-    if user_ids:
-        element["initial_users"] = list(user_ids)
-    blocks: list[dict[str, Any]] = [
-        _section(f"Who runs <#{meta.channel_id}> besides the workspace admins."),
-        {
-            "type": "input",
-            "block_id": CHANNEL_ADMINS_INPUT_ID,
-            "label": {"type": "plain_text", "text": "Members"},
-            "optional": True,
-            "element": element,
-        },
-    ]
-    if groups is None:
-        blocks.append(_context(GROUPS_UNLISTED_NOTE))
-    elif group_input := _groups_input(groups, group_ids):
-        blocks += [group_input, _context(GROUP_GRANT_WARNING)]
-    blocks += [_context("Empty the lists to clear it."), _context(CHANNEL_ADMINS_NOTE)]
-    return finish_modal(
-        title=CHANNEL_ADMINS_LABEL,
-        blocks=blocks,
-        private_metadata=encode_panel_metadata(meta),
-        callback_id=CALLBACK_CHANNEL_ADMINS,
-        close="Cancel",
-        submit="Save",
-    )
-
-
 def build_channel_skills_form(
     *, meta: PanelMetadata, rows: Sequence[ChannelSkillRow]
 ) -> dict[str, Any]:
@@ -1253,42 +1142,6 @@ def build_channel_skills_form(
         close="Cancel",
         submit="Save",
     )
-
-
-def _groups_input(groups: Mapping[str, str], group_ids: Sequence[str]) -> dict[str, Any] | None:
-    """A user group multi-select, or None when the workspace has none to offer.
-
-    A stored group Slack no longer lists stays an option, so saving the
-    form doesn't drop it unseen. A static select holds 100 options.
-    """
-    labels = {gid: groups.get(gid, f"unknown group {gid}") for gid in group_ids}
-    labels |= {gid: label for gid, label in groups.items() if gid not in labels}
-    if not labels:
-        return None
-    options = [
-        {
-            "text": {"type": "plain_text", "text": label[:_MAX_OPTION_TEXT]},
-            "value": gid,
-        }
-        for gid, label in list(labels.items())[:100]
-    ]
-    element: dict[str, Any] = {
-        "type": "multi_static_select",
-        "action_id": CHANNEL_ADMINS_GROUPS_INPUT_ID,
-        "max_selected_items": MAX_CHANNEL_ADMIN_IDS,
-        "placeholder": {"type": "plain_text", "text": "Pick user groups"},
-        "options": options,
-    }
-    initial = [option for option in options if option["value"] in group_ids]
-    if initial:
-        element["initial_options"] = initial
-    return {
-        "type": "input",
-        "block_id": CHANNEL_ADMINS_GROUPS_INPUT_ID,
-        "label": {"type": "plain_text", "text": "User groups"},
-        "optional": True,
-        "element": element,
-    }
 
 
 def _file_list(paths: Sequence[str], *, shown: int = 15) -> str:

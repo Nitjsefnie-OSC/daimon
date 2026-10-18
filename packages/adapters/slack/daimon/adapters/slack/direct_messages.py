@@ -1,4 +1,4 @@
-"""Opt-in Slack IM conversations and /dm workspace selection."""
+"""Opt-in Slack IM conversations and /dm-me workspace selection."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.agent_post import post_as_agent
-from daimon.adapters.slack.channel_admin_groups import user_group_ids
 from daimon.adapters.slack.errors import bound_request_id, render_error
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
@@ -100,7 +99,7 @@ def _log_dm_setup_needed(*, team_id: str, cause: str) -> None:
 
 
 def _error_message(exc: Exception, *, settings: Settings, team_id: str) -> str:
-    """What a /dm or DM failure tells the person.
+    """What a /dm-me or DM failure tells the person.
 
     Missing DM scopes and admission refusals have their own words. Everything
     else goes through `render_error`: `UserFacingError` text is shown, any
@@ -175,7 +174,10 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
         elif action in {"", "move"}:
             await require_dm_enabled(runtime.turn_deps, tenant_id=tenant_id)
             if channel_id.startswith("D"):
-                raise UserFacingError("Run /dm in the workspace channel you want to continue from.")
+                raise UserFacingError(
+                    "You can't start a private conversation from here.\n\n"
+                    "Run /dm-me in the channel you want to continue from."
+                )
             admission = await admit(
                 runtime.turn_deps,
                 tenant_id=tenant_id,
@@ -183,11 +185,6 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 external_user_id=user_id,
                 channel_id=channel_id,
                 role=role,
-                platform_role_ids=()
-                if role is Role.ADMIN
-                else sorted(
-                    await user_group_ids(runtime, client, tenant_id=tenant_id, user_id=user_id)
-                ),
                 is_dm=True,
                 dm_source_channel_id=channel_id,
                 now=datetime.now(UTC),
@@ -195,7 +192,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             require_unsealed_source(admission)
             response = await client.conversations_history(channel=channel_id, limit=12)  # pyright: ignore[reportUnknownMemberType]
             messages = cast(list[dict[str, Any]], response.get("messages", []))
-            # /dm carries no thread_ts, so admission cannot see a thread sealed
+            # /dm-me carries no thread_ts, so admission cannot see a thread sealed
             # on its own: drop such threads' roots and broadcast replies here.
             sealed = await sealed_channel_ids(runtime.turn_deps, tenant_id=tenant_id)
             messages = [
@@ -234,14 +231,18 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             )
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=dm_channel,
-                text=f"Continuing from <#{channel_id}>.\n\nSend your next message here.",
+                text=(
+                    f"Continuing from <#{channel_id}>.\n\nSend your next message here. "
+                    "To start a new private conversation, run /dm-me in a channel."
+                ),
                 unfurl_links=False,
             )
             reply = "Ready in your DMs."
         else:
             reply = (
-                "Run `/dm` in a channel to carry on in private.\n\n"
-                "Admins: `/dm enable` or `/dm disable`."
+                "That option isn't recognized.\n\n"
+                "Run `/dm-me` in a channel to continue privately. "
+                "Admins: `/dm-me enable` or `/dm-me disable`."
             )
         await client.chat_postEphemeral(channel=channel_id, user=user_id, text=reply)  # pyright: ignore[reportUnknownMemberType]
     except _ERRORS as exc:

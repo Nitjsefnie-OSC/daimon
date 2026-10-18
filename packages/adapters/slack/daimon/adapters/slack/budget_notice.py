@@ -6,7 +6,6 @@ from dataclasses import replace
 from typing import cast
 
 import structlog
-from daimon.adapters.slack.channel_admin_groups import stored_group_members
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
@@ -51,5 +50,8 @@ def with_budget_notifier(runtime: SlackRuntime) -> SlackRuntime:
     notifier = slack_budget_notifier(real)
     return replace(
         real,
-        turn_deps=replace(deps, budget_notifier=notifier, group_members=stored_group_members(real)),
+        turn_deps=replace(
+            deps,
+            budget_notifier=notifier,
+        ),
     )

@@ -20,6 +20,8 @@ from mux.drivers.gemini.transport import SDKTransport
 from mux.errors import OperationConflict, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import CrashPoint, MemoryStateStore, SimulatedCrash
 
+pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
+
 SCOPE = Scope(tenant_id="n12", account_id="offline", principal_id="human", authorization_id="auth")
 INPUT = (UserMessage(content=(TextPart(text="same text is not native identity"),)),)
 STAMP = datetime(2026, 10, 10, tzinfo=UTC).isoformat()

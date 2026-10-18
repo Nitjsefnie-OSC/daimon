@@ -37,7 +37,6 @@ SLACK_BOT_SCOPES: tuple[str, ...] = (
     "files:write",  # post-turn delivery of session output artifacts
     "channels:read",  # channel tools: public channel metadata + membership checks
     "groups:read",  # channel tools: private channel metadata + membership checks
-    "usergroups:read",  # channel admin grants that name a user group
 )
 
 

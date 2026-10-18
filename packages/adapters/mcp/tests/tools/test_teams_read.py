@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -23,10 +26,12 @@ from daimon.adapters.mcp.tools.teams._read import (
 )
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import AgentRef
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.teams_installations import record_teams_installation
-from daimon.testing.factories import make_tenant
+from daimon.core.stores.turn_origins import create_origin
+from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -68,6 +73,10 @@ class _Fake:
         # A file posted from a library folder outside the channel's own (`Board`).
         self.restricted = False
         self.site_status = 200
+        # daimon's reply links the file it saved, as its answers read back from Graph.
+        self.saved_link = False
+        # Shared file name -> its folder, as `/shares` found it.
+        self._folders: dict[str, str] = {}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -122,7 +131,7 @@ class _Fake:
                     "attachments": self._file("q3.xlsx")
                     + (self._file("plan.docx", folder="Board") if self.restricted else []),
                     "replies": [
-                        _message("1700000000002", "reply two", app=True),
+                        self._bot_reply(),
                         _message("1700000000001", "reply one"),
                     ],
                     "replies@odata.nextLink": "x",
@@ -135,6 +144,14 @@ class _Fake:
                 return httpx.Response(200, json={"value": []})
         return httpx.Response(404)
 
+    def _bot_reply(self) -> dict[str, Any]:
+        reply = _message("1700000000002", "reply two", app=True)
+        if self.saved_link:
+            link = f"{_LIBRARY}/research/chart.png".replace(" ", "%20")
+            html = f'<p>Saved to this channel\'s files:</p><ul><li><a href="{link}">chart.png</a>'
+            reply["body"] = {"contentType": "html", "content": html + "</li></ul>"}
+        return reply
+
     def _file(self, name: str, *, folder: str = "research") -> list[dict[str, str]]:
         if not self.files:
             return []
@@ -142,25 +159,30 @@ class _Fake:
         return [{"contentType": "reference", "name": name, "contentUrl": url}]
 
     def _site(self, path: str) -> httpx.Response | None:
-        """The channel's SharePoint site, readable only once granted (`site_status`)."""
-        if path == f"/v1.0/groups/{_GROUP}/sites/root":
+        """The channel's files, readable once `Files.ReadWrite.All` is consented (`site_status`)."""
+        if path.endswith("/filesFolder"):
             if self.site_status != 200:
                 return httpx.Response(self.site_status)
-            return httpx.Response(200, json={"id": _SITE})
-        if path == "/v1.0/sites/example.sharepoint.com:/sites/team":
-            return httpx.Response(200, json={"id": _SITE})
-        if path == f"/v1.0/sites/{_SITE}/drives":
-            return httpx.Response(200, json={"value": [{"id": "b!d", "webUrl": _LIBRARY}]})
-        # The channel's folder, found by name: `filesFolder` is refused under `Sites.Selected`.
-        if path in (f"/v1.0/sites/{_SITE}/drive/root:/research", "/v1.0/drives/b!d/items/f1"):
-            parent = {"driveId": "b!d", "path": "/drives/b!d/root:"}
-            return httpx.Response(
-                200, json={"id": "f1", "name": "research", "parentReference": parent}
-            )
-        if path.startswith("/v1.0/drives/b!d/root:/"):
-            folder, name = path.removeprefix("/v1.0/drives/b!d/root:/").rsplit("/", 1)
+            # A private channel's folder is on a site of its own.
+            drive = "b!p" if f"/channels/{_PRIVATE}/" in path else "b!d"
+            return httpx.Response(200, json={"id": "f1", "parentReference": {"driveId": drive}})
+        if path in ("/v1.0/drives/b!d/items/f1", "/v1.0/drives/b!d/items/f2"):
+            # `research` (the channel's) and `Board` sit at the library's root.
+            folder = path.rsplit("/", 1)[1]
+            parent = {"driveId": "b!d", "id": "root"}
+            return httpx.Response(200, json={"id": folder, "parentReference": parent})
+        if path == "/v1.0/drives/b!d/items/root":
+            return httpx.Response(200, json={"id": "root", "parentReference": {"driveId": "b!d"}})
+        if path.startswith("/v1.0/shares/u!") and path.endswith("/driveItem"):
+            share = path.removeprefix("/v1.0/shares/u!").removesuffix("/driveItem")
+            url = base64.urlsafe_b64decode(share + "=" * (-len(share) % 4)).decode()
+            folder, name = unquote(url).removeprefix(f"{_LIBRARY}/").rsplit("/", 1)
+            self._folders[name] = folder
+            return httpx.Response(200, json={"id": name, "parentReference": {"driveId": "b!d"}})
+        if path.startswith("/v1.0/drives/b!d/items/"):
+            name = path.removeprefix("/v1.0/drives/b!d/items/")
             download = f"https://example.sharepoint.com/download/{name}?tempauth=t"
-            parent = {"driveId": "b!d", "path": f"/drives/b!d/root:/{folder}"}
+            parent = {"driveId": "b!d", "id": "f1" if self._folders[name] == "research" else "f2"}
             item = {"id": name, "parentReference": parent, "@microsoft.graph.downloadUrl": download}
             return httpx.Response(200, json=item)
         return None
@@ -264,6 +286,15 @@ async def test_reads_refuse_non_members_chats_and_unknown_channels(
         await _teams_read_thread_impl(
             runtime, auth, thread_id="a:chat", limit=5, cursor=None, read_policy=OPEN_READ_POLICY
         )
+    with pytest.raises(ToolError, match="group chats"):
+        await _teams_read_channel_impl(
+            runtime,
+            auth,
+            channel_id="19:group@thread.v2",
+            limit=5,
+            cursor=None,
+            read_policy=OPEN_READ_POLICY,
+        )
     with pytest.raises(ToolError, match="not in a team"):
         await _teams_read_channel_impl(
             runtime,
@@ -329,7 +360,7 @@ async def test_a_sealed_thread_stays_out_of_its_channel_reads(
 
 
 @pytest.mark.parametrize("granted", [True, False])
-async def test_files_are_linked_only_where_the_channels_site_is_granted(
+async def test_files_are_linked_only_where_the_files_permission_is_granted(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession], granted: bool
 ) -> None:
     auth, fake = await _setup(db_session), _Fake()
@@ -357,14 +388,35 @@ async def test_files_are_linked_only_where_the_channels_site_is_granted(
         ]
     else:
         assert all(f.url is None for f in files)
-        sites = [r for r in fake.graph() if "/sites" in r.url.path]
-        assert len(sites) == 2, "a refused site stops each read's lookups at the first"
+        paths = [r.url.path for r in fake.graph()]
+        assert len([p for p in paths if p.endswith("/filesFolder")]) == 2, "one try per read"
+        assert not [p for p in paths if p.startswith("/v1.0/shares/")], "no file is looked up"
+
+
+async def test_a_file_daimon_saved_earlier_is_linked_from_its_own_reply(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """daimon's saved-file links are in its text, not attachments: they resolve all the same."""
+    auth, fake = await _setup(db_session), _Fake()
+    fake.saved_link = True
+    read = await _teams_read_channel_impl(
+        _runtime(fake, sessionmaker),
+        auth,
+        channel_id=_CHANNEL,
+        limit=5,
+        cursor=None,
+        read_policy=OPEN_READ_POLICY,
+    )
+    reply = next(r for p in read.posts for r in p.replies if r.is_bot)
+    assert [(f.name, f.url) for f in reply.files] == [
+        ("chart.png", "https://example.sharepoint.com/download/chart.png?tempauth=t")
+    ], "the link is checked against the channel's folder and resolved"
 
 
 async def test_a_file_outside_the_channels_folder_is_named_but_not_linked(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The site grant ignores per-file permissions, so only the channel's own folder is linked."""
+    """The permission ignores per-file permissions, so only the channel's own folder is linked."""
     auth, fake = await _setup(db_session), _Fake()
     fake.files = fake.restricted = True
     read = await _teams_read_channel_impl(
@@ -383,7 +435,7 @@ async def test_a_file_outside_the_channels_folder_is_named_but_not_linked(
     }, "a file from another folder on the site is listed by name only"
 
 
-async def test_no_link_for_a_sealed_thread_or_an_ungranted_private_channel(
+async def test_no_link_for_a_sealed_thread_or_a_file_outside_a_private_channels_folder(
     db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     auth, fake = await _setup(db_session), _Fake()
@@ -403,8 +455,12 @@ async def test_no_link_for_a_sealed_thread_or_an_ungranted_private_channel(
     private = await _teams_read_channel_impl(
         runtime, auth, channel_id=_PRIVATE, limit=5, cursor=None, read_policy=inside
     )
-    assert all(f.url is None for p in private.posts for f in p.files)
-    assert not [r for r in fake.graph() if "/sites" in r.url.path], "its own site is not stored"
+    assert all(f.url is None for p in private.posts for f in p.files), (
+        "the team site's files are outside the private channel's own folder"
+    )
+    assert any(
+        r.url.path == f"/v1.0/teams/{_GROUP}/channels/{_PRIVATE}/filesFolder" for r in fake.graph()
+    ), "its own folder is looked up"
 
 
 async def test_list_channels_hides_private_channels_from_non_members(
@@ -545,3 +601,66 @@ def test_parse_link_reads_message_and_channel_links() -> None:
     ):
         with pytest.raises(ToolError):
             _teams_parse_link_impl(bad)
+
+
+async def test_channel_reads_are_refused_from_a_group_chat_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.adapters.mcp.tools import channels
+
+    origin: Any = MagicMock(parent_channel_id="19:group@thread.v2")
+
+    async def from_a_group_chat(*_args: object, **_kwargs: object) -> ChannelReadPolicy:
+        return ChannelReadPolicy(policy=OPEN_ACCESS_POLICY, origin=origin)
+
+    monkeypatch.setattr(channels, "load_read_policy", from_a_group_chat)
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform="teams"
+    )
+    with pytest.raises(ToolError, match="group chats"):
+        await channels._read_policy(MagicMock(), auth, "origin")  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(("place", "refused"), [("19:group@thread.v2", True), (_CHANNEL, False)])
+async def test_reads_naming_no_origin_are_refused_while_a_group_chat_turn_runs(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    place: str,
+    refused: bool,
+) -> None:
+    """A chat token names no turn, so leaving the origin out cannot read from a group chat."""
+    from daimon.adapters.mcp.tools import channels
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    now = datetime.now(UTC)
+    await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="teams",
+        parent_channel_id=place,
+        thread_id=place,
+        responder_ma_agent_id="ag_chat",
+        responder_name="chat",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        expires_at=now + timedelta(minutes=10),
+        now=now,
+    )
+    await db_session.commit()
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="teams",
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_chat"),
+    )
+    runtime = _runtime(_Fake(), sessionmaker)
+    read = channels._read_policy(runtime, auth, None)  # pyright: ignore[reportPrivateUsage]
+    if refused:
+        with pytest.raises(ToolError, match="group chats"):
+            await read
+    else:
+        assert (await read).origin is None, "a channel turn's call reads as from outside"

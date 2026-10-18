@@ -28,7 +28,6 @@ log = structlog.get_logger(__name__)
 
 PanelOp = Literal[
     "channel_rule",
-    "channel_admins",
     "environment",
     "channel_skills",
     "coding_token_mint",

@@ -32,6 +32,7 @@ from daimon.core.stores.github_access_requests import (
     request_access,
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
+from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.github_links import account_link_is_broken, account_link_status
 from daimon.core.stores.github_personal_links import mint_link
 from fastmcp import Context, FastMCP
@@ -166,7 +167,7 @@ async def request_github_access_impl(
             else None
         )
         if connected is not None and (
-            installation is None or connected.repo_full_name not in installation.repo_full_names
+            not installation_covers_repo(installation, connected.repo_full_name)
         ):
             connected = None
         grant = None

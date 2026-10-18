@@ -9,6 +9,7 @@ settle floor produces.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import httpx
@@ -92,6 +93,53 @@ async def test_sweep_posts_file_when_it_first_appears_on_second_poll() -> None:
     assert count == 1, "the late-indexed file should be posted"
     assert [f.file_id for f in posted] == ["file_late"], "posted file must be the listed one"
     assert delays == [2.0, 4.0], "settle floor must force the confirming t=6 poll before concluding"
+
+
+@pytest.mark.parametrize(
+    ("quiet_s", "files", "expected"),
+    [
+        (0.0, 1, [6.0]),
+        (5.0, 1, [2.0]),
+        (9.0, 1, [2.0]),
+        (9.0, 0, []),
+    ],
+)
+async def test_quiet_time_counts_toward_the_settle_floor(
+    quiet_s: float, files: int, expected: list[float]
+) -> None:
+    """Time since the last tool call counts; a new file still needs a confirming poll."""
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    row = FileMetadata(
+        id="file_a",
+        created_at=NOW,
+        filename="a.txt",
+        mime_type="text/plain",
+        size_bytes=1,
+        type="file",
+        downloadable=True,
+    ).model_dump(mode="json")
+    router = MARouter()
+    router.add("GET", r"/v1/files", lambda request, match: list_response([row] * files))
+    router.add("GET", r"/v1/files/([^/]+)/content", lambda r, m: httpx.Response(200, content=b"a"))
+    router.add(
+        "DELETE",
+        r"/v1/files/([^/]+)",
+        lambda r, m: httpx.Response(200, json={"id": m.group(1), "type": "file_deleted"}),
+    )
+
+    async def post(file: DeliverableFile) -> None:
+        pass
+
+    client = build_fake_anthropic(router.dispatch)
+    count = await sweep_session_outputs(
+        client, session_id="sesn_1", post=post, sleep=sleep, quiet_s=quiet_s
+    )
+
+    assert count == files and delays == expected
 
 
 async def test_sweep_catches_straggler_when_new_file_appears_at_settle_floor() -> None:
@@ -580,6 +628,36 @@ async def test_discard_skipped_up_to_deletes_only_files_that_fit() -> None:
     )
 
     assert deletes == ["file_ok"], "only the file that fits the cap is discarded"
+
+
+async def test_a_skipped_file_carries_its_mime_type() -> None:
+    """A caller that skips everything can still tell an image from the rest."""
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    deletes: list[str] = []
+    skipped: list[SkippedFile] = []
+
+    async def post(file: DeliverableFile) -> None:
+        raise AssertionError("a zero cap posts nothing")
+
+    async def on_skip(file: SkippedFile) -> None:
+        skipped.append(file)
+
+    await sweep_session_outputs(
+        _oversize_then_normal_client(deletes),
+        session_id="sesn_1",
+        post=post,
+        on_skip=on_skip,
+        sleep=sleep,
+        max_bytes=0,
+    )
+
+    assert [(f.file_id, f.mime_type) for f in skipped] == [
+        ("file_big", "video/mp4"),
+        ("file_ok", "text/plain"),
+    ], "each skipped file names its type"
 
 
 async def test_a_kept_original_stays_downloadable_byte_for_byte() -> None:
@@ -1116,3 +1194,53 @@ async def test_sweep_posts_handoff_bundle_when_exclusions_are_cleared() -> None:
     assert count == 1, "with no exclusions the bundle is an ordinary output"
     assert posted == ["daimon-handoff-0f9d1c4e.tar.gz"]
     assert deleted == {"file_bundle"}
+
+
+async def test_sweep_posts_in_the_order_the_caller_gives() -> None:
+    """`order` maps the listed filenames to the indexes to post them in."""
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    names = ["first.pdf", "second.png"]
+    listing = [
+        FileMetadata(
+            id=f"file_{index}",
+            created_at=NOW,
+            filename=name,
+            mime_type="application/octet-stream",
+            size_bytes=3,
+            type="file",
+            downloadable=True,
+        ).model_dump(mode="json")
+        for index, name in enumerate(names)
+    ]
+    router = MARouter()
+    router.add("GET", r"/v1/files", lambda request, match: list_response(listing))
+    router.add(
+        "GET",
+        r"/v1/files/([^/]+)/content",
+        lambda request, match: httpx.Response(200, content=b"x"),
+    )
+    router.add(
+        "DELETE",
+        r"/v1/files/([^/]+)",
+        lambda request, match: httpx.Response(
+            200, json={"id": match.group(1), "type": "file_deleted"}
+        ),
+    )
+    seen: list[list[str]] = []
+    posted: list[str] = []
+
+    def reverse(filenames: Sequence[str]) -> list[int]:
+        seen.append(list(filenames))
+        return [1, 0]
+
+    async def post(file: DeliverableFile) -> None:
+        posted.append(file.filename)
+
+    client = build_fake_anthropic(router.dispatch)
+    await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep, order=reverse)
+
+    assert seen == [names], "order sees the listed names"
+    assert posted == ["second.png", "first.pdf"], "posted in the order given"

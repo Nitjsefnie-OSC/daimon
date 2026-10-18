@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
@@ -51,7 +51,6 @@ from daimon.core.authz import (
     build_turn_place,
 )
 from daimon.core.billing import is_over_cap
-from daimon.core.channel_admins import ChannelAdminCaller, load_administered_channel_ids
 from daimon.core.channel_backend import (
     BackendUnsupported,
     channel_ref,
@@ -89,7 +88,6 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.accounts import (
     get_external,
     set_external,
-    set_platform_role_ids,
     set_role,
 )
 from daimon.core.stores.channel_skills import list_channel_skills
@@ -196,7 +194,7 @@ class Admission:
     # session's publish tools wait for the requester's Approve on a card.
     asks_before_publishing: bool = False
     # The channel or thread itself is sealed (DM memory policy aside). Callers
-    # that copy content out of the channel, such as /dm, must refuse.
+    # that copy content out of the channel, such as /dm-me, must refuse.
     source_sealed: bool = False
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
@@ -312,7 +310,6 @@ async def admit(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
-    platform_role_ids: Sequence[str] | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     category_id: str | None = None,
@@ -336,7 +333,6 @@ async def admit(
                 now=now,
                 thread_id=thread_id,
                 role=role,
-                platform_role_ids=platform_role_ids,
                 is_dm=is_dm,
                 dm_source_channel_id=dm_source_channel_id,
                 category_id=category_id,
@@ -387,7 +383,6 @@ async def admit_impl(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
-    platform_role_ids: Sequence[str] | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     category_id: str | None = None,
@@ -427,41 +422,18 @@ async def admit_impl(
         is_external = stored or (external is not None and external.is_external)
         store_identity = stored or not is_external
         if is_external:
-            # Nor a channel admin: no stored group (a team they own) matches a grant.
-            role, platform_role_ids = Role.USER, ()
+            role = Role.USER
         if role is not None and store_identity:
             await set_role(session, principal.account_id, role)
-        # Kept like the role so MCP calls can match channel admin role grants.
-        if platform_role_ids is not None and store_identity:
-            await set_platform_role_ids(session, principal.account_id, platform_role_ids)
         await session.commit()
         mark("identity")
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        # Matched against the live role ids; a server admin needs no grant.
-        administered = (
-            frozenset[str]()
-            # An external caller administers nothing, whatever a grant names.
-            if role is Role.ADMIN or is_external
-            else await load_administered_channel_ids(
-                session,
-                tenant_id=tenant_id,
-                platform=platform,
-                caller=ChannelAdminCaller(
-                    platform_user_id=external_user_id,
-                    role_ids=frozenset(platform_role_ids or ()),
-                ),
-            )
-        )
         mark("policy_and_admins")
 
         # Refusals must happen before config is read. Keeping the session here
         # reuses its connection for the config cascade after authorization.
-        subject = build_subject(
-            is_admin=role is Role.ADMIN,
-            platform_user_id=external_user_id,
-            administered_channel_ids=administered,
-        )
+        subject = build_subject(is_admin=role is Role.ADMIN, platform_user_id=external_user_id)
         turn_place = build_turn_place(
             channel_id=channel_id,
             thread_id=thread_id,
@@ -950,7 +922,7 @@ async def admit_impl(
                 platform=platform,
                 channel_id=budget_channel_id,
                 now=now,
-                group_members=deps.group_members,
+                server_admins=deps.server_admins,
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
@@ -990,7 +962,7 @@ async def admit_impl(
         origin_thread_id=thread_id,
         origin_seal_ids=seal_ids,
         # Every DM-admitted session is private: the transcript tools never open
-        # it to anyone but its own execution grant, admins included. /dm
+        # it to anyone but its own execution grant, admins included. /dm-me
         # replaces this with its execution-specific grant.
         private_dm_id=(thread_id or channel_id) if is_dm else None,
         account_id=principal.account_id,

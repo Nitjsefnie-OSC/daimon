@@ -557,196 +557,6 @@ async def test_verifier_audits_each_refusal_of_a_registered_token(
     assert token not in events[0].model_dump_json(), "the token value is never stored"
 
 
-async def test_verifier_computes_the_administered_channels_from_stored_roles(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """The grant is read from the DB; a claim the token brings is overwritten."""
-    from daimon.core.stores.accounts import set_platform_role_ids
-    from daimon.core.stores.channel_admins import set_channel_admins
-    from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-
-    async with sessionmaker() as s, s.begin():
-        tenant = await make_tenant(s, platform="discord")
-        account = await make_account(s, tenant=tenant)
-        await make_platform_principal(
-            s, platform="discord", external_id="u1", tenant=tenant, account=account
-        )
-    verifier = DaimonJWTVerifier(
-        legacy_token_cutoff=LEGACY_CUTOFF,
-        allow_legacy_tokens=True,
-        secret=SECRET,
-        sessionmaker=sessionmaker,
-    )
-    token = pyjwt.encode(
-        {"sub": str(account.id), "iat": 0, "administered_channel_ids": ["c9"]},
-        SECRET,
-        algorithm="HS256",
-    )
-
-    before = await verifier.verify_token(token)
-    assert before is not None and before.claims["administered_channel_ids"] == [], (
-        "no grant yet, whatever the token claims"
-    )
-    async with sessionmaker() as s, s.begin():
-        await set_platform_role_ids(s, account.id, ["r1"])
-        await set_channel_admins(
-            s,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id="c1",
-            role_ids=["r1"],
-            user_ids=[],
-            actor_account_id=None,
-        )
-    after = await verifier.verify_token(token)
-    assert after is not None and after.claims["administered_channel_ids"] == ["c1"], (
-        "a new grant shows on the next verify"
-    )
-    assert after.claims["platform_role_ids"] == ["r1"], "the stored role ids ride along"
-
-
-async def test_verifier_rechecks_a_stored_slack_group_live(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """Any member may edit a Slack user group by default, so the stored one is looked up again."""
-    from daimon.core.channel_admins import GroupLookupFailed
-    from daimon.core.stores.accounts import set_platform_role_ids
-    from daimon.core.stores.channel_admins import set_channel_admins
-    from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-
-    async with sessionmaker() as s, s.begin():
-        tenant = await make_tenant(s, platform="slack", workspace_id="T0VERIFY")
-        account = await make_account(s, tenant=tenant)
-        await make_platform_principal(
-            s, platform="slack", external_id="U1", tenant=tenant, account=account
-        )
-        await set_platform_role_ids(s, account.id, ["S1", "S_UNGRANTED"])
-        await set_channel_admins(
-            s,
-            tenant_id=tenant.id,
-            platform="slack",
-            channel_id="C1",
-            role_ids=["S1"],
-            user_ids=[],
-            actor_account_id=None,
-        )
-    token = pyjwt.encode({"sub": str(account.id), "iat": 0}, SECRET, algorithm="HS256")
-    group: dict[str, frozenset[str]] = {"S1": frozenset({"U1"})}
-    asked: list[tuple[str, str, str]] = []
-
-    def lookup(platform: str, workspace_id: str):
-        async def members(group_id: str) -> frozenset[str]:
-            asked.append((platform, workspace_id, group_id))
-            if group_id not in group:
-                raise GroupLookupFailed("gone")
-            return group[group_id]
-
-        return members
-
-    async def claims(verifier: DaimonJWTVerifier) -> tuple[object, object]:
-        access = await verifier.verify_token(token)
-        assert access is not None, "the token verifies either way"
-        return access.claims["administered_channel_ids"], access.claims["platform_role_ids"]
-
-    live = DaimonJWTVerifier(
-        legacy_token_cutoff=LEGACY_CUTOFF,
-        allow_legacy_tokens=True,
-        secret=SECRET,
-        sessionmaker=sessionmaker,
-        group_members=lookup,
-    )
-    assert await claims(live) == (["C1"], ["S1"]), "still in the group: still C1's admin"
-    assert asked == [("slack", "T0VERIFY", "S1")], (
-        "the person's own workspace is asked, and only about a group some grant names"
-    )
-    group["S1"] = frozenset({"U2"})
-    assert await claims(live) == ([], []), "removed from the group: no rights before a new turn"
-    del group["S1"]
-    assert await claims(live) == ([], []), "a failed lookup grants nothing"
-    blind = DaimonJWTVerifier(
-        legacy_token_cutoff=LEGACY_CUTOFF,
-        allow_legacy_tokens=True,
-        secret=SECRET,
-        sessionmaker=sessionmaker,
-    )
-    assert await claims(blind) == ([], []), "no lookup at all grants nothing"
-
-
-async def test_verifier_rechecks_a_stored_discord_role_against_the_members_roles(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """A role taken away lapses before the member's next turn; Discord is read per member."""
-    import httpx
-    from daimon.adapters.mcp.auth.group_members import DiscordMembers, GroupLookups
-    from daimon.core.channel_admins import GroupMembersCache
-    from daimon.core.stores.accounts import set_platform_role_ids
-    from daimon.core.stores.channel_admins import set_channel_admins
-    from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-
-    guild, user = "111111111111111111", "222222222222222222"
-    async with sessionmaker() as s, s.begin():
-        tenant = await make_tenant(s, platform="discord", workspace_id=guild)
-        account = await make_account(s, tenant=tenant)
-        await make_platform_principal(
-            s, platform="discord", external_id=user, tenant=tenant, account=account
-        )
-        await set_platform_role_ids(s, account.id, ["333333333333333333"])
-        await set_channel_admins(
-            s,
-            tenant_id=tenant.id,
-            platform="discord",
-            channel_id="444444444444444444",
-            role_ids=["333333333333333333"],
-            user_ids=[],
-            actor_account_id=None,
-        )
-    answers = [
-        httpx.Response(200, json={"roles": ["333333333333333333"]}),
-        httpx.Response(200, json={"roles": []}),
-        httpx.Response(404, json={"code": 10007}),
-        httpx.Response(500),
-        httpx.Response(200, text="<html>"),
-        httpx.Response(200, json=["333333333333333333"]),
-    ]
-    asked: list[httpx.Request] = []
-
-    def discord(request: httpx.Request) -> httpx.Response:
-        asked.append(request)
-        return answers[len(asked) - 1]
-
-    lookups = GroupLookups(
-        sessionmaker=sessionmaker,
-        fernet=None,
-        teams_client=None,
-        discord=DiscordMembers(
-            "bot-token", httpx.AsyncClient(transport=httpx.MockTransport(discord))
-        ),
-        cache=GroupMembersCache(ttl_s=0, failure_ttl_s=0),
-    )
-    verifier = DaimonJWTVerifier(
-        legacy_token_cutoff=LEGACY_CUTOFF,
-        allow_legacy_tokens=True,
-        secret=SECRET,
-        sessionmaker=sessionmaker,
-        group_members=lookups.members,
-    )
-    token = pyjwt.encode({"sub": str(account.id), "iat": 0}, SECRET, algorithm="HS256")
-
-    async def administered() -> object:
-        access = await verifier.verify_token(token)
-        assert access is not None, "the token verifies either way"
-        return access.claims["administered_channel_ids"]
-
-    assert await administered() == ["444444444444444444"], "still holds the role"
-    assert str(asked[0].url).endswith(f"/guilds/{guild}/members/{user}"), "the member is read"
-    assert asked[0].headers["authorization"] == "Bot bot-token"
-    assert await administered() == [], "the role was taken away"
-    assert await administered() == [], "left the guild"
-    assert await administered() == [], "a failed read grants nothing"
-    assert await administered() == [], "neither does a body that isn't JSON"
-    assert await administered() == [], "or isn't a member object"
-
-
 async def _agent_token(
     sessionmaker: async_sessionmaker[AsyncSession], *, platform: str | None, channel_id: str | None
 ) -> str:
@@ -765,7 +575,7 @@ async def _agent_token(
         )
 
 
-async def test_verifier_reads_the_bound_channel_from_the_token_row(
+async def test_verifier_refuses_nonadmin_bound_token(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     token = await _agent_token(sessionmaker, platform="discord", channel_id="c-1")
@@ -775,8 +585,7 @@ async def test_verifier_reads_the_bound_channel_from_the_token_row(
         secret=SECRET,
         sessionmaker=sessionmaker,
     ).verify_token(token)
-    assert result is not None
-    assert result.claims["bound_channel_id"] == "c-1"
+    assert result is None
 
 
 async def test_verifier_drops_a_bound_channel_claimed_in_the_jwt(
@@ -823,50 +632,6 @@ async def test_verifier_rejects_a_binding_on_another_platform(
     assert [(e.reason, e.token_kind) for e in events] == [("platform_mismatch", "agent")], (
         "the refusal is audited like every other registry refusal"
     )
-
-
-async def test_verifier_reads_the_external_mark_live_and_drops_admin_rights(
-    sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    """Whatever the token says, an account marked external is a plain user."""
-    from daimon.core.stores.accounts import set_external
-    from daimon.core.stores.channel_admins import set_channel_admins
-    from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-
-    async with sessionmaker() as s, s.begin():
-        tenant = await make_tenant(s, platform="teams")
-        account = await make_account(s, tenant=tenant)
-        await make_platform_principal(
-            s, platform="teams", external_id="u1", tenant=tenant, account=account
-        )
-        await set_role(s, account.id, Role.ADMIN)
-        await set_channel_admins(
-            s,
-            tenant_id=tenant.id,
-            platform="teams",
-            channel_id="c1",
-            role_ids=[],
-            user_ids=["u1"],
-            actor_account_id=None,
-        )
-    verifier = DaimonJWTVerifier(
-        legacy_token_cutoff=LEGACY_CUTOFF,
-        allow_legacy_tokens=True,
-        secret=SECRET,
-        sessionmaker=sessionmaker,
-    )
-    claims = {"sub": str(account.id), "iat": 0, EXTERNAL_CLAIM: False}
-    token = pyjwt.encode(claims, SECRET, algorithm="HS256")
-
-    ours = await verifier.verify_token(token)
-    assert ours is not None and ours.claims[EXTERNAL_CLAIM] is False
-    assert ours.claims["role"] == Role.ADMIN.value
-    async with sessionmaker() as s, s.begin():
-        await set_external(s, account.id, True)
-    theirs = await verifier.verify_token(token)
-    assert theirs is not None and theirs.claims[EXTERNAL_CLAIM] is True, "the row, not the token"
-    assert theirs.claims["role"] == Role.USER.value
-    assert theirs.claims["administered_channel_ids"] == [], "no channel admin grant counts"
 
 
 async def test_a_turn_held_as_external_holds_its_tool_calls_while_it_runs(
@@ -1282,3 +1047,36 @@ async def test_registered_remote_chat_credential_reaches_real_verifier(sessionma
         assert "agent_id" not in result.claims
         assert result.claims[TOKEN_JTI_CLAIM] == str(jti)
         assert result.claims["role"] == "user"
+
+
+async def test_verifier_reads_the_external_mark_live_and_drops_admin_rights(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Whatever the token says, an account marked external is a plain user."""
+    from daimon.core.stores.accounts import set_external
+    from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+
+    async with sessionmaker() as s, s.begin():
+        tenant = await make_tenant(s, platform="teams")
+        account = await make_account(s, tenant=tenant)
+        await make_platform_principal(
+            s, platform="teams", external_id="u1", tenant=tenant, account=account
+        )
+        await set_role(s, account.id, Role.ADMIN)
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        allow_legacy_tokens=True,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+    )
+    claims = {"sub": str(account.id), "iat": 0, EXTERNAL_CLAIM: False}
+    token = pyjwt.encode(claims, SECRET, algorithm="HS256")
+
+    ours = await verifier.verify_token(token)
+    assert ours is not None and ours.claims[EXTERNAL_CLAIM] is False
+    assert ours.claims["role"] == Role.ADMIN.value
+    async with sessionmaker() as s, s.begin():
+        await set_external(s, account.id, True)
+    theirs = await verifier.verify_token(token)
+    assert theirs is not None and theirs.claims[EXTERNAL_CLAIM] is True, "the row, not the token"
+    assert theirs.claims["role"] == Role.USER.value

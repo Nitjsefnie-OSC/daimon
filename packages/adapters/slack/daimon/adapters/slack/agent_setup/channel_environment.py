@@ -2,8 +2,6 @@
 
 Workspace admins and this channel's admins get a select there. A pick
 re-checks both live through `authorize` (which keeps an unrestricted network
-out of a channel admin's reach in a sealed channel), and checks that the
-environment still exists before anything is written. A channel admin is a
 member the channel's grant names, directly or through a user group.
 """
 
@@ -15,11 +13,10 @@ from typing import Final
 
 import anthropic
 import structlog
-from daimon.adapters.slack.channel_admin_groups import channel_admin_caller
+from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.answering_map import AnsweringMap
 from daimon.core.authz import Subject
-from daimon.core.channel_admins import load_live_subject
 from daimon.core.channel_environments import (
     NOT_OFFERED_NOTE,
     EnvironmentPicker,
@@ -36,6 +33,7 @@ from daimon.core.channel_environments import (
     plan_environment_picker,
     save_scope_environment,
 )
+from daimon.core.native_admins import load_live_subject
 from daimon.core.panel_audit import record_panel_write
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.web.async_client import AsyncWebClient
@@ -60,7 +58,7 @@ async def load_picker_subject(
     is_admin: bool,
 ) -> Subject:
     """The caller as `authorize` sees them. `is_admin` is resolved live."""
-    caller = await channel_admin_caller(
+    caller = await admin_caller(
         runtime, client, tenant_id=tenant_id, user_id=user_id, is_admin=is_admin
     )
     async with runtime.sessionmaker() as session:

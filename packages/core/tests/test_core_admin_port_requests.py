@@ -244,6 +244,58 @@ async def test_missing_grant_and_mismatched_scopes_fail_before_io(operation: str
     assert not transport.requests
 
 
+async def test_lane_workspace_helpers_keep_archive_filter_and_marker_wire() -> None:
+    archived: dict[str, JsonValue] = {"id": "agent_old", "archived_at": "2026-01-01T00:00:00Z"}
+    transport = ScriptedTransport()
+    queue(transport, "GET", "/v1/agents", page([archived], "agents_second"))
+    queue(transport, "GET", "/v1/agents", page([SENTINEL]))
+    queue(transport, "GET", "/v1/agents", page([]))
+    queue(transport, "GET", "/v1/environments", page([]))
+    queue(transport, "GET", "/v1/vaults", page([]))
+    queue(transport, "GET", "/v1/memory_stores", page([{"id": "store_archived"}]))
+    queue(transport, "POST", "/v1/agents", {"id": "agent_marker"})
+    async with transport.client() as client:
+        with_archived = await ma.list_workspace_agents_for_lane(client, include_archived=True)
+        assert [agent.id for agent in with_archived] == ["agent_old", "agent_sentinel"]
+        assert with_archived[0].archived_at is not None
+        assert await ma.list_workspace_agents_for_lane(client) == []
+        assert await ma.workspace_has_resources_for_lane(client)
+        await ma.create_lane_marker_agent(
+            client,
+            name="daimon-lane-marker-x",
+            description="marker",
+            model="claude-haiku-5-5",
+            metadata={"daimon_workspace": "disposable"},
+        )
+    transport.assert_consumed()
+    queries = [dict(request.query) for request in transport.requests]
+    assert queries[0].get("include_archived") == "true"
+    assert queries[1].get("include_archived") == "true"
+    assert "include_archived" not in queries[2]
+    assert [dict(q).get("include_archived") for q in queries[3:6]] == ["true"] * 3
+    assert transport.requests[6].json() == {
+        "model": "claude-haiku-5-5",
+        "name": "daimon-lane-marker-x",
+        "description": "marker",
+        "metadata": {"daimon_workspace": "disposable"},
+    }
+
+
+async def test_lane_workspace_methods_refuse_tenant_scope_before_io() -> None:
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        port = managed_agents(client, scope=SCOPE).extension(
+            CoreAdmin, namespace="anthropic.core_admin", version=1
+        )
+        with pytest.raises(ScopeViolation):
+            await port.workspace_has_resources(SCOPE)
+        with pytest.raises(ScopeViolation):
+            await port.create_workspace_agent(
+                SCOPE, name="n", description="d", model="m", metadata={}
+            )
+    assert not transport.requests
+
+
 async def test_orphan_without_account_scope_logs_skip_without_provider_io(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

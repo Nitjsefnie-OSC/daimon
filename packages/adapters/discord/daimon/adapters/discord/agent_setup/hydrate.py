@@ -26,7 +26,6 @@ from daimon.adapters.discord.agent_setup.state import (
     ThreadContext,
     WebhookBlock,
 )
-from daimon.adapters.discord.checks import channel_admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core import channel_backend
 from daimon.core.access_policy import TenantAccessPolicy
@@ -37,7 +36,6 @@ from daimon.core.agent_identity import (
     resolve_agent_identity,
 )
 from daimon.core.answering_map import AnsweringMap, load_answering_map
-from daimon.core.channel_admins import load_administered_channel_ids
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import UserFacingError
@@ -347,16 +345,6 @@ async def load_roster_state(
             if overwrite_guild is not None
             else ()
         )
-        managed_channels = (
-            await load_administered_channel_ids(
-                session,
-                tenant_id=tenant_id,
-                platform="discord",
-                caller=channel_admin_caller(interaction.user),
-            )
-            if not is_admin
-            else frozenset[str]()
-        )
         binding = (
             await get_binding(
                 session,
@@ -391,7 +379,7 @@ async def load_roster_state(
         guild_account_id=derive_guild_account_uuid(tenant_id),
         default_mcp_url=public_mcp_url(runtime),
         is_admin=is_admin,
-        can_manage_github_agents=is_admin or bool(managed_channels),
+        can_manage_github_agents=is_admin,
         guild_id=interaction.guild_id,
         channel_id=int(channel_id),
         channel_name=channel_name,

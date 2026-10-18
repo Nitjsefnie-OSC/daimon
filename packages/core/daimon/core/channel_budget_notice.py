@@ -1,15 +1,8 @@
 """Tell a channel's admins, once per budget window, that its budget is used up.
 
 When chat admission refuses a turn for the channel budget, the first refusal
-of each window claims the budget's `exhausted_notice_key` and DMs the
-channel's admins (its grant's users, plus members whose stored roles match a
-granted role), or the server admins when it has none. The claim commits
-before recipients are resolved or any DM is sent. Setting or raising the
-budget clears the claim, and so does a notice nobody was sent, so a later
-refusal tries again; one cut short mid-send keeps it. Delivery is the
-adapter's `BudgetNotifier`, held to the tenant's DM policy; it runs in the
-background under one timeout and never changes or delays the refusal. A
-tenant opts out with the `budget_notices` setting.
+of each window claims the budget notice and DMs the server admins. The claim
+commits before any DM is sent. A tenant opts out with `budget_notices`.
 """
 
 from __future__ import annotations
@@ -22,9 +15,9 @@ from datetime import datetime
 from typing import Final
 
 import structlog
-from daimon.core.channel_admins import GroupMembers, GroupMembersFor, channel_admin_user_ids
 from daimon.core.channel_budget import get_channel_budget_status
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.native_admins import ServerAdminIds
 from daimon.core.stores.accounts import list_platform_user_ids
 from daimon.core.stores.channel_budgets import claim_exhausted_notice, release_exhausted_notice
 from daimon.core.stores.domain import ChannelBudgetRow
@@ -120,23 +113,11 @@ async def claim_budget_notice(
 async def notice_recipients(
     sessionmaker: async_sessionmaker[AsyncSession],
     notice: BudgetNotice,
-    members: GroupMembers | None,
+    server_admins: ServerAdminIds | None = None,
 ) -> tuple[str, ...]:
-    """The channel's admins, else the server admins; at most `MAX_RECIPIENTS`.
-
-    `members` re-checks a recipient matched by a stored group or Discord role,
-    with no DB session open; without it a Slack or Teams match reaches nobody.
-    """
-    listed = await channel_admin_user_ids(
-        sessionmaker,
-        tenant_id=notice.tenant_id,
-        platform=notice.platform,
-        channel_id=notice.channel_id,
-        limit=MAX_RECIPIENTS,
-        members=members,
-    )
-    if listed:
-        return tuple(listed)
+    """The server admins; at most `MAX_RECIPIENTS`."""
+    if server_admins is not None:
+        return tuple(sorted(await server_admins())[:MAX_RECIPIENTS])
     async with sessionmaker() as session:
         admins = await list_platform_user_ids(
             session,
@@ -156,7 +137,7 @@ async def _claim_and_send(
     platform: str,
     channel_id: str,
     now: datetime,
-    group_members: GroupMembersFor | None,
+    server_admins: ServerAdminIds | None,
 ) -> None:
     notice: BudgetNotice | None = None
     sending = returned = False
@@ -172,9 +153,9 @@ async def _claim_and_send(
                 )
             if notice is None:
                 return
-            members = group_members(platform, notice.workspace_id) if group_members else None
             notice = replace(
-                notice, recipient_ids=await notice_recipients(sessionmaker, notice, members)
+                notice,
+                recipient_ids=await notice_recipients(sessionmaker, notice, server_admins),
             )
             if notice.recipient_ids:
                 sending = True
@@ -201,7 +182,7 @@ async def notify_budget_exhausted(
     platform: str,
     channel_id: str | None,
     now: datetime,
-    group_members: GroupMembersFor | None = None,
+    server_admins: ServerAdminIds | None = None,
 ) -> None:
     """Claim and send this window's notice; every failure is logged, never raised."""
     if notifier is None or channel_id is None:
@@ -214,7 +195,7 @@ async def notify_budget_exhausted(
             platform=platform,
             channel_id=channel_id,
             now=now,
-            group_members=group_members,
+            server_admins=server_admins,
         )
     except Exception as exc:  # background notice: a failure is logged, never raised
         log.warning(
@@ -230,7 +211,7 @@ def spawn_budget_notice(
     platform: str,
     channel_id: str | None,
     now: datetime,
-    group_members: GroupMembersFor | None = None,
+    server_admins: ServerAdminIds | None = None,
 ) -> None:
     """Send the notice off the refusal path, so a slow DM API never holds the reply."""
     if notifier is None or channel_id is None:
@@ -243,7 +224,7 @@ def spawn_budget_notice(
             platform=platform,
             channel_id=channel_id,
             now=now,
-            group_members=group_members,
+            server_admins=server_admins,
         ),
         name="channel_budget.notice",
     )

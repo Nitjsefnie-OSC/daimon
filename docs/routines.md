@@ -289,6 +289,10 @@ next to their wake poller (Teams for its one organisation). Each poll claims `pe
 - **No broadcasts.** Discord posts with every mention disabled; Slack escapes
   the text the way agent replies are escaped, so `<!channel>` and `<!here>`
   stay literal.
+- **A Teams notice.** A result posted in a Teams channel or thread also sends
+  the creator an activity feed notice linking to it, one feed entry per
+  routine; a DM fallback sends none. A failed notice is only logged and never
+  changes the outcome ([teams.md](teams.md)).
 
 The post reads `Result from <agent>'s <schedule>:` followed by the result, for
 example `Result from team-020-analyst's daily routine at 09:00 UTC:`. The
@@ -483,8 +487,7 @@ as its conversations are, by its owner too (a server admin owner still reads
 it from the hub, as with their own DMs). A routine with neither is not
 stamped. Every stamped routine session also carries the private-DM stamp
 (`daimon_private_dm=routine:<id>`): a routine runs on its owner's
-credentials, so its transcript stays its owner's alone. No server admin or
-channel admin reads it from the hub, as before routine sessions carried a
+credentials, so its transcript stays its owner's alone. No server admin reads it from the hub, as before routine sessions carried a
 channel.
 
 

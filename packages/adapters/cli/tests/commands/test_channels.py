@@ -1,4 +1,4 @@
-"""`daimon channels budget` and `daimon channels admins` against the real database."""
+"""`daimon channels budget` against the real database."""
 
 from __future__ import annotations
 
@@ -24,9 +24,6 @@ from daimon.adapters.cli.commands.channels import (
     budget_clear,
     budget_list,
     budget_set,
-    channels_admins_clear,
-    channels_admins_get,
-    channels_admins_set,
     channels_list,
     channels_rule_set,
     channels_skills_add,
@@ -42,7 +39,6 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
-from daimon.core.stores.channel_admins import get_channel_admins
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
@@ -188,101 +184,11 @@ TEAMS_CHANNEL = "19:growth@thread.tacv2"
 TEAMS_USER = "0b8e2c1a-1d2e-4f3a-9b4c-5d6e7f8a9b0c"
 
 
-async def test_a_teams_thread_budgets_and_admins_its_channel(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Teams channel ids contain ":", so only the `;messageid=` suffix is cut."""
-    rt = build_cli_runtime(db_session_factory)
-    console = _console()
-    tenant = await provision_tenant(db_session_factory, platform="teams", workspace_id="tid")
-    args = {"rt": rt, "console": console, "platform": "teams", "workspace_id": "tid"}
-    thread = f"{TEAMS_CHANNEL};messageid=1717"
-
-    await budget_set(
-        **args, channel_id=thread, usd="5", window="monthly", starts_at=None, ends_at=None
-    )
-    await channels_admins_set(
-        **args, channel_id=thread, roles=[], users=[TEAMS_USER.upper()], as_json=False
-    )
-
-    async with db_session_factory() as s:
-        budget = await channel_budgets.get_channel_budget(
-            s, tenant_id=tenant.tenant_id, platform="teams", channel_id=TEAMS_CHANNEL
-        )
-        admins = await get_channel_admins(
-            s, tenant_id=tenant.tenant_id, platform="teams", channel_id=TEAMS_CHANNEL
-        )
-    assert budget is not None, "a Teams thread budgets against its whole channel id"
-    assert admins is not None and admins.user_ids == (TEAMS_USER,), (
-        "the channel's admins are stored under the channel, Entra ids lower-cased"
-    )
-    await budget_clear(**args, channel_id=thread)
-    assert f"channel {TEAMS_CHANNEL}: budget cleared" in _out(console), "clear finds it"
-
-
 GUILD = "900000000000000001"
 CHANNEL = "900000000000000002"
 ROLE = "900000000000000003"
 USER = "900000000000000004"
 OTHER_CHANNEL = "900000000000000005"
-
-
-async def test_set_get_clear_round_trip(
-    db_session_factory: async_sessionmaker[AsyncSession], stub_anthropic: AsyncAnthropic
-) -> None:
-    async with db_session_factory.begin() as session:
-        await make_tenant(session, platform="discord", workspace_id=GUILD)
-    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic)
-    where = {"rt": rt, "platform": "discord", "workspace_id": GUILD}
-
-    await channels_admins_set(
-        **where,
-        console=_console(),
-        channel_id=CHANNEL,
-        roles=[ROLE],
-        users=[USER, USER],
-        as_json=True,
-    )
-    listed = _console()
-    await channels_admins_get(**where, console=listed, channel_id=None, as_json=True)
-    (row,) = json.loads(_out(listed))
-    assert (row["channel_id"], row["role_ids"], row["user_ids"]) == (CHANNEL, [ROLE], [USER]), (
-        "json lists the saved grant"
-    )
-
-    cleared = _console()
-    await channels_admins_clear(**where, console=cleared, channel_id=CHANNEL)
-    assert "cleared" in _out(cleared), "clear reports it"
-    after = _console()
-    await channels_admins_get(**where, console=after, channel_id=CHANNEL, as_json=True)
-    assert json.loads(_out(after)) == [], "nothing is left after clear"
-
-
-async def test_set_refuses_bad_ids_empty_lists_and_unknown_tenants(
-    db_session_factory: async_sessionmaker[AsyncSession], stub_anthropic: AsyncAnthropic
-) -> None:
-    async with db_session_factory.begin() as session:
-        await make_tenant(session, platform="slack", workspace_id="T0ADMINS")
-    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic)
-    slack = {"rt": rt, "console": _console(), "platform": "slack", "workspace_id": "T0ADMINS"}
-
-    with pytest.raises(typer.BadParameter, match="invalid slack group id"):
-        await channels_admins_set(
-            **slack, channel_id="C0GROWTH", roles=["<!subteam^S1>"], users=[], as_json=False
-        )
-    with pytest.raises(typer.BadParameter, match="use clear"):
-        await channels_admins_set(**slack, channel_id="C0GROWTH", roles=[], users=[], as_json=False)
-    with pytest.raises(StoreError, match="no tenant"):
-        await channels_admins_set(
-            rt=rt,
-            console=_console(),
-            platform="discord",
-            workspace_id=GUILD,
-            channel_id=CHANNEL,
-            roles=[],
-            users=[USER],
-            as_json=False,
-        )
 
 
 def _discord_settings() -> object:
@@ -680,9 +586,6 @@ async def test_list_shows_the_balance_and_each_configured_channel(
         starts_at=None,
         ends_at=None,
     )
-    await channels_admins_set(
-        **args, console=_console(), channel_id="C2", roles=[], users=["U1"], as_json=False
-    )
 
     json_console = _console()
     await channels_list(**args, console=json_console, as_json=True)
@@ -690,7 +593,6 @@ async def test_list_shows_the_balance_and_each_configured_channel(
     channels = {c["channel_id"]: c for c in summary["channels"]}
     assert summary["balance_usd"] == "0.00", "a fresh tenant has no balance"
     assert channels["C1"]["budget"]["limit_usd"] == "5.00", "C1 is listed for its budget"
-    assert channels["C2"]["admins"] == {"role_ids": [], "user_ids": ["U1"]}, "C2 for its admins"
 
     table = _console()
     await channels_list(**args, console=table, as_json=False)
@@ -716,15 +618,16 @@ async def test_list_json_carries_each_channels_readers_and_writers(
             ),
         )
 
-    await channels_admins_set(
+    await budget_set(
         rt=rt,
         platform="slack",
         workspace_id="T1",
         console=_console(),
         channel_id="C2",
-        roles=[],
-        users=["U1"],
-        as_json=False,
+        usd="5",
+        window="monthly",
+        starts_at=None,
+        ends_at=None,
     )
     console = _console()
     await channels_list(rt=rt, platform="slack", workspace_id="T1", console=console, as_json=True)

@@ -40,6 +40,7 @@ from daimon.core.handoff_context import (
     select_recent_turns,
 )
 from daimon.core.ma import replay_events
+from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
@@ -643,9 +644,18 @@ async def _replace_dead_session_locked(
                 # seal added since, or a replacement built writable that the
                 # current decision makes read-only, makes this turn wait (rolls
                 # back the dead-mark) so the next turn rebuilds it read-only.
+                # So does one built with the agent's keys for a caller from
+                # another organisation.
                 current = await reauthorize(deps, admission)
                 snapshot = live.effective_config
                 writable = snapshot is None or not snapshot.memory_read_only
+                if (admission.is_external or current.is_external) and (
+                    snapshot is None or not snapshot.is_external
+                ):
+                    raise SessionBusyError(
+                        pending_reasons=("external_caller",),
+                        retry_after=datetime.now(UTC) + timedelta(seconds=1),
+                    )
                 if current.origin_seal_ids != admission.origin_seal_ids or (
                     current.memory_read_only and writable
                 ):
@@ -674,7 +684,9 @@ async def _replace_dead_session_locked(
                     ma_session_id=live.ma_session_id,
                     mapping_id=live.id,
                     model_id=(
-                        snapshot.model_id if snapshot is not None else admission.agent.model.id
+                        snapshot.pricing_id
+                        if snapshot is not None
+                        else model_choice_id(admission.agent.model)
                     ),
                     transfer_kind=live.transfer_kind or "history",
                     previous_session=None,
@@ -768,7 +780,7 @@ async def _replace_dead_session_locked(
     return _Replacement(
         ma_session_id=fresh.ma_session_id,
         mapping_id=fresh.mapping_id,
-        model_id=fresh.snapshot.model_id,
+        model_id=fresh.snapshot.pricing_id,
         transfer_kind=loss_transfer_kind,
         previous_session=previous_session,
         adopted=False,

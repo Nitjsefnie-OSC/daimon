@@ -198,8 +198,6 @@ async def _remove_skill_impl(
         location_channel_id=origin_channel_id(origin),
     )
     await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)
-    # Same rule as add_skill: a built-in agent is refused; a channel admin may
-    # change an agent local to their channels.
     await require_skill_change(
         runtime, auth, agent, agent_name=agent_name, operation="skill_remove"
     )

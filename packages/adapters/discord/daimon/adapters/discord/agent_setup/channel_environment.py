@@ -3,7 +3,6 @@
 Server admins and this channel's admins get a select that runs the channel in
 one of the server's environments or hands it back to the default. What the
 panel rendered is a hint: the select re-checks the caller live through
-`authorize` (which keeps an unrestricted network out of a channel admin's
 reach in a sealed channel), and the pick is checked against the environments
 that still exist before anything is written.
 """
@@ -16,10 +15,9 @@ from typing import Final
 import anthropic
 import structlog
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import channel_admin_caller
+from daimon.adapters.discord.checks import admin_caller
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.authz import Subject
-from daimon.core.channel_admins import load_live_subject
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
     NOT_OFFERED_NOTE,
@@ -39,6 +37,7 @@ from daimon.core.channel_environments import (
     save_scope_environment,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.native_admins import load_live_subject
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
 
 import discord
@@ -86,7 +85,7 @@ async def load_picker_subject(
     ``live`` reads Manage Server off the member instead of the panel state;
     clicks pass it, rendering does not. Anyone else costs one grant read.
     """
-    caller = channel_admin_caller(interaction.user)
+    caller = admin_caller(interaction.user)
     if not live:
         caller = caller.model_copy(update={"is_server_admin": state.is_admin})
     async with runtime.sessionmaker() as session:
@@ -98,7 +97,7 @@ async def load_picker_subject(
 async def may_pick_environment(
     subject: Subject, *, runtime: DiscordRuntime, state: PanelState
 ) -> bool:
-    """Server admin, or an admin of the panel's channel."""
+    """Server admin for the panel's channel."""
     async with runtime.sessionmaker() as session:
         return await may_pick_environment_in(
             session,

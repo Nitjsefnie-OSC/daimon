@@ -10,6 +10,8 @@ it works only in personal chats and stops after two minutes. Cancel clicks
 route by `cancel_key` (the card intent id), carried from the first render.
 An `unprompted` turn (organic thread participation) posts no card: it stays
 invisible until it has an answer, and posts nothing if it has none or fails.
+With a completion ping the asker's message also gets 👀 once the turn is
+accepted and ✅ in its place once answered, as on Discord (`acknowledge`).
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import asyncio
 import contextlib
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -28,6 +30,7 @@ import httpx
 import structlog
 from anthropic.types import RawMessageStreamEvent
 from daimon.adapters.teams import card
+from daimon.adapters.teams.image_preview import MAX_PREVIEWS
 from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
@@ -36,9 +39,10 @@ from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.teams_markdown import has_math
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
-from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
+from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
@@ -50,7 +54,7 @@ from daimon.core.turn.state import (
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import termination_reason
 from daimon.core.usage_totals import ProviderUsageTotals
-from microsoft_teams.api import Account, MessageActivityInput, SentActivity
+from microsoft_teams.api import Account, Attachment, MessageActivityInput, SentActivity
 from microsoft_teams.cards import Action, ExecuteAction
 from mux.contracts.events import Event
 from mux.profiles import emits_legacy_events_for
@@ -116,6 +120,13 @@ def retry_hint(text: str, *, direct_chat: bool) -> str:
     return text.replace("Mention me to try again.", "Send a message to try again.")
 
 
+def _may_have_outputs(state: TurnState) -> bool:
+    """A tool call of the turn names the outputs folder: the sweep may post files."""
+    return any(
+        isinstance(block, ToolUseBlock) and "outputs" in str(block.input) for block in state.content
+    )
+
+
 class TeamsTurnLifecycle:
     """Implements `daimon.core.turn.lifecycle.TurnLifecycle`. One per turn attempt."""
 
@@ -143,8 +154,26 @@ class TeamsTurnLifecycle:
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         budget_channel_id: str | None = None,
         on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
+        acknowledge: Callable[[Acknowledgment], None] | None = None,
+        roster_open: Callable[[bool], Awaitable[bool]] | None = None,
+        hold_controls: bool = False,
     ) -> None:
         self._sender = sender
+        # The caller posts the controls after the output sweep (`release_controls`),
+        # so they land below every file it posts; only for a turn that may have outputs.
+        self._hold_controls = hold_controls
+        self._held_controls: MessageActivityInput | None = None
+        # When the turn's last tool call ended: every output was written before it.
+        self._finished_tools = 0
+        self._tool_done_at: float | None = None
+        self._tool_open = False
+        # A group chat's `group_chats.turn_guard`: False withholds all the turn's work.
+        self._roster_open = roster_open
+        self._withheld = False
+        # Reacts on the asker's message, in the background; None when there is none.
+        self._acknowledge = acknowledge
+        # An answer, or a tool-only turn's result, reached the chat: ✅ is due.
+        self._answered = False
         # Support is on: the controls below the answer offer Ask a human.
         self._ask_human = ask_human
         # The summary line's agent, price and money left.
@@ -188,6 +217,10 @@ class TeamsTurnLifecycle:
         # Shown messages that are notice cards, not answers: edited as cards,
         # with their buttons, whether they carry 👍/👎, and their summary line.
         self._notices: dict[str, tuple[tuple[Action, ...], str | None]] = {}
+        # Previews edited into an answer message as markdown images, kept apart
+        # from `_shown` (TEAMS_LIMIT counts the text alone): every later edit
+        # sends them again.
+        self._attached: dict[str, tuple[Attachment, ...]] = {}
         # Edits of a shown answer, from the turn and the output sweep, one at a time.
         self._answer_edits = asyncio.Lock()
 
@@ -265,6 +298,7 @@ class TeamsTurnLifecycle:
             )
 
     async def on_render(self, state: TurnState) -> None:
+        self._note_tools(state)
         if self._terminal or self._message_id is None:
             return
         self._state = card.on_activity(self._state, state)
@@ -272,7 +306,34 @@ class TeamsTurnLifecycle:
         if now - self._last_flush < _DEBOUNCE_S:
             return
         self._last_flush = now
+        if (self._state.draft or self._state.tool_lines) and await self._withhold(fresh=False):
+            return
         await self._send(self._status(), message_id=self._message_id)
+
+    def _note_tools(self, state: TurnState) -> None:
+        finished = state.finished_tool_ids
+        if len(finished) > self._finished_tools:
+            self._finished_tools = len(finished)
+            self._tool_done_at = self._clock()
+        self._tool_open = any(
+            isinstance(block, ToolUseBlock) and block.id not in finished for block in state.content
+        )
+
+    def outputs_quiet_s(self) -> float | None:
+        """Seconds since the turn's last tool call ended; None when none did or one is open."""
+        if self._tool_done_at is None or self._tool_open:
+            return None
+        return self._clock() - self._tool_done_at
+
+    async def _withhold(self, *, fresh: bool) -> bool:
+        """True once the group chat holds an outsider: the card then says only that."""
+        if self._roster_open is None or self._withheld:
+            return self._withheld
+        if await self._roster_open(fresh):
+            return False
+        self._withheld = True
+        await self.close_with_notice(card.OUTSIDER_JOINED_NOTICE)
+        return True
 
     async def close_with_notice(
         self, text: str, *, actions: Sequence[ExecuteAction] = (), summary: str | None = None
@@ -365,6 +426,9 @@ class TeamsTurnLifecycle:
         ran and billed. `final_message_id` stays None so the watermark cannot
         pass an answer nobody saw.
         """
+        self._note_tools(state)
+        if await self._withhold(fresh=True):  # the roster is read afresh before any answer
+            return
         self._terminal = True
         answer = self._answer_text(state)
         degraded = render_degraded_notice(state.mcp_failures)
@@ -384,6 +448,7 @@ class TeamsTurnLifecycle:
                     actions = (*actions, card.ask_human_action())
                 summary = await self._summary(state)
                 await self._close(text, actions=actions, summary=summary)
+                self._answered = tool_only
                 return
             if self.answer_prefix is not None:
                 answer = f"{self.answer_prefix}\n\n{answer}"
@@ -406,11 +471,12 @@ class TeamsTurnLifecycle:
                     current = await self._send(message, message_id=None)
                 if index == 0:
                     self._answer_id, replaced = current, True
+                    self._answered = True
                 self._shown[current] = chunk
             self.final_message_id = current
             if fresh:  # retire before the best-effort controls so a lost post can't strand it
                 await self._retire_card()
-            await self._post_controls(state)
+            await self._post_controls(state, hold=self._hold_controls and _may_have_outputs(state))
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)
@@ -435,12 +501,27 @@ class TeamsTurnLifecycle:
                 await self._send(failed, message_id=self._message_id)
                 self.card_closed = True
 
-    async def _post_controls(self, state: TurnState) -> None:
-        """The summary line, Ask a human and 👍/👎 below the answer; best effort, it landed."""
+    async def _post_controls(self, state: TurnState, *, hold: bool = False) -> None:
+        """The summary line, Ask a human and 👍/👎 below the answer; best effort, it landed.
+
+        `hold` keeps them for `release_controls`, timed as the turn ended.
+        """
+        named = self._agent_name_prefix is not None
+        summary = await self._summary(state, named_above=named)
+        controls = card.controls_card(summary, ask_human=self._ask_human)
+        if hold:
+            self._held_controls = controls
+        else:
+            await self._send_controls(controls)
+
+    async def release_controls(self) -> None:
+        """Post the controls held for the output sweep, once; a no-op when none are."""
+        if (controls := self._held_controls) is not None:
+            self._held_controls = None
+            await self._send_controls(controls)
+
+    async def _send_controls(self, controls: MessageActivityInput) -> None:
         try:
-            named = self._agent_name_prefix is not None
-            summary = await self._summary(state, named_above=named)
-            controls = card.controls_card(summary, ask_human=self._ask_human)
             await self._send(controls, message_id=None)
         except TEAMS_SEND_ERRORS:
             log.warning("teams.turn.controls_failed", exc_info=True)
@@ -466,27 +547,51 @@ class TeamsTurnLifecycle:
             self._answer_id, lambda text: f"{notice}\n\n{text}", _PREFIX_EVENTS
         )
 
-    async def append_to_answer(self, text: str) -> bool:
-        """Edit `text` in below the answer's last message; False if it cannot go there."""
+    async def append_to_answer(
+        self, text: str | None = None, attachments: Sequence[Attachment] = ()
+    ) -> bool:
+        """Edit `text` and data-URI previews in below the answer's last message.
+
+        The previews go in as markdown images after the text and any already
+        there: Teams refuses an edit with text and an attachment. False if
+        they cannot go there: no answer shown, a notice card given previews,
+        math in the message, too long, more than MAX_PREVIEWS in all, or the
+        edit refused (400, 413); the caller then sends them on their own.
+        """
         return await self._amend(
-            self.final_message_id, lambda shown: f"{shown}\n\n{text}", _SUFFIX_EVENTS
+            self.final_message_id,
+            lambda shown: shown if text is None else f"{shown}\n\n{text}",
+            _SUFFIX_EVENTS,
+            attachments=attachments,
         )
 
     async def _amend(
-        self, message_id: str | None, change: Callable[[str], str], events: tuple[str, str]
+        self,
+        message_id: str | None,
+        change: Callable[[str], str],
+        events: tuple[str, str],
+        *,
+        attachments: Sequence[Attachment] = (),
     ) -> bool:
         async with self._answer_edits:
             if message_id is None or (shown := self._shown.get(message_id)) is None:
                 return False
+            if attachments and message_id in self._notices:
+                return False  # A notice is a card, whose TextBlock shows no image.
             updated = change(shown)
             if len(updated) > card.TEAMS_LIMIT:
                 return False
+            mention = self._requester if message_id == self._answer_id else None
+            if attachments and mention is None and has_math(updated):
+                return False  # Previews make it plain markdown, which would show the math raw.
+            attached = (*self._attached.get(message_id, ()), *attachments)
+            if len(attached) > MAX_PREVIEWS:
+                return False  # image_preview's size budget is MAX_PREVIEWS per message.
             if message_id in self._notices:
                 actions, summary = self._notices[message_id]
                 rendered = card.notice_card(updated, actions=actions, summary=summary)
             else:
-                mention = self._requester if message_id == self._answer_id else None
-                rendered = card.answer_message(updated, mention=mention)
+                rendered = card.answer_message(updated, mention=mention, images=attached)
             try:
                 await self._edit(rendered, message_id)
             except _TIMEOUTS:
@@ -495,6 +600,8 @@ class TeamsTurnLifecycle:
                 log.warning(events[1], exc_info=True)
                 return False
             self._shown[message_id] = updated
+            if attached:
+                self._attached[message_id] = attached
             return True
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
@@ -535,6 +642,14 @@ class TeamsTurnLifecycle:
             request_id=request_id,
         )
         await self.close_with_notice(text, summary=summary)
+
+    async def on_acknowledgment(self, phase: Acknowledgment) -> None:
+        """Discord's completion-ping reactions; queued in the background, so never a delay."""
+        if not self._ping or self._acknowledge is None:
+            return
+        if phase == "done" and not self._answered:
+            return
+        self._acknowledge(phase)
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
         return None

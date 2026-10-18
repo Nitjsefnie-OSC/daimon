@@ -1,4 +1,4 @@
-"""A DM moved with `/dm` keeps its source channel, and its turns are admitted against it."""
+"""A DM moved with `/dm-me` keeps its source channel, and its turns are admitted against it."""
 
 from __future__ import annotations
 

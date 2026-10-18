@@ -34,6 +34,8 @@ from mux.drivers.gemini.transport import SDKTransport
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
 
+pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
+
 SCOPE = Scope(tenant_id="n12", account_id="offline", principal_id="human", authorization_id="auth")
 FILES = {
     "SKILL.md": b"---\nname: fixture\ndescription: Offline deployment proof\n---\nUse scripts/run.py.\n",

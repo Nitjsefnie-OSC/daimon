@@ -194,7 +194,7 @@ def routine_origin(
     placed by its saved channel (for one made in a DM, the channel the DM
     came from); one with neither is headless (None). Every stamp is private
     too (`private_routine_stamp`): the routine runs on its owner's
-    credentials, so no admin or channel admin reads it from the hub, as
+    credentials, so no admin reads it from the hub, as
     before it carried a channel.
     """
     channel_id = routine_destination_channel(row) or row.channel_id

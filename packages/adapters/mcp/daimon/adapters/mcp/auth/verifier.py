@@ -14,8 +14,6 @@ token row is also written to `security_audit_events`. An operator token's
 admin check reads the account's stored role, which the account's next
 platform turn refreshes, so a demoted admin's token keeps working until then
 or until it expires; `daimon mcp revoke-token` stops it on its next request.
-Channel admin rights from a stored Slack user group or Teams team hold only
-while a live lookup (`group_members`, cached a minute) still admits the person.
 """
 
 from __future__ import annotations
@@ -26,15 +24,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import structlog
-from daimon.core.channel_admins import (
-    CHANNEL_ADMIN_PLATFORMS,
-    ChannelAdminCaller,
-    GroupMembers,
-    GroupMembersFor,
-    confirm_stored_group_ids,
-    grant_group_ids,
-)
-from daimon.core.channel_admins import administered_channel_ids as administered_channel_ids_for
 from daimon.core.config import McpSettings
 from daimon.core.mcp_auth import (
     CHAT_TOKEN_TTL,
@@ -42,7 +31,6 @@ from daimon.core.mcp_auth import (
     registered_agent_claims_match,
 )
 from daimon.core.stores.accounts import get_account_with_tenant
-from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.security_audit import append_event
@@ -107,6 +95,8 @@ def token_row_refusal(
                 return "chat_binding_mismatch"
         elif claims.get("agent_id") != row.agent_id:
             return "agent_mismatch"
+        if row.channel_id is not None and identity.role is not Role.ADMIN:
+            return "admin_required"
         return None
     if claims.get("kind") != row.kind:
         return "kind_mismatch"
@@ -177,7 +167,6 @@ class DaimonJWTVerifier(JWTVerifier):
         *,
         secret: bytes,
         sessionmaker: async_sessionmaker[AsyncSession],
-        group_members: GroupMembersFor | None = None,
         legacy_token_cutoff: datetime | None = None,
         allow_legacy_tokens: bool = False,
     ) -> None:
@@ -199,19 +188,19 @@ class DaimonJWTVerifier(JWTVerifier):
         )
         self._allow_legacy_tokens = policy.allow_legacy_tokens
         self._sessionmaker = sessionmaker
-        self._group_members_for = group_members
-
-    def _group_members(self, identity: AccountIdentityRow) -> GroupMembers | None:
-        if self._group_members_for is None:
-            return None
-        return self._group_members_for(identity.platform, identity.external_id)
 
     async def verify_token(self, token: str) -> AccessToken | None:
         access = await super().verify_token(token)
         if access is None:
             return _reject_token("signature_or_expiry", {})
         # Only the registry row sets these, never a claim.
-        for key in (TOKEN_KIND_CLAIM, TOKEN_JTI_CLAIM, SCOPES_CLAIM, "bound_channel_id"):
+        for key in (
+            TOKEN_KIND_CLAIM,
+            TOKEN_JTI_CLAIM,
+            SCOPES_CLAIM,
+            "bound_channel_id",
+            "platform_role_ids",
+        ):
             access.claims.pop(key, None)
         sub = access.claims.get("sub")
         if not isinstance(sub, str):
@@ -268,16 +257,6 @@ class DaimonJWTVerifier(JWTVerifier):
                 identity_row.platform == "teams"
                 and await has_external_origin(session, account_id=account_id, now=datetime.now(UTC))
             )
-            grants = (
-                await list_channel_admins(
-                    session, tenant_id=identity_row.tenant_id, platform=identity_row.platform
-                )
-                if identity_row.role is not Role.ADMIN
-                and not external
-                and identity_row.platform in CHANNEL_ADMIN_PLATFORMS
-                and identity_row.platform_user_id is not None
-                else []
-            )
         if row is not None:
             refusal = token_row_refusal(
                 row, claims=access.claims, identity=identity_row, now=datetime.now(UTC)
@@ -285,23 +264,6 @@ class DaimonJWTVerifier(JWTVerifier):
             if refusal is not None:
                 await self._audit_refusal(row, identity=identity_row, reason=refusal)
                 return _reject_token(refusal, access.claims)
-        # Outside the DB session: a stored Slack group or Teams team is
-        # looked up live, and only one that still admits the person counts.
-        role_ids = await confirm_stored_group_ids(
-            identity_row.platform,
-            identity_row.platform_user_id,
-            identity_row.platform_role_ids,
-            self._group_members(identity_row) if grants else None,
-            named=grant_group_ids(grants),
-        )
-        administered_channel_ids = sorted(
-            administered_channel_ids_for(
-                ChannelAdminCaller(
-                    platform_user_id=identity_row.platform_user_id, role_ids=role_ids
-                ),
-                grants,
-            )
-        )
         access.claims["tenant_id"] = str(identity_row.tenant_id)
         # An external account is never an admin; the store keeps its role a user too.
         access.claims["role"] = Role.USER.value if external else identity_row.role.value
@@ -310,9 +272,6 @@ class DaimonJWTVerifier(JWTVerifier):
         access.claims["external_id"] = identity_row.external_id
         if identity_row.platform_user_id is not None:
             access.claims["platform_user_id"] = identity_row.platform_user_id
-        # Always overwritten, so a token can never carry its own grant.
-        access.claims["platform_role_ids"] = sorted(role_ids)
-        access.claims["administered_channel_ids"] = administered_channel_ids
         if row is not None:
             access.claims[TOKEN_KIND_CLAIM] = row.kind
             access.claims[TOKEN_JTI_CLAIM] = str(row.jti)

@@ -457,5 +457,9 @@ def test_core_platform_scopes_are_limited_to_workspace_operations() -> None:
             ("pending_file_sweeper.py", "sweep_pending_file_deletes"): 1,
             ("ma.py", "find_workspace_disposable_sentinel"): 1,
             ("ma.py", "delete_entire_workspace_for_testing"): 1,
+            # Dev-lane ownership check and marker (daimon lane-wipe), audited in #1084.
+            ("ma.py", "list_workspace_agents_for_lane"): 1,
+            ("ma.py", "workspace_has_resources_for_lane"): 1,
+            ("ma.py", "create_lane_marker_agent"): 1,
         }
     )

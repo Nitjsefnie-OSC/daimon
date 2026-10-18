@@ -8,20 +8,15 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
-import pytest
-from daimon.adapters.slack.agent_setup import actions
 from daimon.adapters.slack.agent_setup.actions import (
     _dispatch_panel_action,  # pyright: ignore[reportPrivateUsage]
-    load_routing_view,
 )
-from daimon.adapters.slack.agent_setup.channel_environment import ENVIRONMENT_NEED_ADMIN_MESSAGE
 from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_ENVIRONMENT,
     MAX_ENVIRONMENT_LINES,
     build_routing_view,
 )
 from daimon.adapters.slack.agent_setup.state import PANEL_PAGE_SIZE, PanelMetadata
-from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
@@ -29,12 +24,8 @@ from daimon.core.channel_environments import (
     environment_option_value,
 )
 from daimon.core.roster import paginate
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault
-from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.channel_admins import set_channel_admins
-from daimon.core.stores.scoped_config_read import get_scope
+from daimon.core.scope import DeploymentDefault
 from daimon.testing import ma_environment
-from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -180,22 +171,6 @@ def _client() -> MagicMock:
     return client
 
 
-async def _seed(sessionmaker: async_sessionmaker[AsyncSession], *, grant: bool) -> uuid.UUID:
-    async with sessionmaker() as session, session.begin():
-        tenant = await make_tenant(session, platform="slack", workspace_id=TEAM)
-        if grant:
-            await set_channel_admins(
-                session,
-                tenant_id=tenant.id,
-                platform="slack",
-                channel_id=CHANNEL,
-                role_ids=[],
-                user_ids=[USER],
-                actor_account_id=None,
-            )
-    return tenant.id
-
-
 async def _pick(runtime: MagicMock, client: MagicMock, tenant_id: uuid.UUID, value: str) -> None:
     await _dispatch_panel_action(
         runtime,
@@ -208,142 +183,3 @@ async def _pick(runtime: MagicMock, client: MagicMock, tenant_id: uuid.UUID, val
         team_id=TEAM,
         user_id=USER,
     )
-
-
-async def test_members_get_no_select_and_no_environment_listing(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant_id = await _seed(db_session_factory, grant=False)
-    calls: list[str] = []
-
-    view = await load_routing_view(
-        _runtime(db_session_factory, tenant_id, calls),
-        _client(),
-        tenant_id=tenant_id,
-        meta=META,
-        is_admin=False,
-        user_id=USER,
-    )
-
-    assert _select(view) is None, "a member with no grant for this channel cannot pick"
-    assert "/v1/environments" not in calls, "and costs no environment listing"
-
-
-async def test_a_channel_admin_picks_this_channels_environment_and_hands_it_back(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(actions, "resolve_is_admin", AsyncMock(return_value=False))
-    tenant_id = await _seed(db_session_factory, grant=True)
-    runtime = _runtime(db_session_factory, tenant_id, [])
-    client = _client()
-    scope = ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL)
-
-    await _pick(runtime, client, tenant_id, environment_option_value("science"))
-
-    row = await get_scope(db_session, scope=scope)
-    assert row is not None and row.environment_name == "science", "the pick is stored"
-    refreshed = client.views_update.call_args.kwargs["view"]
-    assert f"<#{CHANNEL}> → *science*" in _text(refreshed), "the view shows the pick"
-    assert _select(refreshed) is not None, "the channel admin keeps the select"
-    note = client.chat_postEphemeral.call_args.kwargs["text"]
-    assert "now runs in the science environment" in note, "the reader is told what changed"
-
-    await _pick(runtime, client, tenant_id, ENVIRONMENT_OPTION_INHERIT)
-
-    assert await get_scope(db_session, scope=scope) is None, (
-        "handing the channel back leaves no row, exactly as before any pick"
-    )
-
-
-@pytest.mark.parametrize(
-    ("grant", "value", "expected"),
-    [
-        (False, environment_option_value("science"), ENVIRONMENT_NEED_ADMIN_MESSAGE),
-        (True, environment_option_value("gone"), "no longer exists"),
-        (True, "science", "Nothing changed"),
-    ],
-    ids=["member", "vanished-environment", "forged-value"],
-)
-async def test_a_refused_or_stale_pick_writes_nothing(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-    grant: bool,
-    value: str,
-    expected: str,
-) -> None:
-    monkeypatch.setattr(actions, "resolve_is_admin", AsyncMock(return_value=False))
-    tenant_id = await _seed(db_session_factory, grant=grant)
-    client = _client()
-
-    await _pick(_runtime(db_session_factory, tenant_id, []), client, tenant_id, value)
-
-    assert expected in client.chat_postEphemeral.call_args.kwargs["text"], (
-        "the reader is told why nothing changed"
-    )
-    assert (
-        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
-        is None
-    ), "nothing is written"
-
-
-async def test_a_channel_admin_of_a_sealed_channel_is_refused_an_open_network(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """In a sealed channel unrestricted networking stays a workspace admin's pick."""
-    monkeypatch.setattr(actions, "resolve_is_admin", AsyncMock(return_value=False))
-    tenant_id = await _seed(db_session_factory, grant=True)
-    async with db_session_factory() as session, session.begin():
-        await set_access_policy(
-            session, tenant_id=tenant_id, policy=TenantAccessPolicy(sealed_channel_ids=(CHANNEL,))
-        )
-    client = _client()
-
-    await _pick(
-        _runtime(db_session_factory, tenant_id, []),
-        client,
-        tenant_id,
-        environment_option_value("science"),
-    )
-
-    assert "Only turns inside" in client.chat_postEphemeral.call_args.kwargs["text"], (
-        "the refusal names the rule"
-    )
-    assert (
-        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
-        is None
-    ), "the refused pick writes nothing"
-
-
-async def test_a_workspace_admin_is_sent_to_chat_to_confirm_an_open_network(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    db_session: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The select has no confirm step, so it writes nothing and points at chat, which asks."""
-    monkeypatch.setattr(actions, "resolve_is_admin", AsyncMock(return_value=True))
-    tenant_id = await _seed(db_session_factory, grant=False)
-    async with db_session_factory() as session, session.begin():
-        await set_access_policy(
-            session, tenant_id=tenant_id, policy=TenantAccessPolicy(sealed_channel_ids=(CHANNEL,))
-        )
-    client = _client()
-
-    await _pick(
-        _runtime(db_session_factory, tenant_id, []),
-        client,
-        tenant_id,
-        environment_option_value("science"),
-    )
-
-    assert client.chat_postEphemeral.call_args.kwargs["text"].endswith(
-        f"\n\nAsk me in chat to make this change for <#{CHANNEL}>, then confirm when I ask."
-    )
-    assert (
-        await get_scope(db_session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=CHANNEL))
-        is None
-    ), "the unconfirmed pick writes nothing"

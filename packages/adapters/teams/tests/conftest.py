@@ -31,6 +31,7 @@ from daimon.core.config import (
 )
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.native_admins import GroupLookupFailed, GroupMembers
 from daimon.core.posted_controls.teams_card import ADAPTIVE_CARD_TYPE
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
@@ -65,8 +66,11 @@ SERVICE_URL = "https://smba.trafficmanager.net/test"
 CONVERSATION_ID = "a:conversation-1"
 CHANNEL_ID = "19:channel-1@thread.tacv2"
 THREAD_ID = f"{CHANNEL_ID};messageid=1700000000001"
+GROUP_CHAT_ID = "19:group-chat-1@thread.v2"
 # The Entra group behind the fixtures' team, as Bot Framework's team details name it.
 TEAM_GROUP_ID = "00000000-0000-0000-0000-000000007ea3"
+#: `DAIMON_TEAMS__ADMIN_TEAM_ID`: its owners are the deployment admins.
+ADMIN_TEAM = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
 DIRECT_CHAT_ID = "a:direct-chat"
 USER_NAME = "Ada Lovelace"
 # Vendored for an offline test from
@@ -102,7 +106,6 @@ MAX_ACTIVITY_BYTES = 26_000  # a margin under Teams' 28 KB
 def teams_settings(
     *,
     enabled: bool = True,
-    admins: tuple[str, ...] = (),
     public_url: str | None = None,
 ) -> TeamsSettings:
     return TeamsSettings.model_validate(
@@ -111,7 +114,6 @@ def teams_settings(
             "client_secret": "test-secret",
             "tenant_id": ENTRA_TENANT_ID,
             "enabled": enabled,
-            "admin_user_ids": admins,
             "public_url": public_url,
         }
     )
@@ -130,10 +132,12 @@ def make_message_activity(
     is_group: bool | None = None,
     mention_bot: bool = False,
     service_url: str = SERVICE_URL,
+    targeted: bool = False,
 ) -> dict[str, object]:
     """An inbound Bot Framework `message` activity, camelCase as Teams posts it.
 
-    `mention_bot` prefixes an `<at>` mention of the bot, as a channel post has.
+    `mention_bot` prefixes an `<at>` mention of the bot, as a channel post has;
+    `targeted` sends it to the bot alone, as a slash command does.
     """
     conversation: dict[str, object] = {
         "id": conversation_id,
@@ -171,11 +175,21 @@ def make_message_activity(
         "serviceUrl": service_url,
         "from": from_,
         "conversation": conversation,
-        "recipient": {"id": BOT_ACCOUNT_ID},
+        "recipient": {"id": BOT_ACCOUNT_ID} | ({"isTargeted": True} if targeted else {}),
         "text": text,
         "entities": entities,
         "channelData": channel_data,
     }
+
+
+def make_group_activity(**kwargs: Any) -> dict[str, object]:
+    """A group chat message that @mentions the bot."""
+    params: dict[str, Any] = {
+        "conversation_id": GROUP_CHAT_ID,
+        "conversation_type": "groupChat",
+        "mention_bot": True,
+    }
+    return make_message_activity(**(params | kwargs))
 
 
 def make_channel_activity(**kwargs: Any) -> dict[str, object]:
@@ -219,7 +233,7 @@ def make_inbound(
     *,
     user: str = AAD_OBJECT_ID,
     conversation: str = CONVERSATION_ID,
-    kind: Literal["dm", "channel"] = "dm",
+    kind: Literal["dm", "channel", "group"] = "dm",
     setup_thread_id: str | None = None,
 ) -> TeamsInbound:
     return TeamsInbound(
@@ -242,7 +256,8 @@ async def bot_token() -> str:
 def teams_update_error(body: dict[str, Any]) -> str | None:
     """Why Teams refuses this edit, in its words; None when it takes it.
 
-    An edit replaces one Teams message, and text beside an attachment is two.
+    An edit replaces one Teams message, and text beside any attachment, a card
+    or an image, is two. A new post of both is split into two messages.
     """
     if body.get("text") and body.get("attachments"):
         return "Activity resulted into multiple skype activities"
@@ -275,6 +290,10 @@ class TeamsApiFake:
     """Roster names by Entra object id; a member lookup answers with the person's name."""
     absent: set[str] = dataclasses.field(default_factory=set[str])
     """Entra object ids no roster has: a member lookup answers 404."""
+    chat_guests: list[dict[str, object]] = dataclasses.field(
+        default_factory=list[dict[str, object]]
+    )
+    """Members a group chat's roster lists beside the sender and the bot."""
 
     async def send(
         self,
@@ -303,6 +322,15 @@ class TeamsApiFake:
         if context.method == "GET" and team:
             details = {"id": team.group(1), "aadGroupId": TEAM_GROUP_ID}
             return httpx.Response(200, json=details, request=request)
+        if context.method == "GET" and httpx.URL(context.url).path.endswith("/members"):
+            ours = {
+                "id": f"29:{AAD_OBJECT_ID}",
+                "aadObjectId": AAD_OBJECT_ID,
+                "tenantId": ENTRA_TENANT_ID,
+                "userRole": "user",
+            }
+            roster = [ours, {"id": BOT_ACCOUNT_ID, "name": "daimon"}, *self.chat_guests]
+            return httpx.Response(200, json=roster, request=request)
         if context.method == "GET" and "/members/" in context.url:
             aad_object_id = httpx.URL(context.url).path.rsplit("/", 1)[-1]
             if aad_object_id in self.absent:
@@ -332,6 +360,11 @@ class TeamsApiFake:
     @property
     def activity_requests(self) -> list[SentRequest]:
         return [r for r in self.requests if "/activities" in r.url]
+
+    @property
+    def private_requests(self) -> list[SentRequest]:
+        """Activities only their recipient sees, as channel commands are answered."""
+        return [r for r in self.activity_requests if "isTargetedActivity=true" in r.url]
 
 
 @functools.cache
@@ -367,7 +400,7 @@ def assert_teams_accepts(request: SentRequest) -> None:
     if request.method == "PUT":
         edited = re.search(r"/activities/([^/]+)$", httpx.URL(request.url).path)
         assert edited and request.body.get("id") == edited.group(1), "an edit names its activity"
-        assert teams_update_error(request.body) is None, "an edit stays one Teams message"
+    assert teams_update_error(request.body) is None, "an activity stays one Teams message"
 
 
 def build_teams_client(fake: TeamsApiFake) -> Client:
@@ -381,7 +414,7 @@ class FakeSender:
     """A `TeamsSender` recording every send. Indices in `fail_on` raise; in
     `refuse_on` they answer `refuse_status`; in `timeout_on` they time out after landing
     (odd: httpx, even: asyncio). An edit Teams would refuse answers 400, as
-    Teams does."""
+    Teams does; a new post of text and attachments fails the test."""
 
     sent: list[tuple[str, MessageActivityInput, str | None]] = dataclasses.field(
         default_factory=list[tuple[str, MessageActivityInput, str | None]]
@@ -409,6 +442,7 @@ class FakeSender:
             request = httpx.Request("PUT", f"https://teams.test/activities/{activity.id}")
             response = httpx.Response(400, json={"error": {"message": refused}}, request=request)
             raise httpx.HTTPStatusError(refused, request=request, response=response)
+        assert teams_update_error(body) is None, "Teams splits text and attachments in two"
         return SentActivity(id=activity.id or f"m-{index + 1}", activity_params=activity)
 
     @property
@@ -424,14 +458,18 @@ def build_teams_runtime(
     http_client: httpx.AsyncClient | None = None,
     deployment_default: DeploymentDefault | None = None,
     private_channel_messages: bool = False,
+    admins: tuple[str, ...] = (),
 ) -> TeamsRuntime:
     """A runtime over the test DB and a fake MA transport, with real turn deps.
 
     Outbound HTTP never reaches the network: it answers 404 unless given.
+    `admins` own `ADMIN_TEAM`, which is then the admin team.
     """
     settings = MagicMock()
     settings.agent_identity.enabled = False
     settings.teams = teams or teams_settings()
+    if admins:
+        settings.teams = settings.teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
     settings.turn_queue = TurnQueueSettings()
     settings.crypto.keys = ()
     settings.mcp.public_url = None
@@ -466,7 +504,19 @@ def build_teams_runtime(
             billing_config=None,
         ),
         deployment_default=deployment_default,
+        team_owners=admin_team(admins) if admins else None,
     )
+
+
+def admin_team(owners: Sequence[str]) -> GroupMembers:
+    """Graph's owner read: `owners` own `ADMIN_TEAM`; any other team is refused."""
+
+    async def read(group_id: str) -> frozenset[str]:
+        if group_id != ADMIN_TEAM:
+            raise GroupLookupFailed("not the test's admin team (status 404)")
+        return frozenset(owners)
+
+    return read
 
 
 @contextmanager

@@ -32,9 +32,6 @@ the read path for these existing workflows:
   - Use from your coding tools mints a scoped bearer token behind a live admin
     check resolved post-ack, server-side (hiding ≠ gating). Token values
     are never logged, not even in part.
-  - Channel admins, on Who answers where, pushes the form naming this
-    channel's admins, submitted in channel_admins.py. Workspace admins only,
-    re-checked live on the click and on the submission.
   - Channel skills, on Who answers where, pushes the form adding or removing
     this channel's extra skills, submitted in channel_skills.py. Workspace
     admins only, re-checked live on the click and on the submission.
@@ -112,7 +109,6 @@ from daimon.adapters.slack.agent_setup.state import (
     decode_panel_metadata,
     encode_panel_metadata,
 )
-from daimon.adapters.slack.channel_admin_groups import list_user_groups
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.errors import render_error
 from daimon.adapters.slack.interactions import resolve_web_client
@@ -132,7 +128,6 @@ from daimon.core.agent_identity import (
 )
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.authz import build_subject
-from daimon.core.channel_admins import GroupLookupFailed
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
@@ -151,11 +146,6 @@ from daimon.core.roster import Roster, paginate
 from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.channel_admins import (
-    get_channel_admins,
-    list_administered_channel_ids,
-    list_channel_admins,
-)
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.github_access_requests import list_asker_requests
 from daimon.core.stores.github_connected_repos import agent_repo_summary
@@ -170,9 +160,6 @@ from sqlalchemy.exc import SQLAlchemyError
 log = structlog.get_logger()
 
 OPERATOR_TOKENS_NEED_ADMIN_MESSAGE = "Only a workspace admin can mint or revoke operator tokens."
-CHANNEL_ADMINS_NEED_ADMIN_MESSAGE = (
-    "Only a workspace admin can name a channel's admins. Nothing changed."
-)
 CHANNEL_SKILLS_NEED_ADMIN_MESSAGE = (
     "Only a workspace admin can change a channel's skills. Nothing changed."
 )
@@ -181,23 +168,7 @@ CHANNEL_SKILLS_NEED_ADMIN_MESSAGE = (
 async def github_can_choose_agent(
     runtime: SlackRuntime, *, tenant_id: uuid.UUID, user_id: str, is_admin: bool
 ) -> bool:
-    if is_admin:
-        return True
-    async with runtime.sessionmaker() as session:
-        principal = await get_or_create_platform_principal(
-            session, tenant_id=tenant_id, platform="slack", external_id=user_id
-        )
-        account = await get_account(session, principal.account_id)
-        if account is None or account.is_external:
-            return False
-        grants = await list_administered_channel_ids(
-            session,
-            tenant_id=tenant_id,
-            platform="slack",
-            platform_user_id=user_id,
-            role_ids=account.platform_role_ids,
-        )
-    return bool(grants)
+    return is_admin
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +428,6 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         panel_views.ACTION_BACKEND_CONFIRM,
         panel_views.ACTION_BACKEND_CANCEL,
         panel_views.ACTION_REVOKE_TOKEN,
-        panel_views.ACTION_CHANNEL_ADMINS,
         panel_views.ACTION_CHANNEL_SKILLS,
         panel_views.ACTION_OPERATOR_MINT,
         panel_views.ACTION_OPERATOR_REVOKE,
@@ -583,8 +553,7 @@ async def load_routing_view(
     """Build the Who-answers-where view for `meta`'s page; admins also get the channel
     admins and this channel's permissions.
 
-    `user_id` lets an admin of this channel see its environment select;
-    workspace admins get it without one.
+    `user_id` identifies the caller; workspace admins may select an environment.
     """
     async with runtime.sessionmaker() as session:
         answering_map = await load_panel_answering_map(
@@ -594,11 +563,6 @@ async def load_routing_view(
             default=runtime.deployment_default,
             channel_id=meta.channel_id or None,
             is_admin=is_admin,
-        )
-        channel_admins = (
-            await list_channel_admins(session, tenant_id=tenant_id, platform="slack")
-            if is_admin
-            else None
         )
         operator_tokens = (
             await list_panel_operator_tokens(session, tenant_id=tenant_id, now=datetime.now(UTC))
@@ -661,7 +625,6 @@ async def load_routing_view(
         setup_links=setup_links,
         channel_id=meta.channel_id,
         unrouted_agent_name=unrouted_agent_name,
-        channel_admins=channel_admins,
         environment_picker=environment_picker,
         rule_status=rule_status,
         operator_tokens=operator_tokens,
@@ -1217,35 +1180,6 @@ async def _dispatch_panel_action(
         )
         return
 
-    if action_id == panel_views.ACTION_CHANNEL_ADMINS:
-        if not is_admin or not meta.channel_id:
-            await post_ephemeral(
-                client,
-                channel_id=meta.channel_id or user_id,
-                user_id=user_id,
-                text=CHANNEL_ADMINS_NEED_ADMIN_MESSAGE,
-            )
-            return
-        async with runtime.sessionmaker() as session:
-            grant = await get_channel_admins(
-                session, tenant_id=tenant_id, platform="slack", channel_id=meta.channel_id
-            )
-        try:
-            groups: dict[str, str] | None = await list_user_groups(client)
-        except GroupLookupFailed:
-            log.warning("slack.agent_setup.channel_admins.groups_unlisted", exc_info=True)
-            groups = None
-        await client.views_push(  # pyright: ignore[reportUnknownMemberType]
-            trigger_id=trigger_id,
-            view=panel_views.build_channel_admins_form(
-                meta=meta.with_view("channel_admins", root_view_id=view_id),
-                user_ids=grant.user_ids if grant else (),
-                group_ids=grant.role_ids if grant else (),
-                groups=groups,
-            ),
-        )
-        return
-
     if action_id == panel_views.ACTION_CHANNEL_SKILLS:
         if not is_admin or not meta.channel_id:
             await record_panel_write(
@@ -1582,6 +1516,12 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             "slack.agent_setup_action.unknown_action_id",
             action_id=action_id,
             team_id=team_id,
+        )
+        await post_ephemeral(
+            client,
+            channel_id=channel_id or user_id,
+            user_id=user_id,
+            text="That setup control is no longer available. Reopen setup.",
         )
 
     except (

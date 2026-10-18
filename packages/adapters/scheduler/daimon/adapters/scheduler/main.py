@@ -101,6 +101,7 @@ from daimon.core.rule_views import (
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.scheduler import FireFn, RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.session_compat import valid_unavailable_repo_urls
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
@@ -836,7 +837,18 @@ async def _refresh_github_app_sessions(
                     fernet=fernet,
                     mounted_only=True,
                 )
-                if desired_urls != snapshot.repo_urls and not active_turn:
+                valid_exclusions = valid_unavailable_repo_urls(snapshot, now=now)
+                comparable_urls = tuple(url for url in desired_urls if url not in valid_exclusions)
+                # A session that ever had a refused repo, or still owes a notice, is
+                # replaced at the turn boundary instead, which carries notice history.
+                refusal_history = bool(
+                    snapshot.unavailable_repos or snapshot.unavailable_notice_pending
+                )
+                if (
+                    comparable_urls != snapshot.repo_urls
+                    and not active_turn
+                    and not refusal_history
+                ):
                     scope = session_scope(
                         tenant_id=item.mapping.tenant_id,
                         account_id=item.mapping.account_id,
@@ -869,7 +881,7 @@ async def _refresh_github_app_sessions(
                     _last_app_access_checks[session_id] = now
                     _app_refresh_failures.pop(session_id, None)
                     continue
-                await rotate_live_app_tokens(
+                access = await rotate_live_app_tokens(
                     anthropic_client,
                     sm,
                     session_id=session_id,
@@ -879,6 +891,7 @@ async def _refresh_github_app_sessions(
                     is_external=item.mapping.is_external,
                     vault_id=snapshot.vault_id,
                     resource_ids=snapshot.repo_resource_ids,
+                    unavailable_repos=snapshot.unavailable_repos,
                     config=settings.github_app,
                     fernet=fernet,
                     active_turn=active_turn,
@@ -888,6 +901,8 @@ async def _refresh_github_app_sessions(
                         session,
                         ma_session_id=session_id,
                         issued_at=int(now.timestamp()),
+                        access=access,
+                        now=now,
                     )
             _last_app_access_checks[session_id] = now
             _app_refresh_failures.pop(session_id, None)
@@ -989,8 +1004,9 @@ async def _refresh_github_app_sessions(
                     _last_app_access_checks[current.session_id] = now
                     _app_refresh_failures.pop(current.session_id, None)
                     continue
+                access = None
                 if current.expires_at is not None or current.repo_urls or desired_permissions:
-                    await rotate_live_app_tokens(
+                    access = await rotate_live_app_tokens(
                         anthropic_client,
                         sm,
                         session_id=current.session_id,
@@ -1005,7 +1021,10 @@ async def _refresh_github_app_sessions(
                         active_turn=active_turn,
                     )
                 _last_app_access_checks[current.session_id] = now
-                _app_refresh_failures.pop(current.session_id, None)
+                if access is not None and access.excluded_repo_urls:
+                    _record_refresh_failure(current.session_id, now)
+                else:
+                    _app_refresh_failures.pop(current.session_id, None)
         except Exception:
             _last_app_access_checks[candidate.session_id] = now
             _record_refresh_failure(candidate.session_id, now)
@@ -1225,7 +1244,7 @@ async def run(
         await _anthropic_factory(settings)
         if _anthropic_factory is not None
         else AsyncAnthropic(
-            api_key=settings.anthropic.api_key.get_secret_value(),
+            api_key=settings.anthropic.resolved_api_key(),
             base_url=str(settings.anthropic.base_url),
             max_retries=MA_MAX_RETRIES,
             http_client=DefaultAsyncHttpxClient(

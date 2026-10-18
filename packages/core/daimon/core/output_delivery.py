@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
 import anthropic
@@ -82,11 +82,16 @@ class DeliverableFile:
 
 @dataclass(frozen=True)
 class SkippedFile:
-    """An output skipped without downloading it (oversize). No ``content``."""
+    """An output skipped without downloading it (oversize). No ``content``.
+
+    ``mime_type`` lets a caller that skips everything still pick some types
+    to fetch on its own, such as an image to preview where nothing is saved.
+    """
 
     file_id: str
     filename: str
     size_bytes: int
+    mime_type: str = "application/octet-stream"
 
 
 class OutputPostingUnavailable(DaimonError):
@@ -163,28 +168,31 @@ async def _poll_until_settled(
     session_id: str,
     sleep: Callable[[float], Awaitable[None]],
     scope: Scope | None = None,
+    quiet_s: float | None = None,
 ) -> dict[str, FileMetadata]:
     """Poll the session listing until it settles; return downloadable entries by id.
 
     A poll "settles" the sweep only once cumulative elapsed time has reached
     ``_MIN_SETTLE_S`` AND that poll contributed no new downloadable file id.
-    An exhausted schedule settles unconditionally.
+    An exhausted schedule settles unconditionally. ``quiet_s``, the seconds
+    since the turn's last tool call ended, counts as elapsed: every output was
+    written before then. The schedule then polls at once, then at the minimum.
     """
     seen: dict[str, FileMetadata] = {}
-    elapsed = 0.0
+    scope = scope or Scope.legacy_host_authorized(call_site="output_delivery:_poll_until_settled")
+    elapsed = quiet_s or 0.0
+    delays = _POLL_DELAYS_S
+    if quiet_s is not None:
+        delays = (0.0, max(_MIN_SETTLE_S - quiet_s, _POLL_DELAYS_S[1]), _POLL_DELAYS_S[-1])
     polls = 0
-    for delay in _POLL_DELAYS_S:
+    for delay in delays:
         if delay > 0:
             await sleep(delay)
         elapsed += delay
         polls += 1
         # Retained oversize entries must not hide later pages.
         records = await list_output_records(
-            anthropic_client,
-            session_id,
-            all_pages=True,
-            scope=scope
-            or Scope.legacy_host_authorized(call_site="output_delivery:_poll_until_settled"),
+            anthropic_client, session_id, all_pages=True, scope=scope
         )
         added_new_id = False
         for meta in records:
@@ -252,8 +260,13 @@ async def sweep_session_outputs(
     scope: Scope | None = None,
     noticed: NoticedFiles | None = None,
     discard_skipped_up_to: int = 0,
+    order: Callable[[Sequence[str]], Sequence[int]] | None = None,
+    quiet_s: float | None = None,
 ) -> int:
     """Deliver the session's output files via ``post``; return how many posted.
+
+    ``order`` takes the listed filenames and returns the indexes to handle
+    them in; without it they go in listing order.
 
     Raises :class:`OutputPostingUnavailable` when ``post`` signals that
     delivery is impossible for the whole workspace — nothing further is
@@ -277,11 +290,15 @@ async def sweep_session_outputs(
     larger one, which no destination could take, is still kept.
     """
     settled = await _poll_until_settled(
-        anthropic_client, session_id=session_id, sleep=sleep, scope=scope
+        anthropic_client, session_id=session_id, sleep=sleep, scope=scope, quiet_s=quiet_s
     )
 
+    listed = list(settled.values())
+    if order is not None:
+        listed = [listed[index] for index in order([meta.filename for meta in listed])]
+
     posted = 0
-    for meta in settled.values():
+    for meta in listed:
         if exclude_filename_prefixes and meta.filename.startswith(exclude_filename_prefixes):
             # Left listed on purpose: the owner of this file deletes it.
             _log.info(
@@ -319,6 +336,7 @@ async def sweep_session_outputs(
                             file_id=meta.id,
                             filename=meta.filename,
                             size_bytes=meta.size_bytes,
+                            mime_type=meta.mime_type,
                         )
                     )
                     if noticed is not None:

@@ -33,15 +33,15 @@ from daimon.adapters.discord.agent_setup.expiry import (
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
-from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import admin_caller, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import build_agent_ref
-from daimon.core.channel_admins import load_live_subject
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import authorize_coding_token, mint_agent_mcp_token
+from daimon.core.native_admins import load_live_subject
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.roster import RosterAgent
 from daimon.core.setup_conversations import get_setup_agent
@@ -53,9 +53,7 @@ import discord
 log = structlog.get_logger()
 
 
-#: What a member sees instead of a token. Minting needs Manage Server, or channel
-#: admin of every channel the agent's rule runs it in, pressed inside one of them;
-#: the refusal names only the way out.
+#: What a member sees instead of a token. Minting needs Manage Server.
 CODING_TOOLS_REFUSAL = (
     "You can't create this token.\n\n"
     'Ask an admin to open this agent\'s Details and press "Use from your coding tools".'
@@ -88,9 +86,8 @@ async def send_coding_tools_access(
 
     Who may mint is `authorize(MINT_CODING_TOKEN)`'s call, on the caller's
     live permissions and roles read at click time (the panel's ``is_admin`` is
-    a snapshot from panel-open): a server admin, or a channel admin of every
-    channel the agent is pinned to, whose token is always bound to one of
-    them. Anyone else is refused before any token material exists.
+    a snapshot from panel-open): a server admin. Anyone else is refused
+    before any token material exists.
     """
     card_agent = agent or state.selected_agent
     selected = card_agent or state.selected
@@ -138,7 +135,7 @@ async def send_coding_tools_access(
         )
         return
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(ma_agent.id))
-    caller = channel_admin_caller(interaction.user).model_copy(
+    caller = admin_caller(interaction.user).model_copy(
         update={"is_server_admin": is_guild_admin(interaction)}  # pyright: ignore[reportArgumentType]  # reads only user and guild
     )
     try:

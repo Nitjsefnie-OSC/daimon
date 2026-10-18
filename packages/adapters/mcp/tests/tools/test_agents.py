@@ -4755,7 +4755,9 @@ async def test_update_agent_impl_rejects_non_admin_system_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="admin must change"):
+    with pytest.raises(
+        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
+    ):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4804,7 +4806,9 @@ async def test_update_agent_impl_rejects_non_admin_skills_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="admin must change"):
+    with pytest.raises(
+        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
+    ):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4828,7 +4832,9 @@ async def test_update_agent_impl_rejects_non_admin_mcp_servers_patch_when_agent_
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="admin must change"):
+    with pytest.raises(
+        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
+    ):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4852,7 +4858,9 @@ async def test_update_agent_impl_rejects_non_admin_tools_patch_when_agent_reacha
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="admin must change"):
+    with pytest.raises(
+        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
+    ):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4930,7 +4938,9 @@ async def test_attach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="admin must change"):
+    with pytest.raises(
+        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
+    ):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,

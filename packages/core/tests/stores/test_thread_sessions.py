@@ -14,7 +14,8 @@ from datetime import UTC, datetime
 
 import pytest_asyncio
 from daimon.core._models import ThreadSession
-from daimon.core.session_snapshot import SessionSnapshot
+from daimon.core.github_app_session import AppSessionAccess
+from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.thread_session_lineage import (
     clear_fresh_start,
@@ -878,6 +879,45 @@ async def test_app_token_refresh_updates_live_session_snapshots(
     assert dead_row is not None and dead_row.effective_config is not None
     assert live_row.effective_config.repo_token_issued_at == 200
     assert dead_row.effective_config.repo_token_issued_at == 100
+
+
+async def test_partial_app_rotation_records_exclusion_in_live_snapshot(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    url = "https://github.com/acme/working"
+    snapshot = _snapshot().model_copy(
+        update={
+            "github_mode": "app",
+            "repo_urls": (url,),
+            "token_repo_urls": (url,),
+        }
+    )
+    row = await create_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        thread_id="partial-rotation",
+        account_id=uuid.uuid4(),
+        ma_session_id="sess_partial_rotation",
+        effective_config=snapshot,
+        identity_fingerprint=fingerprint_identity(snapshot),
+    )
+    now = datetime(2026, 10, 16, 12, tzinfo=UTC)
+    await record_app_token_refresh(
+        db_session,
+        ma_session_id="sess_partial_rotation",
+        issued_at=int(now.timestamp()),
+        access=AppSessionAccess((), (), None, (url,), ()),
+        now=now,
+    )
+    updated = await get_thread_session_by_id(db_session, id=row.id)
+    assert updated is not None and updated.effective_config is not None
+    assert updated.effective_config.repo_urls == ()
+    assert updated.effective_config.token_repo_urls == ()
+    assert updated.effective_config.unavailable_repos == ((url, now),)
+    assert updated.effective_config.unavailable_notice_pending == (url,)
+    assert updated.identity_fingerprint == fingerprint_identity(updated.effective_config)
 
 
 async def test_update_mutable_fingerprint_leaves_the_identity_fingerprint_alone(

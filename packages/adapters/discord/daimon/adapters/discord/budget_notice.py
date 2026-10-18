@@ -7,7 +7,6 @@ from dataclasses import replace
 from typing import cast
 
 import structlog
-from daimon.adapters.discord.channel_admin_roles import stored_member_roles
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
@@ -75,6 +74,5 @@ def with_budget_notifier(
         turn_deps=replace(
             deps,
             budget_notifier=discord_budget_notifier(real, open_dm, is_closed),
-            group_members=stored_member_roles(real, client) if client is not None else None,
         ),
     )

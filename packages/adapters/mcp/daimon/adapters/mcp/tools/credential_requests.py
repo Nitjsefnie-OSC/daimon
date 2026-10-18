@@ -4,8 +4,7 @@ These tools create single-use, expiring request rows and post a target-naming
 card through the caller's platform. Secret values never enter tool arguments.
 Submission checks requester identity. Adding a new key is a contribution;
 MCP connections and skill imports also mutate the shared agent spec, so they
-require server-admin rights or exclusive rule-bound channel ownership.
-Replacing an existing key also requires mutation ownership.
+require server-admin rights. Replacing an existing key also requires admin rights.
 `daimon.core.operation_policy` decides these here, *before* the mint. A refusal
 posts no card at all —
 nobody is asked for a secret they were never going to be allowed to save. A
@@ -34,8 +33,7 @@ from daimon.adapters.mcp.tools.discord._credential_button import (
     edit_card_replaced as edit_discord_card_replaced,
 )
 from daimon.adapters.mcp.tools.reachability import (
-    UNPLACED_RUN_REASON,
-    channel_admin_caller,
+    admin_caller,
     target_facts,
 )
 from daimon.adapters.mcp.tools.setup_target import (
@@ -301,8 +299,10 @@ async def _require_key_replacement_allowed(
     `adding` is set when `key` is not being overwritten but shadowed: a
     different name (`adding`) the same tool reads as `key`.
     """
-    outcome, facts = await _decide_attachment_write(runtime, auth, "key_replace", ma_agent=ma_agent)
-    shared = UNPLACED_RUN_REASON if facts.has_unplaced_run else "is shared with everyone here"
+    outcome, _facts = await _decide_attachment_write(
+        runtime, auth, "key_replace", ma_agent=ma_agent
+    )
+    shared = "is shared with everyone here"
     if outcome in ("managed_agent", "needs_admin") and adding is not None:
         raise ToolError(
             f"'{ma_agent.name}' {shared}, and adding '{adding}' "
@@ -348,7 +348,7 @@ async def _require_mcp_replacement_allowed(
         server_name=server_name,
         url=url,
         platform=auth.platform or "",
-        caller=channel_admin_caller(auth),
+        caller=admin_caller(auth),
         default=runtime.deployment_default,
         shares_token=shares_token,
     )
@@ -478,7 +478,7 @@ async def _mint_and_post(
                 runtime,
                 auth,
                 channel_id=channel_id,
-                # A /dm conversation's thread is its private scope ("dm:<uuid>"),
+                # A /dm-me conversation's thread is its private scope ("dm:<uuid>"),
                 # not a Slack ts: the card goes to the top of the DM.
                 thread_ts=None
                 if origin.thread_id.startswith(DM_SCOPE_PREFIX)
@@ -860,9 +860,8 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         Match supported authentication; an API key is not automatically an MCP token.
 
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
-        credentials in chat. Connecting requires a workspace or server admin, or an
-        admin of every channel the agent's rule names, with all of its uses staying
-        inside those channels. This applies to new servers and replacements.
+        credentials in chat. Connecting requires a workspace or server admin.
+        This applies to new servers and replacements.
 
         Posts a requester-only card naming the agent and the server, opening a private
         form, expiring in 30 minutes. Submission attaches the server to the agent, not

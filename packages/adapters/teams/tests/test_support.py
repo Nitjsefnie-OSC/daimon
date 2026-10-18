@@ -24,19 +24,14 @@ from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.channel_admins import set_channel_admins
-from daimon.core.stores.tenants import get_tenant
-from daimon.testing.factories import make_platform_principal
 from microsoft_teams.common.http.client import MiddlewareContext
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
     CHANNEL_ID,
     CONVERSATION_ID,
-    DIRECT_CHAT_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     THREAD_ID,
@@ -376,68 +371,6 @@ async def test_ask_a_human_is_refused_to_someone_who_could_not_ask_there(
         sent = await post_activity(service, _ask("send", message="m-7", note="help"))
     assert opened["task"]["value"] == sent["task"]["value"] == NOT_ALLOWED
     assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == []
-
-
-async def _grant_lead(db_factory: async_sessionmaker[AsyncSession]) -> None:
-    """`LEAD` admins the channel `make_channel_activity` posts in, and has chatted before."""
-    async with db_factory.begin() as session:
-        tenant = await get_tenant(session, TENANT)
-        await make_platform_principal(session, platform="teams", external_id=LEAD, tenant=tenant)
-        await set_channel_admins(
-            session,
-            tenant_id=TENANT,
-            platform="teams",
-            channel_id=CHANNEL_ID,
-            role_ids=[],
-            user_ids=[LEAD],
-            actor_account_id=None,
-        )
-
-
-@pytest.mark.parametrize("on_roster", [True, False])
-async def test_a_channel_with_its_own_admins_sends_the_request_to_them_first(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    teams_api_fake: TeamsApiFake,
-    on_roster: bool,
-) -> None:
-    await _grant_lead(db_session_factory)
-    if not on_roster:
-        teams_api_fake.absent.add(LEAD)
-    async with _running(db_session_factory, teams_api_fake) as service:
-        card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
-        reply = await _send(service, _token(card), "the routine broke")
-
-    assert support.RECEIVED.format(remaining=2) in reply, "delivered either way"
-    lookups = [r.url for r in teams_api_fake.requests if f"/members/{LEAD}" in r.url]
-    assert lookups and CHANNEL_ID in lookups[0], "the admin is looked up on the channel's roster"
-    chats = [p for p in _posts_to(teams_api_fake, DIRECT_CHAT_ID) if "Human support requested" in p]
-    ops = _posts_to(teams_api_fake, OPS)
-    if on_roster:
-        assert len(chats) == 1 and "the routine broke" in chats[0], "the admin's 1:1 chat"
-        assert ops == [], "the escalation channel only when no admin got it"
-    else:
-        assert chats == [] and len(ops) == 1, "no admin reachable: the escalation channel"
-
-
-async def test_a_database_error_picking_admins_still_reaches_the_support_channel(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    teams_api_fake: TeamsApiFake,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def unreachable(*args: object, **kwargs: object) -> list[frozenset[str]]:
-        raise OperationalError("SELECT", {}, OSError("connection refused"))
-
-    await _grant_lead(db_session_factory)
-    monkeypatch.setattr(support, "support_recipient_tiers", unreachable)
-    async with _running(db_session_factory, teams_api_fake) as service:
-        card = await _form(service, teams_api_fake, make_channel_activity(text="support"))
-        reply = await _send(service, _token(card), "the routine broke")
-
-    assert support.RECEIVED.format(remaining=2) in reply, "the spent credit is not a failure"
-    [posted] = _posts_to(teams_api_fake, OPS)
-    assert "the routine broke" in posted, "the escalation channel is still tried"
-    [row] = await _rows(db_session_factory)
-    assert row.delivered_at is not None, "and stamped once it lands"
 
 
 async def test_a_protected_support_channel_gets_no_post(

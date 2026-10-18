@@ -12,7 +12,7 @@ from daimon.adapters.discord.agent_setup.github_embed_panel import (
     GitHubEmbedPanel as PanelViewBase,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import admin_caller, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -110,9 +110,7 @@ class GitHubReposView(PanelViewBase):
             account = await get_account(session, self.state.account_id)
             if account is None or account.is_external or account.tenant_id != tenant_id:
                 return False
-            caller = channel_admin_caller(interaction.user).model_copy(
-                update={"is_server_admin": admin}
-            )
+            caller = admin_caller(interaction.user).model_copy(update={"is_server_admin": admin})
             facts = (
                 await load_target_facts(
                     session,

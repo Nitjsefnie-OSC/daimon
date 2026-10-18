@@ -16,6 +16,7 @@ from importlib.metadata import version
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
 from daimon.core.context_prompt import TurnContext
+from daimon.core.model_presets import OPUS, OPUS_FAST
 from daimon.core.pricing import (
     MODEL_PRICING,
     ProviderPrice,
@@ -203,7 +204,7 @@ class TurnObservation:
                     tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,
                 )
             )
-            if usage.model is not None:
+            if usage.model is not None and not (model_id == OPUS_FAST and usage.model.id == OPUS):
                 model_id = usage.model.id
             cost = cost_of(usage, MODEL_PRICING.get(model_id or ""))
             self._samples[key] = UsageSample(

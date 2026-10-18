@@ -21,13 +21,6 @@ import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
-from daimon.core.channel_admins import (
-    CHANNEL_ADMIN_PLATFORMS,
-    ChannelAdminCaller,
-    GroupMembersFor,
-    confirm_stored_group_ids,
-    grant_group_ids,
-)
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
@@ -42,10 +35,10 @@ from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
 from daimon.core.mcp_vault import ensure_agent_mcp_vault, hold_agent_vault_lock
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import delete_credential
+from daimon.core.native_admins import AdminCaller
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import get_account_with_tenant
-from daimon.core.stores.channel_admins import list_channel_admins
 from daimon.core.stores.domain import McpOAuthFlowRow, Role
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -102,7 +95,6 @@ async def complete_mcp_oauth_flow(
     session_factory: async_sessionmaker[AsyncSession],
     default: DeploymentDefault,
     may_write: Callable[[], Awaitable[bool]] | None = None,
-    group_members: GroupMembersFor | None = None,
 ) -> McpOAuthCompletion:
     """Exchange, store in the requester's vault, attach the server to the agent.
 
@@ -118,9 +110,7 @@ async def complete_mcp_oauth_flow(
     The grant is personal, but the attach is not: repointing a server name the
     agent already declares at another URL redirects every caller. That is
     re-decided here as `mcp_replace` against the requester as stored (the
-    browser callback carries no live platform identity): role, platform id and
-    role ids, so a channel admin passes or fails here as at the request (a
-    stored Slack group or Teams team only as `group_members` confirms it). A
+    browser callback carries no live platform identity): stored admin role. A
     refused replacement raises `McpServerReplaceRefusedError` with the agent
     unchanged.
     """
@@ -182,27 +172,9 @@ async def complete_mcp_oauth_flow(
         return McpOAuthCompletion(vault_id=vault_id, credential_id=credential_id, ma_agent_id=None)
     async with session_factory() as session:
         requester = await get_account_with_tenant(session, account_id=flow.account_id)
-        grants = (
-            await list_channel_admins(
-                session, tenant_id=requester.tenant_id, platform=requester.platform
-            )
-            if requester is not None and requester.platform in CHANNEL_ADMIN_PLATFORMS
-            else []
-        )
-    caller = (
-        ChannelAdminCaller(platform_user_id=None)
-        if requester is None
-        else ChannelAdminCaller(
-            platform_user_id=requester.platform_user_id,
-            role_ids=await confirm_stored_group_ids(
-                requester.platform,
-                requester.platform_user_id,
-                requester.platform_role_ids,
-                group_members(requester.platform, requester.external_id) if group_members else None,
-                named=grant_group_ids(grants),
-            ),
-            is_server_admin=requester.role is Role.ADMIN,
-        )
+    caller = AdminCaller(
+        platform_user_id=requester.platform_user_id if requester is not None else None,
+        is_server_admin=requester is not None and requester.role is Role.ADMIN,
     )
     # Decide and attach under the per-agent MCP lock, serialized with the
     # token forms' attach-then-publish and the direct tools.

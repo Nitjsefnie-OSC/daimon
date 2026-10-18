@@ -17,14 +17,15 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import quote
 
+from daimon.adapters.teams.admin_caller import admin_caller
 from daimon.adapters.teams.card_actions import Actor
-from daimon.adapters.teams.channel_admin_groups import channel_admin_caller
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize, build_turn_place
-from daimon.core.channel_admins import ChannelAdminCaller, load_live_subject
+from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.teams_threads import is_group_chat
 from microsoft_teams.api import InvokeActivity
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +35,7 @@ POLICY_UNREADABLE = (
     "Ask an admin to check it."
 )
 IN_DIRECT_CHAT = "(an answer in a 1:1 chat)"
+IN_GROUP_CHAT = "(an answer in a group chat)"
 
 Access = Literal["allowed", "refused", "unreadable"]
 
@@ -57,9 +59,9 @@ class AnswerPlace:
         return self.conversation_id.split(";", 1)[0]
 
     def link(self, entra_tenant_id: str) -> str:
-        """A link to the answer; a 1:1 chat has none anyone else can open."""
+        """A link to the answer; a 1:1 or group chat has none anyone else can open."""
         if not self.is_channel:
-            return IN_DIRECT_CHAT
+            return IN_GROUP_CHAT if is_group_chat(self.conversation_id) else IN_DIRECT_CHAT
         _, _, root = self.conversation_id.partition(";messageid=")
         query = f"tenantId={entra_tenant_id}" + (f"&parentMessageId={root}" if root else "")
         channel = quote(self.channel_id)
@@ -81,9 +83,9 @@ def sealed_at(policy: TenantAccessPolicy, place: AnswerPlace) -> bool:
     )
 
 
-async def clicker(runtime: TeamsRuntime, actor: Actor) -> ChannelAdminCaller:
+async def clicker(runtime: TeamsRuntime, actor: Actor) -> AdminCaller:
     """The clicker with the grant-named teams they own. Network: call with no session open."""
-    return await channel_admin_caller(
+    return await admin_caller(
         runtime, tenant_id=actor.tenant_id, user_id=actor.user_id, is_admin=actor.is_admin
     )
 
@@ -92,7 +94,7 @@ async def may_start_turn_at(
     session: AsyncSession,
     policy: TenantAccessPolicy,
     actor: Actor,
-    caller: ChannelAdminCaller,
+    caller: AdminCaller,
     place: AnswerPlace,
 ) -> bool:
     """START_TURN at the answer's place, as admission decides it for a message there."""
