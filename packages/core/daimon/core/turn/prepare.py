@@ -1407,8 +1407,21 @@ async def bind_session_impl(
 
             backend = managed_agents(deps.anthropic, scope=scope)
 
+            # Worker intent retains the root's ownership stamps. The native
+            # allocation needs its own resolver identity, even when the source
+            # is cloned or allocation succeeds before dispatch is interrupted.
+            from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+
+            worker_name = persistence.slot.thread.thread_id.replace("/", "-")
+            native_spec = worker.spec.model_copy(
+                update={
+                    "name": worker_name,
+                    "metadata": {**(worker.spec.metadata or {}), MA_METADATA_KEY_NAME: worker_name},
+                }
+            )
+
             async def create(key: str) -> Agent:
-                return await backend.agents.create(scope, worker.spec, key=key)
+                return await backend.agents.create(scope, native_spec, key=key)
 
             allocated = await persistence.mutate(
                 None,
@@ -1428,7 +1441,7 @@ async def bind_session_impl(
                 allocated.ref.account_scope_id,
                 scope,
             )
-            expected = agent_payload(worker.spec)
+            expected = agent_payload(native_spec)
             expected.update(
                 {name: expected.get(name) or [] for name in ("tools", "skills", "mcp_servers")}
             )
