@@ -6,6 +6,7 @@ import uuid
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.stores.domain import TurnOriginRow
@@ -42,8 +43,9 @@ async def require_one_to_one(
 ) -> TurnOriginRow:
     """The verified turn origin, if it is the person's 1:1 chat with Daimon.
 
-    Read from the turn itself, never from tool arguments: mail, calendar and
-    OneNote content must not reach a channel or group chat.
+    The model passes the origin id, but only a live origin of this person's own
+    turn with this agent verifies, and its id is random per turn: mail,
+    calendar and OneNote content must not reach a channel or group chat.
     """
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     if not origin.parent_channel_id.startswith("a:"):
@@ -53,3 +55,9 @@ async def require_one_to_one(
             "again in a 1:1 chat."
         )
     return origin
+
+
+async def is_one_to_one(runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str) -> bool:
+    """Whether the verified turn origin is the person's 1:1 chat; False when unverified."""
+    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    return origin is not None and origin.parent_channel_id.startswith("a:")

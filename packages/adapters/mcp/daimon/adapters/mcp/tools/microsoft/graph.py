@@ -3,7 +3,9 @@
 Every call runs as the Teams person with their own delegated token, over the
 path allowlist in `_paths`. What Graph returns is other people's text and is
 marked untrusted. Mail, calendar and OneNote work only in the person's 1:1
-chat with Daimon, checked against the verified turn origin.
+chat with Daimon, checked against the verified turn origin. Pre-authenticated
+links open a file for anyone holding them, so JSON never carries one and a
+/content redirect's link is returned only in that 1:1 chat.
 """
 
 from __future__ import annotations
@@ -20,7 +22,11 @@ from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.adapters.mcp.tools._untrusted import UntrustedResult
 from daimon.adapters.mcp.tools.microsoft._access import GRAPH_ROOT
 from daimon.adapters.mcp.tools.microsoft._paths import check_write, parse_path
-from daimon.adapters.mcp.tools.microsoft._person import require_one_to_one, require_person
+from daimon.adapters.mcp.tools.microsoft._person import (
+    is_one_to_one,
+    require_one_to_one,
+    require_person,
+)
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -42,8 +48,16 @@ _HIT_KEYS = (
     "size",
     "bodyPreview",
 )
+_ERROR_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.]{0,63}")
 _ADDRESS = re.compile(r"[^@\s,;<>]+@[^@\s,;<>]+")
 _MAX_RECIPIENTS = 50
+_DOWNLOAD_KEYS = frozenset({"@microsoft.graph.downloadurl", "@content.downloadurl"})
+
+
+_NO_LINK = (
+    "This file's download link is given only in the person's 1:1 chat with Daimon, since "
+    "anyone holding it could open the file. Ask them there."
+)
 
 
 class GraphResult(UntrustedResult):
@@ -75,15 +89,27 @@ class SendResult(BaseModel):
 
 
 def _refused(response: httpx.Response) -> ToolError:
+    # Only the code: Graph's message can quote content other people wrote.
     try:
         error = cast(dict[str, JsonValue], response.json()).get("error")
     except ValueError:
         error = None
-    code = message = ""
-    if isinstance(error, dict):
-        code = str(error.get("code") or "")
-        message = str(error.get("message") or "")[:300]
-    return ToolError(f"Microsoft Graph refused ({response.status_code} {code}): {message}".strip())
+    code = str(error.get("code") or "") if isinstance(error, dict) else ""
+    code = f" {code}" if _ERROR_CODE.fullmatch(code) else ""
+    return ToolError(f"Microsoft Graph refused ({response.status_code}{code}).")
+
+
+def _without_links(value: JsonValue) -> JsonValue:
+    """`value` without the pre-authenticated download links Graph adds to items."""
+    if isinstance(value, dict):
+        return {
+            key: _without_links(item)
+            for key, item in value.items()
+            if key.lower() not in _DOWNLOAD_KEYS
+        }
+    if isinstance(value, list):
+        return [_without_links(item) for item in value]
+    return value
 
 
 def _next_path(data: dict[str, JsonValue]) -> str | None:
@@ -93,16 +119,21 @@ def _next_path(data: dict[str, JsonValue]) -> str | None:
     return None
 
 
-def _result(response: httpx.Response) -> GraphResult:
-    """A bounded result: JSON trimmed by dropping list items, text cut, never bytes."""
+def _result(response: httpx.Response, *, links: bool) -> GraphResult:
+    """A bounded result: JSON trimmed by dropping list items, text cut, never bytes.
+
+    `links` (the person's 1:1 chat only) returns a /content redirect's link.
+    """
     status = response.status_code
     if response.is_redirect:
-        return GraphResult(status=status, download_url=response.headers.get("location"))
+        if links:
+            return GraphResult(status=status, download_url=response.headers.get("location"))
+        return GraphResult(status=status, text=_NO_LINK)
     if not response.content:
         return GraphResult(status=status)
     kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
     if kind == "application/json":
-        data = cast(JsonValue, response.json())
+        data = _without_links(cast(JsonValue, response.json()))
         next_path = _next_path(data) if isinstance(data, dict) else None
         text = json.dumps(data)
         if len(text) <= _MAX_CHARS:
@@ -125,10 +156,8 @@ def _result(response: httpx.Response) -> GraphResult:
         return GraphResult(status=status, text=text[:_MAX_CHARS], truncated=len(text) > _MAX_CHARS)
     return GraphResult(
         status=status,
-        text=(
-            "Binary content is not returned. GET the item without /content: its "
-            "@microsoft.graph.downloadUrl downloads it."
-        ),
+        text="Binary content is not returned. GET .../content for a download link"
+        + ("." if links else " in the person's 1:1 chat with Daimon."),
     )
 
 
@@ -213,7 +242,7 @@ async def microsoft_get_impl(
     )
     if response.is_error:
         raise _refused(response)
-    return _result(response)
+    return _result(response, links=await is_one_to_one(runtime, auth, origin_context_id))
 
 
 async def microsoft_write_impl(
@@ -266,7 +295,7 @@ async def microsoft_write_impl(
     )
     if response.is_error:
         raise _refused(response)
-    return _result(response)
+    return _result(response, links=False)
 
 
 def _recipients(addresses: list[str], field: str) -> list[dict[str, object]]:

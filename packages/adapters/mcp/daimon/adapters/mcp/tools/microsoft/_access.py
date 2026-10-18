@@ -2,8 +2,10 @@
 
 Each call reads the stored row, so a disconnect or reconnect from another
 process applies at once. Access tokens are cached in memory against the
-row's `updated_at`; a refresh stores the rotated refresh token over the row it
-came from. A revoked grant deletes the row and asks the person to reconnect.
+connection (`created_at`), which a refresh's rotation leaves alone; a refresh
+stores the rotated refresh token over the row it came from, and losing that
+race to another process keeps the stored token. A revoked grant deletes the
+row and asks the person to reconnect.
 """
 
 from __future__ import annotations
@@ -48,7 +50,7 @@ HttpFactory = Callable[[], httpx.AsyncClient]
 class _Cached:
     access_token: str
     expires_at: float
-    row_updated_at: datetime
+    connected_at: datetime
 
 
 @dataclass
@@ -81,7 +83,7 @@ class MicrosoftGraph:
             cached = self._cache.get(key)
             if (
                 cached is not None
-                and cached.row_updated_at == row.updated_at
+                and cached.connected_at == row.created_at
                 and cached.access_token != stale
                 and cached.expires_at - _EARLY > self.clock()
             ):
@@ -99,7 +101,7 @@ class MicrosoftGraph:
                 raise ToolError(_REVOKED) from None
             except (MicrosoftIdentityError, httpx.HTTPError) as exc:
                 raise ToolError("Microsoft sign-in did not answer; try again in a minute.") from exc
-            updated_at = row.updated_at
+            connected_at = row.created_at
             if tokens.refresh_token and tokens.refresh_token != refresh_token:
                 async with self.session_factory.begin() as session:
                     stored = await tokens_store.update_microsoft_refresh_token(
@@ -111,13 +113,22 @@ class MicrosoftGraph:
                         scopes=tokens.scope or row.scopes,
                         now=datetime.now(UTC),
                     )
-                if stored is None:  # disconnected or reconnected meanwhile
-                    raise ToolError("This person's Microsoft connection just changed; try again.")
-                updated_at = stored.updated_at
+                if stored is None:
+                    # Another process rotated it first (its token stays stored), or
+                    # the person disconnected or reconnected meanwhile.
+                    async with self.session_factory() as session:
+                        current = await tokens_store.get_microsoft_user_token(
+                            session, tenant_id=tenant_id, user_id=user_id
+                        )
+                    if current is None:
+                        self._cache.pop(key, None)
+                        raise ToolError(NOT_CONNECTED)
+                    if current.created_at != connected_at:
+                        return tokens.access_token  # the old grant's token: never cached
             self._cache[key] = _Cached(
                 access_token=tokens.access_token,
                 expires_at=self.clock() + tokens.expires_in,
-                row_updated_at=updated_at,
+                connected_at=connected_at,
             )
             return tokens.access_token
 

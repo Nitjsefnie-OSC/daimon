@@ -3,8 +3,9 @@
 A path is relative to the v1.0 root and must match one of a few shapes under
 OneDrive, SharePoint sites, mail, calendar and OneNote. Anything else, any
 absolute URL, dot segment, encoded separator or unlisted query key is refused
-before a request is made. Mail, calendar and OneNote are personal: callers
-show them only in the person's 1:1 chat.
+before a request is made. Mail, calendar and any OneNote path are personal:
+callers show them only in the person's 1:1 chat. Sharing permissions and
+thumbnails carry pre-authenticated links, so they are refused outright.
 """
 
 from __future__ import annotations
@@ -38,12 +39,20 @@ _QUERY_KEYS = frozenset(
         "search",
     }
 )
+# Their answers hold links anyone can open without signing in.
+_BEARER = frozenset({"permissions", "thumbnails"})
 _ENCODED = ("%2e", "%2f", "%5c", "%00", "%3f", "%23", "%25")
 _DRIVE = r"/(?:me/drive|drives/[^/:]+|sites/[^/:]+/drive)"
 _ITEM = _DRIVE + r"/(?:root|items/[^/:]+)(?::/[^:]+:)?"
 _WRITES: tuple[tuple[frozenset[str], re.Pattern[str], WriteKind], ...] = (
     (frozenset({"PUT"}), re.compile(_ITEM + r"/content", re.I), "upload"),
-    (frozenset({"POST", "PATCH"}), re.compile(_ITEM + r"/workbook/.+", re.I), "workbook"),
+    # A colon only inside a quoted argument (range(address='A1:B2')), never
+    # path addressing that could step out of the workbook.
+    (
+        frozenset({"POST", "PATCH"}),
+        re.compile(_ITEM + r"/workbook/(?:[^:']|'[^'/]*')+", re.I),
+        "workbook",
+    ),
     (
         frozenset({"POST"}),
         re.compile(r"/me/onenote/(?:sections/[^/:]+/)?pages", re.I),
@@ -85,11 +94,21 @@ def parse_path(raw: str) -> GraphPath:
     pairs = tuple(parse_qsl(query, keep_blank_values=True))
     if any(key.lower() not in _QUERY_KEYS for key, _ in pairs):
         raise _refuse("it has a query parameter outside $select, $top, $filter and the like")
-    head = [segment.lower() for segment in segments[:2]]
+    lowered = [segment.lower() for segment in segments]
+    if _BEARER & set(lowered) or any(
+        word in value.lower()
+        for key, value in pairs
+        if key.lower() in ("$expand", "$select")
+        for word in _BEARER
+    ):
+        raise _refuse("sharing permissions and thumbnails hold pre-authenticated links")
+    # A site's notebooks are as personal as the person's own (/sites/{id}/onenote).
+    onenote = "onenote" in lowered
+    head = lowered[:2]
     if head[0] in ("drives", "sites"):
-        return GraphPath(path=path, query=pairs, personal=False)
+        return GraphPath(path=path, query=pairs, personal=onenote)
     if head[0] == "me" and len(head) == 2 and head[1] in _FILES:
-        return GraphPath(path=path, query=pairs, personal=False)
+        return GraphPath(path=path, query=pairs, personal=onenote)
     if head[0] == "me" and len(head) == 2 and head[1] in _PERSONAL:
         return GraphPath(path=path, query=pairs, personal=True)
     raise _refuse("it is outside the files, mail, calendar and notes this tool reaches")
