@@ -123,7 +123,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: ${{ matrix.fetch-depth }}  # Core's credential equivalence tests import the fixed base commit and origin/integration/neutral-core, so core fetches full history.
+          fetch-depth: ${{ matrix.fetch-depth }}  # Some core tests read other commits (origin/integration/neutral-core, pinned base commits), so core fetches full history.
       - uses: ./.github/actions/setup-daimon
         with:
           database: "true"
