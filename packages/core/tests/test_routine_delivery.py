@@ -556,9 +556,13 @@ async def test_clear_creator_returns_the_policy_or_why_not(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from unittest.mock import AsyncMock
+
     import daimon.core.routine_delivery as delivery_mod
+    from daimon.core.membership import CachedMembershipResolver, Membership
     from daimon.core.stores.access_policy import AccessPolicyUnreadable
 
+    resolver = CachedMembershipResolver(AsyncMock(return_value=Membership(is_member=True)))
     row = await _routine(db_session)
     await set_access_policy(
         db_session,
@@ -567,7 +571,13 @@ async def test_clear_creator_returns_the_policy_or_why_not(
     )
     await db_session.commit()
 
-    cleared = await clear_creator(db_session_factory, row, platform="discord")
+    assert (
+        await clear_creator(db_session_factory, row, platform="discord") == "invoker_not_allowed"
+    ), "missing membership credentials must not grant delivery under an open invoker policy"
+
+    cleared = await clear_creator(
+        db_session_factory, row, platform="discord", membership_resolver=resolver
+    )
     assert isinstance(cleared, TenantAccessPolicy)
     assert {c: r.writers for c, r in cleared.category_rules.items()} == {"CAT": "none"}
 
@@ -575,17 +585,17 @@ async def test_clear_creator_returns_the_policy_or_why_not(
         db_session, tenant_id=row.tenant_id, policy=TenantAccessPolicy(invoker_user_ids=("U9",))
     )
     await db_session.commit()
-    assert await clear_creator(db_session_factory, row, platform="discord") == (
-        "invoker_not_allowed"
-    )
+    assert await clear_creator(
+        db_session_factory, row, platform="discord", membership_resolver=resolver
+    ) == ("invoker_not_allowed")
 
     async def unreadable(*args: object, **kwargs: object) -> TenantAccessPolicy:
         raise AccessPolicyUnreadable(tenant_id=row.tenant_id)
 
     monkeypatch.setattr(delivery_mod, "load_access_policy", unreadable)
-    assert await clear_creator(db_session_factory, row, platform="discord") == (
-        "access_policy_unreadable"
-    )
+    assert await clear_creator(
+        db_session_factory, row, platform="discord", membership_resolver=resolver
+    ) == ("access_policy_unreadable")
 
 
 @pytest.mark.parametrize(

@@ -926,6 +926,10 @@ async def _reserve_fleet_worker(
         return snapshot
 
 
+#: Consecutive slow budget reads tolerated before a run's workers are cancelled.
+BUDGET_READ_TIMEOUT_LIMIT = 3
+
+
 async def watch_fleet_budget(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -952,6 +956,7 @@ async def watch_fleet_budget(
     timeout = read_timeout if read_timeout is not None else poll_interval * 8
     if not all(math.isfinite(v) and v > 0 for v in (poll_interval, timeout)):
         raise ValueError("budget poll and read timeout must be positive finite durations")
+    timeouts = 0
     try:
         while not finished.is_set():
             started = asyncio.get_running_loop().time()
@@ -967,6 +972,22 @@ async def watch_fleet_budget(
                         )
                         if any(worker_id not in usages for worker_id, _ in watched):
                             raise FleetConflict("watched worker is unavailable")
+            except TimeoutError:
+                # One slow read (e.g. while sibling admissions hold the run lock)
+                # is not unavailable usage: retry, and fail closed only after
+                # consecutive timeouts. Holds are unchanged meanwhile.
+                timeouts += 1
+                if timeouts < BUDGET_READ_TIMEOUT_LIMIT:
+                    log.info("fleet.budget_read_slow", consecutive=timeouts)
+                    continue
+                log.warning(
+                    "fleet.budget_read_unavailable",
+                    reason="read_unavailable",
+                    error_class="TimeoutError",
+                )
+                for event in cancelled.values():
+                    event.set()
+                return "usage_unavailable"
             except Exception as error:
                 log.warning(
                     "fleet.budget_read_unavailable",
@@ -976,6 +997,7 @@ async def watch_fleet_budget(
                 for event in cancelled.values():
                     event.set()
                 return "usage_unavailable"
+            timeouts = 0
             for worker_id, event in watched:
                 usage = usages.get(worker_id)
                 if event.is_set() or usage is None:

@@ -170,3 +170,44 @@ def test_every_named_rule_must_allow_the_channel() -> None:
     agent = agent_permissions(policy, ("Acme Display", "acme"))
     assert not outside_runs_in(agent, "C111")
     assert outside_runs_in(agent, "C999")
+
+
+@pytest.mark.parametrize(
+    ("user", "roles", "member", "admin", "allowed"),
+    [
+        ("u1", (), True, False, True),
+        ("u2", ("123",), True, False, True),
+        ("u2", ("456",), True, False, False),
+        ("u2", (), None, True, False),
+        ("u2", (), True, True, True),
+        ("u1", ("123",), False, False, False),
+    ],
+)
+def test_role_policy_is_verified_user_or_role_union(user, roles, member, admin, allowed):  # type: ignore[no-untyped-def]
+    policy = TenantAccessPolicy(invoker_user_ids=("u1",), invoker_role_ids=("123",))
+    assert (
+        is_invoker_allowed(
+            policy,
+            external_user_id=user,
+            is_admin=admin,
+            role_ids=roles,
+            verified_membership=member,
+        )
+        is allowed
+    )
+
+
+def test_role_list_alone_closes_open_user_list() -> None:
+    policy = TenantAccessPolicy(invoker_role_ids=("123",))
+    assert not is_invoker_allowed(
+        policy, external_user_id="u1", is_admin=False, verified_membership=True
+    )
+    assert is_invoker_allowed(
+        policy, external_user_id="u1", is_admin=False, role_ids=("123",), verified_membership=True
+    )
+
+
+@pytest.mark.parametrize("role", ["", "@everyone", "core", "-1", "0", str(2**64), "１２３"])
+def test_roles_require_snowflakes(role: str) -> None:
+    with pytest.raises(ValidationError):
+        TenantAccessPolicy(invoker_role_ids=(role,))

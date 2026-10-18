@@ -54,6 +54,7 @@ from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
+from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_app_session import (
     archive_app_vault,
     effective_repo_state,
@@ -77,6 +78,8 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
+from daimon.core.membership import MembershipResolver
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
@@ -222,6 +225,7 @@ async def _build_fire(
     settings: Settings,
     deployment_default: DeploymentDefault,
     resolver_cache: ResolverCache,
+    membership_resolver: MembershipResolver | None = None,
 ) -> FireFn:
     """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
 
@@ -240,6 +244,12 @@ async def _build_fire(
     Errors propagate out of this callable into the guarded gather member's
     named error boundary, which records ``last_error``.
     """
+
+    membership_resolver = membership_resolver or (
+        DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
+        if settings.discord is not None
+        else None
+    )
 
     async def _fire(row: RoutineRow) -> None:
         if row.created_by_user_id is None:
@@ -273,8 +283,8 @@ async def _build_fire(
 
             # Invoker policy at fire time: someone taken off the allowlist
             # stops running headless turns through routines they created. The
-            # stored role is the only admin signal a fire has. Unreadable
-            # policy fails closed.
+            # creator facts come from live Discord membership, never a saved
+            # Discord admin role. Unreadable policy fails closed.
             direct_post: DirectPost = "allowed"
             fire_policy: TenantAccessPolicy | None = None
             fire_channel_id: str | None = None
@@ -306,17 +316,36 @@ async def _build_fire(
                         policy, platform=platform, kind=row.destination_kind
                     ):
                         direct_post = "unverified"
-                account = await get_account(s, account_id)
-                is_admin = account is not None and account.role is Role.ADMIN
+                account = await get_account(s, account_id) if platform != "discord" else None
+                is_admin = (
+                    account is not None and account.role is Role.ADMIN and platform != "discord"
+                )
+                subject = build_subject(is_admin=is_admin, platform_user_id=row.created_by_user_id)
+                if platform == "discord" and (
+                    policy.invoker_role_ids or membership_resolver is not None
+                ):
+                    subject = await resolve_subject(
+                        sm,
+                        membership_resolver,
+                        tenant_id=row.tenant_id,
+                        user_id=row.created_by_user_id,
+                        require_fresh=True,
+                        session=s,
+                    )
                 allowed = authorize(
                     policy,
-                    subject=build_subject(
-                        is_admin=is_admin, platform_user_id=row.created_by_user_id
-                    ),
+                    subject=subject,
                     action=Action.ACT_FOR_CREATOR,
                     surface=Surface.ROUTINE,
                 )
-                policy_error = None if allowed else "invoker_not_allowed"
+                membership_required = platform == "discord" and (
+                    bool(policy.invoker_role_ids) or membership_resolver is not None
+                )
+                policy_error = (
+                    None
+                    if allowed and (not membership_required or subject.verified_membership is True)
+                    else "invoker_not_allowed"
+                )
                 # A pinned agent fires only when it posts straight into one of
                 # its pinned channels; `_check_agent_pin` refuses anything else
                 # at save time, and this holds for a pin added since. Isolation

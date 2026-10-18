@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, localcontext
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -318,7 +319,9 @@ async def test_app_cleanup_respects_native_ownership_and_retains_allocation_ack(
 
     revoke = AsyncMock(wraps=session_module.revoke_app_access)
     monkeypatch.setattr(session_module, "revoke_app_access", revoke)
-    grant_view = AsyncMock(return_value=(("declared",), None, None))
+    grant_view = AsyncMock(
+        return_value=(((None, SimpleNamespace(installation_id=1), "write"),), None, None)
+    )
     monkeypatch.setattr(  # pyright: ignore[reportUnknownMemberType]
         session_module, "effective_app_grant_view", grant_view
     )
@@ -1530,7 +1533,9 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
     identity = BotIdentity(name="daimon[bot]", email="7+daimon[bot]@users.noreply.github.com")
     token = AppToken(uuid.uuid4(), "ghs_x", 1, (1,), "write", "GH_TOKEN_ACME_WRITE")
     monkeypatch.setattr("daimon.core.sessions.create_session_vault", AsyncMock(return_value="v"))
-    grant_view = AsyncMock(return_value=(("declared",), None, None))
+    grant_view = AsyncMock(
+        return_value=(((None, SimpleNamespace(installation_id=1), "write"),), None, None)
+    )
     monkeypatch.setattr("daimon.core.sessions.effective_app_grant_view", grant_view)
     monkeypatch.setattr(
         "daimon.core.sessions.prepare_app_access",
@@ -1542,6 +1547,8 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
     )
     monkeypatch.setattr("daimon.core.sessions.add_app_credentials", AsyncMock())
     monkeypatch.setattr("daimon.core.sessions.finish_app_delivery", AsyncMock())
+    upload_helper = AsyncMock()
+    monkeypatch.setattr("daimon.core.sessions.upload_github_repo_helpers_and_mount", upload_helper)
     resolve = AsyncMock(return_value=identity if identity_resolves else None)
     monkeypatch.setattr("daimon.core.sessions.resolve_bot_identity", resolve)
     mount = AsyncMock(
@@ -1577,8 +1584,10 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
 
     resolve.assert_awaited_once()
     grant_view.assert_awaited_once()
+    upload_helper.assert_not_awaited()
     assert observed_access[0].excluded_repo_urls == ("https://github.com/example/unavailable",)
     assert "github_unavailable_repo_urls" not in bodies[0]["metadata"]
+    assert bodies[0]["agent"] == "ag_identity"
     assert resolve.await_args is not None and resolve.await_args.kwargs["slug"] == "daimon"
     mounted = [r for r in bodies[0].get("resources", []) if r["type"] == "file"]
     if identity_resolves:
@@ -1588,6 +1597,110 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
     else:
         assert mounted == [], "an unresolved identity leaves the session without one"
         mount.assert_not_awaited()
+
+
+@pytest.mark.parametrize("delivered_installations", [0, 1, 2, -1])
+async def test_multi_installation_helper_requires_a_delivered_named_token(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    delivered_installations: int,
+) -> None:
+    tenant = await make_tenant(db_session)
+    agent_uuid = uuid.uuid4()
+    await db_session.commit()
+    grant_view = AsyncMock(
+        return_value=(
+            (
+                (None, SimpleNamespace(installation_id=101), "write"),
+                (None, SimpleNamespace(installation_id=202), "write"),
+            ),
+            None,
+            None,
+        )
+    )
+    monkeypatch.setattr("daimon.core.sessions.effective_app_grant_view", grant_view)
+    monkeypatch.setattr(
+        "daimon.core.sessions.create_session_vault", AsyncMock(return_value="vlt_multi")
+    )
+    all_tokens = (
+        AppToken(uuid.uuid4(), "token-a", 101, (11,), "write", "GH_TOKEN_I101_0", 1, 0),
+        AppToken(uuid.uuid4(), "token-b", 202, (22,), "write", "GH_TOKEN_I202_0", 1, 0),
+    )
+    all_entries = (
+        ("a/one", "GH_TOKEN_I101_0"),
+        ("b/two", "GH_TOKEN_I202_0"),
+    )
+    tokens = (
+        all_tokens[1:] if delivered_installations == -1 else all_tokens[:delivered_installations]
+    )
+    entries = (
+        all_entries[1:] if delivered_installations == -1 else all_entries[:delivered_installations]
+    )
+    access = AppSessionAccess(
+        (),
+        tokens,
+        "token-a" if tokens and delivered_installations != -1 else None,
+        multi_installation=True,
+        repo_credential_map=entries,
+    )
+    monkeypatch.setattr("daimon.core.sessions.prepare_app_access", AsyncMock(return_value=access))
+    monkeypatch.setattr("daimon.core.sessions.add_app_credentials", AsyncMock())
+    monkeypatch.setattr("daimon.core.sessions.finish_app_delivery", AsyncMock())
+    monkeypatch.setattr("daimon.core.sessions.revoke_app_access", AsyncMock())
+    monkeypatch.setattr("daimon.core.sessions.archive_app_vault", AsyncMock())
+    monkeypatch.setattr("daimon.core.sessions.resolve_bot_identity", AsyncMock(return_value=None))
+    upload_helper = AsyncMock(
+        return_value=(
+            {"type": "file", "file_id": "file_map", "mount_path": "github-repos.tsv"},
+            {"type": "file", "file_id": "file_script", "mount_path": "github-repo.sh"},
+        )
+    )
+    monkeypatch.setattr("daimon.core.sessions.upload_github_repo_helpers_and_mount", upload_helper)
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST" and request.url.path == "/v1/sessions"
+        body = json_body(request)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_multi_helper",
+                agent_id="ag_multi_helper",
+                environment_id=body["environment_id"],
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(handler),
+        agent=_make_agent(anthropic_id="ag_multi_helper"),
+        environment=_make_env(anthropic_id="env_multi_helper"),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+    )
+    grant_view.assert_awaited_once()
+    if tokens:
+        assert upload_helper.await_args is not None
+        assert upload_helper.await_args.kwargs["entries"] == entries
+        assert {resource["mount_path"] for resource in bodies[0]["resources"]} >= {
+            "github-repos.tsv",
+            "github-repo.sh",
+        }
+        assert bodies[0]["metadata"]["daimon_github_repo_map_sha256"]
+        if delivered_installations == -1:
+            assert access.working_token is None
+            assert entries == (("b/two", "GH_TOKEN_I202_0"),)
+    else:
+        upload_helper.assert_not_awaited()
+        assert not any(
+            resource.get("mount_path") in ("github-repos.tsv", "github-repo.sh")
+            for resource in bodies[0].get("resources", [])
+        )
+        assert "daimon_github_repo_map_sha256" not in bodies[0]["metadata"]
+        assert "daimon_github_repo_script_sha256" not in bodies[0]["metadata"]
+    assert bodies[0]["agent"] == "ag_multi_helper"
 
 
 async def test_app_session_attaches_caller_and_session_vaults(
@@ -1601,7 +1714,9 @@ async def test_app_session_attaches_caller_and_session_vaults(
     monkeypatch.setattr(
         "daimon.core.sessions.create_session_vault", AsyncMock(return_value="vlt_session")
     )
-    grant_view = AsyncMock(return_value=(("declared",), None, None))
+    grant_view = AsyncMock(
+        return_value=(((None, SimpleNamespace(installation_id=1), "write"),), None, None)
+    )
     monkeypatch.setattr("daimon.core.sessions.effective_app_grant_view", grant_view)
     monkeypatch.setattr(
         "daimon.core.sessions.prepare_app_access",

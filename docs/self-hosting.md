@@ -1212,3 +1212,51 @@ before connecting. A standby that receives SIGTERM exits without touching the
 lease. A holder that loses its owner connection and cannot retake the lease stops.
 The first process to take the lease with no earlier holder recorded also waits for any Discord process from before the lease to exit, so the first deploy of this change still replaces the container stop-first. The deploy script falls back to stop-first for an image that lacks the lease, so a rollback to an older image behaves as it did before. To use the same pattern with your own deploy scripts, start the new Discord
 container before stopping the old one and give it the same database.
+
+## Discord membership checks
+
+Role-based admission uses the existing `DAIMON_DISCORD__BOT_TOKEN`. Set it
+in scheduler and MCP processes serving Discord tenants as well as the gateway
+process. It must belong to a bot in the selected guild and permit reading
+guild members, guild metadata, and roles. No separate user credential is used.
+
+Embedded gateway hosts can enable Discord's privileged Server Members intent
+in the developer portal and their `discord.Intents` to receive prompt member
+role and departure events. The stock entrypoint does not request this privileged
+intent; it uses the REST freshness bound when member events are absent.
+Daimon invalidates gateway evidence on member updates/removals and guild
+removal/unavailability. REST fallback remains necessary when events or intents
+are missing; untimestamped SDK member cache entries are not fresh proof.
+Ordinary positive checks expire after 30 seconds, negative checks after five.
+Private result delivery always fetches live membership. Concurrent lookups
+share work; rate-limit retries and network waits have a ten-second overall
+bound. API denial, timeout, missing credentials, and unavailable guilds fail
+closed when current evidence is required. An expired grant is never reused
+after an error.
+
+
+### Enabling Discord cold DMs
+
+Run `uv run alembic upgrade head` before starting a version that reads the nullable
+`direct_message_policies.dm_agent_name` column. Existing rows stay null, so cold
+DMs remain off after migration. Upgrade every Discord reader before configuring an
+agent: older readers do not recognize source-free cold scopes. Existing `/dm-me`
+moves remain available when tenant
+DMs are enabled. Configure an existing tenant-owned agent explicitly:
+
+```bash
+daimon tenants dm-policy discord GUILD_ID --agent AGENT_NAME --enabled
+daimon tenants dm-policy discord GUILD_ID --json
+```
+
+The Discord admin equivalent is `/dm-me action:enable`, followed by
+`/dm-me action:agent agent_name:AGENT_NAME`. Configure the tenant's invoker role IDs
+and recipient policy as usual; cold discovery uses live member fetches through the
+shared membership resolver. No new environment setting or Discord command alias is
+required. `--clear-agent` (or `/dm-me action:clear-agent`) disables cold discovery
+without closing existing private conversations or disabling explicit moves.
+
+For downgrade, stop the new readers before removing the column. Downgrade discards
+the selected agent names; record them first if they will be restored later. Existing
+DM enablement and conversation rows survive. Pending server selectors are ephemeral;
+a restart invalidates them and the person must send a new message.

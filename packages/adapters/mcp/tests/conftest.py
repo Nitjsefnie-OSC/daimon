@@ -73,3 +73,23 @@ async def committing_sessionmaker(
     schema mapping is needed here.
     """
     return async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
+
+@pytest.fixture(autouse=True)
+def current_discord_membership(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing MCP fixtures simulate a current non-admin server member.
+
+    Explicit resolver fakes override this default in role/admin/error tests.
+    No runtime constructed by this suite can accidentally call Discord REST.
+    """
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    async def fetch(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        return Membership(is_member=True)
+
+    def initialize(runtime: McpRuntime) -> None:
+        if runtime.membership_resolver is None:
+            object.__setattr__(runtime, "membership_resolver", CachedMembershipResolver(fetch))
+
+    monkeypatch.setattr(McpRuntime, "__post_init__", initialize)

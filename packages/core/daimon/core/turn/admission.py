@@ -73,6 +73,7 @@ from daimon.core.ma_resolver import (
     retrieve_agent_cached,
     retrieve_environment_cached,
 )
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import (
     agent_permissions,
     at_home,
@@ -173,6 +174,7 @@ class AdmissionGrant:
     channel_id: str
     thread_id: str | None
     is_dm: bool
+    cold_dm: bool = False
     # Set by the DM path: the conversation's source, whose seal is re-checked.
     dm_source: DmSource | None = None
     # The caller is from another organisation: answered only in an isolated channel.
@@ -310,8 +312,12 @@ async def admit(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
+    dm_agent_name: str | None = None,
+    cold_dm: bool = False,
     category_id: str | None = None,
     category_unresolved: bool = False,
     external: ExternalFinding | None = None,
@@ -333,8 +339,12 @@ async def admit(
                 now=now,
                 thread_id=thread_id,
                 role=role,
+                role_ids=role_ids,
+                verified_membership=verified_membership,
                 is_dm=is_dm,
                 dm_source_channel_id=dm_source_channel_id,
+                dm_agent_name=dm_agent_name,
+                cold_dm=cold_dm,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
                 external=external,
@@ -383,8 +393,12 @@ async def admit_impl(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
+    dm_agent_name: str | None = None,
+    cold_dm: bool = False,
     category_id: str | None = None,
     category_unresolved: bool = False,
     external: ExternalFinding | None = None,
@@ -433,7 +447,29 @@ async def admit_impl(
 
         # Refusals must happen before config is read. Keeping the session here
         # reuses its connection for the config cascade after authorization.
-        subject = build_subject(is_admin=role is Role.ADMIN, platform_user_id=external_user_id)
+        subject = build_subject(
+            is_admin=role is Role.ADMIN,
+            platform_user_id=external_user_id,
+            role_ids=role_ids,
+            verified_membership=verified_membership,
+        )
+        if (
+            platform == "discord"
+            and verified_membership is None
+            and (policy.invoker_role_ids or deps.membership_resolver is not None)
+        ):
+            subject = await resolve_subject(
+                deps.sessionmaker,
+                deps.membership_resolver,
+                tenant_id=tenant_id,
+                user_id=external_user_id,
+                require_fresh=is_dm,
+                session=session,
+            )
+            if subject.verified_membership is not True:
+                raise AdmissionDenied(reason="invoker_not_allowed")
+        if is_dm and platform == "discord" and subject.verified_membership is not True:
+            raise AdmissionDenied(reason="invoker_not_allowed")
         turn_place = build_turn_place(
             channel_id=channel_id,
             thread_id=thread_id,
@@ -461,6 +497,12 @@ async def admit_impl(
             thread_id=thread_id,
         )
         config = await resolve_config(session, context=scope, default=deps.deployment_default)
+        if dm_agent_name is not None:
+            if not is_dm or thread_id is not None:
+                raise ValueError("A cold DM agent override requires a fresh private scope")
+            config = config.model_copy(
+                update={"agent_name": dm_agent_name, "responder_ma_agent_id": None}
+            )
         # Feature-disabled turns retain the existing channel read and skip all
         # agent preference, materialization and thread-pinning work.
         channel = channel_ref(tenant_id, platform, channel_id) if deps.channel_backends else None
@@ -612,6 +654,9 @@ async def admit_impl(
         raise AdmissionDenied(reason="backend_unsupported") from err
 
     async def _apply() -> object:
+        if dm_agent_name is not None:
+            # Cold discovery must never provision an agent to make it eligible.
+            return None
         return await reconcile_tenant_defaults(
             deps.anthropic,
             deps.sessionmaker,
@@ -723,6 +768,7 @@ async def admit_impl(
         channel_id=channel_id,
         thread_id=thread_id,
         is_dm=is_dm,
+        cold_dm=cold_dm or dm_agent_name is not None,
         is_external=is_external,
     )
     _require_run_agent(policy, grant)
@@ -1022,9 +1068,18 @@ def _require_external_inside_home(
 
 def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> None:
     """The agent pin, then channel isolation; any denial refuses the turn."""
+    subject = replace(grant.subject, is_admin=False) if grant.cold_dm else grant.subject
+    if grant.cold_dm and not authorize(
+        policy,
+        subject=subject,
+        action=Action.DIRECT_MESSAGE,
+        agent=grant.agent,
+        recipient_id=subject.platform_user_id,
+    ):
+        raise AdmissionDenied(reason="own_agents_only")
     decision = authorize(
         policy,
-        subject=grant.subject,
+        subject=subject,
         action=Action.RUN_AGENT,
         surface=grant.surface,
         agent=grant.agent,
@@ -1075,6 +1130,34 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         return admission
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
+        # The opt-in conversation policy is separate from native personal-chat
+        # surfaces (for example Teams), which also admit with is_dm=True.
+        if grant.is_dm and (grant.cold_dm or grant.dm_source is not None):
+            from daimon.core.stores.direct_messages import dm_enabled
+            from daimon.core.stores.tenants import get_tenant
+
+            tenant = await get_tenant(session, grant.tenant_id)
+            if (
+                tenant is None
+                or tenant.archived_at is not None
+                or tenant.provision_status != "ready"
+                or not await dm_enabled(session, tenant_id=grant.tenant_id)
+            ):
+                raise AdmissionDenied(reason="invoker_not_allowed")
+    if grant.subject.platform_user_id is not None and (
+        policy.invoker_role_ids
+        or (deps.membership_resolver is not None and grant.subject.verified_membership is not None)
+    ):
+        subject = await resolve_subject(
+            deps.sessionmaker,
+            deps.membership_resolver,
+            tenant_id=grant.tenant_id,
+            user_id=grant.subject.platform_user_id,
+        )
+        if subject.verified_membership is not True:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        grant = replace(grant, subject=subject)
+        admission = replace(admission, grant=grant)
     _require_turn_start(policy, grant.subject, grant.turn_place)
     _require_external_inside_home(
         policy,

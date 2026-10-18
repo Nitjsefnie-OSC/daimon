@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Private Discord replies recheck the answering agent's current pin and isolation rules before delivery. Unavailable bound agents and unreadable private policies are silent, and superseded server-switch controls are retired.
+
+- Discord can answer a first DM using an explicitly configured tenant agent, with a private server chooser when several servers qualify. Cold starts copy no channel history. Ineligible senders and revoked private access receive no reply; server switches reset the private scope.
+
+- Gate Discord turns and routine owners by configured role IDs, with current membership checks for MCP, scheduled fires, and private delivery. Configure roles with `daimon tenants access-policy set --invoker-role`.
+
+### Fixed
+
+- Discord private conversations retain operational and billing notices while access denials stay silent. Discovery failures after membership and invoker checks show a generic notice without server or agent names.
+
+- Switching providers preserves supported MCP tools when a sibling needs confirmation; unavailable tools require explicit consent and remain blocked.
+
+- Fleet workers can wake the root again after an Anthropic turn reaches its budget.
+- Blocked fleet runs post a final Discord notice with worker statuses, without sharing unreviewed results.
+
 ### Changed
 
 - **Third-party MCP tools that say they only read can stop asking for
@@ -21,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `denied` entry still wins, and when the server cannot be read the tool name
   decides as before. The list is empty by default: an unlisted server's
   annotations are never fetched and its tools are classified by name only.
+- The GitHub repo editor now refuses saves over 256 KiB, gives up listing your GitHub repos after 60 seconds, and keeps your ticked repos when Try again follows a GitHub error.
 - **People from another organisation get none of the agent's credentials.**
   A Teams external participant or guest answered in a `readers: own`
   channel used to get the agent's keys as a mounted `.env` and its shared
@@ -31,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaced, not reused, the next time such a person is answered in it,
   without carrying its work.
 
+- A Teams channel command whose "answered in your 1:1 chat" notice Teams refuses is still answered in the 1:1 chat. Failed sends now log Teams' error code.
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
 - Revoked GitHub token records are now deleted 7 days after they expire and unused ones 1 hour after, while live tokens and the security audit log are kept.
 - `/dm` is now `/dm-me` on Slack and Discord, including `/dm-me enable` and `/dm-me disable`. Slack reserves `/dm` for its own command, so a Slack app could not offer it. Its replies read as one line for what happened and one for what to do; a DM closed because its channel was sealed now says to keep working in that channel.

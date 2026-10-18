@@ -1992,12 +1992,59 @@ Discord uses a live guild-member lookup and Slack checks the current workspace
 membership and role. No stored admin role grants access.
 
 `/dm-me` in a server/channel moves recent text context into a new private scope. This
-selects the workspace explicitly; unselected DMs remain ignored. The scope uses a
+selects the workspace explicitly. The scope uses a
 normal thread-agent binding, config cascade and per-account session mapping. Each
 new selection resets the scope, so a physical Discord DM shared across servers
 never contributes the previous server's private history. The live membership check
 is bound to that scope to prevent a concurrent selection from changing its authority.
 The context is escaped with the existing handoff builder and includes a source link.
+Discord also accepts a first text DM when a ready, unarchived registered tenant has
+DMs enabled and a non-null `dm_agent_name` in its durable DM policy. Null leaves
+cold DMs off without disabling `/dm-me` moves. Admins select or clear the name with
+`/dm-me action:agent agent_name:NAME` and `/dm-me action:clear-agent`; operators can
+inspect or update it with `daimon tenants dm-policy discord GUILD_ID`,
+`--agent NAME --enabled`, and `--clear-agent`. The agent must already exist in that
+tenant; there is no fallback to the server-default agent or automatic provisioning.
+
+Discovery checks fresh membership, invoker access, recipient restrictions and the
+selected agent's rules before exposing any server. One eligible server starts a
+new private scope and answers the original message. Several produce a requester-only,
+route-bound server selector, including pagination for more than 25 servers. It retains
+the original message for five minutes and rechecks eligibility on selection. Later
+messages on that route are silently ignored while selection is pending. After expiry,
+the next message discovers again. Unknown membership asks for a retry rather than
+presenting an incomplete choice. No eligible tenant means no reply and a structured
+reason log. Discovery and server switching share a per-user bucket of three attempts,
+refilling one every 20 seconds; exhaustion is silent. Ordinary active replies do not
+consume this bucket. Pending controls and rate buckets are process-local; a restart
+invalidates selectors, so the person sends a new message.
+
+A cold scope binds its own agent without changing the physical DM channel's config.
+Its context and history start empty, its source channel/thread are absent, and its
+origin label is `Private conversation`. This explicit provenance is distinct from
+old moved conversations that lack recorded sources. The opening notice names the
+server and agent and offers **Switch server**. Only the latest switch control for
+each user/DM route remains active; a later reply or switch stops its predecessor.
+Controls expire absolutely after fifteen minutes, and adapter unload stops all
+controls and pending selectors. Send another message to renew an expired switch
+control. Switching creates a fresh scope, retires the previous session mapping and
+never replays the previous prompt or history.
+An active conversation always wins over discovery, even if access to its tenant is
+revoked; revoked access is silent and never reroutes the message to another server.
+Route writes serialize even before a conversation exists, and message claims deduplicate
+turns. Distinct simultaneous first messages may each run once as successive turns
+in the same newly created scope; duplicate gateway events and concurrent selector
+clicks never answer a message twice. The reply result carries the exact admitted
+agent grant. Immediately before each private output chunk, delivery rechecks fresh
+membership, current tenant/invoker policy, recipient restrictions, the answering
+agent's `RUN_AGENT` and `DIRECT_MESSAGE` permissions without an admin exemption,
+and moved-source sealing. Unavailable bound identities and unreadable private
+policies are typed core denials that Discord logs without sending a reply.
+Routine notifications deliver through their transport without calling
+`start_dm`, `start_cold_dm` or `start_conversation`. The active route is exposed by
+`stores.direct_messages.get_conversation(platform, route_key, external_user_id)`;
+routine delivery neither replaces it nor appends to its private model history.
+
 `/dm-me` refuses in a channel with limited readers or a Discord thread that has
 or sits under one, before any history is read: the DM sits outside the rule
 and can reach open channels. Admission reports this as `source_sealed`, and
@@ -2039,7 +2086,7 @@ The provenance thread ID remains the private scope ID, matching session mapping.
 The first version delivers text replies after completion. Attachments, streaming
 cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
 slash command carries recent channel messages. Run `/dm-me` again to reset or select
-another channel. Disabling DMs prevents new turns, without cancelling a running turn.
+another channel. Disabling DMs prevents new turns; Discord also suppresses private result delivery. Disabling DMs does not cancel a model turn already running.
 
 Slack consumes the same optional neutral-event tap for alternate-provider drafts. Its render task retains debounce and Cancel registration, and terminal callbacks replace the progress card and deregister Cancel. Foreign provider observations never become Anthropic display meters.
 
@@ -2079,3 +2126,21 @@ existing progress card while it waits behind the tenant cap. The same card
 returns to ordinary progress when the slot is granted. Stop, queue limits and
 FIFO admission are unchanged, and the card displays no tenant identities or
 queue counts. Drained follow-up turns keep their existing card wording.
+
+## Current Discord membership evidence
+
+The pure authorization subject carries platform role IDs and verified tenant
+membership. Admission and reauthorization use these facts for the tenant's
+invoker policy. `daimon.core.membership.MembershipResolver.resolve(tenant_id,
+guild_id, user_id, require_fresh=False)` is the shared asynchronous boundary.
+`Membership` reports membership (true, false, or unknown), current role IDs,
+and current server-admin permissions. Callers select a registered tenant's
+guild; internal account UUIDs never substitute for Discord user IDs.
+
+The Discord adapter timestamps gateway facts at ingress, before queue waits;
+queued or replayed message snapshots cannot restore revoked roles. Its live
+SDK fetch refreshes guild role/owner metadata as well as the member. MCP and scheduler hosts use the core Discord REST transport
+with the existing bot credential, without importing the Discord adapter.
+The shared cache keys by tenant, guild, and user, shares concurrent fetches,
+and discards results invalidated while in flight. `require_fresh=True` bypasses
+completed cache entries. Unknown evidence cannot satisfy a role gate.

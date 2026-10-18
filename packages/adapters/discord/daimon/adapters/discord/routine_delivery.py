@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 import structlog
+from daimon.adapters.discord.membership import GatewayMembershipResolver
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
@@ -38,6 +39,7 @@ from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.membership import MembershipResolver
 from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -155,11 +157,24 @@ def make_discord_routine_poster(
     dm_policy: DmPolicyLookup,
     client: discord.Client | None = None,
     resolve_identity: IdentityResolver | None = None,
+    membership_resolver: MembershipResolver | None = None,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
     """A poster bound to the bot's channel lookup (cache first, then REST).
 
     Without `client` and `resolve_identity` every result posts as the bot.
     """
+
+    membership_resolver = membership_resolver or (
+        GatewayMembershipResolver(client) if client is not None else None
+    )
+
+    async def creator_still_cleared(row: RoutineRow) -> DeliveryOutcome | None:
+        cleared = await clear_creator(
+            sessionmaker, row, platform="discord", membership_resolver=membership_resolver
+        )
+        if not isinstance(cleared, TenantAccessPolicy):
+            return DeliveryOutcome(status="skipped", note=cleared)
+        return None
 
     async def _dm_fallback(row: RoutineRow, reason: str, guild_id: str) -> DeliveryOutcome:
         creator = row.created_by_user_id
@@ -175,6 +190,8 @@ def make_discord_routine_poster(
             for chunk in split_fenced(
                 render_fallback_dm(row, reason), _DISCORD_MAX_CHARS, word_boundary=True
             ):
+                if (refused := await creator_still_cleared(row)) is not None:
+                    return refused
                 await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
         except (discord.HTTPException, LookupError) as err:
             log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=str(err))
@@ -189,7 +206,9 @@ def make_discord_routine_poster(
         # Creator first, before resolving or sending anything: a creator who
         # may no longer invoke the agent, or an unreadable policy, gets
         # nothing — no destination post and no direct message.
-        cleared = await clear_creator(sessionmaker, row, platform="discord")
+        cleared = await clear_creator(
+            sessionmaker, row, platform="discord", membership_resolver=membership_resolver
+        )
         if not isinstance(cleared, TenantAccessPolicy):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
@@ -267,6 +286,8 @@ def make_discord_routine_poster(
             for chunk in split_fenced(
                 render_fallback_post(row), _DISCORD_MAX_CHARS, word_boundary=True
             ):
+                if (refused := await creator_still_cleared(row)) is not None:
+                    return refused
                 sent = await channel.send(
                     content=chunk, allowed_mentions=discord.AllowedMentions.none()
                 )
@@ -285,6 +306,8 @@ def make_discord_routine_poster(
         for index, chunk in enumerate(
             split_fenced(render_fallback_post(row, as_agent=True), limit, word_boundary=True)
         ):
+            if (refused := await creator_still_cleared(row)) is not None:
+                return refused
             sent = await transport.send(
                 content=chunk,
                 allowed_mentions=discord.AllowedMentions.none(),

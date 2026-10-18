@@ -636,6 +636,51 @@ def _session_with_memory(*mounts: BetaManagedAgentsMemoryStoreResource) -> BetaM
     )
 
 
+def test_multi_repo_helper_mounts_and_map_enter_snapshot() -> None:
+    base = _session_with_memory()
+    resources = [
+        BetaManagedAgentsFileResource(
+            id="res_map",
+            created_at=_NOW,
+            file_id="file_map",
+            mount_path="/mnt/session/uploads/github-repos.tsv",
+            type="file",
+            updated_at=_NOW,
+        ),
+        BetaManagedAgentsFileResource(
+            id="res_script",
+            created_at=_NOW,
+            file_id="file_script",
+            mount_path="/mnt/session/uploads/github-repo.sh",
+            type="file",
+            updated_at=_NOW,
+        ),
+    ]
+    session = base.model_copy(
+        update={
+            "resources": resources,
+            "metadata": {
+                "daimon_github_repo_map_sha256": "map-hash",
+                "daimon_github_repo_script_sha256": "script-hash",
+            },
+        }
+    )
+    snapshot = snapshot_from_created_session(
+        session,
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=1,
+        vault_id=None,
+        sent_skills=(),
+    )
+    assert snapshot.github_repo_map_sha256 == "map-hash"
+    assert snapshot.github_repo_script_sha256 == "script-hash"
+    assert snapshot.github_repo_map_file_id == "file_map"
+    assert snapshot.github_repo_map_resource_id == "res_map"
+    assert snapshot.github_repo_script_file_id == "file_script"
+    assert snapshot.github_repo_script_resource_id == "res_script"
+
+
 def test_the_personal_store_is_told_apart_by_id_whatever_the_mount_order() -> None:
     personal = BetaManagedAgentsMemoryStoreResource(
         memory_store_id="memstore_alice", type="memory_store", access="read_write"

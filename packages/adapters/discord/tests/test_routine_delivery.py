@@ -14,6 +14,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_posts import list_posts_in
@@ -125,9 +126,13 @@ def _poster(
             )
         return found
 
+    async def membership(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        return Membership(is_member=True)
+
     return make_discord_routine_poster(
         sm,
         fetch_channel=fetch,
+        membership_resolver=CachedMembershipResolver(membership),
         open_dm=(dms or _Dms()).open,
         dm_policy=lambda row: DirectMessagePolicy(mode=dm_mode),  # type: ignore[arg-type]
         client=MagicMock(spec=discord.Client) if identity is not None else None,
@@ -634,3 +639,70 @@ async def test_a_failed_record_does_not_fail_the_delivery(
 
     assert outcome.status == "delivered", "the result is out; a lost record only loses tidying"
     channel.send.assert_awaited_once()
+
+
+async def test_role_loss_during_destination_lookup_refuses_delayed_delivery(
+    db_session, db_session_factory
+):  # type: ignore[no-untyped-def]
+    from daimon.core.config import DirectMessagePolicy
+
+    row = await _routine(db_session)
+    await set_access_policy(
+        db_session, tenant_id=row.tenant_id, policy=TenantAccessPolicy(invoker_role_ids=("123",))
+    )
+    await db_session.commit()
+    facts = [Membership(is_member=True, role_ids=("123",))]
+    calls = []
+
+    async def member(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        calls.append(user_id)
+        return facts[0]
+
+    resolver = CachedMembershipResolver(member)
+    channel = _text_channel()
+    dms = _Dms()
+
+    async def fetch(channel_id):  # type: ignore[no-untyped-def]
+        facts[0] = Membership(is_member=True)
+        return channel
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=fetch,
+        open_dm=dms.open,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=resolver,
+    )
+    outcome = await poster(row)
+    assert outcome.status == "skipped" and outcome.note == "invoker_not_allowed"
+    channel.send.assert_not_awaited()
+    assert not dms.sent
+    assert calls == ["1", "1"], (
+        "delivery must bypass the positive cache after the destination await"
+    )
+
+
+async def test_routine_dm_does_not_replace_an_active_private_conversation(db_session_factory):
+    from daimon.core.stores.direct_messages import get_conversation
+    from daimon.testing.factories import make_account, make_dm_conversation
+
+    async with db_session_factory() as session:
+        routine = await _routine(session, destination_id="unavailable")
+        active_tenant = await make_tenant(session, workspace_id="700000102")
+        account = await make_account(session, tenant=active_tenant)
+        active = await make_dm_conversation(
+            session,
+            tenant=active_tenant,
+            account_id=account.id,
+            route_key="physical-dm",
+            external_user_id="1",
+        )
+        await session.commit()
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, {}, dms=dms)(routine)
+    assert outcome.status == "delivered" and dms.sent
+    async with db_session_factory() as session:
+        after = await get_conversation(
+            session, platform="discord", route_key="physical-dm", external_user_id="1"
+        )
+    assert after == active, "routine output changes neither the active tenant nor private history"

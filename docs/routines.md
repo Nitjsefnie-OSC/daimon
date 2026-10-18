@@ -549,3 +549,14 @@ persisted 30-minute expiry, actual card identity/readback and the native/root
 oracle context. A component test's store creation/renderer proves host expiry,
 not native credential-target ingress. Routine jobs and ordinary product defaults
 are unchanged.
+
+## Discord creator membership
+
+Discord scheduled fires check the creator's current server membership, role
+IDs, and native admin permissions against the tenant invoker policy. Stored
+account admin status cannot satisfy a configured role gate. The Discord
+poster checks again with a live membership lookup before delivery, including
+a private fallback. A departed creator, revoked role, or unavailable lookup
+refuses the result; no destination post or private fallback is authorized
+by stale evidence. User exceptions and current server admins retain their
+invoker-policy bypass; destination and agent restrictions remain separate.
