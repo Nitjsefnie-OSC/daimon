@@ -6,6 +6,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from daimon.core.github_app_auth import PermissionProfile, group_repository_access
+from daimon.core.github_app_session import (
+    AppToken,
+    _working_alias,  # pyright: ignore[reportPrivateUsage]
+    token_scopes_for_groups,
+)
 from daimon.core.session_compat import (
     DEFAULT_MA_CAPABILITIES,
     ChangeReason,
@@ -20,7 +26,7 @@ from daimon.core.session_compat import (
     decide_session_compatibility,
     identity_change_reasons,
 )
-from daimon.core.session_snapshot import SessionSnapshot
+from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
 
 NOW = datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)
 
@@ -45,6 +51,288 @@ def make_snapshot(**overrides: Any) -> SessionSnapshot:
     }
     fields.update(overrides)
     return SessionSnapshot(**fields)
+
+
+def test_single_installation_fingerprint_matches_pre_m1_golden() -> None:
+    snapshot = make_snapshot(
+        github_mode="app",
+        repo_url=None,
+        repo_branch=None,
+        repo_urls=("https://github.com/example/one",),
+        token_repo_urls=("https://github.com/example/one",),
+    )
+    assert snapshot.token_scopes == ()
+    assert fingerprint_identity(snapshot) == (
+        "8c98253a6a1f0b5cdf65465b1c52e7d069f80a12774ec295cf0ce8a81149e623"
+    )
+    assert "token_scopes" not in snapshot.model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    ("grants", "working_url", "token_urls", "golden"),
+    [
+        (
+            [(71, 101, "read"), (71, 102, "write")],
+            "https://github.com/example/write",
+            ("https://github.com/example/read", "https://github.com/example/write"),
+            "829f05dab0445d71bede9ebfb264d6ca8ec2e6ab39899c4132419c864f8c5737",
+        ),
+        (
+            [(71, repo_id, "write") for repo_id in range(1, 502)],
+            "https://github.com/example/repo-001",
+            tuple(f"https://github.com/example/repo-{repo_id:03d}" for repo_id in range(1, 502)),
+            "834982d92e98d9083755e3d5a5685a5e5406356b497ee226ed1a1b9cc72ce609",
+        ),
+    ],
+)
+def test_single_installation_multi_group_fingerprint_and_compat_stay_legacy(
+    grants: list[tuple[int, int, PermissionProfile]],
+    working_url: str,
+    token_urls: tuple[str, ...],
+    golden: str,
+) -> None:
+    groups = group_repository_access(grants)
+    assert len(groups) > 1
+    assert token_scopes_for_groups(groups) == ()
+    snapshot = make_snapshot(
+        github_mode="app",
+        repo_url=None,
+        repo_branch=None,
+        repo_urls=(working_url,),
+        token_repo_urls=token_urls,
+        token_scopes=token_scopes_for_groups(groups),
+        repo_token_issued_at=int(NOW.timestamp()),
+    )
+    assert fingerprint_identity(snapshot) == golden
+    assert "token_scopes" not in snapshot.model_dump(mode="json")
+    assert (
+        decide_session_compatibility(
+            recorded=snapshot,
+            desired=snapshot,
+            capabilities=DEFAULT_MA_CAPABILITIES,
+            now=NOW,
+        )
+        == ReuseAsIs()
+    )
+
+
+def test_single_installation_chunking_keeps_main_alias_for_out_of_order_grants() -> None:
+    import uuid
+
+    groups = group_repository_access([(71, repo_id, "write") for repo_id in (501, *range(1, 501))])
+    assert groups == [
+        (71, "write", (501, *range(1, 500))),
+        (71, "write", (500,)),
+    ]
+    groups.sort(key=lambda group: (group[0], group[1], group[2]))
+    assert groups[0][2] == (500,)  # main's first-token fallback when no repo is working
+    tokens = tuple(
+        AppToken(uuid.uuid4(), f"token-{index}", installation_id, ids, profile, "GH_TOKEN")
+        for index, (installation_id, profile, ids) in enumerate(groups)
+    )
+    assert _working_alias(tokens, None, multi_installation=False) == "token-0"
+    assert token_scopes_for_groups(groups) == ()
+
+
+def test_reassigning_a_repo_between_installations_changes_identity() -> None:
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_urls=("https://github.com/example/a", "https://github.com/example/b"),
+        token_repo_urls=("https://github.com/example/a", "https://github.com/example/b"),
+        token_scopes=((1, (101,)), (2, (102,))),
+    )
+    reassigned = recorded.model_copy(update={"token_scopes": ((2, (101, 102)),)})
+    assert identity_change_reasons(recorded, reassigned) == ("repo_set",)
+    assert fingerprint_identity(recorded) != fingerprint_identity(reassigned)
+
+
+def test_only_aged_installation_rotates() -> None:
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_urls=("https://github.com/example/a", "https://github.com/example/b"),
+        token_repo_urls=("https://github.com/example/a", "https://github.com/example/b"),
+        token_scopes=((1, (101,)), (2, (102,))),
+        token_issued_at_by_installation={
+            1: int(NOW.timestamp()) - 2400,
+            2: int(NOW.timestamp()),
+        },
+        vault_id="session-vault",
+    )
+    decision = decide_session_compatibility(
+        recorded=recorded,
+        desired=recorded,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    )
+    assert decision == UpdateInPlace(
+        ops=(RotateAppTokens(resource_ids={}, installation_ids=(1,)), RemirrorVaultCredentials()),
+        reasons=("repo_token_age",),
+    )
+    fresh = recorded.model_copy(
+        update={
+            "token_issued_at_by_installation": {1: int(NOW.timestamp()), 2: int(NOW.timestamp())}
+        }
+    )
+    forced = decide_session_compatibility(
+        recorded=fresh,
+        desired=fresh,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+        force_app_token_rotation=True,
+        forced_app_installation_ids=(2,),
+    )
+    assert forced == UpdateInPlace(
+        ops=(RotateAppTokens(resource_ids={}, installation_ids=(2,)), RemirrorVaultCredentials()),
+        reasons=("repo_token_age",),
+    )
+
+
+def test_any_aged_chunk_rotates_its_installation_even_when_other_chunks_are_fresh() -> None:
+    fresh = int(NOW.timestamp())
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_urls=("https://github.com/example/a",),
+        token_repo_urls=(
+            "https://github.com/example/a",
+            "https://github.com/example/a2",
+            "https://github.com/example/b",
+        ),
+        token_scopes=(
+            (1, 0, (101,), fresh, "token-a0"),
+            (1, 1, (102,), fresh - 2400, "token-a1"),
+            (2, 0, (201,), fresh, "token-b0"),
+        ),
+        token_issued_at_by_installation={1: fresh, 2: fresh},
+        vault_id="session-vault",
+    )
+    assert decide_session_compatibility(
+        recorded=recorded,
+        desired=recorded,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    ) == UpdateInPlace(
+        ops=(RotateAppTokens(resource_ids={}, installation_ids=(1,)), RemirrorVaultCredentials()),
+        reasons=("repo_token_age",),
+    )
+    assert fingerprint_identity(recorded) == fingerprint_identity(
+        recorded.model_copy(
+            update={
+                "token_scopes": (
+                    (1, 0, (101,), fresh + 1, "new-a0"),
+                    (1, 1, (102,), fresh + 1, "new-a1"),
+                    (2, 0, (201,), fresh + 1, "new-b0"),
+                )
+            }
+        )
+    )
+
+
+def test_new_unmounted_repo_refreshes_only_its_installation() -> None:
+    a = "https://github.com/example/a"
+    b = "https://github.com/example/b"
+    new_b = "https://github.com/example/new-b"
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_urls=(a,),
+        token_repo_urls=(a, b),
+        token_scopes=((1, (101,)), (2, (102,))),
+        token_issued_at_by_installation={1: int(NOW.timestamp()), 2: int(NOW.timestamp())},
+        vault_id="session-vault",
+    )
+    desired = recorded.model_copy(
+        update={
+            "token_repo_urls": (a, b, new_b),
+            "token_scopes": ((1, (101,)), (2, (102, 103))),
+        }
+    )
+    assert decide_session_compatibility(
+        recorded=recorded,
+        desired=desired,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    ) == UpdateInPlace(
+        ops=(RotateAppTokens(resource_ids={}, installation_ids=(2,)), RemirrorVaultCredentials()),
+        reasons=("repo_set",),
+    )
+
+
+def test_scope_expansion_and_other_installation_refresh_use_one_rotation() -> None:
+    a = "https://github.com/example/a"
+    b = "https://github.com/example/b"
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_urls=(a,),
+        token_repo_urls=(a, b),
+        token_scopes=((1, (101,)), (2, (102,))),
+        token_issued_at_by_installation={1: int(NOW.timestamp()), 2: int(NOW.timestamp())},
+        vault_id="session-vault",
+    )
+    desired = recorded.model_copy(
+        update={
+            "token_repo_urls": (a, b, "https://github.com/example/new-b"),
+            "token_scopes": ((1, (101,)), (2, (102, 103))),
+        }
+    )
+    assert decide_session_compatibility(
+        recorded=recorded,
+        desired=desired,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+        force_app_token_rotation=True,
+        forced_app_installation_ids=(1,),
+    ) == UpdateInPlace(
+        ops=(RotateAppTokens(resource_ids={}, installation_ids=(1, 2)), RemirrorVaultCredentials()),
+        reasons=("repo_set", "repo_token_age"),
+    )
+
+
+def test_removed_unmounted_installation_leaves_other_token_current() -> None:
+    a = "https://github.com/example/a"
+    b = "https://github.com/example/b"
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_urls=(b,),
+        token_repo_urls=(a, b),
+        token_scopes=((1, (101,)), (2, (102,))),
+        token_issued_at_by_installation={1: int(NOW.timestamp()), 2: int(NOW.timestamp())},
+        vault_id="session-vault",
+    )
+    desired = recorded.model_copy(update={"token_repo_urls": (b,), "token_scopes": ()})
+    assert decide_session_compatibility(
+        recorded=recorded,
+        desired=desired,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+        force_app_token_rotation=True,
+        forced_app_installation_ids=(1,),
+    ) == UpdateInPlace(
+        ops=(RotateAppTokens(resource_ids={}, installation_ids=()), RemirrorVaultCredentials()),
+        reasons=("repo_set",),
+    )
+
+
+def test_adding_second_installation_refreshes_all_tokens_into_multi_mode() -> None:
+    a = "https://github.com/example/a"
+    b = "https://github.com/example/b"
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_urls=(b,),
+        token_repo_urls=(b,),
+        repo_token_issued_at=int(NOW.timestamp()),
+        vault_id="session-vault",
+    )
+    desired = recorded.model_copy(
+        update={"token_repo_urls": (a, b), "token_scopes": ((1, (101,)), (2, (102,)))}
+    )
+    assert decide_session_compatibility(
+        recorded=recorded,
+        desired=desired,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    ) == UpdateInPlace(
+        ops=(RotateAppTokens(resource_ids={}, installation_ids=()), RemirrorVaultCredentials()),
+        reasons=("repo_set",),
+    )
 
 
 def test_decision_is_reuse_when_recorded_and_desired_are_identical() -> None:

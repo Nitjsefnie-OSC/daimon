@@ -1,26 +1,86 @@
-# Live GitHub session token
+# GitHub session tokens across installations
 
-The models cover one agent, one live session, one old token, and one replacement. `SessionToken.tla` separates mint, resource update, vault update, inventory delivery, and retirement. Both the vault and repository resource must point to a live token while access is unchanged. A crash may occur while the replacement row is still provisional. A stale sweep may select an old token before a rollback restores it.
+A session with grants in installations A and B needs a separate exact-scope token for each. A repo-aware git credential helper must return B's token for B's repo, and nothing for an uncovered repo. A change to A keeps B's token when the session remains in multi mode. Crossing between one and multiple installations re-mints all remaining groups into the target mode. M1 supplies per-installation token issuance, rotation, and saved issue times behind the existing second-installation grant guard. M2 adds helper routing and M3 removes the guard.
 
-| Model action | Code boundary |
+## Models and code boundaries
+
+| Model action or state | Code boundary / status |
 | --- | --- |
-| `VersionBump` / unchanged re-grant | `packages/core/daimon/core/stores/github_access.py:403`; unchanged rows return without changing `version` |
-| `Mint` | `packages/core/daimon/core/github_app_session.py:332` |
-| `SwapResource`, `SwapVault` | `packages/core/daimon/core/github_app_session.py:802` and `:819` |
-| `LockDelivery`, `Deliver` | `finish_app_delivery` takes the grant lock, checks token versions and writes delivery rows in one short transaction |
-| `LockRetire`, `RetireOld` | `rotate_live_app_tokens` takes the grant lock, rechecks versions and marks old rows due in one short transaction |
-| `UnsafeLongLock` | The former rotation wrapper held a transaction and grant lock across GitHub mint and MA calls |
-| `Crash`, `UnsafeCrash` | Provisional cleanup in `packages/core/daimon/core/stores/github_issued_tokens.py:418` waits through GitHub expiry |
-| `SelectSweep`, `RecheckSweep` | `packages/adapters/scheduler/daimon/adapters/scheduler/main.py:656` and `packages/core/daimon/core/stores/github_issued_tokens.py:555` |
-| `RestoreOld`, `UnsafeRemoved` | `packages/core/daimon/core/github_app_session.py:850`; a hard-stale old token is not restored |
-| `UnsafePartialCleanup` | `packages/core/daimon/core/stores/github_issued_tokens.py:358`; a resource-delivered replacement stays live when current grants permit it |
-| `RemoveGrant` | Hard-change revocation in the scheduler sweep after `packages/core/daimon/core/stores/github_access.py:509` removes the grant |
-| `LockA/B`, `WriteA/B` | `packages/core/daimon/core/stores/github_access.py:61` and `:403`; one transaction lock covers check and write |
+| `GrantInstall.LockA/B`, `WriteA/B` | `packages/core/daimon/core/stores/github_access.py:406-415,444-470`; proposed removal of the cross-installation rejection at `:416-428` |
+| `GrantInstall.UnsafeReadA/B`, `UnsafeWriteA/B` | Rejected split read/write of the same grant operation; `lock_agent_grants` at `github_access.py:406` prevents this |
+| `MultiInstallation.Init`, `Eligible`, `ExactLiveScope` | `_effective_rows`, `prepare_app_access`, and `group_repository_access` create an exact-scope token per installation and 500-repo chunk; `stores/github_issued_tokens.py:create_pending` records scope and expiry |
+| `ClearWorking`, `AliasSelected` | `prepare_app_access` records the full desired working repo; `_combine_app_access` selects the alias only from its token group; `add_app_credentials` omits `GH_TOKEN` and Copilot when no alias exists |
+| `FailChunkZero`, `MintAllChunks`, `RebuildAfterBRotation` | `prepare_app_access` discards every chunk of a failed installation; `create_pending` saves the chunk label with the inventory row; `_current_app_access` reads that label, and `add_app_credentials` syncs its credential name |
+| `RevokeAChunk`, `DetectChunks`, `MissingChunkDetected` | `stores/github_issued_tokens.py:session_installations_needing_rotation` compares the complete grant-derived chunk set with the current inventory set; a revoked row is absent even if its sibling remains |
+| `SweepContractA`, `DetectSnapshotContraction`, `SweptContractionDetected` | The same detector compares saved snapshot scopes with desired grants, so sweeping all A rows cannot hide an A-only contraction |
+| `ContractAChunks`, `TickChunks`, `DetectDue`, `RetainedTokenAge`, `PerTokenDue` | Within multi mode, `github_app_session.py:_combine_app_access` retains unaffected token records; `session_snapshot.py:SessionSnapshot.token_scopes` stores each issue time; `session_compat.py:decide_session_compatibility` refreshes an installation when any chunk reaches 40 minutes |
+| `TransitionToSingle`, `ModeTransitionShape` | A change between one and multiple installations re-mints all remaining groups into the target mode; single mode has no chunk labels or saved token scopes |
+| `DeleteObsolete`, `UpdateExisting`, `CreateNew`, `VaultBudget` | `github_app_session.py:add_app_credentials` deletes obsolete `GH_TOKEN*` and Copilot credentials, updates survivors, then creates new names; `require_vault_budget` checks the final count |
+| `Read(r)`, `Return` | M2 helper lookup and return remain unimplemented; M1 `add_app_credentials` keeps every single-installation session at `GH_TOKEN` only, and installs per-token variables plus the working-repo alias for multiple installations |
+| `RevokeA` | `github_access.py:remove_grant` changes the grant; `stores/github_issued_tokens.py:select_stale_tokens` identifies A's row; `github_app_session.py:revoke_app_access` revokes the selected token without touching B |
+| `ReassignA` | `session_snapshot.py:fingerprint_identity` and `session_compat.py:identity_change_reasons` compare canonical `token_scopes` even when repo URLs are unchanged |
+| `AddRepoB` | `github_access.py:stage_grant` still rejects a second installation in M1; with a seeded second-installation grant, `session_compat.py:decide_session_compatibility` selects an in-place B refresh for a new unmounted repo, and `rotate_live_app_tokens(installation_ids=(B,))` mints B's new scope while retaining A |
+| `Expire(i)`, `Rotate(i)` | `github_app_session.py:prepare_app_access` records a conservative 55-minute expiry; `turn/prepare.py` saves per-installation issue times; `session_compat.py:decide_session_compatibility` selects due installation IDs; `session_update_ops.py` passes them to `rotate_live_app_tokens` |
+| `SessionToken.VersionBump`, `Mint`, `SwapResource`, `SwapVault` | Grant version update in `github_access.py:stage_grant`; `prepare_app_access` mints; `rotate_live_app_tokens` swaps resources and `add_app_credentials` syncs the vault |
+| `SessionToken.LockDelivery`, `Deliver`, `LockRetire`, `RetireOld` | `finish_app_delivery` locks grants and delivers new rows; `rotate_live_app_tokens` locks again before `mark_session_tokens_superseded` |
+| `SessionToken.SelectSweep`, `RecheckSweep`, `RestoreOld`, `RemoveGrant` | `stores/github_issued_tokens.py:select_stale_tokens` rechecks inventory; rotation rollback calls `restore_session_tokens`; `github_access.py:remove_grant` removes access |
+| `SessionToken.Crash`, `Unsafe*` | Existing crash, cleanup, rollback and long-lock fault witnesses; see `SessionToken.tla` and the prior single-token lifecycle paths above |
 
-`LiveSessionHasToken` requires live vault and resource credentials while access is unchanged. `RemovedAccessInvalid` requires old and new tokens to be invalid once the hard-change sweep completes. `NoNetworkUnderLock` requires mint and MA calls to run without a grant lock. `GrantInstall.tla` requires at most one installation. The safe configs are clean. Each unsafe config reproduces one ordering error: version-based revocation, revocation of either token after a resource-only swap, provisional cleanup after a vault swap, stale-sweep revocation after rollback, restoration of removed access, a network call under the grant lock, or two first-grant writes based on the same empty read.
+`GrantInstall` allows both installations and checks that completed grants persist. `MultiInstallation` has token scope, validity, expiry and generation per installation, plus separate chunk detection, age, and vault delivery actions. `Read` captures the helper's token selection; `Return` may run after a revocation. A fresh read never selects an expired or revoked token. A token selected before revocation can still be returned, but `ResultScoped` requires the captured token to have belonged to the requested repository and installation. `NoStaleUsable` assumes GitHub invalidates the token at revocation, so the returned placeholder cannot authenticate. `AddRepoB` re-mints B with its new exact scope and leaves A unchanged. `SessionToken` retains the detailed mint, delivery, and rollback races for one token. The multi-installation model still treats each token's rotation as one atomic transition.
 
-TLC 2.19 explores 50 distinct states for `Safe`. `UnsafeLongLock` violates `NoNetworkUnderLock` after 5 distinct states. The remaining verdicts and counts are pinned in `formal/expected.tsv`.
+For multi-installation sessions, each saved `token_scopes` entry contains `(installation_id, chunk, repo_ids, issued_at, token_id)`. The token ID joins the snapshot entry to its encrypted inventory row. `create_pending` saves `chunk` under the reserved `__credential_chunk__` key in that row's existing JSONB `grant_versions` column; version checks read only the `grant:<repo>` and `authorization:<repo>` keys. A B-only rotation within multi mode uses the saved chunk of each retained A row. A mode transition re-mints every remaining group. Single mode keeps the old snapshot shape, inventory rows without chunk labels, and refresh timestamp. A failed read-group mint does not advance the healthy write token's refresh deadline.
 
-Database replays are in `packages/core/tests/test_github_access_foundation.py`, `packages/core/tests/test_github_connect.py`, and `packages/adapters/scheduler/tests/test_main.py`. They cover parallel grant writes, a provisional token after crash, a sweep recheck after restore, active-turn partial delivery, grant-lock release during a blocked mint, external-session exclusion, and discovery when all token rows are revoked.
+The model's token ID is an abstraction for a vault credential, not a secret value present in the sandbox. The M2 helper will return the selected vault variable's placeholder; GitHub request-header injection supplies the real token (`packages/core/daimon/core/github_app_session.py:add_app_credentials`; `packages/core/daimon/core/credential_env.py:151-157`). `NoStaleUsable` describes whether GitHub accepts that placeholder after substitution.
 
-Bounds and assumption: GitHub mint and successful MA resource/vault updates are atomic individual effects. The removal action represents the completed hard-change sweep, not the interval between a grant commit and the scheduler's next sweep. The models do not prove immediate GitHub revocation at the database commit boundary; that would require synchronous external revocation in every grant-removal path.
+## Bounds and assumptions
+
+| Item | Model bound | Source / limit |
+| --- | --- | --- |
+| Installations and repos | Two installations; A starts with `a`, B with `b`; `c` can be granted in B and `a` can move to B | `github_app_session.py:401-408` groups arbitrary live rows; this bound is a model choice |
+| Token generations | Two per installation | Model choice for one rotation or B re-mint; production has no two-generation cap |
+| Expiry | A Boolean per installation for helper reads; two B chunks with ages 39 and 40 for refresh | `github_app_session.py:prepare_app_access` records a conservative 55-minute expiry; `session_compat.py:decide_session_compatibility` refreshes when any chunk reaches 40 minutes |
+| Repository inventory | At most three repos | `stores/github_issued_tokens.py:create_pending` accepts 1..500 IDs per token |
+| Alias and mint chunks | Working installation A or none; three ordered A chunks | `prepare_app_access` chooses the working repo's token; `group_repository_access` sorts IDs within each chunk, and a failed multi-installation mint discards every chunk of that installation |
+| Vault credentials | 12 named tokens, alias, Copilot, and one other begin at 15; two named tokens are added | `add_app_credentials` deletes obsolete alias and Copilot credentials before creating names; `require_vault_budget` enforces the 15-credential cap before mint. Single-installation sessions use only `GH_TOKEN` for App access |
+| Helper read and return | Two actions, with grant/revoke/expiry/rotation allowed between them | Proposed M2 helper. For multiple installations, M1 delivers `GH_TOKEN_I<installation_id>_<chunk>` variables and the working-repo `GH_TOKEN` alias, when present, through `add_app_credentials` |
+| Upstream revocation | `invalidated` gains the old token ID at the same model step as grant removal | Unsupported atomicity assumption. `github_app_session.py:revoke_app_access` calls GitHub over the network; a failed call or a commit-to-sweep delay is not modeled |
+
+`NoStaleUsable` is conditional on that upstream revocation assumption. The `MultiNoUpstreamRevoke` counterexample shows the gap: the helper reads A, A's grant is removed, and it returns A's placeholder while GitHub still accepts the underlying token. The result is provisional until a contract test and a real execution replay verify revocation timing. The repository-to-installation mapping is assumed unambiguous at lookup time. `UnrelatedSurvives` checks A revocation against B; the symmetric B case is assumed. The existing single-token race model does not re-prove full-set delivery and rollback.
+
+## TLC results
+
+Run `TLA2TOOLS_JAR=/home/derick/scratch/daimon-os-devenv/tla2tools.jar FORMAL_CHECK_FILTER=github_session_token formal/check.sh`. The checker uses one TLC worker, a timeout, and a metadir cap. `formal/expected.tsv` pins verdicts and distinct-state counts.
+
+| Config | Verdict | States | User-visible failure shown |
+| --- | --- | ---: | --- |
+| `GrantSafe` | clean | 8 | Both concurrent grants persist |
+| `GrantUnsafe` | `CompletedGrantsPersist` | 31 | A stale write loses a granted installation |
+| `MultiSafe` | clean | 5,593 | Exact scope, independent expiry/rotation, B re-mint, and read/return race |
+| `MultiSingleToken` | `GrantedReachable` | 3 | B repo cannot be reached after the guard is removed |
+| `MultiFallback` | `ResultScoped` | 28 | Helper returns A's token for uncovered B repo `c` |
+| `MultiRevokeAll` | `UnrelatedSurvives` | 5 | A revocation also invalidates B's token |
+| `MultiOldFingerprint` | `FingerprintExact` | 5 | Reassignment keeps the old map fingerprint |
+| `MultiExpiredLookup` | `FreshRead` | 55 | Helper reads A's token after A expires |
+| `MultiExpireAll` | `ExpiryIsolation` | 8 | A expiry also invalidates B |
+| `MultiRotationStaleB` | `RotationRefreshes` | 11 | B rotation leaves B's old token in place |
+| `MultiGrantStaleScope` | `ExactLiveScope` | 7 | New B grant leaves B's live token without `c` |
+| `MultiGrantOldFingerprint` | `FingerprintExact` | 7 | New B grant leaves the old mapping fingerprint |
+| `MultiGrantTouchesA` | `GrantIsolation` | 7 | New B grant kills A's token |
+| `MultiNoUpstreamRevoke` | `NoStaleUsable` | 95 | Read, revoke, return yields a token GitHub still accepts |
+| `MultiAliasSafe` | clean | 14,612 | No working repo keeps `GH_TOKEN` absent through B-only rotation |
+| `MultiAliasFallback` | `AliasSelected` | 108 | Partial B rotation introduces an unrelated alias |
+| `MultiAtomicSafe` | clean | 42,801 | Complete chunks retain stable names; a failed installation discards all chunks |
+| `MultiPartialMint` | `AtomicChunks` | 12 | Failed chunk zero leaves later A chunks live |
+| `MultiRenumberNames` | `StableNames` | 109 | B rotation renumbers surviving A rows but skips an unchanged stale vault name |
+| `MultiChunkSafe` | clean | 3 | Revoking A's second chunk is detected |
+| `MultiAnyRowDetection` | `MissingChunkDetected` | 3 | A's surviving chunk hides its revoked sibling |
+| `MultiSnapshotContraction` | clean | 3 | Saved scopes identify A after its rows are swept |
+| `MultiSweptContractionMissed` | `SweptContractionDetected` | 3 | Live-only comparison misses swept A |
+| `MultiModeTransitionSafe` | clean | 2 | Contraction re-mints B into unlabelled single-mode rows |
+| `MultiTransitionKeepsLabels` | `ModeTransitionShape` | 2 | Contraction carries multi-mode labels into single mode |
+| `MultiAgeSafe` | clean | 4 | Contraction retains both B issue times and the 40-minute refresh |
+| `MultiResetAgeOnContraction` | `RetainedTokenAge` | 2 | Contraction resets B's token age |
+| `MultiVaultSafe` | clean | 6 | Delete, update, create stay within 15 credentials |
+| `MultiCreateBeforeDelete` | `VaultBudget` | 3 | New token creation reaches 16 before obsolete credentials are deleted |
+
+The existing `SessionToken` configs remain in `formal/expected.tsv`: `Safe` is clean at 50 states, and each unsafe config still witnesses its named lifecycle invariant. `GrantUnsafe` loses one completed grant when two writers act on stale reads. Database tests replay the revoked A chunk with B live, B-only remint, retained token ages, and vault deletion before creation. Chunk labels `0`, `1`, and `2` abstract sorted repository-ID chunks. The helper read/return and GitHub-side revocation timing have no code replay until M2.

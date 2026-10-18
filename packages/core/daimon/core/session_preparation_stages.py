@@ -352,6 +352,7 @@ async def desired_snapshot_for(
         github_mode="app",
         repo_urls=app_urls[1],
         token_repo_urls=app_urls[0],
+        token_scopes=app_urls[2],
         env_sha256=hash_env_bytes(assemble_env_bytes(rows)) if rows else None,
         repo_url=None,
         repo_branch=None,
@@ -364,6 +365,9 @@ async def desired_snapshot_for(
         env_file_id=None if recorded is None else recorded.env_file_id,
         repo_mount_path=None if recorded is None else recorded.repo_mount_path,
         repo_token_issued_at=None if recorded is None else recorded.repo_token_issued_at,
+        token_issued_at_by_installation=(
+            {} if recorded is None else recorded.token_issued_at_by_installation
+        ),
         channel_skills=channel_skills,
         tool_safety=tool_safety,
         public_url=public_url,

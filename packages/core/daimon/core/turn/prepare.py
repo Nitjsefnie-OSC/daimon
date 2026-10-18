@@ -43,7 +43,7 @@ from daimon.core.channel_backend import BackendUnsupported
 from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import backend_switch_tools_for_turn
 from daimon.core.credential_env import assemble_env_bytes
-from daimon.core.github_app_session import AppSessionAccess
+from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, retrieve_agent, sdk_agent
@@ -54,6 +54,7 @@ from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, Ma
 from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
 from daimon.core.session_snapshot import (
     SessionSnapshot,
+    TokenScope,
     fingerprint_identity,
     fingerprint_mutable,
     hash_env_bytes,
@@ -72,8 +73,6 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_memory_stores import get_personal_memory_store_id
 from daimon.core.stores.domain import BackendAgent, TransferKind
-from daimon.core.stores.github_access import list_authorized_repos
-from daimon.core.stores.github_issued_tokens import list_session_tokens
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -107,6 +106,27 @@ if TYPE_CHECKING:
     from daimon.core.stores.neutral_catalog import AgentRevision
 
 log = structlog.get_logger(__name__)
+
+
+def _delivered_app_snapshot_state(
+    access: AppSessionAccess | None,
+) -> tuple[bool, tuple[str, ...], tuple[TokenScope, ...], dict[int, int]]:
+    """Use delivered token identity; later grant changes belong to compatibility."""
+    if access is None or not access.tokens:
+        return False, (), (), {}
+    multi_installation = any(token.chunk is not None for token in access.tokens)
+    if multi_installation != access.multi_installation:
+        raise ValueError("delivered App token labels disagree with the vault mode")
+    scopes = token_scopes_for_tokens(access.tokens, include=multi_installation)
+    issued_at = {
+        installation_id: min(
+            token.issued_at
+            for token in access.tokens
+            if token.installation_id == installation_id and token.issued_at is not None
+        )
+        for installation_id in {scope[0] for scope in scopes}
+    }
+    return True, access.token_repo_urls, scopes, issued_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,10 +616,12 @@ async def create_ma_session(
     if preparation is not None and preparation.native_budget_usd is not None:
         native_controls["native_budget_usd"] = preparation.native_budget_usd
     excluded_repo_urls: tuple[str, ...] = ()
+    delivered_app_access: AppSessionAccess | None = None
 
     def capture_app_access(access: AppSessionAccess) -> None:
-        nonlocal excluded_repo_urls
+        nonlocal excluded_repo_urls, delivered_app_access
         excluded_repo_urls = access.excluded_repo_urls
+        delivered_app_access = access
 
     ma_session = await create_session(
         deps.anthropic,
@@ -654,33 +676,12 @@ async def create_ma_session(
     )
     # App tokens sit in the vault even when no working repo is mounted; record an
     # issue time only when this session was actually delivered some.
-    has_app_tokens = False
-    token_repo_urls: tuple[str, ...] = ()
-    if github_mode == "app":
-        async with deps.sessionmaker() as session:
-            delivered = [
-                row
-                for row in await list_session_tokens(session, session_id=ma_session.id)
-                if row.status == "delivered"
-            ]
-            has_app_tokens = bool(delivered)
-            if delivered:
-                names = {
-                    repo.repo_id: repo.repo_full_name
-                    for repo in await list_authorized_repos(
-                        session, tenant_id=tenant_id, agent_id=agent_uuid
-                    )
-                }
-                token_repo_urls = tuple(
-                    sorted(
-                        {
-                            f"https://github.com/{names[repo_id]}"
-                            for row in delivered
-                            for repo_id in row.repo_ids
-                            if repo_id in names
-                        }
-                    )
-                )
+    (
+        has_app_tokens,
+        token_repo_urls,
+        token_scopes,
+        token_issued_at_by_installation,
+    ) = _delivered_app_snapshot_state(delivered_app_access)
     snapshot = snapshot_from_created_session(
         ma_session,
         env_sha256=env_sha256,
@@ -705,6 +706,8 @@ async def create_ma_session(
     ).model_copy(
         update={
             "token_repo_urls": token_repo_urls,
+            "token_scopes": token_scopes,
+            "token_issued_at_by_installation": token_issued_at_by_installation,
             "unavailable_repos": tuple(
                 (url, dt.datetime.now(dt.UTC)) for url in excluded_repo_urls
             ),

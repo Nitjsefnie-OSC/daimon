@@ -154,6 +154,8 @@ async def get_bot_identity(http_client: httpx.AsyncClient, *, slug: str) -> BotI
 
 def group_repository_access(
     grants: list[tuple[int, int, PermissionProfile]],
+    *,
+    sort_repo_ids: bool = False,
 ) -> list[tuple[int, PermissionProfile, tuple[int, ...]]]:
     """Group effective repository access into GitHub's 500-repository token limit."""
     effective: dict[tuple[int, int], PermissionProfile] = {}
@@ -169,7 +171,11 @@ def group_repository_access(
         group = groups.setdefault(group_key, [])
         group.append(repo_id)
     return [
-        (installation_id, profile, tuple(ids[start : start + 500]))
+        (
+            installation_id,
+            profile,
+            tuple((sorted(ids) if sort_repo_ids else ids)[start : start + 500]),
+        )
         for (installation_id, profile), ids in groups.items()
         for start in range(0, len(ids), 500)
     ]
