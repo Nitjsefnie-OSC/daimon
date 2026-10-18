@@ -49,6 +49,7 @@ from mux.state.lease import Slot
 from mux.state.operations import OperationRecord, request_digest
 from pydantic import JsonValue
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -965,6 +966,8 @@ async def watch_fleet_budget(
         raise ValueError("budget poll and read timeout must be positive finite durations")
     timeouts = 0
     busy_since: float | None = None
+    # Wait in line for the tenant lock, but leave room inside the read timeout.
+    lock_wait_ms = max(1, int(min(1.5, timeout * 0.75) * 1000))
     try:
         while not finished.is_set():
             started = asyncio.get_running_loop().time()
@@ -976,12 +979,22 @@ async def watch_fleet_budget(
                         # passive refresh must not queue behind them. Try it first
                         # (re-entrant for lock_budget below); a held lock is busy,
                         # not unavailable usage.
-                        acquired = await session.scalar(
-                            text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
-                            {"key": f"fleet:{uuid.UUID(parent.fleet.scope.tenant_id)}"},
-                        )
-                        if not acquired:
-                            raise _BudgetLockBusy
+                        # Queue fairly behind writers (try-lock starved behind the
+                        # admissions' repeated short holds), but only briefly.
+                        await session.execute(text(f"SET LOCAL lock_timeout = '{lock_wait_ms}ms'"))
+                        try:
+                            await session.execute(
+                                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                                {"key": f"fleet:{uuid.UUID(parent.fleet.scope.tenant_id)}"},
+                            )
+                        except DBAPIError as error:
+                            if (
+                                "lock timeout" not in str(error.orig).lower()
+                                and getattr(error.orig, "sqlstate", None) != "55P03"
+                            ):
+                                raise
+                            raise _BudgetLockBusy from None
+                        await session.execute(text("SET LOCAL lock_timeout = 0"))
                         usages = await produce_fleet_budget(
                             session,
                             parent=parent,
