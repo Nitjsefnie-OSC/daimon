@@ -241,3 +241,31 @@ immediately. Without member events, role revocation can take up to 30 seconds
 to affect an ordinary cached check. Lookup failures never extend a grant;
 expired evidence fails closed. Private result delivery requires a live lookup, including Discord MCP replies
 and transcript reads.
+
+
+### Discord cold direct messages
+
+Cold DMs require a ready, unarchived tenant with DMs enabled and an explicit
+`dm_agent_name`. Membership is mandatory even for an explicitly allowed user ID;
+unknown membership is never a grant. Discovery and selector clicks require fresh
+membership through the shared resolver, then check the invoker policy, configured
+recipient restrictions and the tenant-owned agent. Pinned agents and agents held
+inside an isolated channel cannot run in a cold DM, including for server admins.
+The live admin bypass for the invoker allowlist still applies.
+
+No eligible tenant, revoked membership or role access, disabled DMs and denied
+recipient access produce no reply and no model turn, with a structured reason log.
+Revocation during a running turn suppresses its private result. The active server
+is retained; sending another DM never falls through into a different tenant.
+An unknown membership lookup during discovery can ask for a retry without naming
+servers. Server selection belongs only to the requester and their physical DM route,
+expires after five minutes, and rechecks access before creating a scope.
+
+Cold conversations copy no public history and grant no additional channel access.
+They mount the tenant's and caller's personal memory under ordinary private-turn
+rules. `dm_memory_read_only` keeps its false default; enabling it makes those mounts
+read-only, including when changed between admission and session preparation.
+Explicit server switching starts empty private history in a new scope and retires
+the old session mapping. Routine notifications do not select a tenant or become
+history in the active DM conversation. `/dm-me` remains the explicit channel-context
+move, with its source sealing and budget checks.

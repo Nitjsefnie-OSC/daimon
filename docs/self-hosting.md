@@ -1233,3 +1233,30 @@ share work; rate-limit retries and network waits have a ten-second overall
 bound. API denial, timeout, missing credentials, and unavailable guilds fail
 closed when current evidence is required. An expired grant is never reused
 after an error.
+
+
+### Enabling Discord cold DMs
+
+Run `uv run alembic upgrade head` before starting a version that reads the nullable
+`direct_message_policies.dm_agent_name` column. Existing rows stay null, so cold
+DMs remain off after migration. Upgrade every Discord reader before configuring an
+agent: older readers do not recognize source-free cold scopes. Existing `/dm-me`
+moves remain available when tenant
+DMs are enabled. Configure an existing tenant-owned agent explicitly:
+
+```bash
+daimon tenants dm-policy discord GUILD_ID --agent AGENT_NAME --enabled
+daimon tenants dm-policy discord GUILD_ID --json
+```
+
+The Discord admin equivalent is `/dm-me action:enable`, followed by
+`/dm-me action:agent agent_name:AGENT_NAME`. Configure the tenant's invoker role IDs
+and recipient policy as usual; cold discovery uses live member fetches through the
+shared membership resolver. No new environment setting or Discord command alias is
+required. `--clear-agent` (or `/dm-me action:clear-agent`) disables cold discovery
+without closing existing private conversations or disabling explicit moves.
+
+For downgrade, stop the new readers before removing the column. Downgrade discards
+the selected agent names; record them first if they will be restored later. Existing
+DM enablement and conversation rows survive. Pending server selectors are ephemeral;
+a restart invalidates them and the person must send a new message.

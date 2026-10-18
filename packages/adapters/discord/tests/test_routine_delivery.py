@@ -680,3 +680,29 @@ async def test_role_loss_during_destination_lookup_refuses_delayed_delivery(
     assert calls == ["1", "1"], (
         "delivery must bypass the positive cache after the destination await"
     )
+
+
+async def test_routine_dm_does_not_replace_an_active_private_conversation(db_session_factory):
+    from daimon.core.stores.direct_messages import get_conversation
+    from daimon.testing.factories import make_account, make_dm_conversation
+
+    async with db_session_factory() as session:
+        routine = await _routine(session, destination_id="unavailable")
+        active_tenant = await make_tenant(session, workspace_id="700000102")
+        account = await make_account(session, tenant=active_tenant)
+        active = await make_dm_conversation(
+            session,
+            tenant=active_tenant,
+            account_id=account.id,
+            route_key="physical-dm",
+            external_user_id="1",
+        )
+        await session.commit()
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, {}, dms=dms)(routine)
+    assert outcome.status == "delivered" and dms.sent
+    async with db_session_factory() as session:
+        after = await get_conversation(
+            session, platform="discord", route_key="physical-dm", external_user_id="1"
+        )
+    assert after == active, "routine output changes neither the active tenant nor private history"

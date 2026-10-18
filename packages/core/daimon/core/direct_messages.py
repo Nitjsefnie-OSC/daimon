@@ -24,11 +24,15 @@ from daimon.core.permissions import dm_source_limited, limited_ids
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import (
+    COLD_DM_ORIGIN,
     DirectMessageRow,
     claim_message,
     dm_enabled,
     finish_message,
+    get_conversation,
+    get_dm_agent_name,
     holds_claim,
+    lock_route,
     quarantine_conversation,
     start_conversation,
 )
@@ -44,7 +48,7 @@ from daimon.core.stores.thread_sessions import get_live_thread_session, mark_dea
 from daimon.core.turn.admission import Admission, DmSource, admit
 from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import DmSourceSealedError
+from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError
 from daimon.core.turn.io import turn_io
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import bind_session
@@ -54,6 +58,14 @@ from daimon.core.turn_origin import render_turn_origin, turn_origin
 from sqlalchemy.exc import SQLAlchemyError
 
 _log = structlog.get_logger(__name__)
+
+
+class DirectMessageAccessRevoked(UserFacingError):
+    """Private access failed closed; Discord suppresses the reply and logs the reason."""
+
+    def __init__(self, reason: str, *, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:
@@ -102,7 +114,7 @@ def is_sealed_slack_message(
 
 def _source_is_sealed(policy: TenantAccessPolicy, conversation: DirectMessageRow) -> bool:
     """Whether any recorded source of this conversation is sealed now (fails closed)."""
-    return dm_source_limited(
+    return not conversation.is_cold and dm_source_limited(
         policy,
         source_channel_id=conversation.source_channel_id,
         source_thread_id=conversation.source_thread_id,
@@ -135,7 +147,7 @@ async def _quarantine(deps: TurnDeps, conversation: DirectMessageRow) -> None:
                 scope=scope,
                 session_ref=ref,
             ).archive()
-    raise UserFacingError(SEALED_SINCE_MESSAGE)
+    raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
 
 
 async def _require_source_still_unsealed(deps: TurnDeps, conversation: DirectMessageRow) -> None:
@@ -236,6 +248,115 @@ async def start_dm(
     return conversation
 
 
+async def admit_cold_dm(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    external_user_id: str,
+    channel_id: str,
+    role: Role,
+    role_ids: tuple[str, ...],
+    verified_membership: bool | None,
+) -> Admission:
+    """Check a configured cold agent without creating one or changing channel routing."""
+    await require_dm_enabled(deps, tenant_id=tenant_id)
+    async with deps.sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+        name = await get_dm_agent_name(session, tenant_id=tenant_id)
+    if (
+        tenant is None
+        or tenant.platform != "discord"
+        or tenant.archived_at is not None
+        or tenant.provision_status != "ready"
+        or name is None
+    ):
+        raise AdmissionDenied(reason="invoker_not_allowed")
+    return await admit(
+        deps,
+        tenant_id=tenant_id,
+        platform="discord",
+        external_user_id=external_user_id,
+        channel_id=channel_id,
+        now=datetime.now(UTC),
+        role=role,
+        role_ids=role_ids,
+        verified_membership=verified_membership,
+        is_dm=True,
+        dm_agent_name=name,
+    )
+
+
+async def start_cold_dm(
+    deps: TurnDeps,
+    admission: Admission,
+    *,
+    tenant_id: uuid.UUID,
+    workspace_id: str,
+    route_key: str,
+    external_user_id: str,
+    expected_scope_id: str | None = None,
+) -> DirectMessageRow | None:
+    """Create a source-free private scope, compare-and-setting the active route.
+
+    A concurrent first message must reuse the winning conversation. An explicit
+    switch names the scope it replaces, so a stale control cannot replace a
+    newer selection. No configuration is written to the physical DM channel.
+    """
+    conversation = DirectMessageRow(
+        platform="discord",
+        route_key=route_key,
+        external_user_id=external_user_id,
+        tenant_id=tenant_id,
+        account_id=admission.account_id,
+        workspace_id=workspace_id,
+        channel_id=route_key,
+        scope_id=f"{DM_SCOPE_PREFIX}{uuid.uuid4()}",
+        source_url=COLD_DM_ORIGIN,
+        context="",
+        memory_read_only=admission.memory_read_only,
+        history=[],
+        recent_message_ids=[],
+        active_until=None,
+    )
+    async with deps.sessionmaker.begin() as session:
+        await lock_route(
+            session, platform="discord", route_key=route_key, external_user_id=external_user_id
+        )
+        current = await get_conversation(
+            session, platform="discord", route_key=route_key, external_user_id=external_user_id
+        )
+        if (current.scope_id if current else None) != expected_scope_id:
+            return None
+        if (
+            not await dm_enabled(session, tenant_id=tenant_id)
+            or await get_dm_agent_name(session, tenant_id=tenant_id) != admission.config.agent_name
+        ):
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
+        if current is not None:
+            # Retired mappings can never be reused by a later private turn.
+            from daimon.core.stores.thread_sessions import retire_dm_scope
+
+            await retire_dm_scope(
+                session,
+                tenant_id=current.tenant_id,
+                platform=current.platform,
+                scope_id=current.scope_id,
+            )
+        await create_binding(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            parent_channel_id=route_key,
+            thread_id=conversation.scope_id,
+            responder_ma_agent_id=admission.agent.id,
+            responder_name=admission.agent.name,
+            creator_account_id=admission.account_id,
+            kind="handoff",
+        )
+    return conversation
+
+
 class _CollectReply(TurnLifecycle):
     async def on_render(self, state: TurnState) -> None:
         pass
@@ -315,11 +436,19 @@ async def reply_to_dm(
     history: list[dict[str, str]] | None = None
     bound = False
     try:
-        await require_dm_enabled(deps, tenant_id=conversation.tenant_id)
+        async with deps.sessionmaker() as session:
+            if not await dm_enabled(session, tenant_id=conversation.tenant_id):
+                raise DirectMessageAccessRevoked(
+                    "dm_disabled",
+                    message="Daimon DMs are off here.\n\nAsk an admin to run /dm-me enable.",
+                )
         async with deps.sessionmaker() as session:
             tenant = await get_tenant(session, conversation.tenant_id)
         if tenant is None or tenant.archived_at is not None or tenant.provision_status != "ready":
-            raise UserFacingError("This workspace is not available. No DM turn was started.")
+            raise DirectMessageAccessRevoked(
+                "tenant_unavailable",
+                message="This workspace is not available. No DM turn was started.",
+            )
         await _require_source_still_unsealed(deps, conversation)
         admission = await admit(
             deps,
@@ -333,12 +462,16 @@ async def reply_to_dm(
             verified_membership=verified_membership,
             is_dm=True,
             dm_source_channel_id=conversation.source_channel_id,
+            cold_dm=conversation.is_cold,
             now=now,
         )
         if admission.account_id != conversation.account_id:
-            raise UserFacingError(
-                "Your account changed, so this DM can't continue.\n\n"
-                "Run /dm-me again in the channel you came from."
+            raise DirectMessageAccessRevoked(
+                "account_changed",
+                message=(
+                    "Your account changed, so this DM can't continue.\n\n"
+                    "Run /dm-me again in the channel you came from."
+                ),
             )
         if on_agent is not None:
             await on_agent(admission.agent.name)
@@ -351,7 +484,9 @@ async def reply_to_dm(
             # Re-asked by `reauthorize` right before the DM's session is built.
             grant=replace(
                 admission.grant,
-                dm_source=DmSource(
+                dm_source=None
+                if conversation.is_cold
+                else DmSource(
                     channel_id=conversation.source_channel_id,
                     thread_id=conversation.source_thread_id,
                     thread_keys=tuple(conversation.source_thread_keys or ()),

@@ -3227,6 +3227,7 @@ class DirectMessagePolicy(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )
+    dm_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
 

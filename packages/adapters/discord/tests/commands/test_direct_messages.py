@@ -159,6 +159,12 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
     bot = MagicMock()
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    bot.runtime.turn_deps.membership_resolver = CachedMembershipResolver(
+        AsyncMock(return_value=Membership(is_member=True))
+    )
+    bot.runtime.settings.direct_message_policies = {}
     bot.get_guild.return_value = guild
     bot.turn_queue = TurnQueue(
         platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
@@ -216,8 +222,11 @@ async def test_role_loss_while_dm_runs_prevents_private_result_delivery(
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
     bot.runtime.turn_deps.membership_resolver = CachedMembershipResolver(
-        AsyncMock(return_value=Membership(is_member=True))
+        AsyncMock(
+            side_effect=[Membership(is_member=True, role_ids=("123",)), Membership(is_member=True)]
+        )
     )
+    bot.runtime.settings.direct_message_policies = {}
     bot.get_guild.return_value = guild
     bot.turn_queue = TurnQueue(
         platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
@@ -231,5 +240,5 @@ async def test_role_loss_while_dm_runs_prevents_private_result_delivery(
     message.content = "hello"
     await DirectMessageCog(bot).on_message(message)
     sent = [call.args[0] for call in message.channel.send.await_args_list]
-    assert sent and all("private secret" not in text for text in sent)
-    assert "No private result was delivered" in sent[-1]
+    assert not sent, "revoked access suppresses the private result without replying"
+    dm_module.reply_to_dm.assert_awaited_once()

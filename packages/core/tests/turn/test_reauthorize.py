@@ -31,6 +31,11 @@ from .test_admission import (
 
 
 async def _admit(db_session_factory, tmp_path: Path, tenant, *, role=Role.USER, is_dm=False):  # type: ignore[no-untyped-def]
+    if is_dm:
+        from daimon.core.stores.direct_messages import set_dm_enabled
+
+        async with db_session_factory.begin() as session:
+            await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
     )
@@ -355,3 +360,16 @@ async def test_concurrent_role_admissions_do_not_need_nested_pool_connections(
             )
         )
     assert len(admissions) == 2
+
+
+async def test_native_private_surface_does_not_inherit_conversation_opt_in(
+    db_session, db_session_factory, tmp_path
+):
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps, admission = await _admit(db_session_factory, tmp_path, tenant, is_dm=True)
+    assert not admission.grant.cold_dm and admission.grant.dm_source is None
+    async with db_session_factory.begin() as session:
+        await set_dm_enabled(session, tenant_id=tenant.id, enabled=False)
+    assert await reauthorize(deps, admission) is admission
