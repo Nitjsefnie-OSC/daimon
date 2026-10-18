@@ -120,6 +120,7 @@ __all__ = [
     "DmSource",
     "MissingTurnConfigError",
     "admit",
+    "backend_platform_skills",
     "reauthorize",
 ]
 
@@ -215,6 +216,9 @@ class Admission:
     # (`turn_platform_skills`, on the Anthropic backend only), then the
     # channel's (`daimon.core.channel_skills`).
     channel_skills: tuple[MaSkill, ...] = ()
+    # Which of `channel_skills` are the platform's, so a create the provider
+    # refuses for one of them can run without it (`create_ma_session`).
+    platform_skill_ids: frozenset[str] = frozenset()
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
@@ -370,6 +374,17 @@ async def admit(
             ),
         )
     return replace(result, observation=observation)
+
+
+def backend_platform_skills(
+    platform_skills: tuple[MaSkill, ...], profile: str | None
+) -> tuple[MaSkill, ...]:
+    """The platform's skills a session on backend `profile` (None: the default) runs. Pure.
+
+    Another backend than Managed Agents has no Anthropic built-in skills and
+    carries a channel's skills only as a declared loss, so it gets none.
+    """
+    return platform_skills if profile in (None, MANAGED_AGENTS.profile_id) else ()
 
 
 async def admit_impl(
@@ -931,6 +946,8 @@ async def admit_impl(
         platform=platform,
         agent=agent,
         platform_skills=deps.platform_skills,
+        now=now,
+        memory=deps.platform_skill_memory,
         cache=deps.resolver_cache,
     )
     channel_skills = (
@@ -954,10 +971,10 @@ async def admit_impl(
 
     if deps.agent_backends:
         await resolve_preference()
-    # Another backend has no Anthropic built-in skills and carries a channel's
-    # skills only as a declared loss, so the platform's stay on this one.
-    if backend_revision is None or backend_revision.profile == MANAGED_AGENTS.profile_id:
-        channel_skills = (*platform_skills, *channel_skills)
+    platform_skills = backend_platform_skills(
+        platform_skills, None if backend_revision is None else backend_revision.profile
+    )
+    channel_skills = (*platform_skills, *channel_skills)
 
     result = Admission(
         backend_revision=backend_revision,
@@ -983,6 +1000,7 @@ async def admit_impl(
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
         budget_channel_id=budget_channel_id,
         channel_skills=channel_skills,
+        platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
         is_external=is_external,
     )

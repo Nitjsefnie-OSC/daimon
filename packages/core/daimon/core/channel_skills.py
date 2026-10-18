@@ -20,10 +20,11 @@ adds it ahead of the channel's on those platforms (`turn_platform_skills`).
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, Literal, NoReturn
 
 import anthropic
@@ -284,12 +285,16 @@ async def choose_channel_skill(
     skill: str,
     agent: BetaManagedAgentsAgent | None,
     current: Sequence[ChannelSkillRow],
+    platform: str,
+    platform_skills: Mapping[str, Sequence[SkillRef]],
 ) -> ChannelSkillChoice | ChannelSkillRefusal:
     """The skill `skill` (an id, a library name or `agent/name`) names, if the channel may add it.
 
     `agent` is the agent the channel resolves to now, None when none does;
-    `current` is the channel's skills. Raises SkillsListTruncatedError when
-    the workspace's skills can't all be read.
+    `current` is the channel's skills. The skills `platform_skills` adds to
+    `agent` on `platform` count toward the cap and the mount check like its
+    own (`turn_platform_skills`). Raises SkillsListTruncatedError when the
+    workspace's skills can't all be read.
     """
     rows = await list_skills_strict(client)
     found = _find(rows, tenant_id=tenant_id, skill=skill.strip())
@@ -315,11 +320,26 @@ async def choose_channel_skill(
     if not found.latest_version:
         return "no_version"
     others = [row for row in current if row.skill_id != found.id]
-    held: set[str] = {s.skill_id for s in agent.skills} if agent is not None else set()
+    running: list[MaSkill] = []
+    if agent is not None:
+        running.extend(agent.skills)
+        for ref in platform_skill_refs(agent, platform, platform_skills):
+            built_in = _built_in(ref)
+            if built_in is not None:
+                running.append(built_in)
+                continue
+            title = tenant_scoped_display_title(tenant_id=tenant_id, name=ref.skill_id)
+            running.extend(
+                BetaManagedAgentsCustomSkill(type="custom", skill_id=match.id, version="latest")
+                for match in match_skills_by_display_title(rows, title)[:1]
+            )
+    held = {s.skill_id for s in running}
     extra = [row.skill_id for row in others if row.skill_id not in held]
     if found.id not in held and len(held) + len(extra) + 1 > AGENT_SKILL_CAP:
         return "too_many"
-    mounts = [bodies[sid].rsplit("/", 1)[-1] for sid in (*held, *extra) if sid in bodies]
+    mounts = _built_in_names(running) | {
+        bodies[sid].rsplit("/", 1)[-1] for sid in (*held, *extra) if sid in bodies
+    }
     if found.id not in held and name in mounts:
         return "mount_clash"
     return ChannelSkillChoice(
@@ -337,11 +357,14 @@ async def add_skill_to_channel(
     skill: str,
     default: DeploymentDefault,
     actor_account_id: uuid.UUID | None,
+    platform_skills: Mapping[str, Sequence[SkillRef]],
 ) -> ChannelSkillRow | ChannelSkillRefusal:
     """Add `skill` to `channel_id` for whatever agent answers there now, or say why not.
 
     The caller has already checked the actor may (`may_set_channel_skills`).
-    Raises SkillsListTruncatedError like `choose_channel_skill`.
+    `platform_skills` is `load_platform_skills`' map, whose skills on
+    `platform` count like the agent's own. Raises SkillsListTruncatedError
+    like `choose_channel_skill`.
     """
     resolved = await resolve(
         session, context=ScopeContext(tenant_id=tenant_id, channel_id=channel_id), default=default
@@ -362,6 +385,8 @@ async def add_skill_to_channel(
         skill=skill,
         agent=agent,
         current=current,
+        platform=platform,
+        platform_skills=platform_skills,
     )
     if isinstance(choice, str):
         return choice
@@ -416,6 +441,68 @@ def platform_skill_refs(
     return tuple(ref for ref in refs if ref.platforms is not None and platform in ref.platforms)
 
 
+# Ceiling on what `PlatformSkillMemory` keeps; past it, it starts over.
+_MEMORY_MAX = 4096
+# How long a platform skill the provider refused stays out of new sessions.
+PLATFORM_SKILL_RETRY_AFTER: Final = dt.timedelta(hours=1)
+
+
+@dataclass
+class PlatformSkillMemory:
+    """What this process remembers about platform-limited skills, per tenant.
+
+    `found` keeps each custom skill's id from the last skills list that showed
+    it, so a failed read leaves a session's skills as they were rather than
+    dropping the skill and replacing the session. `refused` keeps a skill the
+    provider refused at session create out of new sessions until a deadline
+    (`refuse`), so the drift check doesn't replace a session on every turn.
+    """
+
+    found: dict[tuple[uuid.UUID, str], str] = field(
+        default_factory=dict[tuple[uuid.UUID, str], str]
+    )
+    refused: dict[tuple[uuid.UUID, str], dt.datetime] = field(
+        default_factory=dict[tuple[uuid.UUID, str], dt.datetime]
+    )
+
+    def refuse(self, tenant_id: uuid.UUID, skill_id: str, *, now: dt.datetime) -> bool:
+        """Leave `skill_id` out of the tenant's sessions for a while; False if it already was."""
+        self.refused = {key: until for key, until in self.refused.items() if until > now}
+        if (tenant_id, skill_id) in self.refused:
+            return False
+        if len(self.refused) >= _MEMORY_MAX:
+            self.refused.clear()
+        self.refused[(tenant_id, skill_id)] = now + PLATFORM_SKILL_RETRY_AFTER
+        return True
+
+    def is_refused(self, tenant_id: uuid.UUID, skill_id: str, *, now: dt.datetime) -> bool:
+        until = self.refused.get((tenant_id, skill_id))
+        return until is not None and until > now
+
+    def remember(self, tenant_id: uuid.UUID, name: str, skill_id: str | None) -> None:
+        """Record what a complete skills list showed for `name`: its id, or None for gone."""
+        if skill_id is None:
+            self.found.pop((tenant_id, name), None)
+            return
+        if len(self.found) >= _MEMORY_MAX:
+            self.found.clear()
+        self.found[(tenant_id, name)] = skill_id
+
+
+def _built_in(ref: SkillRef) -> BetaManagedAgentsAnthropicSkill | None:
+    """The provider built-in `ref` names, at its latest version; None for a custom skill."""
+    if ref.type == "custom":
+        return None
+    return BetaManagedAgentsAnthropicSkill(type=ref.type, skill_id=ref.skill_id, version="latest")
+
+
+def _built_in_names(skills: Iterable[MaSkill]) -> set[str]:
+    """The mount names of `skills`' provider built-ins, which load under their ids."""
+    return {
+        skill.skill_id for skill in skills if isinstance(skill, BetaManagedAgentsAnthropicSkill)
+    }
+
+
 async def turn_platform_skills(
     client: AsyncAnthropic,
     *,
@@ -423,49 +510,57 @@ async def turn_platform_skills(
     platform: str,
     agent: BetaManagedAgentsAgent,
     platform_skills: Mapping[str, Sequence[SkillRef]],
+    now: dt.datetime,
+    memory: PlatformSkillMemory | None = None,
     cache: ResolverCache | None = None,
 ) -> tuple[MaSkill, ...]:
     """The skills `defaults/` adds to a session of `agent` on `platform`, at latest.
 
     A built-in needs no read. A custom skill is found by its seeded title in
-    the skills list (shared through `cache`); one the list does not show, or a
-    failed read, is left out and the turn runs without it, with a warning
-    logged once per process until what is missing changes. A skill the agent
-    already holds is not added twice.
+    the skills list (shared through `cache`). A failed or incomplete read
+    keeps the id `memory` last saw; one never seen, or gone from a complete
+    list, is left out and the turn runs without it, with a warning logged once
+    per process until what is missing changes. A skill the provider refused
+    (`PlatformSkillMemory.refuse`) stays out until its deadline, and one the
+    agent already holds is not added twice. Only the room the agent's own
+    skills leave under `AGENT_SKILL_CAP` is filled, the first refs first.
     """
     refs = platform_skill_refs(agent, platform, platform_skills)
     if not refs:
         return ()
+    memory = memory if memory is not None else PlatformSkillMemory()
     listed: list[SkillListResponse] = []
-    if any(ref.type == "custom" for ref in refs):
+    complete = False
+    if any(_built_in(ref) is None for ref in refs):
         try:
-            listed, _ = await (
+            listed, truncated = await (
                 list_skills_lenient(client)
                 if cache is None
                 else list_skills_lenient_cached(client, cache)
             )
+            complete = not truncated
         except (anthropic.APIError, SkillsListTruncatedError):
-            listed = []
-    held = {skill.skill_id for skill in agent.skills}
+            _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))
+    own = {skill.skill_id for skill in agent.skills}
+    held = set(own)
     picked: list[MaSkill] = []
     missing: list[str] = []
     for ref in refs:
-        if ref.type != "custom":
-            skill: MaSkill = BetaManagedAgentsAnthropicSkill(
-                type=ref.type, skill_id=ref.skill_id, version="latest"
-            )
-        else:
+        skill: MaSkill | None = _built_in(ref)
+        if skill is None:
             title = tenant_scoped_display_title(tenant_id=tenant_id, name=ref.skill_id)
             matches = match_skills_by_display_title(listed, title)
-            if not matches:
+            if matches or complete:
+                memory.remember(tenant_id, ref.skill_id, matches[0].id if matches else None)
+            skill_id = memory.found.get((tenant_id, ref.skill_id))
+            if skill_id is None:
                 missing.append(ref.skill_id)
                 continue
-            skill = BetaManagedAgentsCustomSkill(
-                type="custom", skill_id=matches[0].id, version="latest"
-            )
-        if skill.skill_id not in held:
-            held.add(skill.skill_id)
-            picked.append(skill)
+            skill = BetaManagedAgentsCustomSkill(type="custom", skill_id=skill_id, version="latest")
+        if skill.skill_id in held or memory.is_refused(tenant_id, skill.skill_id, now=now):
+            continue
+        held.add(skill.skill_id)
+        picked.append(skill)
     if missing:
         _log_once(
             "channel_skills.platform_skills_unavailable",
@@ -474,7 +569,20 @@ async def turn_platform_skills(
             platform=platform,
             missing=missing,
         )
-    return tuple(picked)
+    room = max(0, AGENT_SKILL_CAP - len(own))
+    if len(picked) > room:
+        # An agent near the cap would otherwise fail every session on this platform.
+        dropped = tuple(skill.skill_id for skill in picked[room:])
+        _log_once(
+            "channel_skills.platform_skills_over_cap",
+            (str(tenant_id), platform, agent.id, *dropped),
+            tenant_id=str(tenant_id),
+            platform=platform,
+            agent_id=agent.id,
+            dropped=list(dropped),
+            cap=AGENT_SKILL_CAP,
+        )
+    return tuple(picked[:room])
 
 
 def applicable_skills(
@@ -488,16 +596,14 @@ def applicable_skills(
     """The rows a session of `agent` may add, in order, before the cap (`skill_room`). Pure.
 
     Left out: another agent's upload, a skill the session holds already (the
-    agent's or the platform's), and one whose mount name `bodies` shows
-    clashing with an earlier skill. `bodies` None (unreadable) skips the mount
-    check.
+    agent's or the platform's), and one whose mount name clashes with an
+    earlier skill: a built-in's id, or a custom skill's name in `bodies`.
+    `bodies` None (unreadable) checks the built-ins only.
     """
     held = {skill.skill_id for skill in (*agent.skills, *platform_skills)}
-    mounts: set[str] = (
-        set()
-        if bodies is None
-        else {bodies[sid].rsplit("/", 1)[-1] for sid in held if sid in bodies}
-    )
+    mounts = _built_in_names((*agent.skills, *platform_skills))
+    if bodies is not None:
+        mounts |= {bodies[sid].rsplit("/", 1)[-1] for sid in held if sid in bodies}
     picked: list[BetaManagedAgentsCustomSkill] = []
     for row in rows:
         if row.owner_agent_name is not None and row.owner_agent_name not in agent_names:
@@ -574,9 +680,11 @@ async def turn_channel_skills(
 
 
 __all__ = [
+    "PLATFORM_SKILL_RETRY_AFTER",
     "REFUSALS",
     "ChannelSkillChoice",
     "ChannelSkillRefusal",
+    "PlatformSkillMemory",
     "add_skill_to_channel",
     "applicable_skills",
     "choose_channel_skill",

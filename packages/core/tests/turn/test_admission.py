@@ -984,7 +984,32 @@ async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
     assert [(s.type, s.skill_id) for s in admission.channel_skills] == expected, (
         "only a Teams turn adds the Office skills, in a channel and in a DM alike"
     )
+    assert admission.platform_skill_ids == {n for _, n in expected}, (
+        "the platform's are marked, so a refused one can be left out at create"
+    )
     assert admission.agent.skills == [], "the agent itself is never changed"
+
+
+@pytest.mark.parametrize(
+    ("profile", "kept"),
+    [
+        (None, True),
+        ("anthropic.managed_agents", True),
+        ("openai.persistent_workspace", False),
+        ("gemini.inline_reuse", False),
+    ],
+)
+def test_only_the_managed_agents_backend_gets_a_platforms_skills(
+    profile: str | None, kept: bool
+) -> None:
+    """Another backend has no Anthropic built-ins, so a Teams turn there adds none."""
+    from anthropic.types.beta import BetaManagedAgentsAnthropicSkill
+    from daimon.core.turn.admission import backend_platform_skills
+
+    office = (BetaManagedAgentsAnthropicSkill(type="anthropic", skill_id="docx", version="latest"),)
+    assert backend_platform_skills(office, profile) == (office if kept else ()), (
+        "only the default backend and Managed Agents run the platform's skills"
+    )
 
 
 async def test_admit_refuses_an_invoker_outside_the_allowlist_before_any_ma_call(

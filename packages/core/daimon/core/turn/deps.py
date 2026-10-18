@@ -22,6 +22,7 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget_notice import BudgetNotifier
+from daimon.core.channel_skills import PlatformSkillMemory
 from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
@@ -114,6 +115,9 @@ class TurnDeps:
     platform_skills: Mapping[str, tuple[SkillRef, ...]] = field(
         default_factory=dict[str, tuple[SkillRef, ...]]
     )
+    # What admission learned about those skills in this process: the last ids
+    # read, and the ones the provider refused (`create_ma_session`).
+    platform_skill_memory: PlatformSkillMemory = field(default_factory=PlatformSkillMemory)
 
     @property
     def backend_selection_enabled(self) -> bool:
@@ -149,12 +153,6 @@ def _notices_off(settings: Settings) -> frozenset[uuid.UUID]:
     if not isinstance(configured, dict):
         return frozenset()
     return frozenset(t for t, on in cast("dict[uuid.UUID, bool]", configured).items() if not on)
-
-
-def _platform_skills(settings: Settings) -> dict[str, tuple[SkillRef, ...]]:
-    """Read `defaults/`'s platform-limited skills; tolerate settings mocks in adapter tests."""
-    root = cast(object, settings.defaults_root)
-    return load_platform_skills(root) if isinstance(root, Path) else {}
 
 
 def build_turn_deps(
@@ -204,5 +202,5 @@ def build_turn_deps(
         fleet_enabled=settings.fleet.enabled,
         fleet_max_workers=settings.fleet.max_workers_per_run,
         fleet_root_grants=fleet_root_grants,
-        platform_skills=_platform_skills(settings),
+        platform_skills=load_platform_skills(settings.defaults_root),
     )
