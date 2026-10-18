@@ -1,4 +1,4 @@
-"""Bounded Microsoft Graph operations for one configured Teams QA channel."""
+"""Bounded Microsoft Graph operations for Teams QA target and bot chat."""
 
 from __future__ import annotations
 
@@ -34,6 +34,10 @@ class PostOutcomeUnknown(GraphRequestError):
     """The one POST was not confirmed by a bounded history search."""
 
 
+class NoBotChat(GraphRequestError):
+    """The persona has not established a one-on-one chat with the bot."""
+
+
 def graph_time(value: object) -> datetime | None:
     """Parse a Graph timestamp without assuming its UTC spelling."""
     if not isinstance(value, str):
@@ -54,6 +58,18 @@ def bot_sender_id(message: dict[str, Any]) -> str | None:
     if not isinstance(application, dict):
         return None
     value = cast(dict[str, object], application).get("id")
+    return value if isinstance(value, str) else None
+
+
+def user_sender_id(message: dict[str, Any]) -> str | None:
+    """Read the user object ID from a Graph chat message sender."""
+    sender: Any = message.get("from")
+    if not isinstance(sender, dict):
+        return None
+    user = cast(dict[str, object], sender).get("user")
+    if not isinstance(user, dict):
+        return None
+    value = cast(dict[str, object], user).get("id")
     return value if isinstance(value, str) else None
 
 
@@ -142,6 +158,78 @@ class GraphTeamsDriver:
             raise ValueError("channel target mismatch")
         if not self.config.bot_app_id:
             raise ValueError("bot app identity missing")
+
+    async def bot_chat(self, persona: str) -> tuple[str, list[dict[str, Any]]]:
+        """Find one existing 1:1 chat by a prior message from the bot app ID."""
+        data = await self._request(persona, CHAT, "GET", "/me/chats?$filter=chatType eq 'oneOnOne'")
+        matches: list[tuple[str, list[dict[str, Any]]]] = []
+        for chat in data.get("value", []):
+            if chat.get("chatType") != "oneOnOne":
+                continue
+            chat_id = chat.get("id")
+            if not isinstance(chat_id, str) or not chat_id or "/" in chat_id:
+                continue
+            messages = await self.chat_messages(persona, chat_id)
+            if any(bot_sender_id(item) == self.config.bot_app_id for item in messages):
+                matches.append((chat_id, messages))
+        if len(matches) > 1:
+            raise ValueError("bot chat ambiguous")
+        if not matches:
+            raise NoBotChat("no bot chat")
+        return matches[0]
+
+    async def chat_messages(
+        self, persona: str, chat_id: str, deadline: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Read the latest messages from a previously identified chat."""
+        if not chat_id or "/" in chat_id:
+            raise ValueError("invalid chat id")
+        data = await self._request(
+            persona, CHAT, "GET", f"/chats/{chat_id}/messages?$top=50", deadline=deadline
+        )
+        return list(data.get("value", []))
+
+    async def post_chat_command(
+        self,
+        persona: str,
+        chat_id: str,
+        command: str,
+        seen_ids: frozenset[str],
+    ) -> dict[str, Any]:
+        """Send one plain-text command, reconciling uncertainty without resending."""
+        if not chat_id or "/" in chat_id:
+            raise ValueError("invalid chat id")
+        started = datetime.now(UTC)
+        path = f"/chats/{chat_id}/messages"
+        payload = {"body": {"contentType": "text", "content": command}}
+        try:
+            return await self._request(persona, CHAT, "POST", path, payload=payload)
+        except AmbiguousPostError:
+            deadline = self.now() + 30
+            await self.sleep(3)
+            expected_oid = self.config.personas[persona].expected_oid
+            if expected_oid is None:
+                expected_oid = self.tokens.status(persona).get("oid")
+            while self.now() < deadline:
+                try:
+                    messages = await self.chat_messages(persona, chat_id, deadline)
+                except GraphRequestError:
+                    raise PostOutcomeUnknown("Graph POST outcome unknown") from None
+                for item in messages:
+                    created = graph_time(item.get("createdDateTime"))
+                    body = item.get("body", {}).get("content", "")
+                    plain = unescape(re.sub(r"<[^>]*>", "", body)).strip()
+                    if (
+                        expected_oid
+                        and user_sender_id(item) == expected_oid
+                        and item.get("id") not in seen_ids
+                        and created is not None
+                        and created >= started - timedelta(seconds=10)
+                        and plain == command
+                    ):
+                        return item
+                await self.sleep(min(3, max(0, deadline - self.now())))
+            raise PostOutcomeUnknown("Graph POST outcome unknown") from None
 
     async def find_by_correlation(
         self,

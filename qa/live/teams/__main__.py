@@ -10,7 +10,8 @@ from pathlib import Path
 import httpx
 
 from qa.live.teams.config import TeamsQaConfig
-from qa.live.teams.graph import CHAT, READ, SEND, TARGET, GraphTeamsDriver
+from qa.live.teams.evidence import write_summary
+from qa.live.teams.graph import CHAT, TARGET, GraphTeamsDriver
 from qa.live.teams.journeys import resolve_journey, run_journey
 from qa.live.teams.login import (
     AccessFlowAuthorizer,
@@ -19,6 +20,8 @@ from qa.live.teams.login import (
     manual_login,
 )
 from qa.live.teams.tokens import ReauthRequired, TokenStore
+
+ALL_JOURNEYS = ("routines-admin", "routines-member", "billing-admin", "billing-member")
 
 
 async def execute(args: argparse.Namespace, config: TeamsQaConfig) -> None:
@@ -32,7 +35,7 @@ async def execute(args: argparse.Namespace, config: TeamsQaConfig) -> None:
         tokens.logout(args.persona)
         print("cache deleted; also revoke the session in My Sign-ins or delete the app grant")
     elif args.command == "login":
-        scopes = sorted(set(CHAT + READ + SEND + TARGET))
+        scopes = sorted(set(CHAT + TARGET))
         if args.access_flow:
             identity = config.personas[args.persona]
             authorizer = AccessFlowAuthorizer(config.company, identity.vault_item, identity.upn)
@@ -47,11 +50,21 @@ async def execute(args: argparse.Namespace, config: TeamsQaConfig) -> None:
                 await driver.verify_target(args.persona)
                 print("target verified")
             elif args.command == "smoke":
-                journey = resolve_journey(config, args.journey)
-                await driver.verify_target(journey.persona)
-                result = await run_journey(driver, journey)
-                path = result.write(args.results)
-                print(f"{path} {result.classification}")
+                names = ALL_JOURNEYS if args.all else (args.journey,)
+                journeys = {name: resolve_journey(config, name) for name in names}
+                for persona in dict.fromkeys(journey.persona for journey in journeys.values()):
+                    await driver.verify_target(persona)
+                results = {
+                    name: await run_journey(driver, journey) for name, journey in journeys.items()
+                }
+                if args.all:
+                    path = write_summary(args.results, results)
+                    summary = " ".join(f"{name}={r.classification}" for name, r in results.items())
+                    print(f"{path} {summary}")
+                else:
+                    result = results[args.journey]
+                    path = result.write(args.results)
+                    print(f"{path} {result.classification}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -67,20 +80,24 @@ def main(argv: list[str] | None = None) -> int:
         "--manual", action="store_true", help="paste redirect privately (default)"
     )
     login_mode.add_argument("--access-flow", action="store_true", help="use saved browser flow")
-    parser.add_argument("--journey")
+    smoke_choice = parser.add_mutually_exclusive_group()
+    smoke_choice.add_argument("--journey")
+    smoke_choice.add_argument("--all", action="store_true", help="run all four built-in journeys")
     parser.add_argument("--max-turns", type=int, default=1)
     parser.add_argument("--go", action="store_true")
     parser.add_argument("--results", type=Path)
     args = parser.parse_args(argv)
     if args.command != "login" and (args.manual or args.access_flow):
         parser.error("login mode flags require login")
+    if args.command != "smoke" and (args.journey or args.all):
+        parser.error("journey selection requires smoke")
     if args.command == "smoke":
         if not args.go:
             parser.error("smoke requires --go")
         if not 1 <= args.max_turns <= 4:
             parser.error("max-turns must be 1..4")
-        if not args.journey or args.results is None:
-            parser.error("smoke requires --journey and --results")
+        if not (args.journey or args.all) or args.results is None:
+            parser.error("smoke requires --journey or --all, and --results")
     elif args.command in {"login", "status", "logout", "verify-target"} and not args.persona:
         parser.error("--persona is required")
     try:

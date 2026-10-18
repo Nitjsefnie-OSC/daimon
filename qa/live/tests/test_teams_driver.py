@@ -388,25 +388,26 @@ async def test_routines_card_role_assertions(config: TeamsQaConfig) -> None:
     class Driver:
         posted = False
 
+        def __init__(self) -> None:
+            self.config = config
+
         def now(self) -> float:
             return 0.0 if not self.posted else 1.0
 
         async def sleep(self, seconds: float) -> None:
             return None
 
-        async def channel_message_ids(self, persona: str) -> frozenset[str]:
-            return frozenset()
+        async def bot_chat(self, persona: str) -> tuple[str, list[dict[str, object]]]:
+            return "bot-chat", []
 
-        async def post_mention(
+        async def post_chat_command(
             self,
             persona: str,
+            chat_id: str,
             text: str,
-            correlation: str,
-            *,
-            command: bool = False,
-            seen_ids: frozenset[str] | None = None,
+            seen_ids: frozenset[str],
         ) -> dict[str, str]:
-            assert command and text == "routines"
+            assert chat_id == "bot-chat" and text == "routines" and not seen_ids
             self.posted = True
             return {"id": "posted"}
 
@@ -421,8 +422,8 @@ async def test_routines_card_role_assertions(config: TeamsQaConfig) -> None:
                 }
             ]
 
-        async def chat_messages_with_bot(
-            self, persona: str, since: datetime, deadline: float | None = None
+        async def chat_messages(
+            self, persona: str, chat_id: str, deadline: float | None = None
         ) -> list[dict[str, object]]:
             if not self.posted:
                 return []
@@ -438,6 +439,7 @@ async def test_routines_card_role_assertions(config: TeamsQaConfig) -> None:
             return [
                 {
                     "id": "card",
+                    "from": {"application": {"id": config.bot_app_id}},
                     "createdDateTime": datetime.now(UTC).isoformat(),
                     "body": {"content": ""},
                     "attachments": [{"content": json.dumps(content)}],
@@ -448,7 +450,7 @@ async def test_routines_card_role_assertions(config: TeamsQaConfig) -> None:
     member = await run_journey(Driver(), resolve_journey(config, "routines-member"))  # type: ignore[arg-type]
     assert admin.classification == "allowed" and "New routine" in admin.action_titles
     assert member.classification == "refused" and "New routine" not in member.action_titles
-    assert admin.reply_message_ids == ["pointer", "card"]
+    assert admin.reply_message_ids == ["card"]
     assert card_details({"attachments": [{"content": '{"body":[]}'}]}) == (set(), set())
 
 

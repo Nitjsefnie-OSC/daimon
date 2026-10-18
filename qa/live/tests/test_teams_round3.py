@@ -12,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from qa.live.teams.config import TeamsQaConfig
-from qa.live.teams.graph import GraphTeamsDriver, PostOutcomeUnknown
+from qa.live.teams.graph import GraphTeamsDriver, NoBotChat, PostOutcomeUnknown
 from qa.live.teams.journeys import resolve_journey, run_journey
 from qa.live.teams.tokens import Secret
 
@@ -162,7 +162,8 @@ def test_only_builtin_journeys_are_accepted(config: TeamsQaConfig) -> None:
 
 
 class JourneyDriver:
-    def __init__(self, cards: list[dict[str, Any]] | None = None) -> None:
+    def __init__(self, config: TeamsQaConfig, cards: list[dict[str, Any]] | None = None) -> None:
+        self.config = config
         self.clock = 0.0
         self.posted = False
         self.cards = cards or []
@@ -173,19 +174,13 @@ class JourneyDriver:
     async def sleep(self, seconds: float) -> None:
         self.clock += seconds
 
-    async def channel_message_ids(self, persona: str) -> frozenset[str]:
-        return frozenset({"earlier"})
+    async def bot_chat(self, persona: str) -> tuple[str, list[dict[str, Any]]]:
+        return "bot-chat", self.cards
 
-    async def post_mention(
-        self,
-        persona: str,
-        text: str,
-        correlation: str,
-        *,
-        command: bool,
-        seen_ids: frozenset[str],
+    async def post_chat_command(
+        self, persona: str, chat_id: str, text: str, seen_ids: frozenset[str]
     ) -> dict[str, str]:
-        assert command and text == "routines" and seen_ids == {"earlier"}
+        assert chat_id == "bot-chat" and text == "routines"
         self.posted = True
         return {"id": "posted"}
 
@@ -200,18 +195,23 @@ class JourneyDriver:
             }
         ]
 
-    async def chat_messages_with_bot(
-        self, persona: str, since: datetime, deadline: float | None = None
+    async def chat_messages(
+        self, persona: str, chat_id: str, deadline: float | None = None
     ) -> list[dict[str, Any]]:
         return self.cards
 
 
 @pytest.mark.asyncio
-async def test_missing_chat_waits_until_deadline(config: TeamsQaConfig) -> None:
-    driver = JourneyDriver()
+async def test_missing_chat_fails_before_post(config: TeamsQaConfig) -> None:
+    class MissingDriver(JourneyDriver):
+        async def bot_chat(self, persona: str) -> tuple[str, list[dict[str, Any]]]:
+            raise NoBotChat("no bot chat")
+
+    driver = MissingDriver(config)
     result = await run_journey(driver, resolve_journey(config, "routines-admin"), timeout=3)  # type: ignore[arg-type]
-    assert result.classification == "timeout"
-    assert result.error_reason is None and driver.clock == 3
+    assert result.classification == "error"
+    assert result.error_reason == "no bot chat: sign in to Teams once as this persona"
+    assert not driver.posted and driver.clock == 0
 
 
 @pytest.mark.asyncio
@@ -230,7 +230,7 @@ async def test_prior_card_inside_skew_window_is_ignored(config: TeamsQaConfig) -
             }
         ],
     }
-    driver = JourneyDriver([old_card])
+    driver = JourneyDriver(config, [old_card])
     result = await run_journey(driver, resolve_journey(config, "routines-admin"), timeout=3)  # type: ignore[arg-type]
     assert result.classification == "timeout" and driver.clock == 3
 
@@ -241,6 +241,7 @@ async def test_full_card_text_is_checked_and_error_reason_is_safe(config: TeamsQ
     card = {
         "id": "new",
         "createdDateTime": datetime.now(UTC).isoformat(),
+        "from": {"application": {"id": config.bot_app_id}},
         "attachments": [
             {
                 "content": {
@@ -254,13 +255,13 @@ async def test_full_card_text_is_checked_and_error_reason_is_safe(config: TeamsQ
     }
 
     class FreshDriver(JourneyDriver):
-        async def chat_messages_with_bot(
-            self, persona: str, since: datetime, deadline: float | None = None
+        async def chat_messages(
+            self, persona: str, chat_id: str, deadline: float | None = None
         ) -> list[dict[str, Any]]:
             return [card] if self.posted else []
 
     result = await run_journey(
-        FreshDriver(),
+        FreshDriver(config),
         resolve_journey(config, "routines-admin"),
         timeout=3,  # type: ignore[arg-type]
     )
@@ -268,11 +269,11 @@ async def test_full_card_text_is_checked_and_error_reason_is_safe(config: TeamsQ
     assert len(result.reply_excerpt) == 300
 
     class BrokenDriver(JourneyDriver):
-        async def channel_message_ids(self, persona: str) -> frozenset[str]:
+        async def bot_chat(self, persona: str) -> tuple[str, list[dict[str, Any]]]:
             raise RuntimeError("FAKE_ACCESS https://example.test/?code=FAKE_CODE")
 
     failed = await run_journey(
-        BrokenDriver(),
+        BrokenDriver(config),
         resolve_journey(config, "routines-admin"),
         timeout=3,  # type: ignore[arg-type]
     )

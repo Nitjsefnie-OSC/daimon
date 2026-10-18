@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from html import unescape
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 
 def excerpt(html: str) -> str:
@@ -45,3 +46,15 @@ class Result:
 def timestamp() -> str:
     """Return a UTC timestamp for result records."""
     return datetime.now(UTC).isoformat()
+
+
+def write_summary(directory: Path, results: dict[str, Result]) -> Path:
+    """Write one private record for a serial multi-journey smoke run."""
+    directory = directory.expanduser().resolve()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory.chmod(0o700)
+    path = directory / f"summary-{uuid4()}.json"
+    payload = {name: asdict(result) for name, result in results.items()}
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+    path.chmod(0o600)
+    return path

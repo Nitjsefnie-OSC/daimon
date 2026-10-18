@@ -12,7 +12,13 @@ from pydantic import JsonValue
 
 from qa.live.teams.config import TeamsQaConfig
 from qa.live.teams.evidence import Result, excerpt, timestamp
-from qa.live.teams.graph import GraphTeamsDriver, PostOutcomeUnknown, graph_time
+from qa.live.teams.graph import (
+    GraphTeamsDriver,
+    NoBotChat,
+    PostOutcomeUnknown,
+    bot_sender_id,
+    graph_time,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +42,7 @@ BUILTIN_JOURNEYS = {
     "routines-member": CommandJourney(
         "member", "routines", "refuse", "Routines", None, ("New routine",)
     ),
+    "billing-admin": CommandJourney("admin", "billing", "allow", "", "Add credit"),
     "billing-member": CommandJourney(
         "member",
         "billing",
@@ -45,8 +52,6 @@ BUILTIN_JOURNEYS = {
         ("Add credit", "Look up", "Look up a person"),
     ),
 }
-
-POINTERS = ("I've answered `routines` in our 1:1 chat.", "Commands work in our 1:1 chat.")
 
 
 def resolve_journey(config: TeamsQaConfig, name: str) -> ResolvedJourney:
@@ -107,57 +112,37 @@ def is_new(message: dict[str, Any], seen_ids: frozenset[str], since: datetime) -
 async def run_journey(
     driver: GraphTeamsDriver, journey: ResolvedJourney, *, timeout: float = 120
 ) -> Result:
-    """Snapshot, post once, and collect new channel and private-card evidence."""
+    """Post once in the existing bot chat and wait for a new bot card."""
     started = timestamp()
     correlation = str(uuid.uuid4())
     posted_id: str | None = None
     action_titles: list[str] = []
     spec = journey.spec
     try:
-        channel_ids = await driver.channel_message_ids(journey.persona)
-        old_cards = await driver.chat_messages_with_bot(
-            journey.persona, datetime(1970, 1, 1, tzinfo=UTC)
-        )
-        chat_ids = frozenset(str(item["id"]) for item in old_cards if item.get("id"))
+        chat_id, old_messages = await driver.bot_chat(journey.persona)
+        chat_ids = frozenset(str(item["id"]) for item in old_messages if item.get("id"))
         since = datetime.now(UTC)
-        message = await driver.post_mention(
-            journey.persona, spec.command, correlation, command=True, seen_ids=channel_ids
-        )
+        message = await driver.post_chat_command(journey.persona, chat_id, spec.command, chat_ids)
         posted_id = str(message["id"])
         deadline = driver.now() + timeout
-        pointer = None
         card = None
         delay = 1.0
-        while driver.now() < deadline and (pointer is None or card is None):
-            if pointer is None:
-                replies = await driver.read_replies(journey.persona, posted_id, deadline)
-                pointer = next(
-                    (
-                        item
-                        for item in replies
-                        if is_new(item, channel_ids, since)
-                        and any(
-                            phrase in str(item.get("body", {}).get("content", ""))
-                            for phrase in POINTERS
-                        )
-                    ),
-                    None,
-                )
+        while driver.now() < deadline and card is None:
+            messages = await driver.chat_messages(journey.persona, chat_id, deadline)
+            card = next(
+                (
+                    item
+                    for item in messages
+                    if is_new(item, chat_ids | {posted_id}, since)
+                    and bot_sender_id(item) == driver.config.bot_app_id
+                    and bool(card_details(item)[0])
+                ),
+                None,
+            )
             if card is None:
-                messages = await driver.chat_messages_with_bot(journey.persona, since, deadline)
-                card = next(
-                    (
-                        item
-                        for item in messages
-                        if is_new(item, chat_ids, since)
-                        and any(spec.card_text in text for text in card_details(item)[0])
-                    ),
-                    None,
-                )
-            if pointer is None or card is None:
                 await driver.sleep(min(delay, max(0, deadline - driver.now())))
                 delay = min(delay * 2, 8)
-        if pointer is None or card is None:
+        if card is None:
             return Result(
                 "live",
                 journey.persona,
@@ -189,7 +174,7 @@ async def run_journey(
             posted_id,
             started,
             timestamp(),
-            [str(pointer["id"]), str(card["id"])],
+            [str(card["id"])],
             card_excerpt,
             classification,
             action_titles=action_titles,
@@ -199,7 +184,9 @@ async def run_journey(
         )
     except Exception as exc:
         reason = "journey operation failed"
-        if isinstance(exc, PostOutcomeUnknown):
+        if isinstance(exc, NoBotChat):
+            reason = "no bot chat: sign in to Teams once as this persona"
+        elif isinstance(exc, PostOutcomeUnknown):
             reason = "post outcome unknown"
         elif isinstance(exc, ValueError) and str(exc) == "bot chat ambiguous":
             reason = "bot chat ambiguous"
@@ -214,5 +201,7 @@ async def run_journey(
             "",
             "error",
             action_titles=action_titles,
-            error_reason=f"{type(exc).__name__}: {reason}",
+            error_reason=(
+                reason if isinstance(exc, NoBotChat) else f"{type(exc).__name__}: {reason}"
+            ),
         )
