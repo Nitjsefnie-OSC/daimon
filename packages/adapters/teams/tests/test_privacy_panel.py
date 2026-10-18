@@ -280,21 +280,25 @@ async def test_disconnect_microsoft_shows_when_connected_and_deletes_the_token(
     )
 
 
-async def test_no_disconnect_microsoft_button_when_microsoft_is_not_set_up(
+async def test_disconnect_microsoft_follows_the_saved_account_not_the_settings(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    """Deployments without Microsoft accounts see the privacy card unchanged."""
+    """Without the settings the card is unchanged, unless an account is still saved."""
     await _account(db_session_factory, AAD_OBJECT_ID)
-    await _connect_microsoft(db_session_factory)
     runtime = build_teams_runtime(
         db_session_factory, anthropic=build_fake_anthropic(make_fake_ma_handler())
     )
     runtime.settings.microsoft_accounts = MicrosoftAccountsSettings()
     async with running_service(runtime, teams_api_fake) as service:
-        panel = await post_activity(service, _click("refresh"))
+        plain = await post_activity(service, _click("refresh"))
+        await _connect_microsoft(db_session_factory)
+        saved = await post_activity(service, _click("refresh"))
 
-    assert "Microsoft" not in json.dumps(panel, ensure_ascii=False), (
-        "the panel must not mention Microsoft when the feature is off"
+    assert "Microsoft" not in json.dumps(plain, ensure_ascii=False), (
+        "the panel must not mention Microsoft when nothing is saved"
+    )
+    assert "Disconnect Microsoft" in json.dumps(saved, ensure_ascii=False), (
+        "an account saved before the settings were removed must stay removable"
     )
 
 

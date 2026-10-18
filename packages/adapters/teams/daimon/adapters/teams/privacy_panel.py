@@ -90,8 +90,8 @@ class PrivacyPanel:
         )
 
     async def _microsoft_connected(self, tenant_id: uuid.UUID, user_id: str) -> bool:
-        if not self._runtime.settings.microsoft_accounts.configured:
-            return False
+        # Not gated on the settings: an account saved before they were removed
+        # must stay removable.
         async with self._runtime.sessionmaker() as session:
             count = await microsoft_tokens.count_microsoft_user_tokens(
                 session, tenant_id=tenant_id, user_id=user_id
