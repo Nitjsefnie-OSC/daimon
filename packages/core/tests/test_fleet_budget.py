@@ -2143,3 +2143,64 @@ async def test_run_watch_retries_one_slow_read_without_cancelling_workers(sm, mo
         )
     assert calls >= 3 and not cancelled[a.id].is_set()
     assert (await read(sm, parent, a)).worker_exposure_usd == 1
+
+
+@pytest.mark.parametrize("held_beyond_limit", [False, True])
+async def test_run_watch_skips_while_admissions_hold_the_tenant_lock(
+    sm, monkeypatch, held_beyond_limit
+):
+    # Staging r19 (2026-10-18): budget reads queued behind admissions holding the
+    # tenant fleet lock, timed out, and every in-flight dispatch was cancelled.
+    from daimon.core import channel_budget
+    from sqlalchemy import text
+
+    parent, _ = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    cancelled = {a.id: asyncio.Event()}
+    finished = asyncio.Event()
+    monkeypatch.setattr(channel_budget, "BUDGET_LOCK_BUSY_LIMIT_S", 0.3)
+    holding, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_lock():
+        async with sm.begin() as db:
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"fleet:{parent.fleet.scope.tenant_id}"},
+            )
+            holding.set()
+            await release.wait()
+
+    holder = asyncio.create_task(hold_lock())
+    await holding.wait()
+    watch = asyncio.create_task(
+        watch_fleet_budget(
+            sessionmaker=sm,
+            parent=parent,
+            prices=tariffs(parent),
+            markup=Decimal(1),
+            cancelled=cancelled,
+            finished=finished,
+            poll_interval=0.01,
+            read_timeout=0.1,
+        )
+    )
+    try:
+        await asyncio.sleep(0.6 if held_beyond_limit else 0.15)
+        if held_beyond_limit:
+            assert await asyncio.wait_for(watch, 1) == "usage_unavailable"
+            assert cancelled[a.id].is_set()
+        else:
+            assert not cancelled[a.id].is_set() and not watch.done()
+            release.set()
+            await asyncio.sleep(0.1)
+            finished.set()
+            assert await asyncio.wait_for(watch, 2) == "finished"
+            assert not cancelled[a.id].is_set()
+    finally:
+        release.set()
+        finished.set()
+        await holder
+        if not watch.done():
+            watch.cancel()
+    assert (await read(sm, parent, a)).worker_exposure_usd == 1
