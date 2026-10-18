@@ -148,7 +148,8 @@ class FullWire(Wire):
 
 
 @pytest.fixture
-async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path):
+async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, request):
+    gated = getattr(request, "param", False)
     request, _, source, actor, accepted, router, source_reads, *_ = consent_request
     sessions = request.deps.sessionmaker
     scope = admitted_session_scope(
@@ -196,8 +197,8 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path):
     wire = FullWire(scope.tenant_id)
     clients = clients_for(monkeypatch, wire.handle)
     mcp_calls = []
-    names = ["search_tools", "call_tool"]
-    catalogue_state = {"names": None}
+    names = ["search_tools", "call_tool", *(["add_skill"] if gated else [])]
+    catalogue_state = {"names": names if gated else None}
 
     async def mcp(call):
         mcp_calls.append(call)
@@ -331,7 +332,8 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path):
 
     service = AgentBackendService(sessions, enabled=True, capture_source=capture)
     quote = await service.preview(source, "openai")
-    assert quote.allowed and quote.declared_drops == ("memory",)
+    expected_drops = ("mcp_tool:daimon-mcp:add_skill", "memory") if gated else ("memory",)
+    assert quote.allowed and quote.declared_drops == expected_drops
     accepted = await service.set_backend(
         source,
         "openai",
@@ -530,3 +532,41 @@ async def test_full_source_drift_refuses_before_session_post(full_openai, defect
         )
     assert wire.posts == []
     assert "Bearer" not in json.dumps(wire.agent)
+
+
+ASK_PARAMS = {
+    **PARAMS,
+    "tools": [
+        PARAMS["tools"][0],
+        {
+            **PARAMS["tools"][1],
+            "configs": [
+                *PARAMS["tools"][1]["configs"],
+                {"name": "add_skill", "enabled": True, "permission_policy": {"type": "always_ask"}},
+            ],
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize("consent_request", [ASK_PARAMS], indirect=True)
+@pytest.mark.parametrize("full_openai", [True], indirect=True)
+async def test_confirmation_gated_mcp_tool_is_declared_without_losing_siblings(full_openai):
+    request, _, canonical, wire, *_ = full_openai
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+
+    target = canonical.target_spec
+    assert target.declared_drops == ("mcp_tool:daimon-mcp:add_skill", "memory")
+    assert "mcp_tool:daimon-mcp:add_skill" in target.system
+    assert len(target.skills) == 11
+    assert target.mcp_servers[0].tool_policy["allowed_tools"] == ["search_tools", "call_tool"]
+    assert wire.agent["tools"][-1]["allowed_tools"] == ["search_tools", "call_tool"]
+    # Exact captured evidence alone cannot waive this loss: explicit consent
+    # is mandatory even when all siblings are represented.
+    source = await capture_preparation_source(request, fresh=True)
+    missing = classify_source_obligations(
+        source,
+        target.model_copy(update={"declared_drops": ("memory",)}),
+        environment=source.representations[0].environment,
+    )
+    assert "mcp_tool:daimon-mcp:add_skill" in missing
