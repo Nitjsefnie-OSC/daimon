@@ -54,6 +54,7 @@ from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, Reconnec
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
+    TextBlock,
     ToolUseBlock,
     TurnState,
     extract_final_response,
@@ -1146,9 +1147,17 @@ class DiscordTurnLifecycle:
             if self._thread_stopped():
                 self._skip_terminal()
                 return
-            if self._fleet_card is not None and not await self._fleet_card.allow_summary():
-                self._terminal = True
-                return
+            if self._fleet_card is not None:
+                allowed, notice = await self._fleet_card.summary_gate()
+                if not allowed:
+                    if notice is None:
+                        self._terminal = True
+                        return
+                    # Never deliver the root's unreviewed final or sealed text.
+                    self._state = update_activity(self._state, state)
+                    state = dataclasses.replace(
+                        state, content=[TextBlock(kind="text", text=notice)]
+                    )
             await self._deliver_success(state)
         finally:
             self._mark_ended()
