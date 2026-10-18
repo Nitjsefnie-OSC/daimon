@@ -28,7 +28,7 @@ features:
     display_name: daimon
     always_online: true
   slash_commands:
-    - command: /dm
+    - command: /dm-me
       description: Continue privately (an admin turns it on)
       should_escape: false
     - command: /help

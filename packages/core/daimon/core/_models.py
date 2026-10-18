@@ -3247,7 +3247,7 @@ class DirectMessageConversation(Base):
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
-    # The parent channel (and thread) /dm was run in; re-checked against seals
+    # The parent channel (and thread) /dm-me was run in; re-checked against seals
     # each turn, and the DM's spend counts toward that channel's budget.
     source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)

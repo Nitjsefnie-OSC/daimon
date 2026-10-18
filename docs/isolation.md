@@ -18,7 +18,7 @@ ownership: who has their own copy, and who shares one.
 | Thread | a Discord thread, Slack thread or Teams reply chain | the platform thread id |
 | Caller | the person whose message started the turn | their `accounts` row (`account_id`) and platform user id |
 | Agent | one Managed Agents (MA) agent in a tenant | `derive_agent_uuid` (`packages/core/daimon/core/ma_identity.py:34`) |
-| DM | a private conversation opened with `/dm`, or a Slack private turn | the DM scope id, stamped on the session as `daimon_private_dm` |
+| DM | a private conversation opened with `/dm-me`, or a Slack private turn | the DM scope id, stamped on the session as `daimon_private_dm` |
 
 One deployment runs on one Anthropic API key, so every tenant's agents,
 sessions, files, memory stores and skills live in **one MA workspace**.

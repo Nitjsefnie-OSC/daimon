@@ -1,4 +1,4 @@
-"""/dm renders an admission refusal as copy, not as its reason code."""
+"""/dm-me renders an admission refusal as copy, not as its reason code."""
 
 from __future__ import annotations
 

@@ -6582,11 +6582,27 @@ async def test_dm_slash_command_dispatches_after_ack(monkeypatch):
 
     monkeypatch.setattr("daimon.adapters.slack.app.handle_dm_command", handle)
     request = SocketModeRequest(
-        type="slash_commands", envelope_id="dm-envelope", payload={"command": "/dm"}
+        type="slash_commands", envelope_id="dm-envelope", payload={"command": "/dm-me"}
     )
     await app.on_request(socket, request)
     await asyncio.gather(*list(app._bg_tasks))
     assert socket.call_log == ["send_socket_mode_response", "dm-command"]
+
+
+async def test_bare_dm_slash_command_is_not_routed(monkeypatch):
+    app = _make_app()
+    socket = _FakeSocketClient()
+
+    async def handle(runtime, payload):
+        socket.call_log.append("dm-command")
+
+    monkeypatch.setattr("daimon.adapters.slack.app.handle_dm_command", handle)
+    request = SocketModeRequest(
+        type="slash_commands", envelope_id="dm-envelope", payload={"command": "/dm"}
+    )
+    await app.on_request(socket, request)
+    await asyncio.gather(*list(app._bg_tasks))
+    assert "dm-command" not in socket.call_log
 
 
 @pytest.mark.parametrize(
