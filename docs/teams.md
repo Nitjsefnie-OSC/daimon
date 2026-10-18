@@ -618,7 +618,7 @@ different agent posts a notice instead of running. A deployment with
 
 ### Not supported
 
-`/dm` conversations, files, routines and agent tools in group chats, files in channels whose site is
+`/dm-me` conversations, files, routines and agent tools in group chats, files in channels whose site is
 not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.
 

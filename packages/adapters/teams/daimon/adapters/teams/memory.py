@@ -8,7 +8,7 @@ sender's own personal memory only, never anyone else's
 its agent: a channel post's thread, or the 1:1 chat. Typed in a channel it is
 answered there for the sender only, as Slack does. When Teams refuses that, it
 is answered in the 1:1 chat, and a channel whose readers are limited gets a
-refusal instead: Slack's `/dm` likewise refuses to carry such a channel's work
+refusal instead: Slack's `/dm-me` likewise refuses to carry such a channel's work
 outside it.
 """
 

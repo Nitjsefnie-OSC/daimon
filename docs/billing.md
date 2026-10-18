@@ -262,7 +262,7 @@ per-session cap and no window other than the calendar month.
 **Channel budget** — `is_over_channel_budget` in
 `packages/core/daimon/core/channel_budget.py` compares a channel's spend in
 its budget window against the budget's limit; see
-[channel budgets](#channel-budgets). A DM moved with `/dm` counts toward the
+[channel budgets](#channel-budgets). A DM moved with `/dm-me` counts toward the
 channel it came from. A turn with no channel (an older DM, an MCP turn from
 a key not minted in a channel) and a channel with no budget are never gated.
 On Discord, Slack and Teams, a finished turn ends with one summary line: the agent,
@@ -421,9 +421,9 @@ What a budget does not cover:
 - **Earlier spend.** Attribution starts with this release; debits recorded
   before it have no channel and count toward no budget.
 - **DMs started before this release** have no source channel, so their
-  turns are neither attributed nor gated. A DM moved with `/dm` since then
+  turns are neither attributed nor gated. A DM moved with `/dm-me` since then
   records the parent channel it came from
-  (`direct_message_conversations.source_channel_id`): `/dm` is refused while
+  (`direct_message_conversations.source_channel_id`): `/dm-me` is refused while
   that channel's budget is used up, and the DM's turns and media calls
   count toward it and are gated by it. `get_channel_budget` in such a DM
   reads that channel's budget.

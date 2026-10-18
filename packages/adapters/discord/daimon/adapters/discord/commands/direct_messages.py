@@ -1,4 +1,4 @@
-"""Opt-in /dm move command and private-message listener."""
+"""Opt-in /dm-me move command and private-message listener."""
 
 import asyncio
 import contextlib
@@ -57,7 +57,7 @@ class DirectMessageCog(commands.Cog):
     def __init__(self, bot: DaimonBot) -> None:
         self.bot = bot
 
-    @app_commands.command(name="dm", description="Continue privately (an admin turns it on)")
+    @app_commands.command(name="dm-me", description="Continue privately (an admin turns it on)")
     @app_commands.guild_only()
     @require_registered_guild
     async def dm(
@@ -70,7 +70,9 @@ class DirectMessageCog(commands.Cog):
         channel = interaction.channel
         if guild is None or not isinstance(channel, (discord.TextChannel, discord.Thread)):
             await interaction.followup.send(
-                "Run /dm in a server text channel or thread.", ephemeral=True
+                "You can't start a private conversation from here.\n\n"
+                "Run /dm-me in the channel you want to continue from.",
+                ephemeral=True,
             )
             return
         runtime = self.bot.runtime
@@ -142,8 +144,8 @@ class DirectMessageCog(commands.Cog):
                 context=context,
             )
             await dm_channel.send(
-                f"Continuing from {source_url}. Send your next message here. "
-                "Run /dm again in a server channel to start a new private conversation.",
+                f"Continuing from {source_url}.\n\nSend your next message here. "
+                "To start a new private conversation, run /dm-me in a channel.",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             await interaction.followup.send("Ready in your DMs.", ephemeral=True)
