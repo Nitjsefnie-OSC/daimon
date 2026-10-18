@@ -114,17 +114,23 @@ def _mb(size_bytes: int) -> str:
     return f"{size_bytes / _MIB:.1f}".removesuffix(".0")
 
 
-def render_oversize_notice(skipped: SkippedFile, *, max_bytes: int = MAX_BYTES_PER_FILE) -> str:
+def render_oversize_notice(
+    skipped: SkippedFile, *, max_bytes: int = MAX_BYTES_PER_FILE, for_whom: str | None = None
+) -> str:
     """The chat notice for an output over the per-file delivery cap.
 
     ``max_bytes`` is the limit the sweep applied; the notice quotes it.
+    ``for_whom`` names the person whose turn wrote the file (a platform
+    mention). In a shared thread the notice can arrive during someone else's
+    turn, and only that person's session holds the file.
 
     The file is kept, so the notice says so and names what the person can ask
     for instead; it never offers a download it cannot give.
     """
     limit = _mb(max_bytes)
+    prefix = f"For {for_whom}: " if for_whom else ""
     return (
-        f"`{sanitize_title(skipped.filename)}` is {_mb(skipped.size_bytes)} MB, over the "
+        f"{prefix}`{sanitize_title(skipped.filename)}` is {_mb(skipped.size_bytes)} MB, over the "
         f"{limit} MB upload limit here, so I couldn't attach it. It's still saved in my "
         "workspace: ask me for a smaller version, or to split it into parts under "
         f"{limit} MB, and I'll attach those."

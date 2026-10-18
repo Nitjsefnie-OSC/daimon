@@ -1002,26 +1002,35 @@ the wait finishes or fails.
 After a tool-using Discord or Slack turn, the adapter starts a detached,
 per-MA-session-chained sweep of downloadable session files through
 `daimon.core.output_delivery`. It delivers each file before deleting its MA
-listing entry. Failed deliveries stay listed for a later sweep. Slack posts
-each file into the conversation thread. Discord attaches each file to the
-turn's answer: the message carrying the summary line and the 👍 👎 🙋 emoji
-(the last chunk of a long answer, or the "Done." card of a tool-only turn).
-It edits that message once per file through the turn's post transport,
-passing the attachments already on it back, and never reposts the answer when
-a webhook message cannot be edited. Any edit error that reached Discord (a
-timeout, a 5xx, or a 4xx after discord.py's own retry of a 5xx) may follow an
-applied edit, so the sweep reads the answer back: the file counts as delivered
-only if a new attachment holds its exact bytes, and the next edit starts from
-what is there. A file the answer cannot take (Discord's
-10-attachment limit, or a failed edit) is posted on its own below it, and a
-turn that ended without an answer (stopped or failed) gets its files as
-separate posts. Discord uses the guild's upload limit (10 MB, up to 100 MB
-for a boosted server; 10 MB where there is no guild) and checks the
-channel's writers before posting. No limit goes above 200 MB, because each
-file is read into memory whole. A file over the limit (the guild's on
-Discord, 200 MB on Slack, 20 MB on Teams) is never deleted: it stays listed and in the
-agent's workspace, and the thread gets one notice naming the file, its size
-and the limit, and offering a smaller version or parts under the limit.
+listing entry. Failed deliveries stay listed for a later sweep. The sweep runs
+after the turn has released the thread, so in a shared thread another person's
+turn may have started by the time a file lands; every post the sweep makes
+therefore names the person whose turn made the file. Slack posts each file
+into the conversation thread; the sweep's first post carries a "For @name"
+mention, and the rest do not repeat it, since a Slack mention always pings.
+Files are labelled, not reordered: they can still land after a later turn's
+answer. Discord attaches each file to the turn's answer: the message carrying
+the summary line and the 👍 👎 🙋 emoji (the last chunk of a long answer, or the
+"Done." card of a tool-only turn). It edits that message once per file through
+the turn's post transport, passing the attachments already on it back, and
+never reposts the answer when a webhook message cannot be edited. Any edit
+error that reached Discord (a timeout, a 5xx, or a 4xx after discord.py's own
+retry of a 5xx) may follow an applied edit, so the sweep reads the answer
+back: the file counts as delivered only if a new attachment holds its exact
+bytes, and the next edit starts from what is there. A file the answer cannot
+take (Discord's 10-attachment limit, or a failed edit) is posted on its own,
+and a turn that ended without an answer (stopped or failed) gets its files as
+separate posts. Such a post, and an oversize notice, is a reply to the
+person's own message (or to the answer, when that message is not in the
+thread) and says "For @name" without pinging anyone. Discord uses the guild's
+upload limit (10 MB, up to 100 MB for a boosted server; 10 MB where there is
+no guild) and checks the channel's writers before posting. No limit goes above
+200 MB, because each file is read into memory whole. A file over the limit
+(the guild's on Discord, 200 MB on Slack, 20 MB on Teams) is never deleted: it
+stays listed and in the agent's workspace, and the thread gets one notice
+naming the file, its size and the limit, and offering a smaller version or
+parts under the limit; on Discord, and on Slack when it is the sweep's first
+post, it starts "For @name", since only that person's session holds the file.
 Each adapter remembers which kept files it has announced (bounded, per
 process), so later sweeps that list the file again stay quiet; a restart can
 announce a kept file once more. Teams only logs an oversize file and keeps

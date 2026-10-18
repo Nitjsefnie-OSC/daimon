@@ -634,6 +634,7 @@ class SlackApp:
         channel_id: str,
         thread_ts: str,
         team_id: str,
+        requester_user_id: str,
     ) -> None:
         """Detached post-turn output sweep, chained per MA session.
 
@@ -658,6 +659,7 @@ class SlackApp:
                 notice_keys=self._delivery_notice_keys,
                 team_id=team_id,
                 noticed_files=self._noticed_output_files,
+                requester_user_id=requester_user_id,
             )
         except Exception as exc:  # named boundary: a sweep failure must never escape
             log.warning(
@@ -2967,6 +2969,7 @@ class SlackApp:
                     channel_id=channel,
                     thread_ts=thread_id,
                     team_id=team_id,
+                    requester_user_id=author_id,
                 )
             )
             self._output_sweeps[outcome.ma_session_id] = task
