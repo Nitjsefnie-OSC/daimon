@@ -31,10 +31,10 @@ def register_microsoft_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ConnectMicrosoftResult:
         """Send the person a private Connect Microsoft card so Daimon can use their Microsoft 365.
 
-        Call this when a microsoft_* tool says they are not connected, or when
-        they ask to connect (or reconnect) Microsoft. The card goes to their 1:1
-        chat with Daimon; nothing is connected until they sign in there. Never
-        repeat the link.
+        Call this only when the person asks to connect (or reconnect) Microsoft,
+        or agrees to after a microsoft_* tool says they are not connected. The
+        card goes to their 1:1 chat with Daimon; nothing is connected until they
+        sign in there. While a card is unexpired no new one is sent.
         """
         return await connect_microsoft_impl(
             runtime, await _auth(ctx), origin_context_id=origin_context_id

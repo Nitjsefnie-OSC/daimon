@@ -61,6 +61,20 @@ async def get_live_sign_in(
     return None if orm is None else MicrosoftSignInRow.model_validate(orm)
 
 
+async def get_live_sign_in_for_user(
+    session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str, now: datetime
+) -> MicrosoftSignInRow | None:
+    """The person's unexpired link, if a card carrying one is still out."""
+    orm = await session.scalar(
+        select(MicrosoftSignIn).where(
+            MicrosoftSignIn.tenant_id == tenant_id,
+            MicrosoftSignIn.user_id == user_id,
+            MicrosoftSignIn.expires_at > now,
+        )
+    )
+    return None if orm is None else MicrosoftSignInRow.model_validate(orm)
+
+
 async def consume_sign_in(
     session: AsyncSession, *, state: str, now: datetime
 ) -> MicrosoftSignInRow | None:

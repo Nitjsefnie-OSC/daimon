@@ -22,7 +22,7 @@ SIGN_IN_TTL = timedelta(minutes=10)
 class ConnectMicrosoftResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    status: Literal["sent", "delivery_failed"]
+    status: Literal["sent", "already_sent", "delivery_failed"]
     message: str
 
 
@@ -68,8 +68,21 @@ async def connect_microsoft_impl(
         raise ToolError("Microsoft 365 access is not set up on this server.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     now = datetime.now(UTC)
-    state = secrets.token_urlsafe(32)
     async with runtime.session_factory.begin() as session:
+        # One card per link lifetime: a repeated call must not keep messaging them.
+        live = await sign_ins.get_live_sign_in_for_user(
+            session, tenant_id=auth.tenant_id, user_id=user_id, now=now
+        )
+        if live is not None:
+            return ConnectMicrosoftResult(
+                status="already_sent",
+                message=(
+                    "A Connect Microsoft card is already in the person's 1:1 chat with "
+                    f"Daimon and works until {live.expires_at:%H:%M} UTC, so no new card was "
+                    "sent. Tell them to use it."
+                ),
+            )
+        state = secrets.token_urlsafe(32)
         await sign_ins.create_sign_in(
             session,
             state=state,
@@ -85,14 +98,18 @@ async def connect_microsoft_impl(
         await send_card_to_caller(
             runtime, auth, conversation_id=origin.parent_channel_id, card=connect_card(url)
         )
-    except (httpx.HTTPError, ValueError):
+    except Exception as exc:
+        # Withdraw the link on any failure, so no half-sent sign-in is left behind.
         async with runtime.session_factory.begin() as session:
             await sign_ins.delete_sign_in(session, state=state)
+        if not isinstance(exc, httpx.HTTPError | ValueError):
+            raise
         return ConnectMicrosoftResult(
             status="delivery_failed",
             message=(
-                "The sign-in card could not reach the person's 1:1 chat with Daimon. Ask "
-                "them to open a 1:1 chat with Daimon and ask there."
+                "The sign-in card could not reach the person's 1:1 chat with Daimon (it may "
+                "not be added for them personally), so nothing was sent or saved. Ask them to "
+                "open a 1:1 chat with Daimon in Teams and ask there."
             ),
         )
     return ConnectMicrosoftResult(
