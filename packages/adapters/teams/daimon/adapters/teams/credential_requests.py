@@ -21,6 +21,7 @@ from typing import Literal
 
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.teams.admin_caller import admin_caller
 from daimon.adapters.teams.card_actions import (
     FAILED,
     SENDING_PANEL_ERRORS,
@@ -31,7 +32,6 @@ from daimon.adapters.teams.card_actions import (
     error_text,
     submitted_fields,
 )
-from daimon.adapters.teams.channel_admin_groups import channel_admin_caller
 from daimon.adapters.teams.credential_repos import attach_imported_skills, store_agent_pat
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
@@ -536,7 +536,7 @@ class TeamsCredentialRequests:
                 ma_agent_id=str(agent.id),
                 default=self._runtime.deployment_default,
                 # Only the requester may submit, so they are the caller.
-                caller=await channel_admin_caller(
+                caller=await admin_caller(
                     self._runtime,
                     tenant_id=row.tenant_id,
                     user_id=row.requester_platform_user_id,
@@ -978,7 +978,7 @@ class TeamsCredentialRequests:
             url=row.mcp_server_url,
             platform="teams",
             # Only the requester may submit, so they are the caller.
-            caller=await channel_admin_caller(
+            caller=await admin_caller(
                 self._runtime,
                 tenant_id=row.tenant_id,
                 user_id=row.requester_platform_user_id,

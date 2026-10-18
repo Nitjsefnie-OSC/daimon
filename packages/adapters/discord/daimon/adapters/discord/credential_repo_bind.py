@@ -57,7 +57,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.agent_setup.write import load_agent_inline_pat, store_inline_pat
-from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import admin_caller, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.agent_reach import load_target_facts
@@ -208,7 +208,7 @@ async def refuse_if_shared_and_not_admin_for_request(
             agent_names=agent_pin_names(agent.name, agent.metadata),
             ma_agent_id=str(agent.id),
             default=runtime.deployment_default,
-            caller=channel_admin_caller(interaction.user),
+            caller=admin_caller(interaction.user),
             is_daimon_managed=is_daimon_managed,
             caller_account_id=caller_account_id,
             caller_platform_user_id=str(interaction.user.id),

@@ -76,14 +76,13 @@ SEALED_SOURCE_MESSAGE = (
 
 
 SEALED_SINCE_MESSAGE = (
-    "This DM was started from a channel that is now private to its members, so it was "
-    "closed to keep that channel's messages in. Run /dm again from the channel you want "
-    "to talk about."
+    "This DM was closed because its channel no longer lets its conversation move to a DM."
+    "\n\nKeep working in that channel."
 )
 
 
 async def sealed_channel_ids(deps: TurnDeps, *, tenant_id: uuid.UUID) -> frozenset[str]:
-    """The tenant's current seal list, for filtering history a /dm move copies."""
+    """The tenant's current seal list, for filtering history a /dm-me move copies."""
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
     return limited_ids(policy)
@@ -144,7 +143,7 @@ async def _require_source_still_unsealed(deps: TurnDeps, conversation: DirectMes
 
     The row (copied context and private history) is deleted and the scope's
     provider sessions retired, so nothing supplied earlier survives into a
-    later turn; a fresh /dm is required. `reauthorize` asks the same question
+    later turn; a fresh /dm-me is required. `reauthorize` asks the same question
     again right before the DM's session is built (`DmSourceSealedError`).
     """
     async with deps.sessionmaker() as session:
@@ -155,7 +154,7 @@ async def _require_source_still_unsealed(deps: TurnDeps, conversation: DirectMes
 
 
 def require_unsealed_source(admission: Admission) -> None:
-    """Refuse /dm from a sealed channel or thread before any history is read.
+    """Refuse /dm-me from a sealed channel or thread before any history is read.
 
     A DM sits outside the seal: copying the channel's recent messages into it
     would carry sealed content into a conversation that can reach unsealed
@@ -185,7 +184,7 @@ async def start_dm(
 
     Caller admits the source with is_dm=True and `dm_source_channel_id`, and
     calls `require_unsealed_source`, before reading history or opening the DM.
-    `source_channel_id` is the parent channel `/dm` ran in; the DM's turns
+    `source_channel_id` is the parent channel `/dm-me` ran in; the DM's turns
     count toward its budget. Each move resets the private scope; a prior
     workspace's physical DM history is never replayed into this one.
     """
@@ -289,7 +288,6 @@ async def reply_to_dm(
     expected_scope_id: str,
     text: str,
     role: Role,
-    platform_role_ids: Sequence[str] | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
 ) -> str | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
@@ -329,13 +327,15 @@ async def reply_to_dm(
             channel_id=conversation.channel_id,
             thread_id=conversation.scope_id,
             role=role,
-            platform_role_ids=platform_role_ids,
             is_dm=True,
             dm_source_channel_id=conversation.source_channel_id,
             now=now,
         )
         if admission.account_id != conversation.account_id:
-            raise UserFacingError("Your account changed. Run /dm again in the workspace channel.")
+            raise UserFacingError(
+                "Your account changed, so this DM can't continue.\n\n"
+                "Run /dm-me again in the channel you came from."
+            )
         if on_agent is not None:
             await on_agent(admission.agent.name)
         execution_id = uuid.uuid4() if platform == "slack" else None
@@ -503,4 +503,4 @@ async def require_dm_enabled(deps: TurnDeps, *, tenant_id: uuid.UUID) -> None:
     async with deps.sessionmaker() as session:
         enabled = await dm_enabled(session, tenant_id=tenant_id)
     if not enabled:
-        raise UserFacingError("DM conversations are disabled here. Ask an admin to run /dm enable.")
+        raise UserFacingError("Daimon DMs are off here.\n\nAsk an admin to run /dm-me enable.")

@@ -25,7 +25,7 @@ from typing import Any, Final, Self, cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.checks import channel_admin_caller
+from daimon.adapters.discord.checks import admin_caller
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.thread_handoff import switch_thread_on_request
@@ -100,7 +100,7 @@ class HandOverButton(
             parent_channel_id=str(thread.parent_id),
             thread_id=str(thread.id),
             ma_agent_id=self.agent_id,
-            caller=channel_admin_caller(interaction.user),
+            caller=admin_caller(interaction.user),
             default=runtime.turn_deps.deployment_default,
             channel=f"<#{thread.parent_id}>",
             now=datetime.now(UTC),

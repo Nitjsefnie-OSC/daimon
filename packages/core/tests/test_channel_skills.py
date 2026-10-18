@@ -71,16 +71,6 @@ def _row(
     )
 
 
-def test_only_a_server_admin_may_set_a_channels_skills() -> None:
-    admin = build_subject(is_admin=True, platform_user_id="U1")
-    channel_admin = build_subject(
-        is_admin=False, platform_user_id="U2", administered_channel_ids=frozenset({"C1"})
-    )
-    assert may_set_channel_skills(admin, "C1")
-    refused = may_set_channel_skills(channel_admin, "C1")
-    assert not refused and refused.reason == "admin_required"
-
-
 async def test_a_library_skill_is_chosen_by_name_at_its_latest_version(
     db_session: AsyncSession,
 ) -> None:
@@ -297,3 +287,11 @@ async def test_a_shared_listing_missing_a_skill_the_agent_now_holds_is_read_agai
     listing.append(_skill("skill_own_b", own_b))
     held = [{"type": "custom", "skill_id": "skill_own_b", "version": "1"}]
     assert await turn(held) == [], "the fresh listing shows the clash, so skill_b stays out"
+
+
+def test_only_a_server_admin_may_set_a_channels_skills() -> None:
+    admin = build_subject(is_admin=True, platform_user_id="U1")
+    member = build_subject(is_admin=False, platform_user_id="U2")
+    assert may_set_channel_skills(admin, "C1")
+    refused = may_set_channel_skills(member, "C1")
+    assert not refused and refused.reason == "admin_required"

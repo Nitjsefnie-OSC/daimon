@@ -12,7 +12,7 @@ from daimon.adapters.discord.agent_setup.github_embed_panel import (
     GitHubEmbedPanel as PanelViewBase,
 )
 from daimon.adapters.discord.agent_setup.state import PanelState
-from daimon.adapters.discord.checks import channel_admin_caller, is_guild_admin
+from daimon.adapters.discord.checks import admin_caller, is_guild_admin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
@@ -65,7 +65,7 @@ async def _may_manage_request(
                 agent_names=(row.agent_name, live_agent.name),
                 ma_agent_id=str(live_agent.id),
                 default=runtime.deployment_default,
-                caller=channel_admin_caller(member),
+                caller=admin_caller(member),
                 is_daimon_managed=managed,
                 caller_platform_user_id=str(member.id),
             )

@@ -569,65 +569,6 @@ async def test_controller_refusal_persists_as_an_authz_denial(
     owner.read_result.assert_not_awaited()
 
 
-@pytest.mark.parametrize(
-    "field",
-    (
-        "tenant",
-        "account",
-        "platform",
-        "subject",
-        "admin",
-        "channels",
-        "depth",
-        "agent",
-        "agent_key",
-    ),
-)
-async def test_host_bridge_refuses_root_mismatch_or_nested_worker_before_store_reads(
-    field: str,
-) -> None:
-    root = host_parent()
-    if field == "tenant":
-        root = replace(
-            root,
-            fleet=replace(
-                root.fleet, scope=root.fleet.scope.model_copy(update={"tenant_id": "foreign"})
-            ),
-        )
-    elif field == "account":
-        root = replace(root, fleet=replace(root.fleet, account_id=uuid.UUID(int=999)))
-    elif field == "platform":
-        channel = root.fleet.root.channel.model_copy(update={"platform": "teams"})
-        root = replace(
-            root,
-            fleet=replace(root.fleet, root=root.fleet.root.model_copy(update={"channel": channel})),
-        )
-    elif field == "subject":
-        root = replace(root, subject=replace(root.subject, platform_user_id="other"))
-    elif field == "admin":
-        root = replace(root, subject=replace(root.subject, is_admin=True))
-    elif field == "channels":
-        root = replace(
-            root, subject=replace(root.subject, administered_channel_ids=frozenset({"extra"}))
-        )
-    elif field == "depth":
-        root = replace(root, fleet=replace(root.fleet, depth=1))
-    elif field == "agent":
-        root = replace(root, agent_id=uuid.UUID(int=999))
-    else:
-        root = replace(root, subject=replace(root.subject, via_agent_key=True))
-
-    async def load(caller: AuthIdentity) -> tuple[WorkerPermissions, TenantAccessPolicy]:
-        assert caller is AUTH
-        return root, TenantAccessPolicy(enabled_backends=("anthropic",))
-
-    owner = host_owner()
-    async with Client(registered(HostFleetToolService(FleetOrchestrator(owner), load))) as client:
-        with pytest.raises(ToolError, match="caller_root_mismatch|worker_depth_exceeded"):
-            await client.call_tool("fleet_status", {"run_id": str(RUN)})
-    assert owner.mock_calls == []
-
-
 @pytest.mark.parametrize("tool", sorted(NAMES))
 @pytest.mark.parametrize("credential", ["external_account", "agent_session_token"])
 async def test_authenticated_nonroot_credentials_never_reach_fleet_owner(
@@ -991,3 +932,48 @@ async def test_public_token_caps_keep_existing_resolver_refusals(fault) -> None:
         with pytest.raises(ToolError, match="not_subset|budget: unsupported"):
             await client.call_tool("fleet_spawn", request)
     owner.admit.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("tenant", "account", "platform", "subject", "admin", "depth", "agent", "agent_key"),
+)
+async def test_host_bridge_refuses_root_mismatch_or_nested_worker_before_store_reads(
+    field: str,
+) -> None:
+    root = host_parent()
+    if field == "tenant":
+        root = replace(
+            root,
+            fleet=replace(
+                root.fleet, scope=root.fleet.scope.model_copy(update={"tenant_id": "foreign"})
+            ),
+        )
+    elif field == "account":
+        root = replace(root, fleet=replace(root.fleet, account_id=uuid.UUID(int=999)))
+    elif field == "platform":
+        channel = root.fleet.root.channel.model_copy(update={"platform": "teams"})
+        root = replace(
+            root,
+            fleet=replace(root.fleet, root=root.fleet.root.model_copy(update={"channel": channel})),
+        )
+    elif field == "subject":
+        root = replace(root, subject=replace(root.subject, platform_user_id="other"))
+    elif field == "admin":
+        root = replace(root, subject=replace(root.subject, is_admin=True))
+    elif field == "depth":
+        root = replace(root, fleet=replace(root.fleet, depth=1))
+    elif field == "agent":
+        root = replace(root, agent_id=uuid.UUID(int=999))
+    else:
+        root = replace(root, subject=replace(root.subject, via_agent_key=True))
+
+    async def load(caller: AuthIdentity) -> tuple[WorkerPermissions, TenantAccessPolicy]:
+        assert caller is AUTH
+        return root, TenantAccessPolicy(enabled_backends=("anthropic",))
+
+    owner = host_owner()
+    async with Client(registered(HostFleetToolService(FleetOrchestrator(owner), load))) as client:
+        with pytest.raises(ToolError, match="caller_root_mismatch|worker_depth_exceeded"):
+            await client.call_tool("fleet_status", {"run_id": str(RUN)})
+    assert owner.mock_calls == []

@@ -25,7 +25,6 @@ deleting an auto-opened thread takes the person who opened it or an admin.
 
 Every action is decided at call time with a fresh policy: the caller's own
 platform permission to post there, `require_channel_writable`
-(`authorize(POST)`: protection, pins, isolation, channel admins), the seal
 (only a turn inside a sealed channel may tidy it), and the configured
 support-escalation channels, which are never tidied. Nothing these tools
 return carries message text.

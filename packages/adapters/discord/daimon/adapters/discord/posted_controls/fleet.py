@@ -249,8 +249,8 @@ class DiscordFleetCardFactory:
     @classmethod
     def from_runtime(cls, service: FleetOrchestrator, deps: TurnDeps) -> Self:
         """Bind the real intent/root owner, retaining its original scope."""
-        from daimon.core.channel_admins import load_live_subject, load_stored_subject
         from daimon.core.mux_backend import resource_scope
+        from daimon.core.native_admins import load_live_subject, load_stored_subject
         from daimon.core.stores.identity import find_platform_principal
         from daimon.core.turn.runtime_manifest import read_frozen_root
         from mux.errors import ScopeViolation
@@ -263,7 +263,7 @@ class DiscordFleetCardFactory:
             run_id: uuid.UUID | None,
             interaction: discord.Interaction | None,
         ) -> tuple[WorkerPermissions, TenantAccessPolicy] | None:
-            from daimon.adapters.discord.checks import channel_admin_caller
+            from daimon.adapters.discord.checks import admin_caller
 
             if intent_id is None or (interaction is not None and run_id is None):
                 raise FleetRefused("prerequisites_unavailable")
@@ -288,7 +288,7 @@ class DiscordFleetCardFactory:
                             db,
                             tenant_id=tenant_id,
                             platform="discord",
-                            caller=channel_admin_caller(interaction.user),
+                            caller=admin_caller(interaction.user),
                         )
                     )
                 result = await read_frozen_root(

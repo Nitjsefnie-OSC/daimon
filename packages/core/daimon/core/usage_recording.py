@@ -26,6 +26,7 @@ from typing import Literal
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
+from daimon.core.model_presets import OPUS, OPUS_FAST
 from daimon.core.pricing import ModelRates, ProviderPrice, cost_of, usage_tokens
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.tenant_balance import debit_amount
@@ -124,8 +125,11 @@ async def record_turn_usage(
     if observation.model is None:
         if model_id is None:
             raise ValueError("turn billing requires a model")
-    elif model_id is not None and observation.model.id != model_id:
-        raise ValueError("usage observation belongs to another model")
+    elif model_id is not None:
+        # The bound tariff may be a local preset; the receipt carries the native ID.
+        native_id = OPUS if model_id == OPUS_FAST else model_id
+        if observation.model.id not in (model_id, native_id):
+            raise ValueError("usage observation belongs to another model")
     else:
         model_id = observation.model.id
     managed_session_id = observation.session.id

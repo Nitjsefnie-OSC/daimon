@@ -89,14 +89,28 @@ async def defaults_apply(
     as_json: bool,
     defaults_root: Path,
 ) -> None:
-    public_url = str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
-    report = await apply_defaults(
-        rt.sessionmaker,
-        rt.anthropic,
-        defaults_root,
-        dry_run=dry_run,
-        public_url=public_url,
-    )
+    if rt.settings.anthropic.api_key is None:
+        # OpenAI-only deployment (see docs/self-hosting.md's "Self-host on
+        # OpenAI"): there is no Anthropic-backed default agent/environment/
+        # skill set to reconcile. `daimon openai init` seeds the OpenAI
+        # equivalent separately, once the operator has a project and model.
+        console.print(
+            "defaults apply: no DAIMON_ANTHROPIC__API_KEY configured — skipped the "
+            "Anthropic default agent/environment/skill reconciliation. Run "
+            "`daimon openai init` to provision and seed defaults on OpenAI instead."
+        )
+        report = ApplyReport()
+    else:
+        public_url = (
+            str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
+        )
+        report = await apply_defaults(
+            rt.sessionmaker,
+            rt.anthropic,
+            defaults_root,
+            dry_run=dry_run,
+            public_url=public_url,
+        )
     if as_json:
         _format_report_json(console, report)
     else:

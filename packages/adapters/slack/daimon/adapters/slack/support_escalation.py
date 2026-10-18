@@ -48,12 +48,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import uuid
 from collections.abc import Callable
 from typing import Any, Final, cast
 
 import structlog
-from daimon.adapters.slack.channel_admin_groups import user_group_members
 from daimon.adapters.slack.click_replies import (
     CLICK_REPLY_ERRORS,
     error_name,
@@ -73,8 +71,7 @@ from daimon.adapters.slack.place_access import (
 )
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.authz import Action, Place, Subject, authorize
-from daimon.core.channel_admins import confirm_stored_subject
-from daimon.core.config import DirectMessagePolicy, SupportSettings
+from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -101,7 +98,6 @@ from daimon.core.support_escalation import (
     received_text,
     remaining_credits,
 )
-from daimon.core.support_routing import support_recipient_tiers
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -476,9 +472,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
     async with runtime.sessionmaker() as session:
         stored, account_id = await stored_clicker(session, tenant_id=tenant_id, user_id=s.user_id)
     # Looked up with no session open: a slow Slack must not hold a connection.
-    subject = await confirm_stored_subject(
-        stored, user_group_members(runtime, client, tenant_id=tenant_id)
-    )
+    subject = stored.subject()
     async with runtime.sessionmaker() as session, session.begin():
         tenant = await get_tenant(session, tenant_id)
         if tenant is None or tenant.archived_at is not None:
@@ -538,9 +532,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
     # best-effort delivery, and the person hears the outcome whatever fails.
     delivered = False
     try:
-        delivered = await _dm_channel_admins(
-            runtime, client, submission=s, tenant_id=tenant_id, sealed=sealed
-        ) or await _post_to_escalation_channel(
+        delivered = await _post_to_escalation_channel(
             runtime,
             source_client=client,
             submission=s,
@@ -596,54 +588,6 @@ def render_escalation_post(*, submission: SupportSubmission, link: str | None, s
     if sealed:
         lines.append(f"_{SEALED_POST_MARKER}_")
     return "\n\n".join([*lines, escape_mrkdwn(s.note)])
-
-
-async def _dm_channel_admins(
-    runtime: SlackRuntime,
-    client: AsyncWebClient,
-    *,
-    submission: SupportSubmission,
-    tenant_id: uuid.UUID,
-    sealed: bool,
-) -> bool:
-    """DM the origin channel's admins, else the server admins. True once a tier got it.
-
-    False at once for a channel with no admins of its own, so it keeps the
-    escalation channel. Each DM is held to the tenant's DM policy.
-    """
-    s = submission
-    tiers = await support_recipient_tiers(
-        runtime.sessionmaker,
-        tenant_id=tenant_id,
-        platform="slack",
-        channel_id=s.channel_id,
-        requester_id=s.user_id,
-        members=user_group_members(runtime, client, tenant_id=tenant_id),
-    )
-    if not tiers:
-        return False
-    policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
-    link = await _permalink(client, channel_id=s.channel_id, message_ts=s.message_ts)
-    text = render_escalation_post(submission=s, link=link, sealed=sealed)
-    for tier in tiers:
-        landed = 0
-        for user_id in (uid for uid in tier if policy.allows(uid)):
-            try:
-                opened = await client.conversations_open(users=user_id)  # pyright: ignore[reportUnknownMemberType]
-                channel = cast("dict[str, str]", opened["channel"])["id"]
-                await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel, text=text, unfurl_links=False, unfurl_media=False
-                )
-                landed += 1
-            except CLICK_REPLY_ERRORS as err:
-                # A timeout is ambiguous (the DM may have landed); it counts as
-                # undelivered and daimon does not resend it. (slack_sdk's own
-                # connection-error retry handler still applies, app-wide.)
-                log.info("support.admin_dm_undelivered", error=error_name(err))
-        if landed:
-            log.info("support.sent_to_admins", recipients=landed)
-            return True
-    return False
 
 
 async def _post_to_escalation_channel(

@@ -18,9 +18,8 @@ from asyncpg import (  # pyright: ignore[reportMissingTypeStubs]
     PostgresError,
 )
 from daimon.core.billing import BillingConfig, load_billing_config
-from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.channel_budget_notice import drain_budget_notices
-from daimon.core.config import Settings, prime_channel_admins_enabled
+from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
@@ -262,8 +261,6 @@ class DiscordRuntime:
     # tests use so a form submit never leaves the process; production wires
     # `daimon.core.mcp_oauth.probe_bearer_token`.
     mcp_token_probe: McpTokenProbe | None = None
-    # Members' current roles, re-read outside their turns (`channel_admin_roles`).
-    group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
     # Decides which Discord process may hold the gateway during a deploy overlap.
     # None means "no lease to take" (tests, tools that never connect).
     gateway_lease: GatewayLease | None = None
@@ -281,7 +278,6 @@ async def build_runtime(
     fleet_root_grants: Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]]
     | None = None,
 ) -> AsyncIterator[DiscordRuntime]:
-    prime_channel_admins_enabled(settings)
     fleet_factory: FleetCardFactory | None = None
     owned_fleet_ports: HostFleetPorts | None = None
     engine = build_engine(
@@ -299,7 +295,7 @@ async def build_runtime(
     resolver_cache = new_resolver_cache()
     billing_config = load_billing_config()
     async with AsyncAnthropic(
-        api_key=settings.anthropic.api_key.get_secret_value(),
+        api_key=settings.anthropic.resolved_api_key(),
         base_url=str(settings.anthropic.base_url),
         max_retries=MA_MAX_RETRIES,
         http_client=DefaultAsyncHttpxClient(

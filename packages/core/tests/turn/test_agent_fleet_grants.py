@@ -9,7 +9,6 @@ from decimal import Decimal
 
 import pytest
 from daimon.core._models import AgentBackendRevisionRecord
-from daimon.core.authz import Subject
 from daimon.core.channel_backend import AgentBackendRefused
 from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits
 from daimon.core.stores import security_audit
@@ -226,23 +225,6 @@ async def test_audit_failure_rolls_back_fleet_grant(owned, monkeypatch):
 
     monkeypatch.setattr(security_audit, "append_event", unavailable)
     with pytest.raises(RuntimeError, match="offline audit failure"):
-        await set_grant(service, agent, actor)
-    assert await service.current(agent) is None
-
-
-@pytest.mark.parametrize("fault", ["tenant", "account", "channel_admin"])
-async def test_foreign_or_insufficient_grant_actor_refuses(owned, fault):
-    import uuid
-
-    service, agent, actor, _ = owned
-    await enable(service, agent, actor)
-    if fault == "tenant":
-        actor = replace(actor, tenant_id=uuid.uuid4())
-    elif fault == "account":
-        actor = replace(actor, account_id=uuid.uuid4())
-    else:
-        actor = replace(actor, subject=Subject(administered_channel_ids=frozenset({"chan"})))
-    with pytest.raises(AgentBackendRefused):
         await set_grant(service, agent, actor)
     assert await service.current(agent) is None
 

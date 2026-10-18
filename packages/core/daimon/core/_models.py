@@ -130,9 +130,7 @@ class Account(Base):
         index=True,
     )
     role: Mapped[str] = mapped_column(Text, nullable=False, server_default="user")
-    # The platform roles the member held on their last chat turn, refreshed
-    # with `role`, so MCP calls can match a channel admin role grant without a
-    # live platform lookup. Empty on platforms without roles.
+    # Legacy role ids retained with the existing account column.
     platform_role_ids: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
@@ -391,7 +389,6 @@ class ChannelConfig(Base):
         nullable=True,
     )
     # A server admin set `agent_name`, as decided when it was set: that makes the
-    # agent this channel's admins' to administer (`daimon.core.authz.channel_admin_holds`).
     agent_name_set_by_admin: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
@@ -1078,10 +1075,9 @@ class ChannelSkill(Base):
 
 
 class AgentCreationChannel(Base):
-    """The channel an agent was created for, by a channel admin of it, from there.
+    """The legacy channel recorded when an agent was created.
 
-    Its admins administer the agent while it stays local to their channels
-    (`daimon.core.authz.channel_admin_holds`). No row: nobody's but server admins'.
+    Rows remain for a later data cleanup.
     """
 
     __tablename__ = "agent_creation_channels"
@@ -2710,7 +2706,6 @@ class GitHubConnectInvitation(Base):
     requester_platform_user_id: Mapped[str | None] = mapped_column(Text)
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     agent_name: Mapped[str | None] = mapped_column(Text)
-    # The target's Managed Agents id, so a channel admin's right to connect
     # for it can be checked again when the repos are confirmed.
     agent_ma_id: Mapped[str | None] = mapped_column(Text)
     operator_issued: Mapped[bool] = mapped_column(
@@ -3046,7 +3041,15 @@ class GitHubPersonalLinkIntent(Base):
 
 class GitHubIssuedToken(Base):
     __tablename__ = "github_issued_tokens"
-    __table_args__ = (CheckConstraint("status IN ('pending', 'stored', 'delivered', 'revoked')"),)
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'stored', 'delivered', 'revoked')"),
+        # Revoked rows are most of the table and no query reads them.
+        Index(
+            "ix_github_issued_tokens_live_session",
+            "session_id",
+            postgresql_where=text("status IN ('stored', 'delivered')"),
+        ),
+    )
     token_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
@@ -3244,7 +3247,7 @@ class DirectMessageConversation(Base):
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
-    # The parent channel (and thread) /dm was run in; re-checked against seals
+    # The parent channel (and thread) /dm-me was run in; re-checked against seals
     # each turn, and the DM's spend counts toward that channel's budget.
     source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)

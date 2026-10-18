@@ -117,7 +117,10 @@ async def claim_message(
         DirectMessageConversation, (platform, route_key, external_user_id), with_for_update=True
     )
     if row is None:
-        raise UserFacingError("Run /dm in the workspace channel you want to continue from first.")
+        raise UserFacingError(
+            "No private conversation is open here.\n\n"
+            "Run /dm-me in the channel you want to continue from."
+        )
     if row.scope_id != expected_scope_id:
         raise UserFacingError("The selected workspace changed. Please send your message again.")
     if message_id in row.recent_message_ids:
@@ -183,7 +186,7 @@ async def quarantine_conversation(
     """Remove this exact conversation and retire the provider sessions of its scope.
 
     Returns the retired MA session ids, for a best-effort upstream archive. A
-    later message finds no conversation; a fresh /dm starts a new scope.
+    later message finds no conversation; a fresh /dm-me starts a new scope.
     """
     await session.execute(
         delete(DirectMessageConversation).where(

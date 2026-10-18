@@ -1234,7 +1234,7 @@ async def run(
         await _anthropic_factory(settings)
         if _anthropic_factory is not None
         else AsyncAnthropic(
-            api_key=settings.anthropic.api_key.get_secret_value(),
+            api_key=settings.anthropic.resolved_api_key(),
             base_url=str(settings.anthropic.base_url),
             max_retries=MA_MAX_RETRIES,
             http_client=DefaultAsyncHttpxClient(

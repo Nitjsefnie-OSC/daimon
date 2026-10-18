@@ -12,6 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The hosted deploy workflow no longer runs the one-time, 45-minute MCP legacy-token drain and cutover on every deploy. Staging and production already completed that cutover, so the wait was dead weight blocking every later release; the workflow now just ships MCP's image like any other service. The drain and cutover are still required for a brand-new environment's first upgrade — see the staged steps in `docs/self-hosting.md`, now run by hand.
 
 - Channel admins are deprecated. Hosted Daimon turns them off; self-hosters can set `DAIMON_CHANNEL_ADMINS__ENABLED=false` now. The next release defaults this switch to false, and a later release removes the feature. Existing grant data is kept.
+- **People from another organisation get none of the agent's credentials.**
+  A Teams external participant or guest answered in a `readers: own`
+  channel used to get the agent's keys as a mounted `.env` and its shared
+  MCP tokens in their vault, though their tool calls were already
+  restricted. Their sessions now carry neither: a server only a shared
+  token reaches is left off unless they sign in to it themselves, and their
+  own sign-ins still work. A session that may hold those credentials is
+  replaced, not reused, the next time such a person is answered in it,
+  without carrying its work.
+
+- Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
+- `/dm` is now `/dm-me` on Slack and Discord, including `/dm-me enable` and `/dm-me disable`. Slack reserves `/dm` for its own command, so a Slack app could not offer it. Its replies read as one line for what happened and one for what to do; a DM closed because its channel was sealed now says to keep working in that channel.
+- GitHub connection confirmation now checks the requester's live Discord, Slack, or Teams admin status before saving repository access.
+- Channel admins are removed. Grants no longer give any rights; server and workspace admins are unchanged. Stored grant rows are kept until a later release drops them.
+- Offer “Opus 5.5 fast” as a separate model choice for new Managed Agents sessions, with twice the standard token rates.
 
 - GitHub repository access now uses the GitHub App for every agent. Migration deletes staged grants, keeps live App grants, carries a matching working repo, and retires saved GitHub keys. `daimon github retirement-preview` reports staged rows and saved-key coverage before migration. Private skill imports use an active App grant; missing access posts Connect GitHub. Operators can preview and delete retired Managed Agents vault credentials with `daimon github cleanup-legacy-vault` (`--apply` deletes them).
 
@@ -58,6 +73,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redirect URI can be removed, and a migration drops `teams_channel_sites`.
   The permission is tenant-wide, so Daimon opens a shared file and saves its
   own only inside the channel's Files folder. Uploads take one request.
+
+### Added
+
+- **Self-host on OpenAI, with no Anthropic account at all.** `DAIMON_ANTHROPIC__API_KEY`
+  is now optional; `docker compose up` and `daimon defaults apply` succeed
+  without it. `daimon openai init` creates (or reuses) a project-scoped
+  OpenAI agent and hosted environment, seeds it with the same default skill
+  set an Anthropic deployment gets, and writes one row — optionally a
+  tenant-wide `"*"` default — into the provider runtime file. `daimon
+  agents backend set <agent> openai` routes that agent's channels to it, and
+  `daimon openai smoke` is a post-deploy check: one chat turn, one tool
+  call, one skill, pass/fail. See docs/self-hosting.md's "Self-host on
+  OpenAI" for what's different on OpenAI (no multi-agent delegation, no
+  mid-session resource swap, no workspace export/import, no cross-turn
+  memory, no Daimon model knobs).
 
 ### Removed
 

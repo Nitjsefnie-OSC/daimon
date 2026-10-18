@@ -46,11 +46,10 @@ class TestSlackRuntime:
             "turn_deps",
             "deployment_default",
             "mcp_token_probe",
-            "group_members",
             "slack_http",
         }, (
             "expected exactly settings/anthropic/sessionmaker/billing_config/http_client/"
-            "resolver_cache/turn_deps/deployment_default/mcp_token_probe/group_members/"
+            "resolver_cache/turn_deps/deployment_default/mcp_token_probe/"
             f"slack_http fields, "
             f"got {fields}"
         )

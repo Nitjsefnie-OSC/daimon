@@ -103,11 +103,7 @@ answer can vote or ask. With `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` on, each
 submitted 👎 form is posted once to the support channel without spending a
 credit, and the form says it is shared. Feedback text is never logged.
 
-Support requests route as on Slack and Discord. One asked from a channel with
-channel admins goes to those admins in 1:1 chats first, then to the
-organisation's admins, and to the support channel only when no chat landed;
-each recipient must be allowed by the DM policy and be on the channel's team
-roster. A request asked from a channel is open to those who could start a
+Support requests route to the configured escalation channel. A request asked from a channel is open to those who could start a
 turn there. When the channel is read only from inside (`readers: inside`),
 the form warns that the note leaves it, and the request and any routed 👎
 form say so, so whoever picks it up answers in the channel.
@@ -120,14 +116,16 @@ home tenant, and guests (Entra B2B guest accounts in ours), who can be in
 standard and private channels and 1:1 chats. Daimon answers them only inside
 a channel kept to its own agents (`readers: own`) and its threads. Anywhere else an addressed message gets
 one line saying so and runs no turn, and their unmentioned replies are never
-judged for a followed thread. Their turns run as a member (never an admin or
-a channel admin, whatever is configured, a grant naming a team they own
-included), commands go to the agent as plain text, and the agent sees
+judged for a followed thread. Their turns run as a member (never an admin), commands go to the agent as plain text, and the agent sees
 `external="true"` on their message. Their tool calls get only the
 conversation's tools: reading, searching and posting in it, files into it,
 their own sessions and timers, and signing in to an MCP server the agent
 already has. Anything else, including tools added later, returns a tool
-error the agent relays. Files are saved in a shared channel this
+error the agent relays. Their sessions get none of the agent's keys (no
+`.env`) and none of its shared MCP tokens: a server only such a token
+reaches is left off unless they sign in to it themselves, where it offers a
+sign-in. A session that may hold those credentials is replaced, not reused,
+when they are next answered in it, and none of its work carries over. Files are saved in a shared channel this
 organisation hosts once an admin turned them on there (below); one hosted by
 another organisation keeps its files on that organisation's site.
 
@@ -180,13 +178,13 @@ chat) and after an @mention (channels) fill in a ready-made request to send.
 | --- | --- |
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
 | `help` | List the commands. |
-| `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins, or a channel admin for a token bound to one of their channels), mint, list and revoke operator tokens (admins), or open a setup conversation. |
+| `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins), mint, list and revoke operator tokens (admins), or open a setup conversation. |
 | `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Answered in a 1:1 chat instead of a channel whose readers are limited, it says so, since the answer would leave the channel. |
 | `privacy` | See, export or delete what Daimon stores about you. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
-| `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`); Teams requests never go to Discord's or Slack's channel. The post links to where it was asked; one from a channel with channel admins goes to them first (above). |
+| `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`); Teams requests never go to Discord's or Slack's channel. The post links to where it was asked; requests go to the escalation channel. |
 
 A 1:1 chat has no threads, so **Manage** in `setup` switches the chat into a
 setup conversation for the chosen agent, with its own session. The chat's
@@ -211,14 +209,10 @@ re-checks the organisation, the clicker and their role. Boot does the same
 demotion; support requests and budget notices for "the admins" reach the team's owners.
 A refusal in a channel is a private
 message, toast, dialog message or card edit only its sender or clicker sees.
-Channel admins (`set_channel_admins`, by Entra object ID, or by a team's Entra
-group ID in `role_ids` to admit that team's owners, guests left out), channel
-budgets (`set_channel_budget`) and channel environments
-(`set_channel_environment`) work as on Discord and Slack. Who answers where lists each channel's
-environment, and its **Channel settings** dialog changes one channel picked
-there, since the panel lives in the 1:1 chat: its environment (server admins,
-or that channel's admins), and its permissions (readers and writers), admins by
-Entra object ID and channel skills (server admins only). Channel skills are
+Channel budgets (`set_channel_budget`) and channel environments
+(`set_channel_environment`) work as on Discord and Slack. Who answers where
+lists each channel's environment, and its **Channel settings** dialog changes
+a selected channel's environment, permissions, and skills. Channel skills are
 extra skills for whatever agent answers in that channel, added by name,
 `agent/name` or skill id and removed by ticking them, as on Discord and Slack. Channel rules work as on Discord and Slack,
 with `set_channel_rule` or `daimon channels rule set`. A thread (`;messageid=`)
@@ -247,9 +241,7 @@ A running turn checks it again before its card shows any of its work or it
 posts an approval or question card, and reads it afresh before the answer. If
 the chat has closed meanwhile, the turn stops, no such card is posted (the
 approval or question goes unanswered), its card says only that someone from
-outside is in the chat, and the asker gets the private notice once. A group
-chat has no team, so team owners are not its channel admins: those settings
-need a workspace admin there.
+outside is in the chat, and the asker gets the private notice once. A group chat has no team, so its settings need a workspace admin.
 
 A turn replays the chat like a channel thread (Channel history, below): the
 first turn the newest 25 messages, a later one only newer messages, the
@@ -284,8 +276,7 @@ be read, the agent is told history is unavailable and why, rather than
 guessing from nothing.
 
 Graph access is the resource-specific consent `ChannelMessage.Read.Group` in
-the manifest, plus `TeamMember.Read.Group` for the owner list the admin team
-and a team grant of channel admins read (cached for a minute; without it the
+the manifest, plus `TeamMember.Read.Group` for the owner list the admin team reads (cached for a minute; without it the
 team's owners are not admins). A team owner grants them when adding the app to a team, for that
 team only; no tenant-wide permission or admin consent is needed. It also makes
 Teams deliver every channel post to the bot, which ignores those without a
@@ -460,10 +451,8 @@ file's name before reading its capped body, with the usual preview and
 confirmation card. **Add skill** on an agent's Details in `setup` takes a
 pasted SKILL.md (up to 4,000 characters; a dialog has no file input), shows
 what it holds, and adds it on a second Send as the agent's own skill, under
-Discord's and Slack's rule: an admin for any agent, a channel admin for one
-that answers only in their channels, anyone for one nobody else uses. The
-panel is outside every channel, so a pinned agent needs an admin of every
-channel it is pinned to.
+Discord's and Slack's rule: an admin for any agent, or anyone for an agent nobody else uses. The
+panel is outside every channel, so a pinned agent needs a server admin.
 
 ### Channel files (optional)
 
@@ -629,7 +618,7 @@ different agent posts a notice instead of running. A deployment with
 
 ### Not supported
 
-`/dm` conversations, files, routines and agent tools in group chats, files in channels whose site is
+`/dm-me` conversations, files, routines and agent tools in group chats, files in channels whose site is
 not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.
 

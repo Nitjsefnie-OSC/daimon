@@ -19,11 +19,10 @@ import dataclasses
 import uuid
 from typing import Literal
 
-from daimon.adapters.slack.channel_admin_groups import user_group_members
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize, build_turn_place
-from daimon.core.channel_admins import StoredAdmin, confirm_stored_subject, read_stored_admin
+from daimon.core.native_admins import StoredAdmin, read_stored_admin
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import find_platform_principal
 from slack_sdk.web.async_client import AsyncWebClient
@@ -47,7 +46,7 @@ async def stored_clicker(
     )
     account_id = principal.account_id if principal is not None else None
     if account_id is None:
-        return StoredAdmin(is_admin=False, platform="slack", platform_user_id=user_id), None
+        return StoredAdmin(is_admin=False, platform_user_id=user_id), None
     stored = await read_stored_admin(
         session,
         tenant_id=tenant_id,
@@ -91,9 +90,7 @@ async def resolve_clicker(
     """
     async with runtime.sessionmaker() as session:
         stored, account_id = await stored_clicker(session, tenant_id=tenant_id, user_id=user_id)
-    subject = await confirm_stored_subject(
-        stored, user_group_members(runtime, client, tenant_id=tenant_id)
-    )
+    subject = stored.subject()
     return subject, account_id
 
 
@@ -113,9 +110,7 @@ async def check_place_access(
         except AccessPolicyUnreadable:
             return PlaceAccess(decision="unreadable", account_id=None, policy=None)
         stored, account_id = await stored_clicker(session, tenant_id=tenant_id, user_id=user_id)
-    subject = await confirm_stored_subject(
-        stored, user_group_members(runtime, client, tenant_id=tenant_id)
-    )
+    subject = stored.subject()
     allowed = may_start_turn_at(policy, subject, channel_id=channel_id, thread_ts=thread_ts)
     return PlaceAccess(
         decision="allowed" if allowed else "refused", account_id=account_id, policy=policy

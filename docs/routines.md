@@ -487,8 +487,7 @@ as its conversations are, by its owner too (a server admin owner still reads
 it from the hub, as with their own DMs). A routine with neither is not
 stamped. Every stamped routine session also carries the private-DM stamp
 (`daimon_private_dm=routine:<id>`): a routine runs on its owner's
-credentials, so its transcript stays its owner's alone. No server admin or
-channel admin reads it from the hub, as before routine sessions carried a
+credentials, so its transcript stays its owner's alone. No server admin reads it from the hub, as before routine sessions carried a
 channel.
 
 

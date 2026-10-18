@@ -1,4 +1,4 @@
-"""`/dm` and later DM turns answer to the source channel's budget.
+"""`/dm-me` and later DM turns answer to the source channel's budget.
 
 Admission, the live role lookup and the DM store are patched on the module.
 """
@@ -158,7 +158,6 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
     monkeypatch.setattr(dm_module, "require_dm_enabled", AsyncMock())
     monkeypatch.setattr(dm_module, "sealed_channel_ids", AsyncMock(return_value=frozenset()))
     monkeypatch.setattr(dm_module, "admit", admit)
-    monkeypatch.setattr(dm_module, "user_group_ids", AsyncMock(return_value=frozenset()))
     start_dm = AsyncMock()
     monkeypatch.setattr(dm_module, "start_dm", start_dm)
 
@@ -168,7 +167,7 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
 
     (call,) = admitted
     assert (call["is_dm"], call["dm_source_channel_id"]) == (True, _CHANNEL), (
-        "admitted against the channel /dm ran in"
+        "admitted against the channel /dm-me ran in"
     )
     reply = client.chat_postEphemeral.await_args.kwargs["text"]
     if over_budget:

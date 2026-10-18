@@ -13,14 +13,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.teams import tool_confirmation as confirmation_module
-from daimon.adapters.teams.channel_admin_groups import team_owner_lookup
 from daimon.adapters.teams.tool_confirmation import (
     VERB,
     TeamsConfirmationCards,
     confirmation_adaptive_card,
 )
 from daimon.core.authz import Subject
-from daimon.core.channel_admins import GroupMembersCache
 from daimon.core.config import TurnSettings
 from daimon.core.confirmation import (
     ApprovedConfirmation,
@@ -29,6 +27,7 @@ from daimon.core.confirmation import (
     ToolRuleCardReference,
     prompt_for_tool_call,
 )
+from daimon.core.native_admins import GroupMembersCache
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
     NO_LONGER_PENDING_MESSAGE,
@@ -37,9 +36,7 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_card,
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
-from daimon.core.stores.channel_admins import set_channel_admins
 from daimon.core.tool_safety import ToolCall
-from daimon.testing.factories import make_tenant
 from microsoft_teams.api import (
     Account,
     AdaptiveCardInvokeActivity,
@@ -49,7 +46,6 @@ from microsoft_teams.api import (
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.common import Client, ClientOptions
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -181,57 +177,6 @@ def test_requester_answer_footer(enabled: bool, state: ConfirmationCardState, fo
         by_alias=True, exclude_none=True
     )
     assert payload["body"][0]["items"][-1]["text"] == footer
-
-
-async def test_always_action_checks_admin_and_saves_channel_rule(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sender = FakeSender()
-    cards = TeamsConfirmationCards(sender)
-    token, future = cards._controls.pending.open()
-    prompt = _prompt().model_copy(
-        update={
-            "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-                channel_id="home",
-            ),
-        }
-    )
-    pending = confirmation_adaptive_card(
-        build_confirmation_card(prompt, state="pending", token=token, allow_always=True), prompt
-    ).model_dump_json(by_alias=True)
-    assert '"title":"Always allow"' in pending
-    subject = AsyncMock(
-        return_value=Subject(
-            platform_user_id=OTHER_AAD_OBJECT_ID,
-            administered_channel_ids=frozenset({"home"}),
-        )
-    )
-    cards._controls.cards[token] = confirmation_module._PostedCard(
-        prompt,
-        CONVERSATION_ID,
-        SERVICE_URL,
-        "m-1",
-        rule_factory=MagicMock(),
-        rule_subject=subject,
-    )
-    save = AsyncMock(return_value="saved")
-    monkeypatch.setattr(confirmation_module, "save_always_allow", save)
-    response = await cards.on_action(_click(token, "always", OTHER_AAD_OBJECT_ID))
-    assert response.value == "Checking you're an admin..."
-    await asyncio.gather(*cards._always_tasks)
-    assert future.result() == "approved"
-    assert save.await_args.kwargs["scope"] == "channel"
-    for _ in range(50):
-        if sender.sent:
-            break
-        await asyncio.sleep(0)
-    assert "Always allowed in this channel by" in _json(sender, -1)
 
 
 async def test_always_ack_precedes_live_admin_check() -> None:
@@ -774,70 +719,6 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
     )
     rendered = confirmation_adaptive_card(card, prompt).model_dump_json(by_alias=True)
     assert (losses in rendered) == (state in {"pending", "approved"})
-
-
-async def test_always_click_rechecks_revoked_team_owner_after_cache_fill(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    team_id = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
-    tenant = await make_tenant(db_session, platform="teams", workspace_id="tenant-rules")
-    await set_channel_admins(
-        db_session,
-        tenant_id=tenant.id,
-        platform="teams",
-        channel_id="19:abc@thread.tacv2",
-        role_ids=[team_id],
-        user_ids=[],
-        actor_account_id=None,
-    )
-    await db_session.commit()
-    owners = AsyncMock(return_value=frozenset({OTHER_AAD_OBJECT_ID}))
-    runtime = MagicMock(
-        sessionmaker=db_session_factory, team_owners=owners, group_members=GroupMembersCache()
-    )
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=False)
-    runtime.settings.teams.admin_team_id = None
-    members = team_owner_lookup(runtime)
-    assert members is not None and OTHER_AAD_OBJECT_ID in await members(team_id)
-    owners.return_value = frozenset()
-    prompt = _prompt().model_copy(
-        update={
-            "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=tenant.id,
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-                channel_id="19:abc@thread.tacv2",
-            ),
-        }
-    )
-    sender = FakeSender()
-    cards = TeamsConfirmationCards(sender)
-    waiting = asyncio.create_task(
-        cards.hook(
-            conversation_id=CONVERSATION_ID,
-            service_url=SERVICE_URL,
-            runtime=runtime,
-            tenant_id=tenant.id,
-        )(prompt)
-    )
-    try:
-        while not sender.sent:
-            await asyncio.sleep(0)
-        token = re.search(r'"token":"([^"]+)"', _json(sender, 0))
-        assert token is not None
-        click = _click(token.group(1), "always", OTHER_AAD_OBJECT_ID)
-        await cards.on_action(click)
-        await asyncio.gather(*cards._always_tasks)
-        assert not waiting.done()
-        assert owners.await_count == 2
-        assert click.send.await_args.args[0].text == "Only an admin can allow this for everyone."
-        assert len(sender.sent) == 1
-    finally:
-        waiting.cancel()
-        await asyncio.gather(waiting, return_exceptions=True)
 
 
 @pytest.mark.parametrize("conversation_type", ["personal", "channel", "groupChat", "meeting"])

@@ -10,8 +10,8 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.channel_rules import (
-    _set_agent_rule_impl,  # pyright: ignore[reportPrivateUsage]
-    _set_channel_rule_impl,  # pyright: ignore[reportPrivateUsage]
+    _set_agent_rule_impl,
+    _set_channel_rule_impl,
 )
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.scope import DeploymentDefault
@@ -53,12 +53,38 @@ async def _world(
     return tenant.id, account.id, runtime
 
 
+async def _policy(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> TenantAccessPolicy:
+    async with sessionmaker() as session:
+        return await load_access_policy(session, tenant_id=tenant_id)
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "widens"),
+    [
+        ((ROOM,), (ROOM, OTHER), True),
+        ((ROOM,), None, True),
+        ((ROOM, OTHER), (ROOM,), False),
+        ((ROOM,), (), False),
+        (None, (ROOM,), False),
+    ],
+)
+def test_only_a_rule_that_adds_a_place_widens(
+    before: tuple[str, ...] | None, after: tuple[str, ...] | None, widens: bool
+) -> None:
+    from daimon.adapters.mcp.tools.channel_rules import (
+        _widens,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert _widens(before, after) is widens
+
+
 def _auth(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     *,
     admin: bool = False,
-    administers: frozenset[str] = frozenset(),
 ) -> AuthIdentity:
     return AuthIdentity(
         account_id=account_id,
@@ -67,15 +93,7 @@ def _auth(
         platform="discord",
         platform_user_id="444444444444444444",
         is_admin=admin,
-        administered_channel_ids=administers,
     )
-
-
-async def _policy(
-    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
-) -> TenantAccessPolicy:
-    async with sessionmaker() as session:
-        return await load_access_policy(session, tenant_id=tenant_id)
 
 
 async def test_a_server_admin_limits_and_reopens_a_channel(
@@ -97,22 +115,6 @@ async def test_a_server_admin_limits_and_reopens_a_channel(
     )
     assert (opened.readers, opened.writers) == ("any", "any"), opened
     assert await _policy(committing_sessionmaker, tenant_id) == POLICY, "other rules are kept"
-
-
-async def test_a_channel_admin_sets_no_rule_even_on_their_own_channel(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant_id, account_id, runtime = await _world(committing_sessionmaker)
-    channel_admin = _auth(tenant_id, account_id, administers=frozenset({ROOM, ISOLATED}))
-    member = _auth(tenant_id, account_id)
-
-    for auth in (channel_admin, member):
-        for change in ({"writers": "none"}, {"readers": "inside"}):
-            with pytest.raises(ToolError, match="Only a server or workspace admin"):
-                await _set_channel_rule_impl(runtime, auth, channel_id=ROOM, **change)  # type: ignore[arg-type]
-        with pytest.raises(ToolError, match="Only a server or workspace admin"):
-            await _set_channel_rule_impl(runtime, auth, channel_id=ISOLATED, readers="any")
-    assert await _policy(committing_sessionmaker, tenant_id) == POLICY, "refusals write nothing"
 
 
 async def test_a_channel_kept_to_its_own_agents_keeps_them_until_its_readers_change(
@@ -137,9 +139,9 @@ async def test_set_agent_rule_needs_a_server_admin_and_an_agent(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id, account_id, runtime = await _world(committing_sessionmaker)
-    channel_admin = _auth(tenant_id, account_id, administers=frozenset({ROOM}))
+    member = _auth(tenant_id, account_id)
     with pytest.raises(ToolError, match="Only a server or workspace admin"):
-        await _set_agent_rule_impl(runtime, channel_admin, agent_name="own", runs_in=[ROOM])
+        await _set_agent_rule_impl(runtime, member, agent_name="own", runs_in=[ROOM])
     admin = _auth(tenant_id, account_id, admin=True)
     with pytest.raises(ToolError, match="There is no agent named ghost"):
         await _set_agent_rule_impl(runtime, admin, agent_name="ghost", runs_in=[ROOM])
@@ -167,26 +169,6 @@ async def test_a_protection_change_waits_out_a_held_policy_fence(
         assert not writer.done(), "the write must wait for the fence, not fail as busy"
     done = await asyncio.wait_for(writer, 10)
     assert (done.writers, done.changed) == ("none", True), done
-
-
-@pytest.mark.parametrize(
-    ("before", "after", "widens"),
-    [
-        ((ROOM,), (ROOM, OTHER), True),
-        ((ROOM,), None, True),
-        ((ROOM, OTHER), (ROOM,), False),
-        ((ROOM,), (), False),
-        (None, (ROOM,), False),
-    ],
-)
-def test_only_a_rule_that_adds_a_place_widens(
-    before: tuple[str, ...] | None, after: tuple[str, ...] | None, widens: bool
-) -> None:
-    from daimon.adapters.mcp.tools.channel_rules import (
-        _widens,  # pyright: ignore[reportPrivateUsage]
-    )
-
-    assert _widens(before, after) is widens
 
 
 @pytest.mark.parametrize(

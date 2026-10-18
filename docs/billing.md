@@ -199,6 +199,18 @@ each request is priced on its own (`ModelRates.long_context`,
 `LONG_CONTEXT_PROMPT_TOKENS`). Turn cards also split the turn's token totals by
 request prompt length before pricing, so a turn spanning both tiers displays
 the sum of its request costs.
+
+`claude-opus-5-5-fast` is a client-side preset (`daimon.core.model_presets`),
+never a model id the Managed Agents API sees: `AgentSpec` expands it to
+`{"id": "claude-opus-5-5", "speed": "fast"}` on validation, preserving any
+authored `effort`/`inference_geo`. It is priced at 2x plain Opus 5.5 ($8
+input, $40 output, $10 five-minute cache write, $0.40 cache read) to cover
+Managed Agents' fast-mode surcharge. Every place a model id reaches billing or
+a cost preview must read the agent's resolved `speed` back out and price
+`claude-opus-5-5-fast` instead of `claude-opus-5-5` — `SessionSnapshot.pricing_id`
+and `daimon.core.model_presets.model_choice_id` are the two helpers that do
+this; a call site that reads a bare `model_id` off a snapshot or native model
+silently bills the preset at half its real rate.
 `AGENT_PRICING_CHECKED_ON` records the day every row was last checked against
 `AGENT_PRICING_SOURCE`. `test_pricing.py` pins each row, so a price edit fails
 until the test table and the date move with it, and
@@ -250,7 +262,7 @@ per-session cap and no window other than the calendar month.
 **Channel budget** — `is_over_channel_budget` in
 `packages/core/daimon/core/channel_budget.py` compares a channel's spend in
 its budget window against the budget's limit; see
-[channel budgets](#channel-budgets). A DM moved with `/dm` counts toward the
+[channel budgets](#channel-budgets). A DM moved with `/dm-me` counts toward the
 channel it came from. A turn with no channel (an older DM, an MCP turn from
 a key not minted in a channel) and a channel with no budget are never gated.
 On Discord, Slack and Teams, a finished turn ends with one summary line: the agent,
@@ -409,9 +421,9 @@ What a budget does not cover:
 - **Earlier spend.** Attribution starts with this release; debits recorded
   before it have no channel and count toward no budget.
 - **DMs started before this release** have no source channel, so their
-  turns are neither attributed nor gated. A DM moved with `/dm` since then
+  turns are neither attributed nor gated. A DM moved with `/dm-me` since then
   records the parent channel it came from
-  (`direct_message_conversations.source_channel_id`): `/dm` is refused while
+  (`direct_message_conversations.source_channel_id`): `/dm-me` is refused while
   that channel's budget is used up, and the DM's turns and media calls
   count toward it and are gated by it. `get_channel_budget` in such a DM
   reads that channel's budget.

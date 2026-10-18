@@ -163,6 +163,7 @@ def test_cost_of_gemini_catalog_name_returns_none() -> None:
 # AGENT_PRICING_SOURCE on the date below. Changing a row in pricing.py without
 # changing it here fails, so a price edit always comes with a fresh check.
 _PUBLISHED_AGENT_PRICES_2026_10_10: dict[str, ModelRates] = {
+    "claude-opus-5-5-fast": ModelRates(input=8.0, output=40.0, cache_write=10.0, cache_read=0.40),
     "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
     "claude-opus-5": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
     "claude-opus-4-8": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
@@ -219,6 +220,8 @@ def test_agent_rows_match_the_live_pricing_page() -> None:
             cache_read=_money(cells[4]),
         )
     for model_id, rates in AGENT_MODEL_PRICING.items():
+        if model_id == "claude-opus-5-5-fast":
+            continue  # Local preset: its 2x multiplier is covered offline.
         name = _display_name(model_id)
         if rates.long_context is None:
             listed = published.get(name)

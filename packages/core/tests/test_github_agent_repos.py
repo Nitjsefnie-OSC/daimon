@@ -13,9 +13,9 @@ from daimon.core._models import (
     TenantGitHubRepo,
 )
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
-from daimon.core.channel_admins import ChannelAdminCaller, GroupLookupFailed, GroupMembers
 from daimon.core.github_panel import can_manage_agent_github, requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.native_admins import AdminCaller
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import (
     github_access,
@@ -23,7 +23,6 @@ from daimon.core.stores import (
     github_connect,
 )
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.channel_admins import delete_channel_admins, set_channel_admins
 from daimon.core.stores.github_connected_repos import agent_repo_summary
 from daimon.core.stores.github_panel_grants import (
     load_grants_panel,
@@ -39,35 +38,26 @@ REPOS = {101: "team-a/app", 102: "team-a/docs", 103: "team-b/app"}
 
 
 class World:
-    def __init__(self, tenant_id: uuid.UUID, admin_id: uuid.UUID, channel_admin_id: uuid.UUID):
+    def __init__(self, tenant_id: uuid.UUID, admin_id: uuid.UUID, member_id: uuid.UUID):
         self.tenant_id = tenant_id
         self.admin_id = admin_id
-        self.channel_admin_id = channel_admin_id
+        self.member_id = member_id
 
     def agent(self, ma_agent_id: str) -> uuid.UUID:
         return derive_agent_uuid(tenant_id=self.tenant_id, ma_agent_id=ma_agent_id)
 
 
 async def _world(db_session: AsyncSession) -> World:
-    """TeamA is pinned to #team-a, whose channel admin is user u1; OtherBot runs elsewhere."""
+    """TeamA is pinned to #team-a; OtherBot runs elsewhere."""
     tenant = await make_tenant(db_session, workspace_id=f"guild-{uuid.uuid4().hex[:8]}")
-    admin_id, channel_admin_id = uuid.uuid4(), uuid.uuid4()
+    admin_id, member_id = uuid.uuid4(), uuid.uuid4()
     db_session.add(Account(id=admin_id, tenant_id=tenant.id, role="admin"))
-    db_session.add(Account(id=channel_admin_id, tenant_id=tenant.id, role="user"))
+    db_session.add(Account(id=member_id, tenant_id=tenant.id, role="user"))
     await db_session.flush()
     db_session.add(
         PlatformPrincipal(
-            tenant_id=tenant.id, platform="discord", external_id="u1", account_id=channel_admin_id
+            tenant_id=tenant.id, platform="discord", external_id="u1", account_id=member_id
         )
-    )
-    await set_channel_admins(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        channel_id="team-a",
-        role_ids=[],
-        user_ids=["u1"],
-        actor_account_id=None,
     )
     await set_access_policy(
         db_session,
@@ -86,7 +76,7 @@ async def _world(db_session: AsyncSession) -> World:
         repo_full_names=list(REPOS.values()),
     )
     await db_session.flush()
-    return World(tenant.id, admin_id, channel_admin_id)
+    return World(tenant.id, admin_id, member_id)
 
 
 async def _may_manage(
@@ -102,7 +92,7 @@ async def _may_manage(
         db_session,
         tenant_id=world.tenant_id,
         platform="discord",
-        caller=ChannelAdminCaller(platform_user_id=user_id),
+        caller=AdminCaller(platform_user_id=user_id, is_server_admin=user_id == "admin"),
         agent_names=(agent_name,),
         ma_agent_id=ma_agent_id,
         is_daimon_managed=managed,
@@ -208,6 +198,37 @@ async def _live_ids(db_session: AsyncSession, world: World, agent_id: uuid.UUID)
 
 
 @pytest.mark.asyncio
+async def test_server_admin_connects_for_agent_and_rows_are_scoped(
+    db_session: AsyncSession,
+) -> None:
+    world = await _world(db_session)
+    assert await _may_manage(
+        db_session, world, agent_name="TeamA", ma_agent_id="ma_team_a", user_id="admin"
+    )
+    team_a = world.agent("ma_team_a")
+    result = await _connect(
+        db_session,
+        world,
+        requester_id=world.admin_id,
+        agent_name="TeamA",
+        ma_agent_id="ma_team_a",
+        repo_ids=(101,),
+        manages=True,
+    )
+    assert result == github_connect.ConfirmedActivation(status="activated")
+    rows = await _rows(db_session, world, 101)
+    assert [(row.scope_agent_id, row.authorized_by_account_id) for row in rows] == [
+        (team_a, world.admin_id)
+    ]
+    assert await _live_ids(db_session, world, team_a) == {101}
+    listed = await github_access.list_agent_repos(
+        db_session, tenant_id=world.tenant_id, agent_id=team_a
+    )
+    assert [(repo.full_name, repo.scope) for repo in listed] == [("team-a/app", "agent")]
+    assert await github_access.list_authorized_repos(db_session, tenant_id=world.tenant_id) == []
+
+
+@pytest.mark.asyncio
 async def test_working_repo_selects_only_an_agents_live_repo_and_none_clears(
     db_session: AsyncSession,
 ) -> None:
@@ -216,7 +237,7 @@ async def test_working_repo_selects_only_an_agents_live_repo_and_none_clears(
     assert await _connect(
         db_session,
         world,
-        requester_id=world.channel_admin_id,
+        requester_id=world.member_id,
         agent_name="TeamA",
         ma_agent_id="ma_team_a",
         repo_ids=(101, 102),
@@ -228,7 +249,7 @@ async def test_working_repo_selects_only_an_agents_live_repo_and_none_clears(
             tenant_id=world.tenant_id,
             agent_id=agent_id,
             repo_name="team-b/app",
-            account_id=world.channel_admin_id,
+            account_id=world.member_id,
         )
     assert (
         await github_access.set_working_repo(
@@ -236,7 +257,7 @@ async def test_working_repo_selects_only_an_agents_live_repo_and_none_clears(
             tenant_id=world.tenant_id,
             agent_id=agent_id,
             repo_name="TEAM-A/APP",
-            account_id=world.channel_admin_id,
+            account_id=world.member_id,
         )
         == "team-a/app"
     )
@@ -250,7 +271,7 @@ async def test_working_repo_selects_only_an_agents_live_repo_and_none_clears(
             tenant_id=world.tenant_id,
             agent_id=agent_id,
             repo_name="team-a/docs",
-            account_id=world.channel_admin_id,
+            account_id=world.member_id,
         )
         == "team-a/docs"
     )
@@ -264,7 +285,7 @@ async def test_working_repo_selects_only_an_agents_live_repo_and_none_clears(
             tenant_id=world.tenant_id,
             agent_id=agent_id,
             repo_name=None,
-            account_id=world.channel_admin_id,
+            account_id=world.member_id,
         )
         is None
     )
@@ -309,36 +330,6 @@ async def test_working_repo_can_be_saved_on_a_live_app_grant(
 
 
 @pytest.mark.asyncio
-async def test_channel_admin_connects_for_their_agent_and_rows_are_scoped(
-    db_session: AsyncSession,
-) -> None:
-    world = await _world(db_session)
-    assert await _may_manage(db_session, world, agent_name="TeamA", ma_agent_id="ma_team_a")
-    team_a = world.agent("ma_team_a")
-    result = await _connect(
-        db_session,
-        world,
-        requester_id=world.channel_admin_id,
-        agent_name="TeamA",
-        ma_agent_id="ma_team_a",
-        repo_ids=(101,),
-        manages=True,
-    )
-    assert result == github_connect.ConfirmedActivation(status="activated")
-    rows = await _rows(db_session, world, 101)
-    assert [(row.scope_agent_id, row.authorized_by_account_id) for row in rows] == [
-        (team_a, world.channel_admin_id)
-    ]
-    assert await _live_ids(db_session, world, team_a) == {101}
-    listed = await github_access.list_agent_repos(
-        db_session, tenant_id=world.tenant_id, agent_id=team_a
-    )
-    assert [(repo.full_name, repo.scope) for repo in listed] == [("team-a/app", "agent")]
-    # Nobody else sees it as connected for the server.
-    assert await github_access.list_authorized_repos(db_session, tenant_id=world.tenant_id) == []
-
-
-@pytest.mark.asyncio
 async def test_reconnecting_adds_repos_and_keeps_existing_ones(db_session: AsyncSession) -> None:
     world = await _world(db_session)
     team_a = world.agent("ma_team_a")
@@ -346,7 +337,7 @@ async def test_reconnecting_adds_repos_and_keeps_existing_ones(db_session: Async
         assert await _connect(
             db_session,
             world,
-            requester_id=world.channel_admin_id,
+            requester_id=world.member_id,
             agent_name="TeamA",
             ma_agent_id="ma_team_a",
             repo_ids=repo_ids,
@@ -364,7 +355,7 @@ async def test_scoped_repo_is_never_granted_or_minted_for_another_agent(
     assert await _connect(
         db_session,
         world,
-        requester_id=world.channel_admin_id,
+        requester_id=world.member_id,
         agent_name="TeamA",
         ma_agent_id="ma_team_a",
         repo_ids=(101,),
@@ -433,7 +424,7 @@ async def test_one_repo_on_two_agents_is_two_rows_and_removal_is_per_agent(
         tenant_id=world.tenant_id,
         agent_id=team_a,
         repo_id=101,
-        account_id=world.channel_admin_id,
+        account_id=world.member_id,
     )
     assert await _live_ids(db_session, world, team_a) == set()
     assert await _live_ids(db_session, world, other) == {101}
@@ -490,111 +481,34 @@ async def test_server_wide_and_scoped_rows_coexist_and_the_agents_own_row_wins(
 
 
 @pytest.mark.asyncio
-async def test_channel_admin_cannot_grant_a_server_wide_repo(db_session: AsyncSession) -> None:
+async def test_confirm_refuses_a_non_admin_requester(db_session: AsyncSession) -> None:
     world = await _world(db_session)
-    await _server_wide(db_session, world, 102)
-    with pytest.raises(ValueError, match="Only a server admin"):
-        await github_access.stage_grant(
-            db_session,
-            tenant_id=world.tenant_id,
-            agent_id=world.agent("ma_team_a"),
-            repo_id=102,
-            baseline_access="read",
-            ceiling_access="read",
-            granted_by_account_id=world.channel_admin_id,
-        )
-
-
-@pytest.mark.asyncio
-async def test_channel_admin_needs_a_local_held_unmanaged_agent(db_session: AsyncSession) -> None:
-    world = await _world(db_session)
-    assert await _may_manage(db_session, world, agent_name="TeamA", ma_agent_id="ma_team_a")
-    # Pinned to a channel they don't administer, or not pinned at all.
-    assert not await _may_manage(db_session, world, agent_name="OtherBot", ma_agent_id="ma_other")
-    assert not await _may_manage(db_session, world, agent_name="Loose", ma_agent_id="ma_loose")
-    # Not a channel admin at all.
-    assert not await _may_manage(
-        db_session, world, agent_name="TeamA", ma_agent_id="ma_team_a", user_id="u9"
-    )
-    # A Daimon-managed agent is a server admin's.
-    assert not await _may_manage(
-        db_session, world, agent_name="TeamA", ma_agent_id="ma_team_a", managed=True
-    )
-    # Without the check a member's link is refused outright.
-    with pytest.raises(ValueError, match="tenant admin"):
-        await github_connect.mint_invitation(
-            db_session,
-            tenant_id=world.tenant_id,
-            requester_account_id=world.channel_admin_id,
-            agent_id=world.agent("ma_team_a"),
-            agent_name="TeamA",
-        )
-    # A server-wide link stays admin only even when the caller says they manage an agent.
-    with pytest.raises(ValueError, match="tenant admin"):
-        await github_connect.mint_invitation(
-            db_session,
-            tenant_id=world.tenant_id,
-            requester_account_id=world.channel_admin_id,
-            agent_manager_verified=True,
-        )
-
-
-@pytest.mark.asyncio
-async def test_confirm_refuses_a_requester_who_lost_channel_admin(
-    db_session: AsyncSession,
-) -> None:
-    world = await _world(db_session)
-
-    async def manages() -> bool:
-        return await requester_manages_agent(
-            db_session,
-            tenant_id=world.tenant_id,
-            account_id=world.channel_admin_id,
-            platform="discord",
-            platform_user_id="u1",
-            agent_name="TeamA",
-            ma_agent_id="ma_team_a",
-            default=DEFAULT,
-            is_daimon_managed=False,
-            members=None,
-        )
-
-    assert await manages()
-    await delete_channel_admins(
+    manages = await requester_manages_agent(
         db_session,
         tenant_id=world.tenant_id,
+        account_id=world.member_id,
         platform="discord",
-        channel_id="team-a",
+        platform_user_id="u1",
+        agent_name="TeamA",
+        ma_agent_id="ma_team_a",
+        default=DEFAULT,
+        is_daimon_managed=False,
     )
-    assert not await manages()
-    # The link was made while they managed TeamA; confirming uses the recheck.
+    assert not manages
     assert (
         await _connect(
             db_session,
             world,
-            requester_id=world.channel_admin_id,
+            requester_id=world.member_id,
             agent_name="TeamA",
             ma_agent_id="ma_team_a",
             repo_ids=(101,),
             manages=True,
-            manages_at_confirm=await manages(),
+            manages_at_confirm=manages,
         )
         is None
     )
     assert await _rows(db_session, world, 101) == []
-    # A link without the agent's Managed Agents id fails closed.
-    assert not await requester_manages_agent(
-        db_session,
-        tenant_id=world.tenant_id,
-        account_id=world.channel_admin_id,
-        platform="discord",
-        platform_user_id="u1",
-        agent_name="TeamA",
-        ma_agent_id=None,
-        default=DEFAULT,
-        is_daimon_managed=False,
-        members=None,
-    )
 
 
 @pytest.mark.asyncio
@@ -607,7 +521,7 @@ async def test_read_only_confirmation_still_connects_the_working_repo_with_write
     assert await _connect(
         db_session,
         world,
-        requester_id=world.channel_admin_id,
+        requester_id=world.member_id,
         agent_name="TeamA",
         ma_agent_id="ma_team_a",
         repo_ids=(101,),
@@ -647,70 +561,12 @@ async def test_pinned_agent_refuses_a_server_wide_grant_but_takes_its_own(
     assert await _connect(
         db_session,
         world,
-        requester_id=world.channel_admin_id,
+        requester_id=world.member_id,
         agent_name="TeamA",
         ma_agent_id="ma_team_a",
         repo_ids=(101,),
         manages=True,
     )
-
-
-@pytest.mark.asyncio
-async def test_confirm_recheck_uses_live_roles_and_managed_status(
-    db_session: AsyncSession,
-) -> None:
-    world = await _world(db_session)
-    # The channel admin holds #team-a only through a Discord role now.
-    await set_channel_admins(
-        db_session,
-        tenant_id=world.tenant_id,
-        platform="discord",
-        channel_id="team-a",
-        role_ids=["role-team-a"],
-        user_ids=[],
-        actor_account_id=None,
-    )
-    account = await db_session.get(Account, world.channel_admin_id)
-    assert account is not None
-    account.platform_role_ids = ["role-team-a"]
-    await db_session.flush()
-
-    async def holds(user_id: str) -> frozenset[str]:
-        return frozenset({"role-team-a"}) if user_id == "u1" else frozenset()
-
-    async def left(user_id: str) -> frozenset[str]:
-        return frozenset()
-
-    async def unreachable(user_id: str) -> frozenset[str]:
-        raise GroupLookupFailed("Discord did not answer")
-
-    async def manages(
-        members: GroupMembers | None, managed: bool | None = False, user_id: str | None = "u1"
-    ) -> bool:
-        return await requester_manages_agent(
-            db_session,
-            tenant_id=world.tenant_id,
-            account_id=world.channel_admin_id,
-            platform="discord",
-            platform_user_id=user_id,
-            agent_name="TeamA",
-            ma_agent_id="ma_team_a",
-            default=DEFAULT,
-            is_daimon_managed=managed,
-            members=members,
-        )
-
-    assert await manages(holds)
-    # The stored role alone is not enough: no lookup, a lookup that fails, or
-    # a member who left the role is no.
-    assert not await manages(None)
-    assert not await manages(unreachable)
-    assert not await manages(left)
-    # Managed status must be known, and a managed agent is a server admin's.
-    assert not await manages(holds, managed=None)
-    assert not await manages(holds, managed=True)
-    # Without the requester's platform ID their stored role can't be checked.
-    assert not await manages(holds, user_id=None)
 
 
 @pytest.mark.asyncio
@@ -722,7 +578,7 @@ async def test_reconnecting_with_read_only_access_keeps_write(
     assert await _connect(
         db_session,
         world,
-        requester_id=world.channel_admin_id,
+        requester_id=world.member_id,
         agent_name="TeamA",
         ma_agent_id="ma_team_a",
         repo_ids=(101,),
@@ -731,7 +587,7 @@ async def test_reconnecting_with_read_only_access_keeps_write(
     await _connect(
         db_session,
         world,
-        requester_id=world.channel_admin_id,
+        requester_id=world.member_id,
         agent_name="TeamA",
         ma_agent_id="ma_team_a",
         repo_ids=(101,),
@@ -756,7 +612,7 @@ async def test_panel_manages_only_pinned_agents_own_repos(
     assert await _connect(
         db_session,
         world,
-        requester_id=world.channel_admin_id,
+        requester_id=world.member_id,
         agent_name="TeamA",
         ma_agent_id="ma_team_a",
         repo_ids=(101,),

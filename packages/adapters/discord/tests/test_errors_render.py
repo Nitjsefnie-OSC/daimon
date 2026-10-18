@@ -16,7 +16,6 @@ from daimon.adapters.discord.errors import (
     generate_request_id,
     render_error,
 )
-from daimon.core.channel_admins import InvalidChannelAdminIds
 from daimon.core.channel_budget import ChannelBudgetError
 from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.cron import InvalidScheduleError
@@ -58,24 +57,6 @@ def _status_error(
     )
 
 
-def test_known_local_errors_never_publish_exception_bodies() -> None:
-    body = "sesn_private agent_private access_token=private SELECT secret"
-    for error, expected in [
-        (ChannelBudgetError(body), "That spending budget isn't valid."),
-        (InvalidScheduleError(body), "That schedule isn't valid."),
-        (InvalidChannelAdminIds(body), "That admin selection isn't valid."),
-        (NotebookRateLimitError(body), "The notebook publishing limit has been reached."),
-        (DirectMessageBusy(body), "A reply is still running."),
-        (HandoffRefusedInSetupThread(body), "This setup conversation can't change agents."),
-        (AgentNameCollision(body), "This workspace already has an agent with that name."),
-    ]:
-        result = render_error(error, request_id=TEST_RID)
-        assert result.startswith(expected)
-        assert "private" not in result
-        assert "SELECT" not in result
-        assert result.endswith(f"\n\n{REF}"), "fixed guidance keeps the ref line"
-
-
 def test_everything_else_is_our_side_with_a_ref_and_no_body() -> None:
     body = "sesn_private agent_private access_token=private SELECT secret"
     for error in [
@@ -87,6 +68,23 @@ def test_everything_else_is_our_side_with_a_ref_and_no_body() -> None:
         DBAPIError("SELECT secret", {"token": "private"}, Exception(body)),
     ]:
         assert render_error(error, request_id=TEST_RID) == f"{OUR_SIDE}\n\n{REF}"
+
+
+def test_known_local_errors_never_publish_exception_bodies() -> None:
+    body = "sesn_private agent_private access_token=private SELECT secret"
+    for error, expected in [
+        (ChannelBudgetError(body), "That spending budget isn't valid."),
+        (InvalidScheduleError(body), "That schedule isn't valid."),
+        (NotebookRateLimitError(body), "The notebook publishing limit has been reached."),
+        (DirectMessageBusy(body), "A reply is still running."),
+        (HandoffRefusedInSetupThread(body), "This setup conversation can't change agents."),
+        (AgentNameCollision(body), "This workspace already has an agent with that name."),
+    ]:
+        result = render_error(error, request_id=TEST_RID)
+        assert result.startswith(expected)
+        assert "private" not in result
+        assert "SELECT" not in result
+        assert result.endswith(f"\n\n{REF}")
 
 
 @pytest.mark.parametrize(

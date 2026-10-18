@@ -1,4 +1,4 @@
-"""/dm move refuses a sealed source before reading any of its history."""
+"""/dm-me move refuses a sealed source before reading any of its history."""
 
 from __future__ import annotations
 

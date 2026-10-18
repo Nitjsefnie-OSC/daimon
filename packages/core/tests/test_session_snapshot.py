@@ -748,6 +748,30 @@ def test_a_snapshot_without_a_personal_store_keeps_its_recorded_fingerprint() ->
     assert fingerprint_identity(with_personal) != fingerprint_identity(snapshot)
 
 
+def test_a_members_snapshot_keeps_its_recorded_fingerprint_and_json() -> None:
+    """Rows recorded before the external flag existed must not look changed:
+    only a session made for someone from another organisation records it."""
+    snapshot = desired_snapshot(
+        _agent(),
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env_science",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+    )
+    external = snapshot.model_copy(update={"is_external": True})
+
+    assert "is_external" not in snapshot.model_dump_json(), "a member's row omits the flag"
+    assert SessionSnapshot.model_validate_json(external.model_dump_json()) == external, (
+        "an external caller's flag survives the JSONB round trip"
+    )
+    assert fingerprint_identity(external) != fingerprint_identity(snapshot), (
+        "the flag is session identity: flipping it replaces the session"
+    )
+
+
 def test_old_snapshot_unavailability_fields_are_ignored() -> None:
     snapshot = desired_snapshot(
         _agent(),
@@ -812,3 +836,25 @@ def test_refusal_keeps_first_time_and_announces_once_until_access_returns() -> N
     anew = dropped.model_copy(update=refreshed_unavailable_state(dropped, (url,), now=later))
     assert anew.unavailable_repos == ((url, later),)
     assert anew.unavailable_notice_pending == (url,)
+
+
+def test_native_fast_model_is_in_session_identity_and_pricing():
+    agent = _agent(model_id="claude-opus-5-5")
+    kwargs = dict(
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+    )
+    standard = desired_snapshot(agent, **kwargs)
+    agent = agent.model_copy(
+        update={"model": BetaManagedAgentsModelConfig(id="claude-opus-5-5", speed="fast")}
+    )
+    fast = desired_snapshot(agent, **kwargs)
+    assert fast.model_id == "claude-opus-5-5"
+    assert fast.pricing_id == "claude-opus-5-5-fast"
+    assert identity_change_reasons(standard, fast) == ("model",)
+    assert fingerprint_identity(fast) != fingerprint_identity(standard)

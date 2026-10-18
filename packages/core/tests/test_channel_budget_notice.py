@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -11,7 +10,6 @@ from decimal import Decimal
 
 import pytest
 from daimon.core import channel_budget_notice
-from daimon.core.channel_admins import GroupMembers
 from daimon.core.channel_budget_notice import (
     BudgetNotice,
     claim_budget_notice,
@@ -19,7 +17,7 @@ from daimon.core.channel_budget_notice import (
     notify_budget_exhausted,
 )
 from daimon.core.config import DirectMessagePolicy
-from daimon.core.stores import accounts, channel_admins, channel_budgets
+from daimon.core.stores import accounts, channel_budgets
 from daimon.core.stores.domain import Platform, Role, TenantRow
 from daimon.testing.factories import (
     make_account,
@@ -28,7 +26,7 @@ from daimon.testing.factories import (
     make_platform_principal,
     make_tenant,
 )
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 7, 15, 12, tzinfo=UTC)
 
@@ -76,36 +74,6 @@ async def _recipients(session: AsyncSession, notice: BudgetNotice | None) -> tup
     return await notice_recipients(async_sessionmaker(bind=session.bind), notice, None)
 
 
-async def test_the_notice_goes_to_the_channel_admins_once_per_window(
-    db_session: AsyncSession,
-) -> None:
-    tenant = await _spent_channel(db_session, limit="0")
-    await channel_admins.set_channel_admins(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        channel_id="chan-1",
-        role_ids=["r-1"],
-        user_ids=["u-never-spoke"],
-        actor_account_id=None,
-    )
-
-    notice = await _claim(db_session, tenant)
-    assert notice is not None
-    assert await _recipients(db_session, notice) == ("u-never-spoke", "u-role"), (
-        "granted users and members holding a granted role, never the server admins"
-    )
-    assert notice.workspace_id == tenant.external_id
-    assert notice.text("<#chan-1>") == (
-        "<#chan-1> has used its $0.00 monthly budget.\n\n"
-        "Raise the budget to resume now, or wait until next month."
-    )
-    assert await _claim(db_session, tenant) is None, "one notice per window"
-    assert await _claim(db_session, tenant, now=datetime(2026, 8, 1, tzinfo=UTC)) is not None, (
-        "a monthly budget's next month is a new window"
-    )
-
-
 async def test_a_channel_without_admins_tells_the_server_admins(db_session: AsyncSession) -> None:
     tenant = await _spent_channel(db_session)
     assert await _recipients(db_session, await _claim(db_session, tenant)) == ("u-admin",)
@@ -121,7 +89,7 @@ async def test_live_server_admins_replace_the_stored_ones(db_session: AsyncSessi
         return ("owner-b", "owner-a")
 
     sessionmaker = async_sessionmaker(bind=db_session.bind)
-    recipients = await notice_recipients(sessionmaker, notice, None, live)
+    recipients = await notice_recipients(sessionmaker, notice, live)
     assert recipients == ("owner-a", "owner-b"), "the live admins, sorted, and not u-admin"
 
 
@@ -241,98 +209,3 @@ def test_the_dm_policy_filters_recipients() -> None:
     assert notice.allowed_recipients(allow_b) == ("b",)
     assert notice.allowed_recipients(DirectMessagePolicy(mode="disabled")) == ()
     assert notice.text("c") == "c has used its $5.00 budget.\n\nRaise the budget to resume now."
-
-
-async def _slack_channel_with_group_admin(session: AsyncSession) -> TenantRow:
-    tenant = await _spent_channel(session, platform="slack")
-    await _member(session, tenant, "U_GROUP", roles=["S1"])
-    await channel_admins.set_channel_admins(
-        session,
-        tenant_id=tenant.id,
-        platform="slack",
-        channel_id="chan-1",
-        role_ids=["S1"],
-        user_ids=[],
-        actor_account_id=None,
-    )
-    await session.commit()
-    return tenant
-
-
-async def test_group_lookups_and_dms_run_after_the_claim_commits(
-    db_session: AsyncSession, db_engine: AsyncEngine
-) -> None:
-    """A slow platform must never hold the budget row's lock or a pooled connection."""
-    tenant = await _slack_channel_with_group_admin(db_session)
-    pool = async_sessionmaker(bind=db_engine, expire_on_commit=False)
-    seen_keys: list[str | None] = []
-
-    async def committed_key() -> str | None:
-        async with pool() as other:
-            budget = await channel_budgets.get_channel_budget(
-                other, tenant_id=tenant.id, platform="slack", channel_id="chan-1"
-            )
-        assert budget is not None, "the channel has a budget"
-        return budget.exhausted_notice_key
-
-    async def lookup(group_id: str) -> frozenset[str]:
-        seen_keys.append(await committed_key())
-        return frozenset({"U_GROUP"})
-
-    def group_members(platform: str, workspace_id: str) -> GroupMembers:
-        return lookup
-
-    sent: list[BudgetNotice] = []
-
-    async def notifier(notice: BudgetNotice) -> int:
-        seen_keys.append(await committed_key())
-        sent.append(notice)
-        return 1
-
-    await notify_budget_exhausted(
-        sessionmaker=pool,
-        notifier=notifier,
-        tenant_id=tenant.id,
-        platform="slack",
-        channel_id="chan-1",
-        now=_NOW,
-        group_members=group_members,
-    )
-
-    assert [n.recipient_ids for n in sent] == [("U_GROUP",)], "the live group admin is told"
-    assert seen_keys == ["2026-07", "2026-07"], (
-        "another connection already sees the claim during the lookup and the send"
-    )
-
-
-async def test_a_hanging_group_lookup_is_cut_off_by_the_notice_timeout(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(channel_budget_notice, "NOTICE_TIMEOUT_S", 0.2)
-    tenant = await _slack_channel_with_group_admin(db_session)
-
-    async def hanging(group_id: str) -> frozenset[str]:
-        await asyncio.sleep(30)
-        return frozenset()
-
-    async def notifier(notice: BudgetNotice) -> int:
-        raise AssertionError("no recipients were resolved, so nothing is sent")
-
-    started = time.monotonic()
-    await notify_budget_exhausted(
-        sessionmaker=db_session_factory,
-        notifier=notifier,
-        tenant_id=tenant.id,
-        platform="slack",
-        channel_id="chan-1",
-        now=_NOW,
-        group_members=lambda platform, workspace_id: hanging,
-    )
-
-    assert time.monotonic() - started < 5, "the timeout bounds the lookups, not only the DMs"
-    async with db_session_factory() as session:
-        assert await _claim(session, tenant) is not None, (
-            "nothing was sent, so the window is free for the next refusal"
-        )

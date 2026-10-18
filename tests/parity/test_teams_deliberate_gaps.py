@@ -13,8 +13,7 @@ private message in a channel expires after 24 hours, so `setup` and `support`,
 whose flows outlast that, answer in the 1:1 chat while other commands answer
 privately in the thread, and a Connect GitHub link goes to the requester's 1:1
 chat rather than the thread; the 1:1 chat has no threads, so a setup conversation is keyed inside it, and since panels live
-there a channel admin picks which of their channels a coding-tool token is
-bound to rather than pressing the button inside it; files in a channel work
+there only a server admin can mint a coding-tool token; files in a channel work
 only once a tenant admin consents to the application permission `Files.ReadWrite.All`, because no
 team-scoped permission reaches SharePoint; a dialog has no file input, so a `.env` file is pasted
 rather than uploaded; and once a dialog closes nothing private reaches the
@@ -34,7 +33,7 @@ so there is no running card or Cancel button. The `here` card counts only the pl
 typed in as one the caller can see: naming their other channels would take
 Graph lookups per team, so an agent rule's other channels stay unnamed. Where Teams
 will not deliver `memory` privately in the channel it answers in the 1:1 chat,
-so for a channel whose readers are limited it says why instead, as `/dm`
+so for a channel whose readers are limited it says why instead, as `/dm-me`
 refuses to carry such a channel's work out. Teams bot commands are typed
 words (the manifest's command lists and `/` only fill them in), so a message that is
 exactly a command word runs it: a reply of just `here` gets the card, where

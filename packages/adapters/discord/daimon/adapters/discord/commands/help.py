@@ -33,7 +33,7 @@ def _body(bot_display_name: str) -> str:
 /github home     Your repos, GitHub account and waiting requests
 /memory          What the agent remembers
 /routines        Scheduled jobs
-/dm              Continue privately (an admin turns it on)
+/dm-me           Continue privately (an admin turns it on)
 /billing         Your usage and credit
 /privacy         See, export or delete your data
 /help            This list\

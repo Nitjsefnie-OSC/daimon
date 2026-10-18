@@ -48,6 +48,7 @@ from daimon.core.confirmation import backend_switch_tools_for_turn
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import legacy_call
 from daimon.core.session_compat import (
@@ -768,7 +769,7 @@ async def _prepare_session_for_turn_locked(
         return prepared(
             ma_session_id=fresh.ma_session_id,
             mapping_id=fresh.mapping_id,
-            model_id=fresh.snapshot.model_id,
+            model_id=fresh.snapshot.pricing_id,
             watermark=None,
             reused=False,
             continuity=continuity,
@@ -866,6 +867,7 @@ async def _prepare_session_for_turn_locked(
                 recorded is None
                 and not fresh_start
                 and not admission.memory_read_only
+                and not admission.is_external
                 and row.budget_channel_id in ("", admission.budget_channel_id)
             ):
                 # No readable configuration to compare: the session is gone or
@@ -874,7 +876,7 @@ async def _prepare_session_for_turn_locked(
                 return prepared(
                     ma_session_id=row.ma_session_id,
                     mapping_id=row.id,
-                    model_id=admission.agent.model.id,
+                    model_id=model_choice_id(admission.agent.model),
                     watermark=row.watermark_message_id,
                     reused=True,
                     continuity=CONTINUED,
@@ -925,8 +927,11 @@ async def _prepare_session_for_turn_locked(
             decision = ReplaceSession(reasons=("budget_channel",))
         elif recorded is None:
             # A restricted turn must get a new read-only session when the
-            # previous mount cannot be established, never reuse unknown access.
-            decision = ReplaceSession(reasons=("memory_access",))
+            # previous mount cannot be established, never reuse unknown access;
+            # nor may a caller from another organisation reuse unknown keys.
+            decision = ReplaceSession(
+                reasons=("external_caller",) if admission.is_external else ("memory_access",)
+            )
         else:
             assert recorded is not None, "a readable row always has a recorded snapshot here"
             rotate_app_token = (
@@ -980,10 +985,18 @@ async def _prepare_session_for_turn_locked(
                 continuity=continuity,
             )
 
-        current_model = admission.agent.model.id if recorded is None else recorded.model_id
+        current_model = (
+            model_choice_id(admission.agent.model) if recorded is None else recorded.pricing_id
+        )
 
         tightening_memory = admission.memory_read_only and (
             recorded is None or not recorded.memory_read_only
+        )
+        # The old session may hold the agent's keys and tokens, mounted or
+        # copied into its workspace: never run it, or carry its work, for a
+        # person from another organisation.
+        stripping_credentials = admission.is_external and (
+            recorded is None or not recorded.is_external
         )
         if (
             isinstance(decision, ReplaceSession)
@@ -991,11 +1004,13 @@ async def _prepare_session_for_turn_locked(
                 "agent_identity" in decision.reasons
                 or "budget_channel" in decision.reasons
                 or tightening_memory
+                or stripping_credentials
             )
             and turn_is_active(row, now=moment)
         ):
-            # A changed billing channel, responder, or memory restriction
-            # cannot run against the old session while replacement is deferred.
+            # A changed billing channel, responder, memory restriction or a
+            # caller from another organisation cannot run against the old
+            # session while replacement is deferred.
             log.info(
                 "session_preparation.busy",
                 mapping_id=str(row.id),
@@ -1070,8 +1085,11 @@ async def _prepare_session_for_turn_locked(
                 reasons=decision.reasons,
                 fresh_start=fresh_start,
                 # A checkpoint executes the old session. Never run it with
-                # a writable mount after the origin has become read-only.
-                transfer=None if tightening_memory or not carry else transfer,
+                # a writable mount after the origin has become read-only, or
+                # with the agent's keys for an external caller.
+                transfer=(
+                    None if tightening_memory or stripping_credentials or not carry else transfer
+                ),
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,
@@ -1158,7 +1176,7 @@ async def _prepare_session_for_turn_locked(
                     pending_reasons=("session_changed",),
                     retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
                 )
-            return await on_current(CONTINUED, recorded.model_id)
+            return await on_current(CONTINUED, recorded.pricing_id)
 
         try:
             result = await run_ops()
@@ -1196,7 +1214,7 @@ async def _prepare_session_for_turn_locked(
         continuity = ContinuityOutcome(state=outcome_state, applied=applied, pending=pending)
         if isinstance(result, SessionBusy):
             return PreparationDeferred(
-                prepared=await on_current(continuity, result.snapshot.model_id, result.snapshot),
+                prepared=await on_current(continuity, result.snapshot.pricing_id, result.snapshot),
                 pending_reasons=pending,
             )
         log.info(
@@ -1204,4 +1222,4 @@ async def _prepare_session_for_turn_locked(
             session_id=row.ma_session_id,
             applied=list(applied),
         )
-        return await on_current(continuity, result.snapshot.model_id, result.snapshot)
+        return await on_current(continuity, result.snapshot.pricing_id, result.snapshot)

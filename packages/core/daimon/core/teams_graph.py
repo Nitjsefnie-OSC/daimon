@@ -6,7 +6,7 @@ per team) and `GraphClient`, whose requests only ever go to `GRAPH_HOST` and
 never follow a redirect. The app's resource-specific consent
 `ChannelMessage.Read.Group`, granted by a team owner at install, covers the
 message reads here, `TeamMember.Read.Group` the owner list
-(`list_team_owner_ids`, for channel admin grants) and `ChannelMember.Read.Group`
+(`list_team_owner_ids`, for native admin-team owners) and `ChannelMember.Read.Group`
 a channel's members (`list_channel_members`, for who is from another
 organisation); `ChatMessage.Read.Chat`, granted when the app is added to a
 group chat, the chat reads (`list_chat_messages`, `get_chat_message`);

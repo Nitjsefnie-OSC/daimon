@@ -299,7 +299,7 @@ async def test_policy_revocation_and_disable_refuse_existing_dm(db_session, db_s
     assert not created and not streams
     async with db_session_factory.begin() as session:
         await set_dm_enabled(session, tenant_id=tenant.id, enabled=False)
-    with pytest.raises(DaimonError, match="disabled"):
+    with pytest.raises(DaimonError, match="Daimon DMs are off here"):
         await _reply(deps, route, message_id="2", role=Role.ADMIN)
     assert not created
 
@@ -1481,9 +1481,8 @@ async def _seal_and_expect_quarantine(
     with pytest.raises(
         DaimonError,
         match=(
-            r"This DM was started from a channel that is now private to its members, so it "
-            r"was closed to keep that channel's messages in\. Run /dm again from the channel "
-            r"you want to talk about\."
+            r"This DM was closed because its channel no longer lets its conversation move to "
+            r"a DM\.\n\nKeep working in that channel\."
         ),
     ):
         await _reply(deps, route, message_id="2")
@@ -1629,7 +1628,7 @@ async def test_discord_dm_move_from_thread_under_sealed_parent_refuses_with_real
 async def test_slack_dm_move_withholds_a_thread_sealed_on_its_own_with_real_admission(
     db_session, db_session_factory, monkeypatch
 ):
-    """H1: Slack /dm has no thread_ts, so a thread-only seal is filtered from history."""
+    """H1: Slack /dm-me has no thread_ts, so a thread-only seal is filtered from history."""
     from daimon.adapters.slack import direct_messages as slack_dm
 
     tenant, deps, _admission, _sent, _streams, _created = await _setup(
@@ -1702,9 +1701,7 @@ async def test_dm_source_sealed_during_recovery_is_quarantined(
     monkeypatch.setattr(dm_module, "run_prepared_turn", recovery_finds_seal)
 
     events_before = len(sent)
-    with pytest.raises(
-        DaimonError, match=r"This DM was started from a channel that is now private"
-    ):
+    with pytest.raises(DaimonError, match=r"This DM was closed because its channel"):
         await _reply(deps, route, message_id="2")
     assert len(sent) == events_before
     async with db_session_factory() as session:

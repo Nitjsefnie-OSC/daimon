@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import uuid
 from datetime import UTC, datetime
 
@@ -108,33 +107,6 @@ async def test_a_server_admin_adds_lists_and_removes_a_channel_skill(
     assert removed.skills == []
     with pytest.raises(ToolError, match="doesn't add that skill"):
         await _remove(runtime, admin, _CHANNEL, "pdf-tools")
-
-
-async def test_a_channel_admin_cannot_add_or_remove_even_their_own_channels_skills(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant, account_id = await _seed(committing_sessionmaker)
-    runtime = _runtime(committing_sessionmaker, tenant)
-    channel_admin = dataclasses.replace(
-        _auth(tenant, account_id, admin=False),
-        platform_user_id="u-ca",
-        administered_channel_ids=frozenset({_CHANNEL}),
-    )
-
-    for change in (_add, _remove):
-        with capture_decision() as denied, pytest.raises(ToolError, match="needs a workspace"):
-            await change(runtime, channel_admin, _CHANNEL, "pdf-tools")
-        assert (denied.operation, denied.reason) == (
-            "set_channel_skills",
-            "authz:admin_required",
-        ), "the refusal is audited"
-    with pytest.raises(ToolError):
-        await _list(runtime, channel_admin, _CHANNEL)
-    async with committing_sessionmaker() as session:
-        rows = await channel_skills.list_channel_skills(
-            session, tenant_id=tenant.id, platform="discord"
-        )
-    assert rows == []
 
 
 async def test_an_isolated_agents_upload_is_left_out_of_a_listing_from_outside(
