@@ -59,6 +59,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 
+# Channels whose over-cap drop was already logged, with what was dropped: every
+# turn there repeats it, so it is logged once per process until it changes.
+_OVER_CAP_LOGGED: set[tuple[str, str, str, tuple[str, ...]]] = set()
+_OVER_CAP_LOGGED_MAX = 4096
+
 _TRUNCATED = re.compile(r"~[0-9a-f]{4}$")
 
 ChannelSkillRefusal = Literal["not_found", "not_usable", "no_version", "too_many", "mount_clash"]
@@ -420,7 +425,9 @@ async def turn_channel_skills(
     One DB read; the skills list is read only when the channel adds something,
     to keep a clashing mount (which would fail the session) out. With `cache`
     that list is shared across turns for a few seconds. Skills past the cap
-    (`skill_room`) are left out with a warning naming them.
+    (`skill_room`) are left out, the most recently added ones (rows come
+    oldest first), with a warning naming them, logged once per channel and
+    process until the dropped set changes.
     """
     if rows is None:
         async with sessionmaker() as session:
@@ -447,13 +454,19 @@ async def turn_channel_skills(
     wanted = applicable_skills(rows, agent=agent, agent_names=agent_names, bodies=bodies)
     room = skill_room(agent)
     if len(wanted) > room:
-        _log.warning(
-            "channel_skills.over_cap",
-            tenant_id=str(tenant_id),
-            channel_id=channel_id,
-            dropped=[skill.skill_id for skill in wanted[room:]],
-            cap=AGENT_SKILL_CAP,
-        )
+        dropped = tuple(skill.skill_id for skill in wanted[room:])
+        key = (str(tenant_id), platform, channel_id, dropped)
+        if key not in _OVER_CAP_LOGGED:
+            if len(_OVER_CAP_LOGGED) >= _OVER_CAP_LOGGED_MAX:
+                _OVER_CAP_LOGGED.clear()
+            _OVER_CAP_LOGGED.add(key)
+            _log.warning(
+                "channel_skills.over_cap",
+                tenant_id=str(tenant_id),
+                channel_id=channel_id,
+                dropped=list(dropped),
+                cap=AGENT_SKILL_CAP,
+            )
     return wanted[:room]
 
 

@@ -297,7 +297,7 @@ async def test_built_in_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
     """The default agent's 11 custom and 3 built-in skills leave room for 6 channel skills.
 
     The provider's per-agent limit counts the whole `skills` list, built-in ones
-    included, so a channel that added 9 runs with its first 6 and a warning.
+    included, so a channel that added 9 runs with its first 6 and one warning.
     """
     held = [{"type": "custom", "skill_id": f"skill_own_{i}", "version": "1"} for i in range(11)]
     built_in = [
@@ -307,20 +307,31 @@ async def test_built_in_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
     agent = ma_agent(name="shared", skills=[*held, *built_in])
     assert skill_room(agent) == AGENT_SKILL_CAP - 14, "every held skill counts, built-ins too"
 
-    with capture_logs() as logs:
+    tenant_id = uuid.uuid4()
+
+    async def turn(count: int) -> list[str]:
         picked = await turn_channel_skills(
             db_session_factory,
             _client([]),
-            tenant_id=uuid.uuid4(),
+            tenant_id=tenant_id,
             platform="slack",
             channel_id="C1",
             agent=agent,
             agent_names=("shared",),
-            rows=[_row(f"skill_{i}", f"s{i}") for i in range(9)],
+            rows=[_row(f"skill_{i}", f"s{i}") for i in range(count)],
         )
-    assert [s.skill_id for s in picked] == [f"skill_{i}" for i in range(6)], "the first six run"
-    [warning] = [log for log in logs if log["event"] == "channel_skills.over_cap"]
-    assert warning["dropped"] == ["skill_6", "skill_7", "skill_8"], "the dropped ones are named"
+        return [s.skill_id for s in picked]
+
+    with capture_logs() as logs:
+        first, second = await turn(9), await turn(9)
+        await turn(10)
+    assert first == second == [f"skill_{i}" for i in range(6)], (
+        "the six added first run on every turn, the same six each time"
+    )
+    warnings = [log["dropped"] for log in logs if log["event"] == "channel_skills.over_cap"]
+    assert warnings == [["skill_6", "skill_7", "skill_8"], [f"skill_{i}" for i in range(6, 10)]], (
+        "the dropped skills are named once, not on every turn, and again only when they change"
+    )
 
 
 def test_only_a_server_admin_may_set_a_channels_skills() -> None:
