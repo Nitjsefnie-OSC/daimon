@@ -11,13 +11,17 @@ from typing import cast
 import httpx
 import pytest
 import typer
-from daimon.adapters.cli.commands.channels_answerable import channels_answerable
+from daimon.adapters.cli.commands import channels_answerable as module
+from daimon.adapters.cli.commands.channels_answerable import (
+    channels_answerable,
+    channels_answerable_command,
+)
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -47,11 +51,9 @@ def _out(console: Console) -> str:
     return cast(StringIO, console.file).getvalue()
 
 
-def _settings() -> object:
-    return SimpleNamespace(
-        cli=FakeCliSettings.cli,
-        discord=SimpleNamespace(bot_token=SimpleNamespace(get_secret_value=lambda: "t")),
-    )
+def _settings(*, token: bool = True) -> object:
+    discord = SimpleNamespace(bot_token=SimpleNamespace(get_secret_value=lambda: "t"))
+    return SimpleNamespace(cli=FakeCliSettings.cli, discord=discord if token else None)
 
 
 def _guild(channels: list[dict[str, object]], *, status: int = 200) -> httpx.MockTransport:
@@ -65,7 +67,10 @@ def _guild(channels: list[dict[str, object]], *, status: int = 200) -> httpx.Moc
 
 
 async def _seed(
-    factory: async_sessionmaker[AsyncSession], *, bound_parents: tuple[str, ...]
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    bound_parents: tuple[str, ...],
+    deleted_parents: tuple[str, ...] = (),
 ) -> None:
     await provision_tenant(factory, platform="discord", workspace_id=GUILD)
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=GUILD)
@@ -89,6 +94,24 @@ async def _seed(
                 responder_name="helper",
                 kind="handoff",
             )
+        for n, parent in enumerate(deleted_parents):
+            await create_binding(
+                s,
+                tenant_id=tenant_id,
+                platform="discord",
+                parent_channel_id=parent,
+                thread_id=f"80{n}",
+                responder_ma_agent_id=f"agent_gone_{n}",
+                responder_name="gone",
+            )
+            await update_lifecycle(
+                s,
+                tenant_id=tenant_id,
+                platform="discord",
+                parent_channel_id=parent,
+                thread_id=f"80{n}",
+                deleted=True,
+            )
         await create_binding(
             s,
             tenant_id=tenant_id,
@@ -103,7 +126,7 @@ async def _seed(
 async def _run(
     factory: async_sessionmaker[AsyncSession],
     *,
-    expect: Path | None = None,
+    expected: set[str] | None = None,
     as_json: bool = True,
     channels: list[dict[str, object]] = CHANNELS,
 ) -> tuple[Console, int]:
@@ -115,7 +138,7 @@ async def _run(
             console=console,
             platform="discord",
             guild_id=GUILD,
-            expect=expect,
+            expected=expected,
             as_json=as_json,
             discord_transport=_guild(channels),
         )
@@ -124,10 +147,25 @@ async def _run(
     return console, code
 
 
+async def _fail(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    token: bool = True,
+) -> None:
+    await channels_answerable(
+        rt=build_cli_runtime(factory, settings=_settings(token=token)),
+        console=_console(),
+        platform="discord",
+        guild_id=GUILD,
+        discord_transport=transport,
+    )
+
+
 async def test_rules_categories_open_channels_and_bindings_make_the_set(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _seed(db_session_factory, bound_parents=("105",))
+    await _seed(db_session_factory, bound_parents=("101", "105"), deleted_parents=("102",))
 
     console, code = await _run(db_session_factory)
 
@@ -139,25 +177,26 @@ async def test_rules_categories_open_channels_and_bindings_make_the_set(
         "102": (False, "channel rule writers none"),
         "103": (False, "category 10 writers none"),
         "104": (True, "no writers none rule"),
-        "105": (True, "thread bound here (channel rule writers none)"),
+        "105": (False, "channel rule writers none"),
     }, "categories themselves are not channels"
-    assert found["answerable"] == ["101", "104", "105"], (
-        "an unconfigured channel answers, and a bound thread's parent counts whatever its rule"
+    assert found["answerable"] == ["101", "104"], (
+        "an unconfigured channel answers; a thread bound under a writers none channel "
+        "is refused by the turn gate, so it does not reopen the channel"
     )
-    assert [(b["thread_id"], b["parent_channel_id"]) for b in found["thread_bindings"]] == [
-        ("900", "105")
-    ], "DM scopes are not server channels"
+    assert [
+        (b["thread_id"], b["parent_channel_id"], b["answers"]) for b in found["thread_bindings"]
+    ] == [("900", "101", True), ("901", "105", False)], (
+        "deleted bindings and DM scopes are not listed"
+    )
     assert found["errors"] == []
 
 
-async def test_expect_matches_with_a_thread_binding_under_a_listed_parent(
-    db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+async def test_expect_matches_the_channels_the_other_bot_hands_over(
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _seed(db_session_factory, bound_parents=("101",))
-    listed = tmp_path / "owned.txt"
-    listed.write_text("# channels the other bot owns\n101\n\n104  # forum\n")
+    await _seed(db_session_factory, bound_parents=("101", "105"))
 
-    console, code = await _run(db_session_factory, expect=listed, as_json=False)
+    console, code = await _run(db_session_factory, expected={"101", "104"}, as_json=False)
 
     assert code == 0, _out(console)
     text = _out(console)
@@ -166,26 +205,26 @@ async def test_expect_matches_with_a_thread_binding_under_a_listed_parent(
 
 
 async def test_expect_mismatch_prints_both_diffs_and_the_unlisted_binding(
-    db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _seed(db_session_factory, bound_parents=("105",))
-    listed = tmp_path / "owned.txt"
-    listed.write_text("101\n103\n")
+    await _seed(db_session_factory, bound_parents=("104", "105"))
+    expected = {"101", "103"}
 
-    console, code = await _run(db_session_factory, expect=listed, as_json=False)
+    console, code = await _run(db_session_factory, expected=expected, as_json=False)
 
     assert code == 1
     text = _out(console)
-    assert "Daimon may answer, not in the file: 104, 105" in text
+    assert "Daimon may answer, not in the file: 104" in text
     assert "In the file, Daimon may not answer: 103" in text
-    assert "Thread 900 (helper) is bound under unlisted channel 105" in text
+    assert "Thread 900 (helper) answers under unlisted channel 104" in text
+    assert "Thread 901" not in text, "a refused thread under a silent channel is no difference"
 
-    json_console, code = await _run(db_session_factory, expect=listed)
+    json_console, code = await _run(db_session_factory, expected=expected)
     assert code == 1
     comparison = json.loads(_out(json_console))["comparison"]
     assert comparison["match"] is False
     assert (comparison["missing_from_expect"], comparison["missing_from_daimon"]) == (
-        ["104", "105"],
+        ["104"],
         ["103"],
     )
     assert [b["thread_id"] for b in comparison["unlisted_thread_bindings"]] == ["900"]
@@ -196,7 +235,7 @@ async def test_an_unknown_category_counts_as_answerable_and_fails(
 ) -> None:
     """Fail closed: a channel whose category can't be found is never taken as silent."""
     await _seed(db_session_factory, bound_parents=())
-    orphan = {"id": "106", "type": 0, "name": "orphan", "parent_id": "10"}
+    orphan: dict[str, object] = {"id": "106", "type": 0, "name": "orphan", "parent_id": "10"}
     without_category = [c for c in CHANNELS if c["id"] != "10"]
 
     console, code = await _run(db_session_factory, channels=[*without_category, orphan])
@@ -207,8 +246,27 @@ async def test_an_unknown_category_counts_as_answerable_and_fails(
     assert len(found["errors"]) == 2 and "category 10" in found["errors"][0]
 
 
+async def test_a_binding_under_a_channel_not_in_the_server_is_an_error_and_not_counted(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(db_session_factory, bound_parents=("999",))
+
+    console, code = await _run(db_session_factory, expected={"101", "104"})
+
+    assert code == 1
+    found = json.loads(_out(console))
+    assert found["answerable"] == ["101", "104"], "a parent Discord doesn't list is not counted"
+    assert [
+        (b["thread_id"], b["parent_in_server"], b["answers"]) for b in found["thread_bindings"]
+    ] == [("900", False, False)]
+    assert found["errors"] == [
+        "thread 900: parent channel 999 is not in the server's channel list; not counted"
+    ]
+    assert found["comparison"]["match"] is True, "the error alone is what fails the run"
+
+
 async def test_an_unseeded_server_is_open_and_discord_failures_are_errors(
-    db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     console, code = await _run(db_session_factory)
     assert code == 0
@@ -216,15 +274,44 @@ async def test_an_unseeded_server_is_open_and_discord_failures_are_errors(
         "no tenant yet: no rules, so every channel answers"
     )
 
-    rt = build_cli_runtime(db_session_factory, settings=_settings())
-    where = {"rt": rt, "console": _console(), "platform": "discord", "guild_id": GUILD}
     with pytest.raises(DaimonError, match="not visible to daimon"):
-        await channels_answerable(**where, discord_transport=_guild([], status=403))
+        await _fail(db_session_factory, transport=_guild([], status=403))
+    with pytest.raises(DaimonError, match="not visible to daimon"):
+        await _fail(db_session_factory, transport=_guild([], status=404))
     with pytest.raises(DaimonError, match="HTTP 500"):
-        await channels_answerable(**where, discord_transport=_guild([], status=500))
+        await _fail(db_session_factory, transport=_guild([], status=500))
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down", request=request)
+
+    with pytest.raises(DaimonError, match="could not reach Discord"):
+        await _fail(db_session_factory, transport=httpx.MockTransport(unreachable))
+    with pytest.raises(DaimonError, match="DAIMON_DISCORD__BOT_TOKEN"):
+        await _fail(db_session_factory, token=False)
+
+
+def test_bad_arguments_fail_before_the_runtime_opens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def no_runtime(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the runtime must not open on bad arguments")
+
+    monkeypatch.setattr(module, "build_runtime", no_runtime)
+    monkeypatch.setattr(module, "load_settings", no_runtime)
     bad = tmp_path / "bad.txt"
     bad.write_text("101\ngeneral\n")
     with pytest.raises(typer.BadParameter, match="bad.txt:2"):
-        await channels_answerable(**where, expect=bad, discord_transport=_guild(CHANNELS))
+        channels_answerable_command("discord", GUILD, expect=bad)
+    with pytest.raises(typer.BadParameter, match="cannot read"):
+        channels_answerable_command("discord", GUILD, expect=tmp_path / "missing.txt")
     with pytest.raises(typer.BadParameter, match="only discord"):
-        await channels_answerable(**{**where, "platform": "slack"})
+        channels_answerable_command("slack", GUILD)
+    with pytest.raises(typer.BadParameter, match="not a Discord server id"):
+        channels_answerable_command("discord", "guild")
+
+
+def test_the_expect_file_takes_one_id_per_line_with_comments(tmp_path: Path) -> None:
+    listed = tmp_path / "handed-over.txt"
+    listed.write_text("# channels the other bot does not answer\n101\n\n104  # forum\n")
+
+    assert module.read_expect_file(listed) == {"101", "104"}

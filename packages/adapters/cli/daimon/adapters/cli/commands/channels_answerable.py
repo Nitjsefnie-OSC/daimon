@@ -1,17 +1,25 @@
 """daimon channels answerable: the Discord channels where Daimon may answer at all.
 
-Read-only. Daimon may answer in every server channel not under a `writers: none`
-rule, its own or its category's, and in every channel with a thread bound to an
-agent (the thread tier of the cascade), whatever that channel's rule. Another
-bot sharing the server can compare this set with its own list of channels it
-owns (`--expect`), so the two never answer in the same place.
+Read-only. Daimon may answer in every server channel where the turn gate would
+admit a turn: one not under a `writers: none` rule, its own or its category's.
+Each channel and each bound thread is put through the same `authorize`
+START_TURN check a turn passes, so a thread bound under a `writers: none`
+channel answers no more than the channel does. Agent rules (`--runs-in`,
+`--nowhere`) are not considered: they pick which agent answers, not whether
+Daimon may.
+
+`--expect` takes the list of channels another bot sharing the server does not
+answer, the ones it has handed to Daimon. Daimon's answerable set must equal
+it: a channel in one and not the other is a difference either way, and exits 1.
 
 It fails closed: anything it cannot tell is reported as answerable or as an
 error, never as silent. Channels come from Discord's channel list for the
 server, which names every channel, those the bot cannot view included; viewing
 permission is ignored, because it can be granted later without touching a
 Daimon rule. A channel whose category is not in the list is counted as
-answerable unless its own rule silences it, and reported as an error.
+answerable unless its own rule silences it, and reported as an error. A thread
+binding whose parent channel is not in the list is reported as an error and
+not counted.
 """
 
 from __future__ import annotations
@@ -27,10 +35,11 @@ from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.output import emit_rows
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, authorize, build_subject, build_turn_place
 from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.permissions import channel_permissions, channel_rule
+from daimon.core.permissions import channel_rule
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.thread_agent_bindings import list_answering_bindings
@@ -55,6 +64,7 @@ class BindingAnswer(BaseModel):
     agent: str
     kind: str
     parent_in_server: bool
+    answers: bool
 
 
 class Answerable(BaseModel):
@@ -72,11 +82,28 @@ class Comparison(BaseModel):
     missing_from_daimon: list[str]
     """The file lists it, but Daimon may not answer here."""
     unlisted_thread_bindings: list[BindingAnswer]
-    """Bound threads whose parent channel the file does not list."""
+    """Bound threads that answer under a parent channel the file does not list."""
 
 
 def _sorted_ids(ids: set[str]) -> list[str]:
     return sorted(ids, key=lambda i: (len(i), i))
+
+
+def _admits_turn(
+    policy: TenantAccessPolicy,
+    *,
+    channel_id: str,
+    thread_id: str | None = None,
+    category_id: str | None,
+) -> bool:
+    """Whether the turn gate would let a turn start here. No user is named, so
+    only the place's rules count, not the invoker allowlist."""
+    return authorize(
+        policy,
+        subject=build_subject(is_admin=False, platform_user_id=None),
+        action=Action.START_TURN,
+        place=build_turn_place(channel_id=channel_id, thread_id=thread_id, category_id=category_id),
+    ).allowed
 
 
 def compute_answerable(
@@ -100,12 +127,9 @@ def compute_answerable(
         unresolved = category_id is not None and category_id not in categories
         silenced_by_own = channel_rule(policy, channel_id).writers == "none"
         # The same gate a turn passes; an unresolved category is never taken as silencing.
-        here = channel_permissions(
-            policy,
-            channel_id=channel_id,
-            category_id=None if unresolved else category_id,
+        answers = _admits_turn(
+            policy, channel_id=channel_id, category_id=None if unresolved else category_id
         )
-        answers = here.writers != "none"
         if silenced_by_own:
             why = "channel rule writers none"
         elif not answers:
@@ -127,27 +151,35 @@ def compute_answerable(
                 why=why,
             )
         )
-    in_server = {c.channel_id for c in channels}
+    by_id = {c.channel_id: c for c in channels}
     answerable = {c.channel_id for c in channels if c.answers}
-    thread_bindings = [
-        BindingAnswer(
+    thread_bindings: list[BindingAnswer] = []
+    for b in bindings:
+        parent = by_id.get(b.parent_channel_id)
+        if parent is None:
+            errors.append(
+                f"thread {b.thread_id}: parent channel {b.parent_channel_id} is not in the "
+                "server's channel list; not counted"
+            )
+        unresolved = parent is not None and parent.category_id not in (None, *categories)
+        answers = parent is not None and _admits_turn(
+            policy,
+            channel_id=parent.channel_id,
             thread_id=b.thread_id,
-            parent_channel_id=b.parent_channel_id,
-            agent=b.responder_name,
-            kind=b.kind,
-            parent_in_server=b.parent_channel_id in in_server,
+            category_id=None if unresolved else parent.category_id,
         )
-        for b in bindings
-    ]
-    # A bound thread answers by its binding, so its parent counts whatever its rule.
-    bound = {b.parent_channel_id for b in thread_bindings}
-    channels = [
-        c.model_copy(update={"answers": True, "why": f"thread bound here ({c.why})"})
-        if c.channel_id in bound and not c.answers
-        else c
-        for c in channels
-    ]
-    answerable |= bound
+        thread_bindings.append(
+            BindingAnswer(
+                thread_id=b.thread_id,
+                parent_channel_id=b.parent_channel_id,
+                agent=b.responder_name,
+                kind=b.kind,
+                parent_in_server=parent is not None,
+                answers=answers,
+            )
+        )
+        if answers:
+            answerable.add(b.parent_channel_id)
     return Answerable(
         guild_id=guild_id,
         answerable=_sorted_ids(answerable),
@@ -159,7 +191,9 @@ def compute_answerable(
 
 def compare(found: Answerable, expected: set[str]) -> Comparison:
     answerable = set(found.answerable)
-    unlisted = [b for b in found.thread_bindings if b.parent_channel_id not in expected]
+    unlisted = [
+        b for b in found.thread_bindings if b.answers and b.parent_channel_id not in expected
+    ]
     missing_from_expect = _sorted_ids(answerable - expected)
     missing_from_daimon = _sorted_ids(expected - answerable)
     return Comparison(
@@ -220,17 +254,19 @@ def channels_answerable_command(
         Path | None,
         typer.Option(
             "--expect",
-            help="A file of channel ids, one per line (# comments): compare it with the "
-            "answerable set and exit 1 on any difference.",
+            help="A file of the channel ids the other bot does not answer, one per line "
+            "(# comments): Daimon's answerable set must equal it; exit 1 on any difference.",
             dir_okay=False,
         ),
     ] = None,
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
     """List the Discord channels where Daimon may answer: those not under a writers none
-    rule (theirs or their category's), plus the parent of every thread bound to an agent.
-    Read-only. Exits 1 on an error or, with --expect, on any difference."""
+    rule, theirs or their category's. Read-only. Exits 1 on an error or, with --expect,
+    on any difference."""
     console = Console(highlight=False)
+    # Bad arguments fail before the runtime opens the database.
+    guild_id, expected = _check_arguments(platform, guild_id, expect)
 
     async def _run() -> None:
         async with build_runtime(load_settings()) as rt:
@@ -239,11 +275,23 @@ def channels_answerable_command(
                 console=console,
                 platform=platform,
                 guild_id=guild_id,
-                expect=expect,
+                expected=expected,
                 as_json=as_json,
             )
 
     run_cli(_run(), console=console)
+
+
+def _check_arguments(
+    platform: str, guild_id: str, expect: Path | None
+) -> tuple[str, set[str] | None]:
+    """The server id and the expected ids, or a usage error."""
+    if platform != "discord":
+        raise typer.BadParameter("only discord: the check reads a Discord server's channels")
+    guild_id = guild_id.strip()
+    if not guild_id.isdigit():
+        raise typer.BadParameter(f"{guild_id!r} is not a Discord server id")
+    return guild_id, read_expect_file(expect) if expect is not None else None
 
 
 async def channels_answerable(
@@ -252,16 +300,11 @@ async def channels_answerable(
     console: Console,
     platform: str,
     guild_id: str,
-    expect: Path | None = None,
+    expected: set[str] | None = None,
     as_json: bool = False,
     discord_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
-    if platform != "discord":
-        raise typer.BadParameter("only discord: the check reads a Discord server's channels")
-    guild_id = guild_id.strip()
-    if not guild_id.isdigit():
-        raise typer.BadParameter(f"{guild_id!r} is not a Discord server id")
-    expected = read_expect_file(expect) if expect is not None else None
+    guild_id, _ = _check_arguments(platform, guild_id, None)
     if rt.settings.discord is None:
         raise DaimonError("DAIMON_DISCORD__BOT_TOKEN is not set; it is needed to list channels")
     guild_channels = await _fetch_guild_channels(
@@ -332,7 +375,7 @@ def _print_text(console: Console, found: Answerable, comparison: Comparison | No
     )
     for b in comparison.unlisted_thread_bindings:
         console.print(
-            f"Thread {b.thread_id} ({b.agent}) is bound under unlisted channel "
+            f"Thread {b.thread_id} ({b.agent}) answers under unlisted channel "
             f"{b.parent_channel_id}",
             markup=False,
         )
