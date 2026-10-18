@@ -52,6 +52,19 @@ def test_daimon_server_name_matches_the_defaults_constant() -> None:
         ("verifyAnswer", "read"),
         ("ask_question", "read"),
         ("askQuestion", "read"),
+        # GitHub's "<object>_read" tools, whose verb comes last.
+        ("pull_request_read", "read"),
+        ("pullRequestRead", "read"),
+        ("issue_read", "read"),
+        # A trailing "read" alone is no rule.
+        ("mark_all_notifications_read", "write"),
+        ("mark_as_read", "write"),
+        ("pull_request_review_write", "write"),
+        ("issue_write", "write"),
+        ("create_pull_request", "write"),
+        ("push_files", "write"),
+        ("merge_pull_request", "write"),
+        ("pull_request_read_and_merge", "write"),
         # Plain writes and unknowns.
         ("create_issue", "write"),
         ("update_deal", "write"),
@@ -452,6 +465,42 @@ async def test_question_and_answer_tools_run_without_a_card(
     result = await decider(ToolCall(tool_use_id="tu_1", server_name=server, tool_name=tool))
     assert result.allow
     card.assert_not_awaited()
+
+
+@pytest.mark.parametrize("attended", [True, False])
+async def test_github_pull_request_read_runs_without_a_card(attended: bool) -> None:
+    card = AsyncMock(return_value="denied")
+    decider = (
+        interactive_decider(_ON, requester_platform_user_id="u1", confirm=card)
+        if attended
+        else unattended_decider(_ON)
+    )
+    call = ToolCall(
+        tool_use_id="tu_1",
+        server_name="github",
+        tool_name="pull_request_read",
+        input={"method": "get_diff", "owner": "o", "repo": "r", "pullNumber": 1},
+    )
+    verdict = decide_tool_call(_ON, call, attended=attended)
+    assert (verdict.outcome, verdict.reason) == ("allow", "read")
+    assert (await decider(call)).allow
+    card.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "pull_request_review_write",
+        "create_pull_request",
+        "push_files",
+        "merge_pull_request",
+        "mark_all_notifications_read",
+    ],
+)
+def test_github_write_tools_still_ask_in_chat_and_are_denied_unattended(tool: str) -> None:
+    call = _call("github", tool)
+    assert decide_tool_call(_ON, call, attended=True).outcome == "ask"
+    assert decide_tool_call(_ON, call, attended=False).outcome == "deny"
 
 
 @pytest.mark.parametrize("attended", [True, False])

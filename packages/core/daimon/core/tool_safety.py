@@ -183,6 +183,18 @@ _READ_VERBS: Final[tuple[str, ...]] = (
     "briefing",
 )
 
+# Whole tool names that read although the verb comes last. GitHub's MCP server
+# names its read tools "<object>_read" and picks the action in a `method`
+# argument (get, get_diff, list ...); each carries `readOnlyHint: true` in the
+# server's tool snapshots. A trailing "read" is not a rule: the same server's
+# "mark_all_notifications_read" writes. So this is an exact list, not a suffix.
+_READ_TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "issue_read",
+        "pull_request_read",
+    }
+)
+
 # Verbs that read only when the name also says what comes back. A bare "ask"
 # is an action (daimon's own agent_chat `ask` starts a turn in another agent),
 # and "verify_email" can send a code, so these two fail closed unless the name
@@ -403,6 +415,8 @@ def _name_says_read(tool_name: str) -> bool:
         return False
     if words[0] in _ACTION_PREFIXES:
         return False
+    if "_".join(words) in _READ_TOOL_NAMES:
+        return True
     for slot in (0, 1)[: len(words)]:
         verb = words[slot]
         if verb in _READ_VERBS:
