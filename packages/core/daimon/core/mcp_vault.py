@@ -38,7 +38,7 @@ from daimon.core.mux_compat import (
     store_credential,
     update_credential,
 )
-from daimon.core.stores.accounts import get_account_with_tenant
+from daimon.core.stores.accounts import account_exists, get_account_with_tenant
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from mux.contracts.ids import Scope
 from sqlalchemy import text
@@ -49,6 +49,16 @@ GITHUB_COPILOT_MCP_URL = "https://api.githubcopilot.com/mcp"
 # Namespace prefix for the pg_advisory_xact_lock key — keeps this subsystem's
 # lock keys distinct from any other advisory-lock user in the same database.
 LOCK_NAMESPACE = "mcp_vault"
+
+# A shared thread's vault: `daimon-shared:<shared_owner>:<agent_uuid>`. Its own
+# prefix keeps it out of everything that walks `daimon-mcp:` vaults (the orphan
+# janitor, the credential sweep, `ensure_agent_mcp_vault`), none of which knows
+# a shared owner is never an account.
+SHARED_VAULT_PREFIX = "daimon-shared:"
+
+
+def shared_vault_name(owner: uuid.UUID, agent_id: uuid.UUID) -> str:
+    return f"{SHARED_VAULT_PREFIX}{owner}:{agent_id}"
 
 
 async def _find_vault_by_name(
@@ -112,10 +122,14 @@ async def hold_agent_vault_lock(
     - ``ensure_agent_mcp_vault`` (the daimon-mcp JWT at ``public_url``) and
       ``add_external_mcp_credential`` (a person's pasted token) take it
       themselves;
+    - ``ensure_shared_mcp_vault`` (a shared thread's vault, keyed on its
+      synthetic owner) takes it itself;
     - the OAuth grant (``complete_mcp_oauth_flow`` around
       ``put_mcp_oauth_credential``), the mirror of the agent's shared tokens
       (``create_session`` and ``sync_agent_mcp_credentials`` around
-      ``mirror_credentials_into_vault``) and the Copilot PAT
+      ``mirror_credentials_into_vault``, and the shared vault's prune and
+      mirror in ``sync_shared_mcp_credentials`` and
+      ``resync_mounted_shared_vault``) and the Copilot PAT
       (``create_session`` around ``add_github_copilot_credential``) take it
       through this block.
 
@@ -457,6 +471,42 @@ async def ensure_agent_mcp_vault(
             scope=scope,
         )
 
+        await session.commit()
+        return vault_id
+
+
+async def ensure_shared_mcp_vault(
+    client: AsyncAnthropic,
+    *,
+    owner: uuid.UUID,
+    agent_id: uuid.UUID,
+    session_factory: async_sessionmaker[AsyncSession],
+    scope: Scope,
+) -> str:
+    """Return the ``ma_vault_id`` of a shared thread's vault for this agent.
+
+    ``owner`` is the thread's synthetic owner (``shared_threads.shared_owner``).
+    The vault holds the agent's shared MCP tokens and nothing else: no
+    daimon-mcp JWT (a shared workspace never acts as anyone), no OAuth grant
+    and no pasted token, so it is created empty and
+    ``sync_shared_mcp_credentials`` and ``resync_mounted_shared_vault`` are its
+    only writers. Get-or-create runs under the same advisory lock as
+    ``ensure_agent_mcp_vault``, keyed on ``(owner, agent_id)``.
+
+    Refuses an ``owner`` that is an account: that would put the agent's
+    tokens in a vault named for a person, outside their own.
+    """
+    async with session_factory() as session:
+        await _lock_vault_namespace(session, account_id=owner, agent_id=agent_id)
+        if await account_exists(session, account_id=owner):
+            raise ValueError("a shared thread's owner is never an account")
+        display_name = shared_vault_name(owner, agent_id)
+        oldest = await _find_vault_by_name(client, display_name=display_name)
+        vault_id = (
+            oldest.id
+            if oldest is not None
+            else (await create_vault(client, display_name, scope=scope)).id
+        )
         await session.commit()
         return vault_id
 

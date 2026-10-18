@@ -1355,7 +1355,12 @@ Each caller has their own row per thread. A channel configured for shared
 threads (`thread_mode="shared"`, with `DAIMON_TURN__CHANNEL_BACKENDS` on)
 instead keys the row on an owner derived from the thread, so everyone in it
 uses one session with the agent's own credentials, and records the binding
-in the state store (`packages/core/daimon/core/shared_threads.py`).
+in the state store (`packages/core/daimon/core/shared_threads.py`). That
+session mounts no caller's vault; it mounts a vault of the thread's own,
+`daimon-shared:<owner>:<agent>`, holding only the agent-wide MCP tokens.
+Each turn in the thread by a member of the organisation brings that vault
+up to date, so a token added, rotated or removed reaches the running session
+on that turn.
 
 What MA holds is the agent, the environment, the skills and the session
 transcript. What Postgres holds is metadata: identity, the mapping above, the

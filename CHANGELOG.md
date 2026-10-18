@@ -95,6 +95,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP servers connected agent-wide now work in shared threads.** A shared
+  thread's session mounted no vault holding the agent's shared MCP tokens,
+  so such a server failed authentication there and every reply carried an
+  "unavailable this turn" notice. The thread now has a vault of its own
+  holding those tokens and nothing else; a token added, rotated or removed
+  reaches it on the thread's next turn. The shared workspace still holds
+  the agent's own credentials only, never anyone's personally connected MCP
+  servers. A shared thread whose session was created before this change
+  picks the tokens up once that session is replaced.
+
 - A GitHub App token mint rejected for one repository group now leaves other groups available, queues an installation refresh, and tells the next turn which repositories are unavailable, including after token rotation or reconciliation. Each repository's first refusal starts a 60-minute exclusion; rotation skips fully excluded groups, and a later turn retries with a replacement session after expiry. Notices survive reconciliation and are sent once per continuous refusal. Authentication and transient failures still stop session setup and close pending token rows.
 
 - GitHub App grants stop covering repositories removed from an installation, suspended installations, and installations GitHub confirms deleted. A refreshed GitHub repository snapshot is intersected with the tenant's confirmed Connect set; webhook changes, Connect saves, and existing installations queue a refresh. Connect cannot clear a suspension recorded by reconciliation.

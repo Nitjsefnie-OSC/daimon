@@ -44,6 +44,7 @@ from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import (
     McpVaultIds,
     resolve_hidden_mcp_server_names,
+    resync_mounted_shared_vault,
     sync_agent_mcp_credentials,
 )
 from daimon.core.config import GithubAppSettings, McpSettings
@@ -396,8 +397,27 @@ async def apply_update_ops(
                 )
                 applied.append("repo_token_age")
             case RemirrorVaultCredentials():
+                # A shared thread re-mirrors its own vault, never a caller's.
+                if shared_owner is not None:
+                    # Only into a vault this session mounts; see the callee.
+                    if not is_external and fernet is not None and snapshot.vault_id is not None:
+                        mounted: tuple[str, ...] = (snapshot.vault_id,)
+                        if snapshot.github_mode == "app":
+                            live = await retrieve_session_record(anthropic, session_id, scope=scope)
+                            mounted = tuple(live.vault_ids)
+                        await resync_mounted_shared_vault(
+                            anthropic,
+                            sessionmaker=sessionmaker,
+                            fernet=fernet,
+                            tenant_id=tenant_id,
+                            agent_id=agent_uuid,
+                            owner=shared_owner,
+                            mounted_vault_ids=mounted,
+                            exclude_github_copilot=snapshot.github_mode == "app",
+                            vault_ids=mcp_vault_ids,
+                        )
                 # The organisation's tokens never reach an external caller's vault.
-                if (
+                elif (
                     not is_external
                     and fernet is not None
                     and mcp.public_url is not None
@@ -406,7 +426,7 @@ async def apply_update_ops(
                     await sync_agent_mcp_credentials(
                         anthropic,
                         sessionmaker=sessionmaker,
-                        fernet=cast(MultiFernet, fernet),
+                        fernet=fernet,
                         tenant_id=tenant_id,
                         agent_id=agent_uuid,
                         account_id=account_id,
