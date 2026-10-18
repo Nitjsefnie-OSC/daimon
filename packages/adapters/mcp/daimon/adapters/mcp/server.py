@@ -319,9 +319,7 @@ def create_mcp_app(
             fernet=fernet,
             session_factory=effective_sessionmaker,
         )
-        if effective_settings.microsoft_accounts.configured
-        and fernet is not None
-        and effective_settings.mcp.app_root_url is not None
+        if effective_settings.microsoft_accounts_enabled and fernet is not None
         else None
     )
 
@@ -534,11 +532,9 @@ def create_mcp_app(
     register_github_connect_tools(mcp, runtime)
     if microsoft is not None:
         register_microsoft_tools(mcp, runtime)
-    else:
-        log.info(
-            "microsoft 365 tools disabled",
-            reason="no microsoft_accounts settings, crypto keys or public url",
-        )
+    elif missing := effective_settings.microsoft_accounts_missing():
+        # Partly set up: the feature stays off rather than failing the server.
+        log.warning("microsoft_accounts.disabled", missing=list(missing))
     register_github_request_tools(mcp, runtime)
     register_github_working_repo_tools(mcp, runtime)
     register_github_remove_repo_tools(mcp, runtime)
