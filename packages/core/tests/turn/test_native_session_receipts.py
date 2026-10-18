@@ -123,6 +123,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
     if variant in {"resolver_fresh", "clone_source"}:
         from daimon.core.channel_backend import load_backend_agent
 
+        retained_environment = captured.environment
         source = source.model_copy(
             update={"metadata": {**source.metadata, "daimon_managed": "true"}}
         )
@@ -130,6 +131,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             captured = await load_backend_agent(
                 client, sm, tenant_id=tenant, agent_name="source", actual_agent=source
             )
+        captured = captured.model_copy(update={"environment": retained_environment})
     root = replace(
         old.permissions,
         fleet=replace(old.permissions.fleet, depth=0),
