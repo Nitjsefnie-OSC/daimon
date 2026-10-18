@@ -867,6 +867,7 @@ async def _prepare_session_for_turn_locked(
                 recorded is None
                 and not fresh_start
                 and not admission.memory_read_only
+                and not admission.is_external
                 and row.budget_channel_id in ("", admission.budget_channel_id)
             ):
                 # No readable configuration to compare: the session is gone or
@@ -926,8 +927,11 @@ async def _prepare_session_for_turn_locked(
             decision = ReplaceSession(reasons=("budget_channel",))
         elif recorded is None:
             # A restricted turn must get a new read-only session when the
-            # previous mount cannot be established, never reuse unknown access.
-            decision = ReplaceSession(reasons=("memory_access",))
+            # previous mount cannot be established, never reuse unknown access;
+            # nor may a caller from another organisation reuse unknown keys.
+            decision = ReplaceSession(
+                reasons=("external_caller",) if admission.is_external else ("memory_access",)
+            )
         else:
             assert recorded is not None, "a readable row always has a recorded snapshot here"
             rotate_app_token = (
@@ -988,17 +992,25 @@ async def _prepare_session_for_turn_locked(
         tightening_memory = admission.memory_read_only and (
             recorded is None or not recorded.memory_read_only
         )
+        # The old session may hold the agent's keys and tokens, mounted or
+        # copied into its workspace: never run it, or carry its work, for a
+        # person from another organisation.
+        stripping_credentials = admission.is_external and (
+            recorded is None or not recorded.is_external
+        )
         if (
             isinstance(decision, ReplaceSession)
             and (
                 "agent_identity" in decision.reasons
                 or "budget_channel" in decision.reasons
                 or tightening_memory
+                or stripping_credentials
             )
             and turn_is_active(row, now=moment)
         ):
-            # A changed billing channel, responder, or memory restriction
-            # cannot run against the old session while replacement is deferred.
+            # A changed billing channel, responder, memory restriction or a
+            # caller from another organisation cannot run against the old
+            # session while replacement is deferred.
             log.info(
                 "session_preparation.busy",
                 mapping_id=str(row.id),
@@ -1073,8 +1085,11 @@ async def _prepare_session_for_turn_locked(
                 reasons=decision.reasons,
                 fresh_start=fresh_start,
                 # A checkpoint executes the old session. Never run it with
-                # a writable mount after the origin has become read-only.
-                transfer=None if tightening_memory or not carry else transfer,
+                # a writable mount after the origin has become read-only, or
+                # with the agent's keys for an external caller.
+                transfer=(
+                    None if tightening_memory or stripping_credentials or not carry else transfer
+                ),
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,
