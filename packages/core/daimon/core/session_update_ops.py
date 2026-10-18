@@ -246,6 +246,7 @@ async def apply_update_ops(
     now: dt.datetime,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    daimon_rule_tools: frozenset[str] = frozenset(),
     mcp_vault_ids: McpVaultIds | None = None,
     shared_owner: uuid.UUID | None = None,
 ) -> AppliedOps | SessionBusy:
@@ -320,6 +321,7 @@ async def apply_update_ops(
                     public_url=public_url,
                     asks_before_publishing=asks_before_publishing,
                     confirmed_tools=confirmed_tools,
+                    daimon_rule_tools=daimon_rule_tools,
                 )
                 servers = session_mcp_servers(
                     agent,

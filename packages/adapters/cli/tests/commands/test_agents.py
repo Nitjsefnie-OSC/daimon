@@ -1213,6 +1213,45 @@ def test_tool_rules_set_channel_persists_through_the_cli(
     assert row is not None and row.rule == "allow" and row.channel_id == "C1"
 
 
+def test_tool_rules_set_saves_the_daimon_mcp_wildcard_deny_through_the_cli(
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`daimon-mcp/*` deny is the default-deny the MCP server enforces for the agent."""
+
+    async def seed() -> uuid.UUID:
+        async with schema_sessionmaker.begin() as session:
+            return (await make_tenant(session, platform="cli", workspace_id="local")).id
+
+    tenant_id = asyncio.run(seed())
+    agent = _agent_json(agent_id="ag_helper", name="helper", tenant_id=tenant_id)
+    agent["mcp_servers"] = [
+        {"name": "daimon-mcp", "type": "url", "url": "https://mcp.example.test/mcp"}
+    ]
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([agent]))
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(router.dispatch), base_url="https://api.anthropic.com"
+    )
+    anthropic = AsyncAnthropic(api_key="test", http_client=http_client)
+    _install_agents_runtime(monkeypatch, anthropic=anthropic, sessionmaker=schema_sessionmaker)
+
+    result = CliRunner().invoke(
+        main_mod.app, ["agents", "tool-rules", "set", "helper", "daimon-mcp/*", "deny"]
+    )
+    assert result.exit_code == 0, result.stdout
+
+    async def read():  # type: ignore[no-untyped-def]
+        async with schema_sessionmaker() as session:
+            return await get_rule(
+                session, tenant_id=tenant_id, agent_id="ag_helper", tool_key="daimon-mcp/*"
+            )
+
+    row = asyncio.run(read())
+    assert row is not None and row.rule == "deny" and row.channel_id is None
+    assert row.server_url == "https://mcp.example.test/mcp"
+
+
 def test_agents_list_with_guild_override_lists_that_guilds_agents(
     schema_sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

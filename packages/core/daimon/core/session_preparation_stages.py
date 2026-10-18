@@ -289,6 +289,7 @@ async def desired_snapshot_for(
     memory_read_only: bool = False,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    daimon_rule_tools: frozenset[str] = frozenset(),
     channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
@@ -381,6 +382,7 @@ async def desired_snapshot_for(
         personal_memory_store_id=personal_memory_store_id,
         asks_before_publishing=asks_before_publishing,
         confirmed_tools=confirmed_tools,
+        daimon_rule_tools=daimon_rule_tools,
         vault_id=None if recorded is None else recorded.vault_id,
         env_file_id=None if recorded is None else recorded.env_file_id,
         repo_mount_path=None if recorded is None else recorded.repo_mount_path,

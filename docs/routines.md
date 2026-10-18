@@ -202,7 +202,9 @@ click, so tool confirmations are answered without a person: with
 with it on, reads from attached third-party MCP servers run, and a write is
 refused (the agent is told why) unless its server or `server/tool` is listed
 in `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`. Daimon's own tools are not
-affected. See [architecture.md](architecture.md).
+affected, apart from an agent's `ask` or `deny` rule on one
+(`daimon-mcp/<tool>`, with `DAIMON_TOOL_SAFETY__AGENT_RULES` on), which a
+routine refuses. See [architecture.md](architecture.md).
 
 A routine with a destination sends its trigger message after a
 `<turn_controls>` block (`render_routine_controls` in

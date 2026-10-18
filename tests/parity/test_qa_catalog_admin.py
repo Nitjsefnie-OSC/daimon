@@ -11,15 +11,16 @@ import httpx
 import pytest
 from daimon.testing.admin_bindings import AdminBindings, AdminReceipt
 from daimon.testing.catalog_admin import MCP_TOKEN_CALL, CatalogAdmin
-from daimon.testing.db import DatabasePreflight
+from daimon.testing.db import DatabasePreflight, truncate_all
 from daimon.testing.headless_bindings import (
     QA_TOKEN_MCP_URL,
     DbCheckInvalid,
     db_check,
     loopback_transport,
 )
-from daimon.testing.qa_mcp_host import build_host, cleanup, serve
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from daimon.testing.qa_mcp_host import SharedQaHost, build_run, end_run, serve
+from mux.contracts.ids import Provider
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 # Verbatim from the frozen catalog.
 NEW27_STEP: dict[str, Any] = {
@@ -57,34 +58,67 @@ def db_session_factory(
 @pytest.fixture
 async def mcp_transport(
     db_preflight: DatabasePreflight,
+    qa_shared_host: SharedQaHost,
     tmp_path: Path,
 ) -> AsyncIterator[httpx.AsyncBaseTransport]:
-    database_url = db_preflight.url  # admitted by the shared preflight first
-    qa = await build_host(database_url=database_url, port=0, root=tmp_path)
+    del db_preflight  # admitted first: the shared host is built on the same database
+    qa = await build_run(qa_shared_host, port=0, root=tmp_path)
     try:
         async with serve(qa) as url:
             yield loopback_transport(url)
     finally:
-        await qa.engine.dispose()
-        await cleanup(qa.manifest.path(tmp_path), database_url=database_url)
+        await end_run(qa)
+
+
+async def test_new27_runs_through_the_admin_callback_for_every_backend(
+    mcp_transport: httpx.AsyncBaseTransport,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    db_engine: AsyncEngine,
+    db_schema: str,
+) -> None:
+    # One QA host serves all three backends. Each run seeds the same fixed "fresh
+    # install" tenant, so the worker schema is wiped between runs as db_clean does
+    # between tests.
+    backends: tuple[Provider, ...] = ("anthropic", "openai", "gemini")
+    for backend in backends:
+        async with db_engine.begin() as conn:
+            await truncate_all(conn, db_schema)
+        admin = CatalogAdmin(backend, db_session_factory, mcp_transport=mcp_transport)
+        receipt = await admin(NEW27_STEP, ENV)
+
+        assert receipt.backend == backend
+        assert (receipt.status, receipt.operation, receipt.code) == (
+            "executed",
+            MCP_TOKEN_CALL,
+            None,
+        )
+        assert receipt.observations["outcome"] == "token_rejected"
+        assert receipt.observations["probe_statuses"] == [401]
+        assert receipt.observations["used"] is False  # released for a retry since main's #611
+        # The cell's own assertion then runs on the values the step produced.
+        with pytest.raises(DbCheckInvalid, match="SQLSTATE 42703"):
+            await db_check(db_session_factory, NEW27_SQL, receipt.values)
 
 
 @pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini"])
-async def test_new27_runs_through_the_admin_callback(
-    backend: Any,
-    mcp_transport: httpx.AsyncBaseTransport,
-    db_session_factory: async_sessionmaker[AsyncSession],
+async def test_the_receipt_names_the_backend_it_was_built_for(
+    backend: Provider, owned: _Owned
 ) -> None:
-    admin = CatalogAdmin(backend, db_session_factory, mcp_transport=mcp_transport)
-    receipt = await admin(NEW27_STEP, ENV)
+    """The label is all `backend` does, so the other backends need no host of their own."""
 
-    assert (receipt.status, receipt.operation, receipt.code) == ("executed", MCP_TOKEN_CALL, None)
-    assert receipt.observations["outcome"] == "token_rejected"
-    assert receipt.observations["probe_statuses"] == [401]
-    assert receipt.observations["used"] is False  # released for a retry since main's #611
-    # The cell's own assertion then runs on the values the step produced.
-    with pytest.raises(DbCheckInvalid, match="SQLSTATE 42703"):
-        await db_check(db_session_factory, NEW27_SQL, receipt.values)
+    def no_egress(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"egress attempted: {request.url}")
+
+    unbound = await CatalogAdmin(backend, owned.factory)(NEW27_STEP, ENV)
+    assert (unbound.status, unbound.backend, unbound.code) == (
+        "pending",
+        backend,
+        "ADMIN_MCP_HOST_UNBOUND",
+    )
+    refused = await CatalogAdmin(
+        backend, owned.factory, mcp_transport=httpx.MockTransport(no_egress)
+    )({**NEW27_STEP, "allow_fail": True}, ENV)
+    assert (refused.status, refused.backend) == ("pending", backend)
 
 
 @pytest.mark.parametrize(

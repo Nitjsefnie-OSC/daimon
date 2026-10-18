@@ -35,13 +35,19 @@ from daimon.core.confirmation import (
     prompt_for_tool_call,
 )
 from daimon.core.stores import agent_tool_rules
+from daimon.core.stores.agent_tool_rules import DaimonRuleSet
 from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
+    WILDCARD_TOOL,
     ResolvedAgentToolRule,
     ToolCall,
     ToolSafetyPolicy,
     ToolVerdict,
     decide_tool_call,
     is_publish_call,
+    proxy_refusal,
+    stricter_agent_tool_rule,
+    unwrap_daimon_call,
 )
 from daimon.core.turn.posture import (
     AutoApprove,
@@ -75,38 +81,111 @@ def agent_rule_lookup(
     agent_id: str,
     server_urls: Mapping[str, str],
     channel_id: str | None = None,
+    also_urls: Mapping[str, str] | None = None,
 ) -> RuleLookup:
-    """Capture a session's agent and endpoint bindings; read the row per call."""
+    """Capture a session's agent and endpoint bindings; read the row per call.
+
+    `also_urls` names a second endpoint a server's rules may be bound to. The
+    session re-points a `daimon-mcp` entry that names a foreign URL at the
+    deployment's own (`heal_reserved_server`), so a rule saved against either
+    address is about the server the session really talks to; the stricter of
+    the matches applies.
+    """
 
     async def _lookup(call: ToolCall) -> ResolvedAgentToolRule | None:
-        url = server_urls.get(call.server_name or "")
-        if url is None:
+        name = call.server_name or ""
+        urls = [
+            url
+            for url in dict.fromkeys((server_urls.get(name), (also_urls or {}).get(name)))
+            if url is not None
+        ]
+        if not urls:
             return None
+        resolved: ResolvedAgentToolRule | None = None
+        # Only the deployment's own daimon server has a wildcard, and only when
+        # the caller named its endpoint (`also_urls`), as the session does.
+        wildcard = name == DAIMON_SERVER_NAME and name in (also_urls or {})
         async with factory() as session:
-            return await agent_tool_rules.get_for_call(
-                session,
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                tool_key=call.key,
-                server_url=url,
-                channel_id=channel_id,
-            )
+            for url in urls:
+                resolved = stricter_agent_tool_rule(
+                    resolved,
+                    await agent_tool_rules.get_for_call(
+                        session,
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        tool_key=call.key,
+                        server_url=url,
+                        channel_id=channel_id,
+                    ),
+                )
+                if wildcard:
+                    # `daimon-mcp/*`: only an agent-wide deny means anything.
+                    sweeping = await agent_tool_rules.get_for_call(
+                        session,
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        tool_key=f"{name}/{WILDCARD_TOOL}",
+                        server_url=url,
+                    )
+                    if sweeping is not None and sweeping.rule == "deny":
+                        resolved = stricter_agent_tool_rule(resolved, sweeping)
+        return resolved
 
     return _lookup
+
+
+async def daimon_rule_set_for(
+    factory: async_sessionmaker[AsyncSession],
+    policy: ToolSafetyPolicy,
+    *,
+    tenant_id: uuid.UUID | None,
+    agent_id: str,
+) -> DaimonRuleSet:
+    """The daimon tools this agent has an ask or deny rule on, for a session's tools.
+
+    Empty, with no read, while rules are not applied (`tool_safety.enabled` and
+    `agent_rules`). Read once per bind, so a rule added or cleared reaches the
+    session's tools hash, and with it the session, on the next turn.
+    """
+    if (
+        tenant_id is None
+        or not getattr(policy, "enabled", False)
+        or not getattr(policy, "agent_rules", False)
+    ):
+        return DaimonRuleSet(frozenset(), False)
+    async with factory() as session:
+        return await agent_tool_rules.daimon_rule_set(
+            session, tenant_id=tenant_id, agent_id=agent_id
+        )
+
+
+async def daimon_rule_tools_for(
+    factory: async_sessionmaker[AsyncSession],
+    policy: ToolSafetyPolicy,
+    *,
+    tenant_id: uuid.UUID | None,
+    agent_id: str,
+) -> frozenset[str]:
+    """`daimon_rule_set_for(...).tools`."""
+    return (
+        await daimon_rule_set_for(factory, policy, tenant_id=tenant_id, agent_id=agent_id)
+    ).tools
 
 
 async def _rule_for(
     policy: ToolSafetyPolicy,
     call: ToolCall,
-    trusted_servers: frozenset[str],
     rules_for: RuleLookup | None,
+    *,
+    skip: bool = False,
 ) -> tuple[ResolvedAgentToolRule | None, bool]:
+    """`skip` leaves the lookup out: daimon's own server for an agent with no rule on it."""
     if (
-        not policy.enabled
+        skip
+        or not policy.enabled
         or not policy.agent_rules
         or rules_for is None
         or call.server_name is None
-        or call.server_name in trusted_servers
     ):
         return None, False
     try:
@@ -114,6 +193,38 @@ async def _rule_for(
     except Exception as err:
         log.warning("tool_safety.rule_read_failed", tool=call.key, error=str(err))
         return None, True
+
+
+def _skips_daimon_rules(
+    call: ToolCall, trusted_servers: frozenset[str], daimon_rules: bool
+) -> bool:
+    """Daimon's own server is not looked up for an agent with no rule on it.
+
+    Such an agent keeps today's behaviour on every daimon card, and a paused
+    `add_skill`, publish or backend-switch call costs no query.
+    """
+    return call.server_name in trusted_servers and not daimon_rules
+
+
+def _proxied_approval_refusal(
+    call: ToolCall, sent_as: str, *, attended: bool
+) -> ToolConfirmationResult | None:
+    """A tool that waits for the person's Approve, sent through `call_tool`.
+
+    The server refuses it too (`proxy_refusal`); a card here would approve
+    nothing, so the model is told at once to call it directly.
+    """
+    if call.tool_name == sent_as or (message := proxy_refusal(call.tool_name)) is None:
+        return None
+    log.info(
+        "tool_safety.decided",
+        tool=call.key,
+        outcome="deny",
+        reason="proxied_approval_tool",
+        attended=attended,
+        via=sent_as,
+    )
+    return ToolConfirmationResult(allow=False, deny_message=message)
 
 
 def _read_error_verdict(verdict: ToolVerdict, *, attended: bool) -> ToolVerdict:
@@ -280,6 +391,7 @@ def unattended_decider(
     trusted_servers: frozenset[str] = frozenset(),
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
+    daimon_rules: bool = False,
 ) -> ToolCallDecider:
     """Decider for runs nobody is watching: reads run, writes are refused
     unless the operator allowed them there."""
@@ -287,7 +399,13 @@ def unattended_decider(
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
         if _is_unseen(call):
             return _unseen_refusal(call)
-        rule, read_error = await _rule_for(policy, call, trusted_servers, rules_for)
+        sent_as = call.tool_name
+        call = unwrap_daimon_call(call, trusted_servers)
+        if (refusal := _proxied_approval_refusal(call, sent_as, attended=False)) is not None:
+            return refusal
+        rule, read_error = await _rule_for(
+            policy, call, rules_for, skip=_skips_daimon_rules(call, trusted_servers, daimon_rules)
+        )
         verdict = decide_tool_call(
             policy,
             call,
@@ -305,6 +423,7 @@ def unattended_decider(
             reason=verdict.reason,
             attended=False,
             **({"rule": rule.rule} if verdict.reason.startswith("agent_rule_") and rule else {}),
+            **({"via": sent_as} if sent_as != call.tool_name else {}),
         )
         if verdict.outcome == "allow":
             return ToolConfirmationResult(allow=True)
@@ -323,6 +442,7 @@ def interactive_decider(
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
     rule_card_for: RuleCardFor | None = None,
+    daimon_rules: bool = False,
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
 
@@ -334,7 +454,13 @@ def interactive_decider(
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
         if _is_unseen(call):
             return _unseen_refusal(call)
-        rule, read_error = await _rule_for(policy, call, trusted_servers, rules_for)
+        sent_as = call.tool_name
+        call = unwrap_daimon_call(call, trusted_servers)
+        if (refusal := _proxied_approval_refusal(call, sent_as, attended=True)) is not None:
+            return refusal
+        rule, read_error = await _rule_for(
+            policy, call, rules_for, skip=_skips_daimon_rules(call, trusted_servers, daimon_rules)
+        )
         verdict = decide_tool_call(
             policy,
             call,
@@ -352,6 +478,7 @@ def interactive_decider(
             reason=verdict.reason,
             attended=True,
             **({"rule": rule.rule} if verdict.reason.startswith("agent_rule_") and rule else {}),
+            **({"via": sent_as} if sent_as != call.tool_name else {}),
         )
         if verdict.outcome == "allow":
             return ToolConfirmationResult(allow=True)
@@ -385,7 +512,12 @@ def interactive_decider(
         log.info("tool_safety.answered", tool=call.key, answer=answer)
         if answer == "approved":
             if policy.enabled and policy.agent_rules and rules_for is not None:
-                latest, read_failed = await _rule_for(policy, call, trusted_servers, rules_for)
+                latest, read_failed = await _rule_for(
+                    policy,
+                    call,
+                    rules_for,
+                    skip=_skips_daimon_rules(call, trusted_servers, daimon_rules),
+                )
                 if read_failed or (latest is not None and latest.rule == "deny"):
                     if isinstance(response, ApprovedConfirmation):
                         await response.retire_unsent()
@@ -418,6 +550,7 @@ def headless_tool_confirmation(
     *,
     trusted_servers: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
+    daimon_rules: bool = False,
 ) -> ToolConfirmation:
     """Posture for a run nobody is watching (routines, smoke, transfers).
 
@@ -426,7 +559,9 @@ def headless_tool_confirmation(
     if not policy.enabled:
         return AutoApprove()
     return PolicyApproval(
-        decide=unattended_decider(policy, trusted_servers=trusted_servers, rules_for=rules_for)
+        decide=unattended_decider(
+            policy, trusted_servers=trusted_servers, rules_for=rules_for, daimon_rules=daimon_rules
+        )
     )
 
 
@@ -441,6 +576,7 @@ def chat_tool_confirmation(
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
     rule_card_for: RuleCardFor | None = None,
+    daimon_rules: bool = False,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -460,6 +596,7 @@ def chat_tool_confirmation(
             confirmed_tools=confirmed_tools,
             rules_for=rules_for,
             rule_card_for=rule_card_for,
+            daimon_rules=daimon_rules,
         )
         if attended
         else unattended_decider(
@@ -467,6 +604,7 @@ def chat_tool_confirmation(
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
             rules_for=rules_for,
+            daimon_rules=daimon_rules,
         )
     )
     if not policy.enabled:

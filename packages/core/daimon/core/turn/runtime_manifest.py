@@ -29,7 +29,13 @@ from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMo
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, ResourceRef, Scope, SkillRef
 from mux.contracts.profile import Capability
-from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProviderBinding, ResourceBinding
+from mux.contracts.resources import (
+    AgentSpec,
+    EnvironmentSpec,
+    ProviderBinding,
+    ResourceBinding,
+    ToolSpec,
+)
 from mux.errors import MuxError, UnsupportedCapability
 from mux.profiles import backend_selection, get_profile, native_agent_tools
 from mux.state.operations import OperationRecord, request_digest
@@ -76,6 +82,9 @@ _ADMISSION_FACTS = {
     if name
     not in ("agent", "environment", "observation", "backend_counterpart", "backend_agent_revision")
 }
+
+#: Admission facts a root retained before they existed read as their default.
+_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools", "daimon_rules_need_driver"})
 
 log = structlog.get_logger(__name__)
 
@@ -1077,8 +1086,10 @@ async def read_frozen_preparation(
         try:
             facts = root.preparation
             admission_facts = facts["admission"]
-            if not isinstance(admission_facts, dict) or set(admission_facts) != set(
-                _ADMISSION_FACTS
+            if not isinstance(admission_facts, dict) or not (
+                set(_ADMISSION_FACTS) - _LEGACY_ADMISSION_FACTS
+                <= set(admission_facts)
+                <= set(_ADMISSION_FACTS)
             ):
                 raise WorkerSpecRefused("origin", "unbound")
             retained_source = Agent.model_validate_json(json.dumps(facts["source"]))
@@ -1097,6 +1108,7 @@ async def read_frozen_preparation(
                 **{
                     name: adapter.validate_json(json.dumps(admission_facts[name]))
                     for name, adapter in _ADMISSION_FACTS.items()
+                    if name in admission_facts
                 },
             )
             request = ProviderPreparationRequest(
@@ -1411,7 +1423,13 @@ async def _capture_source_capabilities(
     from daimon.core.stores.domain import SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
-    from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
+    from mux.drivers.anthropic.schemas import (
+        AGENT_TOOLS_NAMESPACE,
+        AgentToolsConfig,
+        MCPToolset,
+        agent_tools,
+        mcp_permissions,
+    )
     from mux.profiles import represented_execution_tools
     from sqlalchemy.exc import SQLAlchemyError
 
@@ -1549,10 +1567,21 @@ async def _capture_source_capabilities(
             if frozenset(inputs.mcp_tools) != catalogue:
                 raise ValueError("MCP representation must preserve the exact source catalogue")
             tools = tuple(spec.tools or ())
+            permissions = {name: "auto" for name in catalogue}
             for extension in spec.extensions or ():
                 if extension.namespace == AGENT_TOOLS_NAMESPACE:
-                    tools = agent_tools(extension).intent(
-                        exact=True, mcp_catalogues={DAIMON_SERVER_NAME: catalogue}
+                    native = agent_tools(extension)
+                    mcps = [tool for tool in native.tools if isinstance(tool, MCPToolset)]
+                    if len(mcps) != 1 or mcps[0].mcp_server_name != DAIMON_SERVER_NAME:
+                        raise ValueError("unrepresented MCP toolset")
+                    permissions = mcp_permissions(mcps[0], catalogue)
+                    tools = (
+                        *AgentToolsConfig(
+                            tools=[
+                                tool for tool in native.tools if not isinstance(tool, MCPToolset)
+                            ]
+                        ).intent(exact=True),
+                        ToolSpec(name=DAIMON_SERVER_NAME, kind="mcp_toolset"),
                     )
             if not any(
                 tool.kind == "mcp_toolset"
@@ -1561,6 +1590,8 @@ async def _capture_source_capabilities(
                 for tool in tools
             ):
                 raise ValueError("source has no enabled daimon-mcp toolset")
+            if not any(permission == "auto" for permission in permissions.values()):
+                raise ValueError("source has no automatically executable MCP tools")
             mapped_tools = represented_execution_tools(
                 profile, tuple(tool for tool in tools if tool.kind != "mcp_toolset")
             )
@@ -1600,10 +1631,23 @@ async def _capture_source_capabilities(
                 or set(inputs.mcp_tools) != set(allowed)
             ):
                 raise ValueError("MCP representation expands the source allowlist")
+            # Hosted Agents MCP currently has no approval request/response
+            # protocol (unlike Responses). Keep confirmation-gated tools out
+            # of its executable allowlist and require explicit per-tool loss
+            # consent. Never convert `ask` into `auto` or drop sibling tools.
+            unavailable_mcp_tools = tuple(
+                f"mcp_tool:{DAIMON_SERVER_NAME}:{name}"
+                for name, permission in sorted(permissions.items())
+                if permission == "ask"
+            )
             connection = servers[0].model_copy(
                 update={
                     "credential_ref": reference,
-                    "tool_policy": {"allowed_tools": list(inputs.mcp_tools)},
+                    "tool_policy": {
+                        "allowed_tools": [
+                            name for name in inputs.mcp_tools if permissions[name] == "auto"
+                        ]
+                    },
                 }
             )
             if {item.source.id for item in inputs.skills} != {s.id for s in spec.skills or ()}:
@@ -1688,6 +1732,7 @@ async def _capture_source_capabilities(
                     source_pin=pin,
                     target=target,
                     credential_refs=(reference,),
+                    unavailable_mcp_tools=unavailable_mcp_tools,
                     environment=inputs.environment,
                 )
             )
@@ -1917,6 +1962,8 @@ def classify_source_obligations(
         and resources == source.resource_requirements
     )
     missing: set[str] = set()
+    if represented is not None:
+        missing.update(set(represented.unavailable_mcp_tools) - set(drops))
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
     source_tools = tuple(spec.tools or ())
