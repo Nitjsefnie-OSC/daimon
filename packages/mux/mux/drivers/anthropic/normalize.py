@@ -196,11 +196,11 @@ class EventNormalizer:
                         }
                     )
                 payload = {"actions": actions}
-            elif reason in {"end_turn", "retries_exhausted"}:
+            elif reason in {"end_turn", "budget_reached", "retries_exhausted"}:
                 name = "session.turn_ended"
                 payload = {
                     "root_turn_id": self.root_turn_id or event_id,
-                    "outcome": "completed" if reason == "end_turn" else "errored",
+                    "outcome": "errored" if reason == "retries_exhausted" else "completed",
                     "native_reason": reason,
                 }
             else:
