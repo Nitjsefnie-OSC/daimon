@@ -6,10 +6,24 @@ test script. `smoke --all` is the sole fixed live check.
 
 ## Before posting
 
-Follow your team's staging rules. Have the operator confirm that no staging
-deploy is in progress before this session posts. Use only the configured QA
-team/channel and each persona's own 1:1 chat with the bot. Never post to another
-channel, chat, or person. Do not click card actions or open dialogs.
+Follow your team's staging rules. Use only the configured QA team/channel and
+each persona's own 1:1 chat with the bot. Never post to another channel, chat,
+or person. Do not click card actions or open dialogs.
+
+**Runs that need no staging claim.** A run qualifies only if all of these hold:
+at most 10 posts, every one a code-routed command from the table below, sent by
+`admin` or `member` in its own 1:1 with the staging bot; zero model turns; and
+you only read the cards (no clicks, spend, creation or other changes). Before
+the first post, record the running staging SHA or image, and confirm that no
+main or manual deploy is running and that nobody else is changing the QA
+fixtures, the admin team or agent defaults. Run only one session at a time per
+persona chat. Watch for deploys throughout. If a deploy starts, or a model turn
+or any other unexpected side effect happens, stop, don't retry, record the cost
+and any writes, and mark the run INCONCLUSIVE. Before calling the run a pass,
+check again: record the UTC window and the SHA afterwards, the total posts, and
+the turn events you actually observed. The window must be clean. Anything else
+(free text, channel posts, config, account or grant changes, card actions)
+needs a staging claim and a bounded approval first.
 
 With staging access, configure application default credentials and the secret
 name supplied by the operator (keep real names out of reports):
@@ -77,7 +91,8 @@ For an approved free-text channel probe, send with `--to channel`, then read
 with `--from thread:<message_id>` or wait with that same source and
 `--after <message_id>`. Stay in the configured QA channel. The default budget is at most
 **5 model turns** and **20 posts** per session unless the operator changes it.
-Commands consume posts but zero model turns; free text consumes both. The QA
+Commands consume posts but zero model turns; free text consumes both and always
+needs a staging claim. The QA
 agent uses the cheap staging model, but your verdict must not depend on a
 model-specific phrasing.
 
