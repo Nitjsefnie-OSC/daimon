@@ -35,6 +35,12 @@ from daimon.testing.db import db_nullpool_engine  # noqa: F401
 
 PLATFORMS = ("discord", "slack", "teams")
 TARGETS = ("openai", "gemini")
+#: The refusal tests below run on one target. The click gate (`verified` in
+#: `core/confirmation.py`, the comparison of tenant, agent, target, allowed, revision,
+#: digest and accepted drops) compares by equality and has no provider branch; `DROPS`
+#: is one constant for both targets. Provider-specific previews are exercised once, by
+#: the apply-once test, which keeps every target.
+TARGET = "openai"
 #: Each platform's requester id, in that platform's own id shape.
 REQUESTER = {
     "discord": "123",
@@ -267,6 +273,10 @@ async def test_chat_fixture_refuses_unowned_binds_without_skipping_or_connecting
     monkeypatch: pytest.MonkeyPatch,
     binding: str,
 ):
+    # The fixture imports the turn package lazily, and its modules subscript
+    # `async_sessionmaker` at import time. Import it before the patch below, or this
+    # test fails whenever it is the first in its process to touch the turn package.
+    import daimon.core.turn.admission  # noqa: F401
     from daimon.core._models import Account
     from sqlalchemy import event
     from sqlalchemy.ext import asyncio as sa_asyncio
@@ -583,11 +593,11 @@ async def test_confirming_the_previewed_losses_applies_once_with_revision_and_au
     assert len(await chat.audit()) == 1
 
 
-@pytest.mark.parametrize("target", TARGETS)
 @pytest.mark.parametrize("accepted", ["missing", "partial", "extra", "empty"])
 async def test_accepted_drops_other_than_the_preview_never_post_or_apply(
-    chat: Chat, card: Card, target: str, accepted: str
+    chat: Chat, card: Card, accepted: str
 ) -> None:
+    target = TARGET
     preview = await chat.tool(target)
     assert preview.declared_drops == DROPS
     drops = {
@@ -606,11 +616,11 @@ async def test_accepted_drops_other_than_the_preview_never_post_or_apply(
     assert current is None and await chat.audit() == []
 
 
-@pytest.mark.parametrize("target", TARGETS)
 @pytest.mark.parametrize("change", ["drop_list", "digest", "source"])
 async def test_a_card_changed_after_prepare_is_refused_on_click(
-    chat: Chat, card: Card, target: str, change: str
+    chat: Chat, card: Card, change: str
 ) -> None:
+    target = TARGET
     preview = await chat.tool(target)
     data = tool_call(target, preview, list(preview.declared_drops))
     assert "Won't be available" in await card.post(prompt_for(chat, data))
@@ -631,11 +641,11 @@ async def test_a_card_changed_after_prepare_is_refused_on_click(
     assert current is None and await chat.audit() == []
 
 
-@pytest.mark.parametrize("target", TARGETS)
 @pytest.mark.parametrize("actor", ["another_user", "demoted_requester"])
 async def test_only_the_requesting_current_admin_can_confirm(
-    chat: Chat, card: Card, target: str, actor: str
+    chat: Chat, card: Card, actor: str
 ) -> None:
+    target = TARGET
     preview = await chat.tool(target)
     data = tool_call(target, preview, list(preview.declared_drops))
     await card.post(prompt_for(chat, data))
@@ -655,21 +665,7 @@ async def test_only_the_requesting_current_admin_can_confirm(
 PRIVATE_CHANNEL = {"discord": "dm:123", "slack": "D123", "teams": "a:123"}
 
 
-@pytest.mark.parametrize(
-    ("admission", "reason"),
-    [
-        ("none", "source_unavailable"),
-        ("no_grant", "source_unavailable"),
-        ("another_account", "source_unavailable"),
-        ("dm", "source_context_unavailable"),
-        ("private_dm", "source_context_unavailable"),
-        ("private_slack_context", "source_context_unavailable"),
-        ("private_conversation", "source_context_unavailable"),
-        ("private_thread", "source_context_unavailable"),
-        ("no_channel", "source_context_unavailable"),
-    ],
-)
-async def test_only_the_turns_own_public_admission_can_prepare_a_card(
+async def _assert_admission_refused(
     chat: Chat, monkeypatch: pytest.MonkeyPatch, admission: str, reason: str
 ) -> None:
     from daimon.core.channel_backend import AgentBackendRefused
@@ -688,8 +684,8 @@ async def test_only_the_turns_own_public_admission_can_prepare_a_card(
         "private_thread": dataclasses.replace(own, origin_thread_id=private),
         "no_channel": dataclasses.replace(own, origin_channel_id=None),
     }[admission]
-    preview = await chat.tool("openai")
-    data = tool_call("openai", preview, list(preview.declared_drops))
+    preview = await chat.tool(TARGET)
+    data = tool_call(TARGET, preview, list(preview.declared_drops))
     card = Card(chat, monkeypatch, replaced)
     try:
         with pytest.raises(AgentBackendRefused) as refused:
@@ -698,6 +694,38 @@ async def test_only_the_turns_own_public_admission_can_prepare_a_card(
         assert not card._posted()  # pyright: ignore[reportPrivateUsage]
     finally:
         await card.close()
+
+
+#: These seven refusals read fields of the admission itself (`capture_admitted_backend_source`
+#: in `core/turn/admission.py`): a missing admission, grant or channel, another account, a DM
+#: grant, a private-DM id or a Slack turn context. Each platform's hook hands the admission to
+#: that one shared function unchanged, so one platform stands for all three.
+@pytest.mark.parametrize("chat", ["discord"], indirect=True)
+@pytest.mark.parametrize(
+    ("admission", "reason"),
+    [
+        ("none", "source_unavailable"),
+        ("no_grant", "source_unavailable"),
+        ("another_account", "source_unavailable"),
+        ("dm", "source_context_unavailable"),
+        ("private_dm", "source_context_unavailable"),
+        ("private_slack_context", "source_context_unavailable"),
+        ("no_channel", "source_context_unavailable"),
+    ],
+)
+async def test_only_the_turns_own_public_admission_can_prepare_a_card(
+    chat: Chat, monkeypatch: pytest.MonkeyPatch, admission: str, reason: str
+) -> None:
+    await _assert_admission_refused(chat, monkeypatch, admission, reason)
+
+
+#: These two depend on the platform's id shape (`is_private_conversation`: a `dm:` scope, a
+#: Slack `D` id, a Teams `a:` id), so they run on every platform.
+@pytest.mark.parametrize("admission", ["private_conversation", "private_thread"])
+async def test_a_private_conversation_or_thread_cannot_prepare_a_card(
+    chat: Chat, monkeypatch: pytest.MonkeyPatch, admission: str
+) -> None:
+    await _assert_admission_refused(chat, monkeypatch, admission, "source_context_unavailable")
 
 
 @pytest.mark.parametrize("tenant", ["own", "another"])

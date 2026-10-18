@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 from collections.abc import Iterator, Mapping
@@ -43,6 +44,23 @@ TLS_PROXY_CASE_NAMES = tuple(
 )
 REFUSED_ENV_NAMES = (*SDK_ENV_VARS, *UNKNOWN_PROVIDER_NAMES, *TLS_PROXY_CASE_NAMES)
 
+# `_require_clean_environment` (isolated_sdk.py) is the one place a name is matched. It
+# iterates `frozenset(os.environ)` and decides on names alone, never on a value, and
+# every factory and owned-copy entrypoint calls that same function. So the full name
+# list is swept once, in `test_environment_preflight_reads_names_only_...`, and every
+# other test crosses its own axis (factory, entrypoint, copy method) with one name from
+# each distinct refusal class: a reported SDK variable, an unreported unknown provider
+# prefix, and an unreported lower or title case TLS/proxy variant.
+REPRESENTATIVE_NAMES = ("ANTHROPIC_API_KEY", UNKNOWN_PROVIDER_NAMES[0], TLS_PROXY_CASE_NAMES[0])
+REPRESENTATIVE_SDK_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY")
+SECRET_VALUE = "offline-secret-do-not-log"
+POISON_VALUE = "X-Poison: sentinel\nX-Other: value"
+
+
+def _sweep(names, owners):
+    """Each name once, dealt round robin across owners, so every owner sees every class."""
+    return list(zip(itertools.cycle(owners), names, strict=False))
+
 
 def _environment_snapshot() -> str:
     """Compare environment changes without exposing values in failed asserts."""
@@ -60,10 +78,17 @@ def clean_provider_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     yield
 
 
-@pytest.mark.parametrize("factory", FACTORIES)
-@pytest.mark.parametrize("name", REFUSED_ENV_NAMES)
 @pytest.mark.parametrize(
-    "value", ["", "offline-secret-do-not-log", "X-Poison: sentinel\nX-Other: value"]
+    ("factory", "name", "value"),
+    [
+        *((factory, name, SECRET_VALUE) for factory in FACTORIES for name in REPRESENTATIVE_NAMES),
+        # The value is never read, so an empty one and a poison header need one name each.
+        *(
+            (factory, "ANTHROPIC_API_KEY", value)
+            for factory in FACTORIES
+            for value in ("", POISON_VALUE)
+        ),
+    ],
 )
 def test_every_provider_variable_refuses_each_factory_before_construction(
     monkeypatch: pytest.MonkeyPatch, factory, name: str, value: str
@@ -282,9 +307,20 @@ async def test_transient_response_is_not_automatically_retried(factory) -> None:
             await client.close()
 
 
-@pytest.mark.parametrize("entrypoint", ["fake", "stub", "scripted", "no_retry"])
-@pytest.mark.parametrize("name", SDK_ENV_VARS)
-@pytest.mark.parametrize("value", ["", "ambient-secret-do-not-log"])
+@pytest.mark.parametrize(
+    ("entrypoint", "name", "value"),
+    [
+        *(
+            (entrypoint, name, SECRET_VALUE)
+            for entrypoint in ("fake", "stub", "scripted", "no_retry")
+            for name in REPRESENTATIVE_SDK_NAMES
+        ),
+        *(
+            (entrypoint, "ANTHROPIC_API_KEY", "")
+            for entrypoint in ("fake", "stub", "scripted", "no_retry")
+        ),
+    ],
+)
 def test_shared_anthropic_builders_refuse_ambient_configuration(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, name: str, value: str
 ) -> None:
@@ -504,8 +540,7 @@ class _NamesOnlyEnvironment(Mapping[str, str]):
         raise AssertionError("guard fetched an environment value")
 
 
-@pytest.mark.parametrize("factory", FACTORIES)
-@pytest.mark.parametrize("name", REFUSED_ENV_NAMES)
+@pytest.mark.parametrize(("factory", "name"), _sweep(REFUSED_ENV_NAMES, FACTORIES))
 def test_environment_preflight_reads_names_only_before_any_sdk_construction(
     monkeypatch: pytest.MonkeyPatch, factory, name: str
 ) -> None:
@@ -638,7 +673,7 @@ def _owned_copy_client(entrypoint: str, handler):
 
 @pytest.mark.parametrize("entrypoint", COPY_ENTRYPOINTS)
 @pytest.mark.parametrize("method", ["copy", "with_options"])
-@pytest.mark.parametrize("name", REFUSED_ENV_NAMES)
+@pytest.mark.parametrize("name", REPRESENTATIVE_NAMES)
 async def test_every_owned_sdk_copy_refuses_late_environment_before_parent_construction(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, method: str, name: str
 ) -> None:
@@ -795,7 +830,7 @@ async def test_clean_real_driver_copy_keeps_single_attempt_and_original_client(
 
 
 @pytest.mark.parametrize("entrypoint", ["fake", "stub", "scripted", "no_retry"])
-@pytest.mark.parametrize("name", REFUSED_ENV_NAMES)
+@pytest.mark.parametrize("name", REPRESENTATIVE_NAMES)
 def test_shared_builder_preflight_never_fetches_environment_values(
     monkeypatch: pytest.MonkeyPatch, entrypoint: str, name: str
 ) -> None:
@@ -828,3 +863,18 @@ def test_shared_builder_preflight_never_fetches_environment_values(
     assert environment.value_reads == 0
     parent.assert_not_called()
     http_client.assert_not_called()
+
+
+def test_the_name_sweep_and_representatives_keep_every_refusal_class() -> None:
+    """Cutting the name and value axes must not drop a name, a factory or a refusal class."""
+    swept = _sweep(REFUSED_ENV_NAMES, FACTORIES)
+    assert sorted(name for _, name in swept) == sorted(REFUSED_ENV_NAMES)
+    for factory in FACTORIES:
+        names = {name for owner, name in swept if owner is factory}
+        assert names & set(SDK_ENV_VARS), factory
+        assert names & set(UNKNOWN_PROVIDER_NAMES), factory
+        assert names & set(TLS_PROXY_CASE_NAMES), factory
+    sdk, unknown, tls = REPRESENTATIVE_NAMES
+    assert sdk in SDK_ENV_VARS and unknown in UNKNOWN_PROVIDER_NAMES
+    assert tls in TLS_PROXY_CASE_NAMES and tls not in SDK_ENV_VARS
+    assert all(name in SDK_ENV_VARS for name in REPRESENTATIVE_SDK_NAMES)
