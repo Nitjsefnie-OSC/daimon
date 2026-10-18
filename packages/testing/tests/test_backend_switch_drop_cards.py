@@ -279,8 +279,10 @@ async def test_chat_fixture_refuses_unowned_binds_without_skipping_or_connecting
         attempts.append(True)
         raise AssertionError("fixture ownership validation must precede connection")
 
+    # `do_connect` alone misses a pooled engine's warm connection, so also trap checkout.
     for engine in (db_committing_engine, foreign):
         event.listen(engine.sync_engine, "do_connect", refuse_connection)
+        event.listen(engine.sync_engine.pool, "checkout", refuse_connection)
 
     def injected_factory(engine, **kwargs):
         if binding == "main":
@@ -300,6 +302,7 @@ async def test_chat_fixture_refuses_unowned_binds_without_skipping_or_connecting
         await fixture.aclose()
         for engine in (db_committing_engine, foreign):
             event.remove(engine.sync_engine, "do_connect", refuse_connection)
+            event.remove(engine.sync_engine.pool, "checkout", refuse_connection)
         await foreign.dispose()
 
 
