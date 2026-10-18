@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -74,6 +75,29 @@ _ANSWER_CUT_SHORT = "⚠️ Part of this answer may be missing. Ask again if it 
 # call, OSError for timeouts and MSAL's transport, ValueError when the SDK
 # cannot get a bot token.
 TEAMS_SEND_ERRORS = (httpx.HTTPError, OSError, ValueError)
+_ERROR_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+
+
+def send_error_details(exc: BaseException) -> tuple[int | None, str | None]:
+    """`exc`'s HTTP status and Bot Framework `error.code`, for logs; never raises.
+
+    The code is kept only if it is a short identifier: the body's message and
+    any other freeform text may echo user content and are never returned.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None, None
+    status = exc.response.status_code
+    try:
+        body = exc.response.json()
+    except Exception:  # unread streaming body, bad JSON or bad encoding
+        return status, None
+    error = body.get("error") if isinstance(body, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    if isinstance(code, str) and _ERROR_CODE.fullmatch(code):
+        return status, code
+    return status, None
+
+
 # A send that timed out may still have landed.
 _TIMEOUTS = (TimeoutError, httpx.TimeoutException)
 SEND_TIMEOUT_S = 30.0
