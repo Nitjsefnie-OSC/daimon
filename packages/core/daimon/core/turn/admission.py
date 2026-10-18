@@ -30,11 +30,7 @@ from typing import Literal
 
 import structlog
 from anthropic import APIError, APIStatusError
-from anthropic.types.beta import (
-    BetaEnvironment,
-    BetaManagedAgentsAgent,
-    BetaManagedAgentsCustomSkill,
-)
+from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core import channel_backend
 from daimon.core.access_policy import (
     TenantAccessPolicy,
@@ -62,7 +58,7 @@ from daimon.core.channel_backend import (
 )
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
-from daimon.core.channel_skills import turn_channel_skills
+from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_identity import derive_agent_uuid
@@ -82,6 +78,7 @@ from daimon.core.permissions import (
     limiting_ids_at,
 )
 from daimon.core.scope import ResolvedConfig, ScopeContext
+from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
@@ -213,9 +210,11 @@ class Admission:
     # was moved from, or None. Apart from `origin_channel_id`, which drives the
     # seal: a DM is budgeted to its source channel but never runs there.
     budget_channel_id: str | None = None
-    # The channel's extra skills (`daimon.core.channel_skills`), decided once
-    # so creating the session and checking it for drift add the same ones.
-    channel_skills: tuple[BetaManagedAgentsCustomSkill, ...] = ()
+    # The skills the session adds to the agent's, decided once so creating the
+    # session and checking it for drift add the same ones: the platform's
+    # (`turn_platform_skills`, on the Anthropic backend only), then the
+    # channel's (`daimon.core.channel_skills`).
+    channel_skills: tuple[MaSkill, ...] = ()
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
@@ -926,6 +925,14 @@ async def admit_impl(
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
+    platform_skills = await turn_platform_skills(
+        deps.anthropic,
+        tenant_id=tenant_id,
+        platform=platform,
+        agent=agent,
+        platform_skills=deps.platform_skills,
+        cache=deps.resolver_cache,
+    )
     channel_skills = (
         ()
         if is_dm
@@ -939,6 +946,7 @@ async def admit_impl(
             agent_names=grant.agent.names,
             rows=channel_skill_rows,
             cache=deps.resolver_cache,
+            platform_skills=platform_skills,
         )
     )
 
@@ -946,6 +954,10 @@ async def admit_impl(
 
     if deps.agent_backends:
         await resolve_preference()
+    # Another backend has no Anthropic built-in skills and carries a channel's
+    # skills only as a declared loss, so the platform's stay on this one.
+    if backend_revision is None or backend_revision.profile == MANAGED_AGENTS.profile_id:
+        channel_skills = (*platform_skills, *channel_skills)
 
     result = Admission(
         backend_revision=backend_revision,

@@ -29,12 +29,14 @@ from daimon.core.config import (
     TurnSettings,
     load_turn_settings,
 )
+from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.native_admins import ServerAdminIds
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
+from daimon.core.specs import SkillRef
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.turn.running import RunningTurns
 from daimon.core.turn.runtimes import RuntimeFactory, build_channel_runtime
@@ -107,6 +109,11 @@ class TurnDeps:
     fleet_root_grants: (
         Callable[[AdmissionGrant, BackendAgent], Awaitable[WorkerPermissions]] | None
     ) = None
+    # Each default agent's platform-limited skills, read from `defaults_root`
+    # once (`load_platform_skills`); admission adds them on their platforms.
+    platform_skills: Mapping[str, tuple[SkillRef, ...]] = field(
+        default_factory=dict[str, tuple[SkillRef, ...]]
+    )
 
     @property
     def backend_selection_enabled(self) -> bool:
@@ -142,6 +149,12 @@ def _notices_off(settings: Settings) -> frozenset[uuid.UUID]:
     if not isinstance(configured, dict):
         return frozenset()
     return frozenset(t for t, on in cast("dict[uuid.UUID, bool]", configured).items() if not on)
+
+
+def _platform_skills(settings: Settings) -> dict[str, tuple[SkillRef, ...]]:
+    """Read `defaults/`'s platform-limited skills; tolerate settings mocks in adapter tests."""
+    root = cast(object, settings.defaults_root)
+    return load_platform_skills(root) if isinstance(root, Path) else {}
 
 
 def build_turn_deps(
@@ -191,4 +204,5 @@ def build_turn_deps(
         fleet_enabled=settings.fleet.enabled,
         fleet_max_workers=settings.fleet.max_workers_per_run,
         fleet_root_grants=fleet_root_grants,
+        platform_skills=_platform_skills(settings),
     )

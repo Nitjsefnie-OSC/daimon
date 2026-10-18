@@ -13,7 +13,11 @@ import re
 from collections.abc import Sequence
 
 import anthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsAnthropicSkill,
+    BetaManagedAgentsCustomSkill,
+)
 from daimon.core.errors import UserFacingError
 
 _UNRESOLVED = re.compile(
@@ -40,7 +44,7 @@ def skill_unavailable(
     *,
     skill_id: str,
     agent: BetaManagedAgentsAgent,
-    channel_skills: Sequence[BetaManagedAgentsCustomSkill],
+    channel_skills: Sequence[BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill],
     channel_skill_name: str | None,
 ) -> SkillUnavailable:
     """The user-facing error for `skill_id`, attributed to the channel or the agent.

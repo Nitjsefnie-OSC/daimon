@@ -937,6 +937,56 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
     )
 
 
+@pytest.mark.parametrize("is_dm", [False, True], ids=["channel", "dm"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    platform: str,
+    is_dm: bool,
+) -> None:
+    """A Teams turn of the seeded agent runs with docx, pptx and xlsx; others run as before.
+
+    They come from `defaults/agents/daimon.yaml`'s `platforms: [teams]` entries
+    and ride the session's skills override, so a Slack or Discord turn adds
+    nothing and its agent, skills and session match a deployment without them.
+    """
+    from daimon.core.defaults.loader import load_platform_skills
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    router = resolved_agent_env_router(
+        ma_agent(
+            id="ag_1",
+            name="daimon",
+            tenant_id=tenant.id,
+            metadata={MA_METADATA_KEY_MANAGED: "true"},
+        ),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        platform_skills=load_platform_skills(Path(__file__).resolve().parents[4] / "defaults"),
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform=platform,
+        external_user_id="user-1",
+        channel_id="chan-1",
+        is_dm=is_dm,
+        now=_NOW,
+    )
+
+    expected = [("anthropic", n) for n in ("docx", "pptx", "xlsx")] if platform == "teams" else []
+    assert [(s.type, s.skill_id) for s in admission.channel_skills] == expected, (
+        "only a Teams turn adds the Office skills, in a channel and in a DM alike"
+    )
+    assert admission.agent.skills == [], "the agent itself is never changed"
+
+
 async def test_admit_refuses_an_invoker_outside_the_allowlist_before_any_ma_call(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

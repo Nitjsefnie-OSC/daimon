@@ -12,20 +12,28 @@ a turn's skills are decided once at admission (`turn_channel_skills`), so a
 session's creation and its drift check build the same list
 (`daimon.core.session_snapshot.session_skills`). A later upload of the skill
 reaches the channel when it is added again.
+
+A `defaults/` agent's skill limited to some platforms (`SkillRef.platforms`)
+rides the same path: it stays off the agent at the provider, and admission
+adds it ahead of the channel's on those platforms (`turn_platform_skills`).
 """
 
 from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal, NoReturn
 
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsAnthropicSkill,
+    BetaManagedAgentsCustomSkill,
+)
 from anthropic.types.beta.skill_list_response import SkillListResponse
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_pin_names
@@ -35,8 +43,11 @@ from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     list_skills_lenient,
     list_skills_strict,
+    match_skills_by_display_title,
 )
 from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
     skill_owner_candidates,
     strip_tenant_prefix,
     tenant_scoped_display_title,
@@ -45,6 +56,8 @@ from daimon.core.errors import SkillsListTruncatedError, StoreError
 from daimon.core.ma_resolver import ResolverCache, list_skills_lenient_cached
 from daimon.core.permissions import agent_permissions, ruled_agents
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.session_snapshot import MaSkill
+from daimon.core.specs import SkillRef
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_skills import add_channel_skill, list_channel_skills
 from daimon.core.stores.domain import ChannelSkillRow
@@ -59,10 +72,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 
-# Channels whose over-cap drop was already logged, with what was dropped: every
-# turn there repeats it, so it is logged once per process until it changes.
-_OVER_CAP_LOGGED: set[tuple[str, str, str, tuple[str, ...]]] = set()
-_OVER_CAP_LOGGED_MAX = 4096
+# Warnings already logged, keyed by event and what they name: every turn in the
+# same place repeats them, so each is logged once per process until it changes.
+_LOGGED: set[tuple[str, ...]] = set()
+_LOGGED_MAX = 4096
 
 _TRUNCATED = re.compile(r"~[0-9a-f]{4}$")
 
@@ -365,14 +378,103 @@ async def add_skill_to_channel(
     )
 
 
-def skill_room(agent: BetaManagedAgentsAgent) -> int:
+def _log_once(event: str, key: tuple[str, ...], **fields: object) -> None:
+    if (event, *key) in _LOGGED:
+        return
+    if len(_LOGGED) >= _LOGGED_MAX:
+        _LOGGED.clear()
+    _LOGGED.add((event, *key))
+    _log.warning(event, **fields)
+
+
+def skill_room(agent: BetaManagedAgentsAgent, platform_skills: Sequence[MaSkill] = ()) -> int:
     """How many channel skills a session of `agent` may add under `AGENT_SKILL_CAP`. Pure.
 
-    Every skill the agent holds counts, Anthropic's built-in ones too: the
-    provider's per-agent limit counts the whole `skills` list, built-in and
-    custom alike.
+    Every skill the session holds before them counts: the agent's own and the
+    platform's (`turn_platform_skills`), Anthropic's built-in ones too, since
+    the provider's limit counts the whole `skills` list.
     """
-    return max(0, AGENT_SKILL_CAP - len({skill.skill_id for skill in agent.skills}))
+    held = {skill.skill_id for skill in (*agent.skills, *platform_skills)}
+    return max(0, AGENT_SKILL_CAP - len(held))
+
+
+def platform_skill_refs(
+    agent: BetaManagedAgentsAgent,
+    platform: str,
+    platform_skills: Mapping[str, Sequence[SkillRef]],
+) -> tuple[SkillRef, ...]:
+    """The skills `defaults/` limits to `platform` for `agent`, by its seeded name. Pure.
+
+    `platform_skills` maps each default agent's name to its platform-limited
+    refs (`load_platform_skills`). Only the agent the defaults pipeline manages
+    gets them, never a fork or another agent that took its name.
+    """
+    metadata = agent.metadata or {}
+    if metadata.get(MA_METADATA_KEY_MANAGED) != "true":
+        return ()
+    refs = platform_skills.get(metadata.get(MA_METADATA_KEY_NAME, ""), ())
+    return tuple(ref for ref in refs if ref.platforms is not None and platform in ref.platforms)
+
+
+async def turn_platform_skills(
+    client: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    agent: BetaManagedAgentsAgent,
+    platform_skills: Mapping[str, Sequence[SkillRef]],
+    cache: ResolverCache | None = None,
+) -> tuple[MaSkill, ...]:
+    """The skills `defaults/` adds to a session of `agent` on `platform`, at latest.
+
+    A built-in needs no read. A custom skill is found by its seeded title in
+    the skills list (shared through `cache`); one the list does not show, or a
+    failed read, is left out and the turn runs without it, with a warning
+    logged once per process until what is missing changes. A skill the agent
+    already holds is not added twice.
+    """
+    refs = platform_skill_refs(agent, platform, platform_skills)
+    if not refs:
+        return ()
+    listed: list[SkillListResponse] = []
+    if any(ref.type == "custom" for ref in refs):
+        try:
+            listed, _ = await (
+                list_skills_lenient(client)
+                if cache is None
+                else list_skills_lenient_cached(client, cache)
+            )
+        except (anthropic.APIError, SkillsListTruncatedError):
+            listed = []
+    held = {skill.skill_id for skill in agent.skills}
+    picked: list[MaSkill] = []
+    missing: list[str] = []
+    for ref in refs:
+        if ref.type == "anthropic":
+            skill: MaSkill = BetaManagedAgentsAnthropicSkill(
+                type="anthropic", skill_id=ref.skill_id, version="latest"
+            )
+        else:
+            title = tenant_scoped_display_title(tenant_id=tenant_id, name=ref.skill_id)
+            matches = match_skills_by_display_title(listed, title)
+            if not matches:
+                missing.append(ref.skill_id)
+                continue
+            skill = BetaManagedAgentsCustomSkill(
+                type="custom", skill_id=matches[0].id, version="latest"
+            )
+        if skill.skill_id not in held:
+            held.add(skill.skill_id)
+            picked.append(skill)
+    if missing:
+        _log_once(
+            "channel_skills.platform_skills_unavailable",
+            (str(tenant_id), platform, *missing),
+            tenant_id=str(tenant_id),
+            platform=platform,
+            missing=missing,
+        )
+    return tuple(picked)
 
 
 def applicable_skills(
@@ -381,14 +483,16 @@ def applicable_skills(
     agent: BetaManagedAgentsAgent,
     agent_names: tuple[str | None, ...],
     bodies: dict[str, str] | None,
+    platform_skills: Sequence[MaSkill] = (),
 ) -> tuple[BetaManagedAgentsCustomSkill, ...]:
     """The rows a session of `agent` may add, in order, before the cap (`skill_room`). Pure.
 
-    Left out: another agent's upload, a skill the agent holds already, and one
-    whose mount name `bodies` shows clashing with an earlier skill. `bodies`
-    None (unreadable) skips the mount check.
+    Left out: another agent's upload, a skill the session holds already (the
+    agent's or the platform's), and one whose mount name `bodies` shows
+    clashing with an earlier skill. `bodies` None (unreadable) skips the mount
+    check.
     """
-    held = {skill.skill_id for skill in agent.skills}
+    held = {skill.skill_id for skill in (*agent.skills, *platform_skills)}
     mounts: set[str] = (
         set()
         if bodies is None
@@ -419,8 +523,9 @@ async def turn_channel_skills(
     agent_names: tuple[str | None, ...],
     rows: Sequence[ChannelSkillRow] | None = None,
     cache: ResolverCache | None = None,
+    platform_skills: Sequence[MaSkill] = (),
 ) -> tuple[BetaManagedAgentsCustomSkill, ...]:
-    """The extra skills a turn in `channel_id` runs with, decided once per turn.
+    """The extra skills a turn in `channel_id` runs with, after `platform_skills`.
 
     One DB read; the skills list is read only when the channel adds something,
     to keep a clashing mount (which would fail the session) out. With `cache`
@@ -451,22 +556,20 @@ async def turn_channel_skills(
     except (anthropic.APIError, SkillsListTruncatedError):
         _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))
         bodies = None
-    wanted = applicable_skills(rows, agent=agent, agent_names=agent_names, bodies=bodies)
-    room = skill_room(agent)
+    wanted = applicable_skills(
+        rows, agent=agent, agent_names=agent_names, bodies=bodies, platform_skills=platform_skills
+    )
+    room = skill_room(agent, platform_skills)
     if len(wanted) > room:
         dropped = tuple(skill.skill_id for skill in wanted[room:])
-        key = (str(tenant_id), platform, channel_id, dropped)
-        if key not in _OVER_CAP_LOGGED:
-            if len(_OVER_CAP_LOGGED) >= _OVER_CAP_LOGGED_MAX:
-                _OVER_CAP_LOGGED.clear()
-            _OVER_CAP_LOGGED.add(key)
-            _log.warning(
-                "channel_skills.over_cap",
-                tenant_id=str(tenant_id),
-                channel_id=channel_id,
-                dropped=list(dropped),
-                cap=AGENT_SKILL_CAP,
-            )
+        _log_once(
+            "channel_skills.over_cap",
+            (str(tenant_id), platform, channel_id, *dropped),
+            tenant_id=str(tenant_id),
+            channel_id=channel_id,
+            dropped=list(dropped),
+            cap=AGENT_SKILL_CAP,
+        )
     return wanted[:room]
 
 
@@ -478,6 +581,8 @@ __all__ = [
     "applicable_skills",
     "choose_channel_skill",
     "may_set_channel_skills",
+    "platform_skill_refs",
     "skill_room",
     "turn_channel_skills",
+    "turn_platform_skills",
 ]

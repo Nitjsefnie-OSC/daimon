@@ -23,7 +23,11 @@ from typing import Any, cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsAnthropicSkill,
+    BetaManagedAgentsCustomSkill,
+)
 from anthropic.types.beta.beta_managed_agents_custom_tool import BetaManagedAgentsCustomTool
 from anthropic.types.beta.beta_managed_agents_custom_tool_input_schema import (
     BetaManagedAgentsCustomToolInputSchema,
@@ -1216,19 +1220,29 @@ async def test_a_channels_skills_are_added_at_create_and_read_as_current_on_the_
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Create and the drift check build the same skill list; dropping one replaces the session."""
+    """Create and the drift check build the same skill list; dropping one replaces the session.
+
+    The list leads with a platform's built-in (Teams' Office skills), which
+    rides the same override at its latest version.
+    """
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     transport = _Transport()
     deps = _deps(db_session_factory, transport)
-    extra = (BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7"),)
+    extra = (
+        BetaManagedAgentsAnthropicSkill(type="anthropic", skill_id="docx", version="latest"),
+        BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7"),
+    )
     with_skill = replace(_admission(account=account), channel_skills=extra)
 
     first = await _prepare(deps, with_skill, tenant=tenant, account=account)
     assert isinstance(first, PreparedTurn)
     frozen = transport.state.sessions[first.ma_session_id].agent.skills
-    assert [(s.skill_id, s.version) for s in frozen] == [("skill_team", "v7")]
+    assert [(s.type, s.skill_id, s.version) for s in frozen] == [
+        ("anthropic", "docx", "latest"),
+        ("custom", "skill_team", "v7"),
+    ], "the session runs the platform's skills, then the channel's"
 
     second = await _prepare(deps, with_skill, tenant=tenant, account=account)
     assert isinstance(second, PreparedTurn)

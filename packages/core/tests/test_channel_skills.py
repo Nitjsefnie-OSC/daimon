@@ -5,9 +5,12 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
+import pytest
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import build_subject
 from daimon.core.channel_skills import (
@@ -15,12 +18,20 @@ from daimon.core.channel_skills import (
     applicable_skills,
     choose_channel_skill,
     may_set_channel_skills,
+    platform_skill_refs,
     skill_room,
     turn_channel_skills,
+    turn_platform_skills,
 )
 from daimon.core.constants import AGENT_SKILL_CAP
-from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.defaults.loader import load_platform_skills
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_MANAGED,
+    tenant_scoped_display_title,
+)
 from daimon.core.ma_resolver import ResolverCache
+from daimon.core.session_snapshot import MaSkill
+from daimon.core.specs import SkillRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_skills import (
     add_channel_skill,
@@ -35,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
+_DEFAULTS = Path(__file__).resolve().parents[3] / "defaults"
 
 
 def _skill(skill_id: str, title: str, *, version: str | None = "v2") -> dict[str, object]:
@@ -291,34 +303,67 @@ async def test_a_shared_listing_missing_a_skill_the_agent_now_holds_is_read_agai
     assert await turn(held) == [], "the fresh listing shows the clash, so skill_b stays out"
 
 
-async def test_built_in_skills_count_toward_the_cap_and_a_dropped_skill_is_logged(
+def _default_agent(*, managed: bool = True) -> BetaManagedAgentsAgent:
+    """The seeded default agent as the provider holds it: its 11 custom skills, no built-ins."""
+    return ma_agent(
+        name="daimon",
+        tenant_id=uuid.uuid4(),
+        metadata={MA_METADATA_KEY_MANAGED: "true"} if managed else None,
+        skills=[
+            {"type": "custom", "skill_id": f"skill_own_{i}", "version": "1"} for i in range(11)
+        ],
+    )
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+def test_the_default_agents_office_skills_are_added_on_teams_only(platform: str) -> None:
+    """`defaults/` limits docx, pptx and xlsx to Teams; other platforms add nothing."""
+    refs = platform_skill_refs(_default_agent(), platform, load_platform_skills(_DEFAULTS))
+    expected = ["docx", "pptx", "xlsx"] if platform == "teams" else []
+    assert [ref.skill_id for ref in refs] == expected, (
+        "only a Teams turn of the seeded agent gets the Office skills"
+    )
+    assert (
+        platform_skill_refs(_default_agent(managed=False), "teams", load_platform_skills(_DEFAULTS))
+        == ()
+    ), "an agent the defaults pipeline does not manage never gets them, whatever its name"
+
+
+async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The default agent's 11 custom and 3 built-in skills leave room for 6 channel skills.
+    """The default agent's 11 skills leave room for 9 channel skills, 6 on Teams.
 
-    The provider's per-agent limit counts the whole `skills` list, built-in ones
-    included, so a channel that added 9 runs with its first 6 and one warning.
+    The provider's limit counts the whole session `skills` list, so the Office
+    built-ins added on Teams count first; a channel that added 9 runs there with
+    its first 6 and one warning.
     """
-    held = [{"type": "custom", "skill_id": f"skill_own_{i}", "version": "1"} for i in range(11)]
-    built_in = [
-        {"type": "anthropic", "skill_id": name, "version": "latest"}
-        for name in ("docx", "pptx", "xlsx")
-    ]
-    agent = ma_agent(name="shared", skills=[*held, *built_in])
-    assert skill_room(agent) == AGENT_SKILL_CAP - 14, "every held skill counts, built-ins too"
-
+    agent = _default_agent()
     tenant_id = uuid.uuid4()
+    office = await turn_platform_skills(
+        _client([]),
+        tenant_id=tenant_id,
+        platform="teams",
+        agent=agent,
+        platform_skills=load_platform_skills(_DEFAULTS),
+    )
+    assert [(s.type, s.skill_id, s.version) for s in office] == [
+        ("anthropic", name, "latest") for name in ("docx", "pptx", "xlsx")
+    ], "the built-ins need no lookup and run at their latest version"
+    assert skill_room(agent) == AGENT_SKILL_CAP - 11, "on Slack and Discord the room is as before"
+    assert skill_room(agent, office) == AGENT_SKILL_CAP - 14, "on Teams the built-ins count too"
 
-    async def turn(count: int) -> list[str]:
+    async def turn(count: int, platform_skills: Sequence[MaSkill] = office) -> list[str]:
         picked = await turn_channel_skills(
             db_session_factory,
             _client([]),
             tenant_id=tenant_id,
-            platform="slack",
+            platform="teams",
             channel_id="C1",
             agent=agent,
-            agent_names=("shared",),
+            agent_names=("daimon",),
             rows=[_row(f"skill_{i}", f"s{i}") for i in range(count)],
+            platform_skills=platform_skills,
         )
         return [s.skill_id for s in picked]
 
@@ -331,6 +376,44 @@ async def test_built_in_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
     warnings = [log["dropped"] for log in logs if log["event"] == "channel_skills.over_cap"]
     assert warnings == [["skill_6", "skill_7", "skill_8"], [f"skill_{i}" for i in range(6, 10)]], (
         "the dropped skills are named once, not on every turn, and again only when they change"
+    )
+    assert await turn(9, ()) == [f"skill_{i}" for i in range(9)], "without them, nine fit"
+
+
+async def test_a_custom_platform_skill_is_found_by_title_or_left_out_once_logged() -> None:
+    """A custom platform skill resolves to the tenant's upload; a missing one is skipped quietly."""
+    tenant_id = uuid.uuid4()
+    agent = _default_agent()
+    limited = {"daimon": (SkillRef(type="custom", skill_id="m365", platforms=("teams",)),)}
+    title = tenant_scoped_display_title(tenant_id=tenant_id, name="m365")
+
+    found = await turn_platform_skills(
+        _client([_skill("skill_m365", title)]),
+        tenant_id=tenant_id,
+        platform="teams",
+        agent=agent,
+        platform_skills=limited,
+    )
+    assert [(s.type, s.skill_id) for s in found] == [("custom", "skill_m365")], (
+        "the seeded upload is added by its id"
+    )
+
+    def failing(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"type": "error", "error": {"type": "api_error"}})
+
+    with capture_logs() as logs:
+        for client in (_client([]), build_fake_anthropic(failing), _client([])):
+            skipped = await turn_platform_skills(
+                client,
+                tenant_id=tenant_id,
+                platform="teams",
+                agent=agent,
+                platform_skills=limited,
+            )
+            assert skipped == (), "a skill that can't be found is left out and the turn runs"
+    warnings = [log for log in logs if log["event"] == "channel_skills.platform_skills_unavailable"]
+    assert [log["missing"] for log in warnings] == [["m365"]], (
+        "logged once per process, not per turn"
     )
 
 
