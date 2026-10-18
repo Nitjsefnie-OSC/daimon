@@ -2134,8 +2134,13 @@ and a verifying dry-run. Slack and Teams explicitly reject DM writes.
 DM routine runs mount no personal memory; tenant memory remains read-only and
 tool authority is the same as for channel routines. Source channels and threads
 are verified against the tenant's guild through core Discord REST transport.
-The source thread is retained separately from its budget parent, and both are
-checked for reader restrictions on save, fire and every delivery chunk.
+Source channel/thread provenance is stored independently of the mutable delivery
+and budget target, including no-destination creation and destination clearing.
+Legacy thread parents are resolved before clearing; unknown provenance refuses
+DM conversion, fire and delivery. Both saved source IDs are checked for reader
+restrictions on save, fire and every delivery chunk. Private-scope origins resolve
+only the caller's current tenant-bound conversation and verify its saved guild
+source; source-free cold conversations require no guild-channel lookup.
 
 The scheduler runs a read-only headless turn and queues its final answer in
 the routine outbox. The Discord host checks live membership, tenant DM

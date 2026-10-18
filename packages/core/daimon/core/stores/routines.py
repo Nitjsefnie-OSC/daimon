@@ -64,6 +64,7 @@ async def create_routine(
     destination_id: str | None = None,
     channel_id: str | None = None,
     source_thread_id: str | None = None,
+    source_channel_id: str | None = None,
 ) -> RoutineRow:
     """`channel_id` is the channel the routine's spend counts against (see `Routine`)."""
     if catch_up_policy not in ("skip", "run-once"):
@@ -71,8 +72,13 @@ async def create_routine(
     destination_id = await _resolve_destination(
         session, tenant_id, destination_kind, destination_id, created_by_user_id
     )
+    source_channel_id = source_channel_id or channel_id
+    if destination_kind == "thread":
+        source_thread_id = source_thread_id or destination_id
+    elif destination_kind == "channel":
+        source_channel_id = source_channel_id or destination_id
     if destination_kind == "dm":
-        await validate_dm_source(session, tenant_id, channel_id, source_thread_id)
+        await validate_dm_source(session, tenant_id, source_channel_id, source_thread_id)
     orm = Routine(
         tenant_id=tenant_id,
         created_by_user_id=created_by_user_id,
@@ -88,6 +94,8 @@ async def create_routine(
         destination_id=destination_id,
         channel_id=channel_id,
         source_thread_id=source_thread_id,
+        source_channel_id=source_channel_id,
+        source_provenance_known=destination_kind != "thread" or source_channel_id is not None,
     )
     session.add(orm)
     await session.flush()
@@ -223,13 +231,31 @@ async def update_routine(
 ) -> RoutineRow | None:
     """PATCH: `None` leaves a field alone. A destination is set as a pair, with
     the `channel_id` it resolves to; `clear_destination=True` removes the pair
-    (and any pending delivery) but keeps `channel_id`, so the routine's spend
-    still counts toward the same budget."""
+    (and any pending delivery) but keeps the source channel/thread provenance
+    and `channel_id`, so the routine's spend still counts toward the same budget."""
     values: dict[str, str | bool | datetime | None] = {}
     if clear_destination:
         if destination_kind is not None or destination_id is not None:
             raise StoreError("clear_destination cannot be combined with a new destination")
         current = await get_routine(session, routine_id, tenant_id=tenant_id)
+        if current is not None:
+            source_channel = current.source_channel_id or current.channel_id
+            source_thread = current.source_thread_id
+            if current.destination_kind == "thread":
+                source_thread = source_thread or current.destination_id
+                source_channel = source_channel or channel_id
+                if source_channel is None:
+                    raise StoreError("resolve the source thread's parent before clearing delivery")
+            elif current.destination_kind == "channel":
+                source_channel = source_channel or current.destination_id
+            values.update(
+                source_channel_id=source_channel,
+                source_thread_id=source_thread,
+                source_provenance_known=current.source_provenance_known
+                or current.destination_kind in ("channel", "thread"),
+            )
+            if current.channel_id is None:
+                values["channel_id"] = source_channel
         if current is not None and current.destination_kind == "dm":
             values.update(last_result_tail=None, last_error=None)
         values.update(
@@ -243,13 +269,15 @@ async def update_routine(
         current = await get_routine(session, routine_id, tenant_id=tenant_id)
         if current is None:
             return None
+        if not current.source_provenance_known and current.destination_kind in (None, "dm"):
+            raise StoreError("the routine's source provenance could not be established")
         destination_id = await _resolve_destination(
             session, tenant_id, destination_kind, destination_id, current.created_by_user_id
         )
-        dm_source = channel_id or current.channel_id
+        dm_source = current.source_channel_id or current.channel_id or channel_id
         dm_thread = current.source_thread_id
         if current.destination_kind == "thread":
-            dm_thread = current.destination_id
+            dm_thread = dm_thread or current.destination_id
         if destination_kind == "dm":
             if dm_source is None and current.destination_kind == "channel":
                 dm_source = current.destination_id
@@ -264,7 +292,10 @@ async def update_routine(
             destination_kind=destination_kind,
             destination_id=destination_id,
             channel_id=dm_source if destination_kind == "dm" else channel_id,
-            source_thread_id=dm_thread if destination_kind == "dm" else None,
+            source_thread_id=dm_thread,
+            source_channel_id=dm_source,
+            source_provenance_known=current.source_provenance_known
+            or current.destination_kind in ("channel", "thread"),
         )
         if current.destination_kind == "dm" and destination_kind != "dm":
             # A private preview must not survive a move to a shared destination.
@@ -288,7 +319,12 @@ async def update_routine(
         and not clear_destination
         and destination_kind is None
     ):
-        await validate_dm_source(session, tenant_id, current.channel_id, current.source_thread_id)
+        await validate_dm_source(
+            session,
+            tenant_id,
+            current.source_channel_id or current.channel_id,
+            current.source_thread_id,
+        )
     if catch_up_policy is not None:
         if catch_up_policy not in ("skip", "run-once"):
             raise StoreError("catch_up_policy must be skip or run-once")

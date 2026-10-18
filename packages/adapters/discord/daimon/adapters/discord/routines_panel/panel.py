@@ -167,9 +167,16 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                 source_id = (
                     row.destination_id
                     if row.destination_kind in ("channel", "thread")
-                    else row.source_thread_id or row.channel_id
+                    else row.source_thread_id or row.source_channel_id or row.channel_id
                 )
-                if self.values[0] == "dm" and source_id is not None:
+                if source_id is not None and (
+                    self.values[0] == "dm"
+                    or (
+                        row.destination_kind == "thread"
+                        and row.channel_id is None
+                        and row.source_channel_id is None
+                    )
+                ):
                     tenant = await get_tenant(session, row.tenant_id)
                     if tenant is None or self.view.runtime.settings.discord is None:
                         raise UserFacingError("The source channel could not be verified.")

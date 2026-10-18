@@ -25,13 +25,20 @@ user ID. A supplied ID must match that owner exactly; admins cannot redirect
 private delivery. Slack and Teams reject DM destinations. The user ID never
 passes through channel lookup or channel budget resolution: an optional
 source channel remains the budget source, otherwise normal tenant/account
-billing applies.
+billing applies. A routine created from a moved private conversation inherits
+that conversation's saved guild channel/thread source, rather than its private
+scope or physical DM channel. Source-free cold conversations remain source-free;
+missing or restricted moved-conversation provenance cannot create DM delivery.
 
 Both the tenant's inbound DM enablement and outbound recipient policy apply.
 Daimon checks current owner membership and invoker permissions at fire and
 again before each delivery chunk. Restricted sources cannot be converted to
 DM delivery; source restrictions and agent rules are checked again at fire
-and delivery, including the original source thread and its parent. DM routine
+and delivery, including the original source thread and its parent. Source
+provenance is retained even when automatic delivery is cleared or a routine
+is created without a destination. Legacy thread parents must be resolved before
+clearing delivery; DM conversion refuses unknown source provenance. Recreate a
+legacy routine if its historical source cannot be established. DM routine
 runs mount no personal memory. Tenant memory remains read-only, and tool
 authority stays the same as for channel routines; selecting DM delivery does
 not restrict tools to private output.

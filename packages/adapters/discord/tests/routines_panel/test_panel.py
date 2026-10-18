@@ -795,9 +795,10 @@ async def test_private_delivery_choice_belongs_to_owner_only(
         assert "Only the routine owner" in interaction.response.send_message.await_args.args[0]
 
 
+@pytest.mark.parametrize("clear_first", [False, True])
 @pytest.mark.parametrize("restricted", [False, True])
 async def test_panel_thread_dm_conversion_retains_and_checks_thread(
-    db_session_factory, monkeypatch, restricted
+    db_session_factory, monkeypatch, restricted, clear_first
 ):
     import httpx
     from daimon.adapters.discord.routines_panel import panel as panel_mod
@@ -863,12 +864,26 @@ async def test_panel_thread_dm_conversion_retains_and_checks_thread(
     interaction.user.id = 123
     interaction.response.send_message = AsyncMock()
     monkeypatch.setattr(panel_mod, "_rerender", AsyncMock())
+    if clear_first:
+        picker._values = ["none"]
+        await picker.callback(interaction)
+        async with db_session_factory.begin() as session:
+            cleared = await get_routine(session, row.id, tenant_id=tenant.id)
+            assert cleared is not None and cleared.destination_kind is None
+            assert (cleared.source_channel_id, cleared.source_thread_id) == ("456", "789")
+            await set_access_policy(
+                session,
+                tenant_id=tenant.id,
+                policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
+            )
+        picker._values = ["dm"]
     await picker.callback(interaction)
     async with db_session_factory() as session:
         saved = await get_routine(session, row.id, tenant_id=tenant.id)
     assert saved is not None
-    assert saved.destination_kind == ("thread" if restricted else "dm")
-    if restricted:
+    assert saved.destination_kind == (None if clear_first else "thread" if restricted else "dm")
+    assert saved.delivery_payload is None
+    if restricted or clear_first:
         assert "restricted source" in interaction.response.send_message.await_args.args[0]
     else:
         assert (saved.channel_id, saved.source_thread_id) == ("456", "789")
@@ -880,3 +895,15 @@ async def test_panel_thread_dm_conversion_retains_and_checks_thread(
             )
         await picker.callback(interaction)
         assert "restricted source" in interaction.response.send_message.await_args.args[0]
+
+    from daimon.core.routine_delivery import poll_deliveries_once
+
+    async def unexpected_dm_post(row):
+        raise AssertionError("clearing/converting delivery must not perform DM I/O")
+
+    assert (
+        await poll_deliveries_once(
+            db_session_factory, platform="discord", post=unexpected_dm_post, now=_NOW
+        )
+        == 0
+    )

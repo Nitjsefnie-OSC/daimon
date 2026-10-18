@@ -755,7 +755,7 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
             )
             # The policy may change after creation, before delivery.
             await update_routine(session, row.id, tenant_id=row.tenant_id, trigger_message="go")
-        updated = updated.model_copy(update={"channel_id": "456"})
+        updated = updated.model_copy(update={"channel_id": "456", "source_channel_id": "456"})
     fetch = AsyncMock(side_effect=AssertionError("a recipient is not a channel"))
     dms = _Dms(fail=mode == "blocked")
 

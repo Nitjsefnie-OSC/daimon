@@ -243,10 +243,16 @@ def keeps_routine_inside(
     `parent_channel_id` once the destination's parent is resolved; until then a
     thread whose parent is unknown stays inside while any channel is kept to its own agents.
     """
+    if row.destination_kind == "dm" and not row.source_provenance_known:
+        return True
     if (
         row.destination_kind == "dm"
-        and row.channel_id is not None
-        and limiting_ids_at(policy, channel_id=row.channel_id, thread_id=row.source_thread_id)
+        and (row.source_channel_id or row.channel_id) is not None
+        and limiting_ids_at(
+            policy,
+            channel_id=row.source_channel_id or row.channel_id or "",
+            thread_id=row.source_thread_id,
+        )
     ):
         return True
     if channel_permissions(policy, channel_id=parent_channel_id).keeps_content:

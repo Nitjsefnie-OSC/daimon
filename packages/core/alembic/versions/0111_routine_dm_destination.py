@@ -13,6 +13,13 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    op.add_column(
+        "routines",
+        sa.Column(
+            "source_provenance_known", sa.Boolean(), nullable=False, server_default=sa.false()
+        ),
+    )
+    op.add_column("routines", sa.Column("source_channel_id", sa.Text(), nullable=True))
     op.add_column("routines", sa.Column("source_thread_id", sa.Text(), nullable=True))
     op.drop_constraint("ck_routines_destination_kind", "routines", type_="check")
     op.create_check_constraint(
@@ -34,6 +41,8 @@ def downgrade() -> None:
     ):
         raise RuntimeError("convert or remove DM routines before downgrade")
     op.drop_column("routines", "source_thread_id")
+    op.drop_column("routines", "source_channel_id")
+    op.drop_column("routines", "source_provenance_known")
     op.drop_constraint("ck_routines_dm_owner", "routines", type_="check")
     op.drop_constraint("ck_routines_destination_kind", "routines", type_="check")
     op.create_check_constraint(

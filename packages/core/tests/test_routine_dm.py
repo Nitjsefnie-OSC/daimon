@@ -178,3 +178,54 @@ async def test_thread_conversion_preserves_source_and_checks_later_seals(db_sess
         await update_routine(
             db_session, row.id, tenant_id=row.tenant_id, trigger_message="admin edit"
         )
+
+
+async def test_unknown_legacy_source_cannot_be_converted_to_dm(db_session):
+    from sqlalchemy import text
+
+    row = await _create(db_session, destination_kind=None)
+    await db_session.execute(
+        text("UPDATE routines SET source_provenance_known = false WHERE id = :id"), {"id": row.id}
+    )
+    with pytest.raises(StoreError, match="provenance could not be established"):
+        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+
+
+async def test_legacy_thread_cannot_be_cleared_without_its_parent(db_session):
+    row = await _create(db_session, destination_kind="thread", destination_id="789")
+    with pytest.raises(StoreError, match="parent before clearing"):
+        await update_routine(db_session, row.id, tenant_id=row.tenant_id, clear_destination=True)
+    cleared = await update_routine(
+        db_session, row.id, tenant_id=row.tenant_id, clear_destination=True, channel_id="456"
+    )
+    assert cleared is not None
+    assert (cleared.source_channel_id, cleared.source_thread_id) == ("456", "789")
+    assert cleared.source_provenance_known
+
+
+async def test_source_pair_survives_changing_budget_and_clearing_delivery(db_session):
+    row = await _create(
+        db_session, destination_kind="thread", destination_id="789", channel_id="456"
+    )
+    moved = await update_routine(
+        db_session,
+        row.id,
+        tenant_id=row.tenant_id,
+        destination_kind="channel",
+        destination_id="999",
+        channel_id="999",
+    )
+    assert moved is not None and moved.channel_id == "999"
+    assert (moved.source_channel_id, moved.source_thread_id) == ("456", "789")
+    cleared = await update_routine(
+        db_session, row.id, tenant_id=row.tenant_id, clear_destination=True
+    )
+    assert cleared is not None and cleared.channel_id == "999"
+    assert (cleared.source_channel_id, cleared.source_thread_id) == ("456", "789")
+    await set_access_policy(
+        db_session,
+        tenant_id=row.tenant_id,
+        policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
+    )
+    with pytest.raises(StoreError, match="restricted source"):
+        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")

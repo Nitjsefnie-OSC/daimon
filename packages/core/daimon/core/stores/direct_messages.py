@@ -90,6 +90,20 @@ async def get_conversation(
     return None if row is None else DirectMessageRow.model_validate(row)
 
 
+async def get_conversation_by_scope(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, scope_id: str
+) -> DirectMessageRow | None:
+    """Resolve only the caller's current private scope in this tenant."""
+    row = await session.scalar(
+        select(DirectMessageConversation).where(
+            DirectMessageConversation.tenant_id == tenant_id,
+            DirectMessageConversation.account_id == account_id,
+            DirectMessageConversation.scope_id == scope_id,
+        )
+    )
+    return None if row is None else DirectMessageRow.model_validate(row)
+
+
 async def start_conversation(
     session: AsyncSession, *, conversation: DirectMessageRow, now: datetime
 ) -> None:
