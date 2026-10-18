@@ -14,9 +14,9 @@ human:
 - click: Open a DM with `daimon-staging` (1530628070405308456) from your own account
     and send 'hi'.
   expect: Within 15 s one reply explaining how to reach Daimon (mention in a server,
-    or /dm-me). Silence = FAIL.
+    or /dm). Silence = FAIL.
 - click: Send 'hi' again.
   expect: No second pointer within the same day (rate-limited).
 - click: In the QA guild, run `/help`.
-  expect: '`/dm-me` and `/memory` are listed; `/routines` is marked admin-only.'
+  expect: '`/dm` and `/memory` are listed; `/routines` is marked admin-only.'
 teardown: []
