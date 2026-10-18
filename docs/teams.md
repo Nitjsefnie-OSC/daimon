@@ -545,8 +545,10 @@ Each person can connect their own Microsoft 365, so the agent reads and
 changes their files, mail, calendar and notes as them, with exactly their
 permissions. Set `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID`, `__CLIENT_SECRET` and
 `__TENANT_ID` (and `__AUTHORITY` for a national cloud), plus
-`DAIMON_CRYPTO__KEYS` and `DAIMON_MCP__PUBLIC_URL`; without them the tools are
-absent.
+`DAIMON_CRYPTO__KEYS` and `DAIMON_MCP__PUBLIC_URL`. With none of them set
+nothing changes. With only some set the tools stay absent and the MCP server
+logs one `microsoft_accounts.disabled` warning naming what is missing; a
+tenant ID that is not a UUID stops startup with an error naming the variable.
 
 Register a single-tenant app in the same Entra tenant.
 
@@ -559,14 +561,22 @@ Register a single-tenant app in the same Entra tenant.
    `Calendars.ReadWrite` and `Notes.ReadWrite.All`. Grant admin consent, or let each person consent
    when they sign in if the tenant allows it.
 
-When a tool needs an account the person has not connected, the agent calls
-`connect_microsoft`, which sends a private card to their 1:1 chat. Its link
-works once, for ten minutes, and only for them: the account they sign in
+When a tool needs an account the person has not connected, the agent asks
+whether they want to connect; only if they agree does it call
+`connect_microsoft`, which sends a private card to their own 1:1 chat. No
+new card is sent while the last one is unexpired. Its link works once, for
+ten minutes, and only for them: the account they sign in
 with must be the same Entra user in the same tenant, or nothing is saved.
 Conditional Access applies to that sign-in and to every token refresh; when
 a policy later demands a new sign-in (for example MFA or a compliant
 device), the saved account is dropped and the agent asks them to connect
 again.
+
+Microsoft outages and throttling never drop a saved account: the tool says
+so, with any `Retry-After` wait, and nothing retries on its own. A client
+secret Entra refuses (`invalid_client`, for example once it expires) is
+reported as a setup problem for an administrator and logged as
+`microsoft_accounts.app_rejected`.
 
 The tools, all Teams-only and limited to an allowlist of Graph v1.0 paths:
 
