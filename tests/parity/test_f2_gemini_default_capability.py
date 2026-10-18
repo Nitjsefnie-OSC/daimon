@@ -71,8 +71,8 @@ def manifest() -> DefaultManifest:
     raw = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
     skills: list[NamedSkill] = []
     for item in raw["skills"]:
-        if item["type"] != "custom":
-            continue  # Anthropic's built-in skills run only there.
+        if item["type"] != "custom" or "platforms" in item:
+            continue  # Built-ins run only on Anthropic; platform-limited ones stay off the agent.
         name = item["skill_id"]
         directory = ROOT / "defaults/skills" / name
         skills.append(
