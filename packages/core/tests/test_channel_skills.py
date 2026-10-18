@@ -327,13 +327,22 @@ def _default_agent(*, managed: bool = True) -> BetaManagedAgentsAgent:
     )
 
 
+@pytest.mark.parametrize("configured", [True, False], ids=["microsoft-on", "microsoft-off"])
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
-def test_the_default_agents_office_skills_are_added_on_teams_only(platform: str) -> None:
-    """`defaults/` limits docx, pptx, xlsx and microsoft-365 to Teams; others add nothing."""
-    refs = platform_skill_refs(_default_agent(), platform, load_platform_skills(_DEFAULTS))
-    expected = ["docx", "pptx", "xlsx", "microsoft-365"] if platform == "teams" else []
+def test_the_default_agents_office_skills_are_added_on_teams_only(
+    platform: str, configured: bool
+) -> None:
+    """`defaults/` limits docx, pptx, xlsx and microsoft-365 to Teams; others add nothing.
+
+    microsoft-365 also requires Microsoft accounts to be set up.
+    """
+    features = frozenset({"microsoft_accounts"} if configured else ())
+    limited = load_platform_skills(_DEFAULTS, features=features)
+    refs = platform_skill_refs(_default_agent(), platform, limited)
+    office = ["docx", "pptx", "xlsx"]
+    expected = (office + ["microsoft-365"] * configured) if platform == "teams" else []
     assert [ref.skill_id for ref in refs] == expected, (
-        "only a Teams turn of the seeded agent gets the Office and Microsoft 365 skills"
+        "only a Teams turn gets the Office skills, and microsoft-365 only where it is set up"
     )
     assert (
         platform_skill_refs(_default_agent(managed=False), "teams", load_platform_skills(_DEFAULTS))
@@ -367,6 +376,17 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
     ], "the built-ins need no lookup; the seeded upload is found by title; all run at latest"
     assert skill_room(agent) == AGENT_SKILL_CAP - 11, "on Slack and Discord the room is as before"
     assert skill_room(agent, office) == AGENT_SKILL_CAP - 15, "on Teams the platform's count too"
+    unconfigured = await turn_platform_skills(
+        _client([_skill("skill_m365", m365)]),
+        tenant_id=tenant_id,
+        platform="teams",
+        agent=agent,
+        platform_skills=load_platform_skills(_DEFAULTS, features=frozenset()),
+        now=_NOW,
+    )
+    assert skill_room(agent, unconfigured) == AGENT_SKILL_CAP - 14 == 6, (
+        "without Microsoft accounts, Teams keeps the room microsoft-365 would take"
+    )
 
     async def turn(count: int, platform_skills: Sequence[MaSkill] = office) -> list[str]:
         picked = await turn_channel_skills(

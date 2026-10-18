@@ -60,6 +60,12 @@ from that session and from new ones for an hour, with a warning. Only
 `defaults/` agents may use `platforms`: resolving a user agent's skills
 refuses it, whichever command or tool writes the agent.
 
+Such an entry may also add `requires: microsoft_accounts`, naming an optional
+feature the deployment must have set up. Where it is not, every process that
+starts turns or changes a channel's skills leaves the skill out, so it takes
+no room on those platforms. An unknown feature name, or `requires` without
+`platforms`, fails validation.
+
 One validator catches a failure that is otherwise a confusing upstream 400:
 declaring `mcp_servers` without a matching `{type: mcp_toolset,
 mcp_server_name: ...}` entry in `tools` is rejected at parse time.

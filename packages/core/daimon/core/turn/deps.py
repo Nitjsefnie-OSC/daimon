@@ -205,5 +205,7 @@ def build_turn_deps(
         fleet_enabled=settings.fleet.enabled,
         fleet_max_workers=settings.fleet.max_workers_per_run,
         fleet_root_grants=fleet_root_grants,
-        platform_skills=load_platform_skills(settings.defaults_root),
+        platform_skills=load_platform_skills(
+            settings.defaults_root, features=settings.configured_features
+        ),
     )

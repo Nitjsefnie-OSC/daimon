@@ -14,7 +14,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import UUID
 
 from daimon.core.mcp_server_url import canonical_mcp_url
@@ -33,6 +33,9 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from daimon.core.specs import SettingsFeature
 
 
 class DatabaseSettings(BaseModel):
@@ -1881,6 +1884,16 @@ class Settings(BaseSettings):
             ("DAIMON_MCP__PUBLIC_URL", self.mcp.public_url is not None),
         )
         return tuple(name for name, present in wanted if not present)
+
+    @property
+    def configured_features(self) -> frozenset[SettingsFeature]:
+        """Optional features set up here; a default skill can require one (`SkillRef.requires`).
+
+        Microsoft accounts count on `configured` alone, as for `microsoft_send`.
+        """
+        return (
+            frozenset({"microsoft_accounts"}) if self.microsoft_accounts.configured else frozenset()
+        )
 
     @property
     def microsoft_accounts_enabled(self) -> bool:

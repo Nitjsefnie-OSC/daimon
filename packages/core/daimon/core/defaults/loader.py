@@ -13,6 +13,7 @@ can jump straight to the broken spec.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from pathlib import Path
 from typing import cast
 
@@ -20,7 +21,14 @@ import structlog
 import yaml
 from daimon.core.errors import DefaultsError
 from daimon.core.scope import DeploymentDefault
-from daimon.core.specs import AgentSpec, EnvironmentSpec, SkillRef, SkillSpec, SystemConfigSpec
+from daimon.core.specs import (
+    AgentSpec,
+    EnvironmentSpec,
+    SettingsFeature,
+    SkillRef,
+    SkillSpec,
+    SystemConfigSpec,
+)
 from pydantic import ValidationError
 
 _log = structlog.get_logger(__name__)
@@ -57,8 +65,14 @@ def load_agent_specs(root: Path) -> list[AgentSpec]:
     return specs
 
 
-def load_platform_skills(defaults_root: Path) -> dict[str, tuple[SkillRef, ...]]:
+def load_platform_skills(
+    defaults_root: Path, *, features: Collection[SettingsFeature] | None = None
+) -> dict[str, tuple[SkillRef, ...]]:
     """Each default agent's platform-limited skills (`SkillRef.platforms`), by agent name.
+
+    `features` is what this deployment has set up (`Settings.configured_features`):
+    a skill that `requires` another is left out. `None` keeps every skill, for
+    callers that only need the names.
 
     Read once per process for admission, which adds them to sessions on those
     platforms. Empty when `defaults_root` has no `agents/` directory, logged once
@@ -74,7 +88,14 @@ def load_platform_skills(defaults_root: Path) -> dict[str, tuple[SkillRef, ...]]
     return {
         spec.name: limited
         for spec in load_agent_specs(agents_root)
-        if (limited := tuple(ref for ref in spec.skills if ref.platforms is not None))
+        if (
+            limited := tuple(
+                ref
+                for ref in spec.skills
+                if ref.platforms is not None
+                and (features is None or ref.requires is None or ref.requires in features)
+            )
+        )
     }
 
 

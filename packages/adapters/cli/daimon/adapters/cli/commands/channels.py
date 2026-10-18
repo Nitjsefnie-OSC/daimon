@@ -633,7 +633,9 @@ async def channels_skills_add(
             skill=skill,
             default=rt.deployment_default,
             actor_account_id=None,
-            platform_skills=load_platform_skills(rt.settings.defaults_root),
+            platform_skills=load_platform_skills(
+                rt.settings.defaults_root, features=rt.settings.configured_features
+            ),
         )
         if isinstance(added, str):
             raise DaimonError(CHANNEL_SKILL_REFUSALS[added])
