@@ -12,8 +12,22 @@ from datetime import datetime
 
 from daimon.core._models import MicrosoftSignIn
 from daimon.core.stores.domain import MicrosoftSignInRow
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def lock_sign_ins_for_user(
+    session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
+) -> None:
+    """Hold the person's links until this transaction ends.
+
+    Taken before reading their live link, so two concurrent connects cannot
+    both find none and send two cards.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"microsoft_sign_in:{tenant_id}:{user_id}"},
+    )
 
 
 async def create_sign_in(

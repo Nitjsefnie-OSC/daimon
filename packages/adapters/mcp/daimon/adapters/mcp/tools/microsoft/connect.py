@@ -69,7 +69,9 @@ async def connect_microsoft_impl(
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     now = datetime.now(UTC)
     async with runtime.session_factory.begin() as session:
-        # One card per link lifetime: a repeated call must not keep messaging them.
+        # One card per link lifetime: a repeated or concurrent call must not
+        # keep messaging them.
+        await sign_ins.lock_sign_ins_for_user(session, tenant_id=auth.tenant_id, user_id=user_id)
         live = await sign_ins.get_live_sign_in_for_user(
             session, tenant_id=auth.tenant_id, user_id=user_id, now=now
         )

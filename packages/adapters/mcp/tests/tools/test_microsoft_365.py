@@ -6,6 +6,7 @@ the database is real.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -805,6 +806,40 @@ async def test_connect_sends_no_second_card_while_the_link_is_live(
             session, state=sent[0].split("state=", 1)[1], now=datetime.now(UTC)
         )
     assert live is not None, "the card already sent must keep working"
+
+
+async def test_concurrent_connects_send_one_card(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two calls at once: the second waits for the first's link and sends nothing."""
+    _, auth = await _person(committing_sessionmaker)
+    origin = await _origin(committing_sessionmaker, auth, ONE_TO_ONE)
+    sent: list[str] = []
+
+    async def fake_send(
+        runtime: McpRuntime, auth: AuthIdentity, *, conversation_id: str, card: dict[str, Any]
+    ) -> None:
+        sent.append(card["actions"][0]["url"])
+
+    create = sign_ins.create_sign_in
+
+    async def slow_create(*args: Any, **kwargs: Any) -> Any:
+        # Widens the gap between the read and the insert, where the race was.
+        await asyncio.sleep(0.2)
+        return await create(*args, **kwargs)
+
+    monkeypatch.setattr(connect_module, "send_card_to_caller", fake_send)
+    monkeypatch.setattr(sign_ins, "create_sign_in", slow_create)
+    runtime = _runtime(committing_sessionmaker, fake)
+    results = await asyncio.gather(
+        *(connect_microsoft_impl(runtime, auth, origin_context_id=origin) for _ in range(2))
+    )
+    assert sorted(result.status for result in results) == ["already_sent", "sent"], (
+        "one call sends the card, the other reports it already out"
+    )
+    assert len(sent) == 1, "the person must get one card, however the calls interleave"
 
 
 async def test_connect_failing_before_delivery_leaves_no_link(
