@@ -252,6 +252,8 @@ class DiscordFleetCardFactory:
         from daimon.core.mux_backend import resource_scope
         from daimon.core.native_admins import load_live_subject, load_stored_subject
         from daimon.core.stores.identity import find_platform_principal
+        from daimon.core.stores.mux_state import get_fleet_root_operation
+        from daimon.core.stores.turn_card_intents import get_turn_card_intent
         from daimon.core.turn.runtime_manifest import read_frozen_root
         from mux.errors import ScopeViolation
         from sqlalchemy.exc import SQLAlchemyError
@@ -291,13 +293,32 @@ class DiscordFleetCardFactory:
                             caller=admin_caller(interaction.user),
                         )
                     )
+                scope = resource_scope(
+                    tenant_id=str(tenant_id),
+                    account_id=str(original.account_id),
+                    authorization_id="discord-fleet-card",
+                )
+                if run_id is None:
+                    # This thread's own turn that never froze a fleet root has no
+                    # fleet card. The durable intent and root records prove that
+                    # absence; the render task has no live persistence context.
+                    # Unknown or foreign intents still go through the refusing path.
+                    async with deps.sessionmaker() as db:
+                        own = await get_turn_card_intent(db, id=intent_id)
+                        frozen = await get_fleet_root_operation(
+                            db, scope, intent_id=intent_id, check_intent_owner=True
+                        )
+                    if (
+                        own is not None
+                        and own.tenant_id == tenant_id
+                        and own.platform == "discord"
+                        and own.thread_id == str(thread.id)
+                        and frozen is None
+                    ):
+                        return None
                 result = await read_frozen_root(
                     deps,
-                    resource_scope(
-                        tenant_id=str(tenant_id),
-                        account_id=str(original.account_id),
-                        authorization_id="discord-fleet-card",
-                    ),
+                    scope,
                     intent_id=intent_id,
                     run_id=run_id,
                     now=datetime.now(UTC),
