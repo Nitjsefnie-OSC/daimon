@@ -608,12 +608,31 @@ def _visibility_digest(installations: Sequence[_Installation]) -> str:
     return hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest()
 
 
+def _owner_avatar(item: _Installation | None) -> str:
+    is_person = item is not None and item.owner_type.lower() == "user"
+    if (
+        item is not None
+        and item.avatar_url
+        and item.avatar_url.startswith("https://avatars.githubusercontent.com/")
+    ):
+        shape = " gh-owner-avatar--person" if is_person else ""
+        return (
+            f'<img class="gh-owner-avatar{shape}" '
+            f'src="{html.escape(item.avatar_url, quote=True)}" alt="">'
+        )
+    shape = " gh-owner-avatar--person" if is_person else ""
+    fallback_icon = icon("user" if is_person else "building-2")
+    return f'<span class="gh-owner-avatar-fallback{shape}">{fallback_icon}</span>'
+
+
 def _saved_agent_page(
     name: str,
     grants: list[github_access.AgentRepo],
     visible_ids: set[int] | None = None,
     back_url: str | None = "https://discord.com/app",
+    installations: Sequence[_Installation] = (),
 ) -> Response:
+    owner_installations = {item.owner_login.casefold(): item for item in installations}
     groups: dict[str, list[github_access.AgentRepo]] = {}
     for repo in grants:
         groups.setdefault(repo.full_name.partition("/")[0], []).append(repo)
@@ -631,7 +650,7 @@ def _saved_agent_page(
         + '<div class="gh-saved-groups">'
         + "".join(
             f'<section class="gh-owner-group"><h2 class="gh-owner-heading">'
-            f'<span class="gh-owner-avatar-fallback">{html.escape(owner[:1].upper())}</span>'
+            f"{_owner_avatar(owner_installations.get(owner.casefold()))}"
             f"{html.escape(owner)}</h2>"
             + "".join(
                 '<div class="gh-saved-row">'
@@ -767,7 +786,10 @@ _EDITOR_SCRIPT = """
       const ownerName = document.createElement("span");
       ownerName.className = "gh-working-owner";
       ownerName.textContent = owner + "/";
-      workingCardName.append(ownerName, document.createTextNode(repo.join("/")));
+      const repoName = document.createElement("span");
+      repoName.className = "gh-working-repo";
+      repoName.textContent = repo.join("/");
+      workingCardName.append(ownerName, repoName);
     } else {
       workingCardName.textContent = chosenRow ? "Hidden repo" : "None chosen";
     }
@@ -792,7 +814,7 @@ _EDITOR_SCRIPT = """
     if (removedCount) parts.push("remove " + removedCount + " " + plural(removedCount));
     if (workingChanged) parts.push("change working repo");
     document.getElementById("selection-status").textContent =
-      parts.length ? "Not saved yet: " + parts.join(", ") : "No changes to save";
+      parts.length ? "Not saved yet" : "No changes to save";
     document.querySelector(".gh-editor-footer").hidden = !parts.length;
     document.getElementById("dock-add").textContent = added ? "+ " + added + " to add" : "";
     document.getElementById("dock-add").hidden = !added;
@@ -877,13 +899,15 @@ _EDITOR_SCRIPT = """
       button.querySelector(".gh-owner-selected").textContent = n ? n + " selected" : "";
     }
     selectShown.textContent = "Select all " + shown;
-    document.getElementById("shown-count").textContent = "Showing " + shown + " of " +
+    document.getElementById("shown-count").textContent = selectedOnly ?
+      "Showing " + shown + " selected" : "Showing " + shown + " of " +
       options.filter(o => o.dataset.owner === activeOwner).length;
     selectShown.hidden = selectedOnly;
     selectShown.disabled = shown === 0;
     clearSelection.disabled = count === 0;
     showSelected.disabled = count === 0;
-    showSelected.textContent = selectedOnly ? "Show all" : "Selected (" + count + ")";
+    showSelected.textContent = "Selected (" + count + ")";
+    showSelected.setAttribute("aria-pressed", String(selectedOnly));
   }
   document.getElementById("open-repo-picker").addEventListener("click", event => {
     opener = event.currentTarget;
@@ -1147,21 +1171,6 @@ def _agent_editor_page(
     """Render one agent's grants and an optional staged add dialog."""
     esc = html.escape
 
-    def owner_avatar(item: _Installation | None) -> str:
-        is_person = item is not None and item.owner_type.lower() == "user"
-        if (
-            item is not None
-            and item.avatar_url
-            and item.avatar_url.startswith("https://avatars.githubusercontent.com/")
-        ):
-            return (
-                f'<img class="gh-owner-avatar{" gh-owner-avatar--person" if is_person else ""}" '
-                f'src="{esc(item.avatar_url, quote=True)}" alt="">'
-            )
-        initial = esc(item.owner_login[:1].upper()) if item else "?"
-        shape = " gh-owner-avatar--person" if is_person else ""
-        return f'<span class="gh-owner-avatar-fallback{shape}">{initial}</span>'
-
     snapshot_digest = hashlib.sha256(snapshot.encode()).hexdigest()
     visibility = _visibility_digest(installations)
     needed = needed or {}
@@ -1273,8 +1282,9 @@ def _agent_editor_page(
     working_name = (
         '<span class="gh-working-owner">'
         + esc(working.full_name.partition("/")[0])
-        + "/</span>"
+        + '/</span><span class="gh-working-repo">'
         + esc(working.full_name.partition("/")[2])
+        + "</span>"
         if working and working.repo_id in usable
         else "Hidden repo"
         if working
@@ -1312,7 +1322,7 @@ def _agent_editor_page(
                 else ""
             )
             + ("" if owner_grants else " hidden")
-            + f'><h3 class="gh-owner-heading">{owner_avatar(installation)}{esc(owner)}'
+            + f'><h3 class="gh-owner-heading">{_owner_avatar(installation)}{esc(owner)}'
             + (
                 " <span>Paused on GitHub</span>"
                 if installation and installation.state == "suspended"
@@ -1390,7 +1400,7 @@ def _agent_editor_page(
             '<button class="gh-owner-button" type="button" '
             f'data-owner="{esc(item.owner_login, quote=True)}"'
             + (" disabled" if disabled else "")
-            + f'>{owner_avatar(item)}<span class="gh-owner-login">{esc(item.owner_login)}</span>'
+            + f'>{_owner_avatar(item)}<span class="gh-owner-login">{esc(item.owner_login)}</span>'
             + (
                 f'<small class="gh-owner-added">{count} '
                 f"{'repo' if count == 1 else 'repos'} added</small>"
@@ -2005,7 +2015,11 @@ def build_oauth_github_routes(
         )
 
     async def successful_page(
-        state: str, cookie: str, invitation_hash: str = "", visible_ids: set[int] | None = None
+        state: str,
+        cookie: str,
+        invitation_hash: str = "",
+        visible_ids: set[int] | None = None,
+        installations: Sequence[_Installation] = (),
     ) -> Response | None:
         async with sessionmaker() as session:
             invitation = await github_connect.successful_confirmation(
@@ -2045,7 +2059,11 @@ def build_oauth_github_routes(
                 else None
             )
             return _saved_agent_page(
-                invitation.agent_name or "Agent", agent_grants, visible_ids, back_url
+                invitation.agent_name or "Agent",
+                agent_grants,
+                visible_ids,
+                back_url,
+                installations=installations,
             )
         back = _back_to_chat(requester.platform, requester.external_id) if requester else ""
         return _already_connected_page(
@@ -2701,7 +2719,9 @@ def build_oauth_github_routes(
                 used = await successful_page(state, cookie, invitation_hash)
                 return used if used is not None else _error()
             await revoke_user_token(token)
-            response = await successful_page(state, cookie, visible_ids=set(visible))
+            response = await successful_page(
+                state, cookie, visible_ids=set(visible), installations=installations
+            )
             if response is None:
                 return _error()
             response.set_cookie(

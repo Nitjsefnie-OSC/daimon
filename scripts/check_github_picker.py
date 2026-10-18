@@ -78,6 +78,7 @@ def fixture_page(
     error_owner: bool = False,
     stale: bool = False,
     three_granted: bool = False,
+    no_avatars: bool = False,
 ) -> str:
     owners = (
         (77, 55, "sam-rivera", "User"),
@@ -95,7 +96,7 @@ def fixture_page(
             owner_type=owner_type,
             avatar_url=(
                 f"https://avatars.githubusercontent.com/u/{owner_id}"
-                if installation_id in (77, 78)
+                if installation_id in (77, 78) and not no_avatars
                 else None
             ),
             fetch_state="error" if error_owner and installation_id == 79 else "ok",
@@ -148,7 +149,30 @@ def saved_page() -> str:
         grant(7901, "tidewater-eap/saved"),
         grant(7902, "tidewater-eap/new"),
     ]
-    response = _saved_agent_page("Atlas", grants, {repo.repo_id for repo in grants})
+    response = _saved_agent_page(
+        "Atlas",
+        grants,
+        {repo.repo_id for repo in grants},
+        installations=(
+            _Installation(
+                id=78,
+                owner_id=56,
+                owner_login="northwind-labs",
+                repository_selection="selected",
+                owner_type="Organization",
+                avatar_url="https://avatars.githubusercontent.com/u/56",
+                repos=(),
+            ),
+            _Installation(
+                id=79,
+                owner_id=57,
+                owner_login="tidewater-eap",
+                repository_selection="selected",
+                owner_type="Organization",
+                repos=(),
+            ),
+        ),
+    )
     return inline_assets(response.body.decode())
 
 
@@ -216,8 +240,11 @@ def check_rows(page: Page) -> int:
             const first = document.createRange();
             first.selectNodeContents(name.firstElementChild || name);
             const line = [...first.getClientRects()].find(r => r.width);
-            const firstCy = line ? (line.top + line.bottom) / 2 : cy(name);
+            const firstCy = innerWidth <= 600 ? cy(card.querySelector(':scope > span')) :
+              line ? (line.top + line.bottom) / 2 : cy(name);
             cardData = {height: rect(card).height, lines,
+              ownerLines: name.querySelector('.gh-working-owner') ?
+                Math.round(rect(name.querySelector('.gh-working-owner')).height / 24) : null,
               iconDy: pin ? cy(pin) - firstCy : null,
               actionDy: button ? cy(button) - firstCy : null,
               ownerMuted: !!name.querySelector('.gh-working-owner') &&
@@ -234,7 +261,11 @@ def check_rows(page: Page) -> int:
             assert abs(head["column"]) <= 1, head
     card = anatomy["card"]
     if card and "Hidden repo" not in card["text"]:
-        assert abs(card["height"] - (56 + (card["lines"] - 1) * 24)) <= 1, card
+        expected_height = (80 if page.viewport_size["width"] <= 600 else 56) + (
+            card["lines"] - 1
+        ) * 24
+        assert abs(card["height"] - expected_height) <= 2, card
+        assert card["ownerLines"] == 1, card
         assert card["ownerMuted"] and "/" in card["text"], card
         assert abs(card["iconDy"]) <= 1, card
         assert abs(card["actionDy"]) <= 1, card
@@ -276,11 +307,21 @@ def capture(width: int) -> None:
         page.locator('.gh-picker-choice[data-repo-id="7902"] input').check()
         page.locator("#show-selected-repos").click()
         assert page.locator(".gh-selected-owner").count() == 2
+        assert page.locator("#shown-count").inner_text() == "Showing 2 selected"
+        assert page.locator("#show-selected-repos").inner_text() == "Selected (2)"
+        assert page.locator("#show-selected-repos").get_attribute("aria-pressed") == "true"
         check_rows(page)
         shot("selected")
         page.locator("#stage-repos").click()
         assert page.locator(".gh-agent-row.gh-added-row").count() == 2
         page.locator('.gh-agent-row[data-repo-id="7701"] .gh-remove-action').click()
+        assert page.locator("#selection-status").inner_text() == "Not saved yet"
+        assert (
+            page.locator('.gh-agent-row[data-repo-id="7701"] .gh-undo-action').evaluate(
+                "el => getComputedStyle(el).backgroundColor"
+            )
+            == "rgba(0, 0, 0, 0)"
+        )
         check_rows(page)
         shot("unsaved")
 
@@ -308,6 +349,8 @@ def capture(width: int) -> None:
         page.locator("#save-repos").click()
         expect(page.get_by_text("Atlas can read and change these 4 repos.")).to_be_visible()
         assert page.locator(".gh-saved-groups .gh-owner-group").count() == 2
+        assert page.locator(".gh-saved-groups .gh-owner-avatar").count() == 1
+        assert page.locator(".gh-saved-groups .web-icon--building-2").count() == 1
         check_rows(page)
         shot("saved")
         browser.close()
@@ -435,10 +478,34 @@ def check(width: int) -> int:
         ).first
         row_icon = page.locator("#connected-repos .gh-row-icon").first
         assert abs(avatar.bounding_box()["x"] - row_icon.bounding_box()["x"]) <= 1
+        row_name = page.locator("#connected-repos .gh-row-name").first
+        owner_name = page.locator("#connected-repos .gh-owner-heading").first
+        owner_text_x = owner_name.evaluate(
+            "el => { const range = document.createRange(); "
+            "range.selectNodeContents(el.lastChild); return range.getBoundingClientRect().x; }"
+        )
+        assert abs(row_name.bounding_box()["x"] - owner_text_x) <= 1
+        assert abs(row_name.bounding_box()["x"] - row_icon.bounding_box()["x"] - 32) <= 1
+        if width == 390:
+            wrap = page.locator("#working-card-name").evaluate(
+                "el => { el.style.maxWidth = '130px'; "
+                "const owner = el.querySelector('.gh-working-owner').getBoundingClientRect(); "
+                "const repo = el.querySelector('.gh-working-repo').getBoundingClientRect(); "
+                "return {ownerHeight: owner.height, repoBelow: repo.top >= owner.bottom}; }"
+            )
+            assert wrap == {"ownerHeight": 24, "repoBelow": True}, wrap
+            page.locator("#working-card-name").evaluate(
+                "el => el.style.removeProperty('max-width')"
+            )
         assert (
             page.locator("#connected-repos .gh-owner-heading").first.bounding_box()["height"] == 40
         )
         check_rows(page)
+        page.set_content(fixture_page(no_avatars=True))
+        assert page.locator("#connected-repos .web-icon--user:visible").count() == 1
+        assert page.locator("#connected-repos .web-icon--building-2:visible").count() == 1
+        assert not page.locator("#connected-repos .gh-owner-avatar-fallback").first.inner_text()
+        page.set_content(html)
         assert "northwind-labs/saved" in page.locator("#working-card").inner_text()
         page.locator("#change-working").click()
         page.locator("#working-choice").select_option("7701")

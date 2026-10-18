@@ -1091,7 +1091,7 @@ def test_editor_stages_remove_undo_and_summarizes_every_change() -> None:
     assert 'data-action="undo" aria-label="Undo removal of lab/visible"' in body
     assert 'isRemoved ? "− To remove"' in body
     assert "removed.delete(id);" in body
-    assert '"Not saved yet: " + parts.join(", ")' in body
+    assert 'parts.length ? "Not saved yet" : "No changes to save"' in body
     assert 'parts.push("change working repo")' in body
     assert 'id="repo-count"' not in body
     assert "cancel.hidden = !!parts.length;" in body

@@ -444,6 +444,7 @@ body:has(.gh-editor),body:has(.gh-flow--saved){background:#f7f6f2;color:#1c1b18}
 .gh-flow:has(.gh-editor) .gh-removed-row .gh-row-name{color:#1c1b18;text-decoration:line-through;text-decoration-color:#5f5c54}
 .gh-flow:has(.gh-editor) .gh-row-actions{height:24px;margin-left:8px}
 .gh-flow:has(.gh-editor) .gh-row-action{min-height:44px;padding:0 4px;border-radius:4px;color:#5f5c54;white-space:nowrap}
+.gh-flow:has(.gh-editor) .gh-row-action:hover,.gh-flow:has(.gh-editor) .gh-row-action:focus-visible{background:transparent;color:#1c1b18}
 .gh-flow:has(.gh-editor) .gh-row-meta:empty{display:none}
 .gh-flow:has(.gh-editor) .gh-row-meta{margin:0 0 0 32px;line-height:24px}
 .gh-flow:has(.gh-editor) .gh-working-badge,.gh-flow:has(.gh-editor) .gh-pending-label{display:inline-flex;align-items:center;min-height:24px;padding:0 6px;border-radius:4px;font-size:13px;font-weight:500;line-height:24px;white-space:nowrap}
@@ -457,9 +458,11 @@ body:has(.gh-editor),body:has(.gh-flow--saved){background:#f7f6f2;color:#1c1b18}
 .gh-flow:has(.gh-editor) .gh-working-card>strong{line-height:24px}
 .gh-flow:has(.gh-editor) .gh-working-card>.gh-add-button{margin-top:-10px;margin-bottom:-10px}
 .gh-flow:has(.gh-editor) .gh-working-owner{color:#5f5c54}
+.gh-flow:has(.gh-editor) .gh-working-owner,.gh-flow:has(.gh-editor) .gh-working-repo{display:inline-block}
 .gh-flow:has(.gh-editor) .gh-owner-heading{height:40px;min-height:40px;padding:8px 16px}
 .gh-flow:has(.gh-editor) .gh-owner-avatar-fallback{border-radius:4px}
 .gh-flow:has(.gh-editor) .gh-owner-avatar-fallback,.gh-flow--saved .gh-owner-avatar-fallback{background:#f1efe9;color:#5f5c54;font-size:12px;font-weight:600}
+.gh-flow--saved .gh-owner-avatar-fallback .web-icon{width:16px;height:16px}
 .gh-flow:has(.gh-editor) .gh-owner-group[data-person=true] .gh-owner-avatar-fallback{border-radius:50%}
 .gh-flow:has(.gh-editor) .gh-owner-button{flex-wrap:nowrap;background:#fcfbf8}
 .gh-flow:has(.gh-editor) .gh-owner-login{flex:1;min-width:0;overflow-wrap:anywhere}
@@ -516,6 +519,12 @@ body:has(.gh-editor) .web-context,body:has(.gh-flow--saved) .web-context{border-
 body:has(.gh-editor) :focus-visible,body:has(.gh-flow--saved) :focus-visible{outline:2px solid #2b6cb0;outline-offset:2px}
 @media(max-width:600px){
  .gh-flow:has(.gh-editor) .gh-row-top{display:flex;flex-direction:row;align-items:flex-start}
+ .gh-flow:has(.gh-editor) .gh-row-top .gh-row-icon{margin-right:12px}
+ .gh-flow:has(.gh-editor) .gh-working-card{display:grid;grid-template-columns:20px minmax(0,1fr) auto;grid-template-rows:24px auto;gap:0 12px;align-items:start}
+ .gh-flow:has(.gh-editor) .gh-working-card>.web-icon{grid-column:1;grid-row:1}
+ .gh-flow:has(.gh-editor) .gh-working-card>span{grid-column:2;grid-row:1}
+ .gh-flow:has(.gh-editor) .gh-working-card>strong{grid-column:2;grid-row:2}
+ .gh-flow:has(.gh-editor) .gh-working-card>.gh-add-button{grid-column:3;grid-row:1;margin-top:-10px}
  .gh-flow:has(.gh-editor) .gh-agent-row{padding:16px}
  .gh-flow:has(.gh-editor) .gh-row-content{flex:1}
  .gh-flow:has(.gh-editor) .gh-row-actions{flex-wrap:nowrap}
