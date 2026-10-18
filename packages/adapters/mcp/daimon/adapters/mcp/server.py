@@ -559,6 +559,7 @@ def create_mcp_app(
         register_media_tools(
             mcp,
             gemini_client=gemini_client,
+            membership_resolver=runtime.membership_resolver,
             sessionmaker=effective_sessionmaker,
             billing_config=effective_billing_config,
             markup=effective_settings.billing.markup,

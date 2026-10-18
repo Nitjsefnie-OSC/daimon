@@ -561,6 +561,7 @@ def _print_policy(
         console.print(f"{label} access policy: open (anyone may invoke; no rules)")
         return
     console.print(f"{label} access policy:")
+    console.print(f"  invoker_role_ids: {', '.join(policy.invoker_role_ids) or '-'}")
     console.print(f"  invoker_user_ids: {', '.join(policy.invoker_user_ids) or '-'}")
     console.print(f"  member_guest_ids: {', '.join(policy.member_guest_ids) or '-'}")
     console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
@@ -698,6 +699,15 @@ def tenants_access_policy_set_command(
             help="Platform user id allowed to start turns (repeatable). Admins always may."
         ),
     ] = None,
+    invoker_role: Annotated[
+        list[str] | None,
+        typer.Option(
+            help="Discord role id allowed to start turns (repeatable). Replaces the role list."
+        ),
+    ] = None,
+    clear_invoker_roles: Annotated[
+        bool, typer.Option("--clear-invoker-roles", help="Clear the Discord invoker role list.")
+    ] = False,
     dm_memory_read_only: Annotated[
         bool | None,
         typer.Option(
@@ -749,6 +759,8 @@ def tenants_access_policy_set_command(
                 platform=platform,
                 external_id=external_id,
                 invoker=invoker,
+                invoker_role=invoker_role,
+                clear_invoker_roles=clear_invoker_roles,
                 dm_memory_read_only=dm_memory_read_only,
                 add_member_guest=add_member_guest,
                 remove_member_guest=remove_member_guest,
@@ -799,6 +811,8 @@ async def tenants_access_policy_set(
     platform: str,
     external_id: str,
     invoker: list[str] | None = None,
+    invoker_role: list[str] | None = None,
+    clear_invoker_roles: bool = False,
     dm_memory_read_only: bool | None = None,
     add_member_guest: list[str] | None = None,
     remove_member_guest: list[str] | None = None,
@@ -814,6 +828,26 @@ async def tenants_access_policy_set(
             "member_guest_ids: an id named in both --add-member-guest and --remove-member-guest"
         )
     changes: dict[str, object] = {}
+    if invoker_role is not None and clear_invoker_roles:
+        raise typer.BadParameter("--invoker-role cannot be combined with --clear-invoker-roles")
+    if invoker_role is not None:
+        if validated_platform != "discord":
+            raise typer.BadParameter("invoker_role_ids are supported only for Discord")
+        roles = tuple(value.strip() for value in invoker_role)
+        if any(
+            not value.isascii()
+            or not value.isdecimal()
+            or not 0 < int(value) < 2**64
+            or str(int(value)) != value
+            or value == external_id
+            for value in roles
+        ):
+            raise typer.BadParameter(
+                "invoker_role_ids: expected Discord snowflakes excluding @everyone (guild id)"
+            )
+        changes["invoker_role_ids"] = tuple(dict.fromkeys(roles))
+    if clear_invoker_roles:
+        changes["invoker_role_ids"] = ()
     if invoker is not None:
         changes["invoker_user_ids"] = _parse_invokers(invoker, platform=validated_platform)
     if dm_memory_read_only is not None:

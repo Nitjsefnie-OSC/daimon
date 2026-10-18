@@ -73,6 +73,7 @@ from daimon.core.ma_resolver import (
     retrieve_agent_cached,
     retrieve_environment_cached,
 )
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import (
     agent_permissions,
     at_home,
@@ -310,6 +311,8 @@ async def admit(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     category_id: str | None = None,
@@ -333,6 +336,8 @@ async def admit(
                 now=now,
                 thread_id=thread_id,
                 role=role,
+                role_ids=role_ids,
+                verified_membership=verified_membership,
                 is_dm=is_dm,
                 dm_source_channel_id=dm_source_channel_id,
                 category_id=category_id,
@@ -383,6 +388,8 @@ async def admit_impl(
     now: datetime,
     thread_id: str | None = None,
     role: Role | None = None,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     category_id: str | None = None,
@@ -433,7 +440,29 @@ async def admit_impl(
 
         # Refusals must happen before config is read. Keeping the session here
         # reuses its connection for the config cascade after authorization.
-        subject = build_subject(is_admin=role is Role.ADMIN, platform_user_id=external_user_id)
+        subject = build_subject(
+            is_admin=role is Role.ADMIN,
+            platform_user_id=external_user_id,
+            role_ids=role_ids,
+            verified_membership=verified_membership,
+        )
+        if (
+            platform == "discord"
+            and verified_membership is None
+            and (policy.invoker_role_ids or deps.membership_resolver is not None)
+        ):
+            subject = await resolve_subject(
+                deps.sessionmaker,
+                deps.membership_resolver,
+                tenant_id=tenant_id,
+                user_id=external_user_id,
+                require_fresh=is_dm,
+                session=session,
+            )
+            if subject.verified_membership is not True:
+                raise AdmissionDenied(reason="invoker_not_allowed")
+        if is_dm and platform == "discord" and subject.verified_membership is not True:
+            raise AdmissionDenied(reason="invoker_not_allowed")
         turn_place = build_turn_place(
             channel_id=channel_id,
             thread_id=thread_id,
@@ -1075,6 +1104,20 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         return admission
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
+    if grant.subject.platform_user_id is not None and (
+        policy.invoker_role_ids
+        or (deps.membership_resolver is not None and grant.subject.verified_membership is not None)
+    ):
+        subject = await resolve_subject(
+            deps.sessionmaker,
+            deps.membership_resolver,
+            tenant_id=grant.tenant_id,
+            user_id=grant.subject.platform_user_id,
+        )
+        if subject.verified_membership is not True:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        grant = replace(grant, subject=subject)
+        admission = replace(admission, grant=grant)
     _require_turn_start(policy, grant.subject, grant.turn_place)
     _require_external_inside_home(
         policy,

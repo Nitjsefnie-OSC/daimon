@@ -47,6 +47,8 @@ from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.membership import MembershipResolver
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import any_writers_none
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -443,6 +445,8 @@ def delivery_refusal(
     target: DeliveryTarget,
     creator_platform_user_id: str | None,
     creator_is_admin: bool,
+    creator_role_ids: tuple[str, ...] = (),
+    creator_verified_membership: bool | None = None,
     parent_channel_id: str | None = None,
     category_id: str | None = None,
 ) -> SkipReason | None:
@@ -455,7 +459,11 @@ def delivery_refusal(
     under one), which a caller may answer with the direct-message fallback.
     """
     creator_refusal = creator_refusal_for(
-        policy, creator_platform_user_id=creator_platform_user_id, creator_is_admin=creator_is_admin
+        policy,
+        creator_platform_user_id=creator_platform_user_id,
+        creator_is_admin=creator_is_admin,
+        creator_role_ids=creator_role_ids,
+        creator_verified_membership=creator_verified_membership,
     )
     if creator_refusal is not None:
         return creator_refusal
@@ -475,12 +483,22 @@ def delivery_refusal(
 
 
 def creator_refusal_for(
-    policy: TenantAccessPolicy, *, creator_platform_user_id: str | None, creator_is_admin: bool
+    policy: TenantAccessPolicy,
+    *,
+    creator_platform_user_id: str | None,
+    creator_is_admin: bool,
+    creator_role_ids: tuple[str, ...] = (),
+    creator_verified_membership: bool | None = None,
 ) -> SkipReason | None:
     """`invoker_not_allowed` unless the routine's creator may still invoke."""
     if not authorize(
         policy,
-        subject=build_subject(is_admin=creator_is_admin, platform_user_id=creator_platform_user_id),
+        subject=build_subject(
+            is_admin=creator_is_admin,
+            platform_user_id=creator_platform_user_id,
+            role_ids=creator_role_ids,
+            verified_membership=creator_verified_membership,
+        ),
         action=Action.ACT_FOR_CREATOR,
         surface=Surface.ROUTINE,
     ):
@@ -489,7 +507,11 @@ def creator_refusal_for(
 
 
 async def clear_creator(
-    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, *, platform: str
+    sessionmaker: async_sessionmaker[AsyncSession],
+    row: RoutineRow,
+    *,
+    platform: str,
+    membership_resolver: MembershipResolver | None = None,
 ) -> TenantAccessPolicy | SkipReason:
     """The tenant's policy if the routine may send anything at all, else why not.
 
@@ -505,7 +527,7 @@ async def clear_creator(
         except AccessPolicyUnreadable:
             return "access_policy_unreadable"
         is_admin = False
-        if row.created_by_user_id is not None:
+        if platform != "discord" and row.created_by_user_id is not None:
             principal = await find_platform_principal(
                 session,
                 tenant_id=row.tenant_id,
@@ -515,8 +537,23 @@ async def clear_creator(
             if principal is not None:
                 account = await get_account(session, principal.account_id)
                 is_admin = account is not None and account.role is Role.ADMIN
+    if platform == "discord" and row.created_by_user_id is not None:
+        subject = await resolve_subject(
+            sessionmaker,
+            membership_resolver,
+            tenant_id=row.tenant_id,
+            user_id=row.created_by_user_id,
+            require_fresh=True,
+        )
+        if subject.verified_membership is not True or not authorize(
+            policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
+        ):
+            return "invoker_not_allowed"
+        return policy
     refusal = creator_refusal_for(
-        policy, creator_platform_user_id=row.created_by_user_id, creator_is_admin=is_admin
+        policy,
+        creator_platform_user_id=row.created_by_user_id,
+        creator_is_admin=is_admin and platform != "discord",
     )
     return refusal if refusal is not None else policy
 

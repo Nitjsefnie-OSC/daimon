@@ -288,6 +288,8 @@ async def reply_to_dm(
     expected_scope_id: str,
     text: str,
     role: Role,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
 ) -> str | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
@@ -327,6 +329,8 @@ async def reply_to_dm(
             channel_id=conversation.channel_id,
             thread_id=conversation.scope_id,
             role=role,
+            role_ids=role_ids,
+            verified_membership=verified_membership,
             is_dm=True,
             dm_source_channel_id=conversation.source_channel_id,
             now=now,

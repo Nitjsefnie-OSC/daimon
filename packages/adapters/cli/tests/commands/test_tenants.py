@@ -927,3 +927,54 @@ def test_policy_json_keeps_legacy_shape_until_backends_are_configured(enabled):
         assert "enabled_backends" not in payload
     else:
         assert payload["enabled_backends"] == ["anthropic", "openai"]
+
+
+@pytest.mark.asyncio
+async def test_invoker_roles_set_show_and_clear(db_session_factory, stub_anthropic):  # type: ignore[no-untyped-def]
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="111")
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="111",
+        invoker_role=["222", "333", "222"],
+    )
+    assert (await _policy(db_session_factory, workspace_id="111")).invoker_role_ids == (
+        "222",
+        "333",
+    )
+    console = _make_console()
+    await tenants_access_policy_get(
+        rt=rt, console=console, platform="discord", external_id="111", as_json=True
+    )
+    assert json.loads(_output(console))["invoker_role_ids"] == ["222", "333"]
+    await tenants_access_policy_set(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="111",
+        clear_invoker_roles=True,
+    )
+    assert not (await _policy(db_session_factory, workspace_id="111")).invoker_role_ids
+    with pytest.raises(typer.BadParameter, match="@everyone"):
+        await tenants_access_policy_set(
+            rt=rt, console=console, platform="discord", external_id="111", invoker_role=["111"]
+        )
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams"])
+@pytest.mark.asyncio
+async def test_invoker_roles_refuse_unsupported_platform(
+    db_session_factory, stub_anthropic, platform: str
+):  # type: ignore[no-untyped-def]
+    with pytest.raises(typer.BadParameter, match="only for Discord"):
+        await tenants_access_policy_set(
+            rt=build_cli_runtime(
+                db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings()
+            ),
+            console=_make_console(),
+            platform=platform,
+            external_id="workspace",
+            invoker_role=["222"],
+        )

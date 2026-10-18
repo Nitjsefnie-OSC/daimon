@@ -2556,6 +2556,7 @@ async def _fire_with_fake_turn(
     destination: tuple[str, str] | None,
     agent_posts_to: str | None,
     policy: object | None = None,
+    membership_resolver=None,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.turn.state import ToolUseBlock, TurnState
 
@@ -2614,6 +2615,7 @@ async def _fire_with_fake_turn(
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
+        membership_resolver=membership_resolver,
     )
 
     async def fake_resolve(*args: object, **kwargs: object) -> str:
@@ -3157,3 +3159,33 @@ async def test_fleet_deadline_sweep_uses_store_owner_and_isolates_tick_failures(
     sessions = object()
     await _sweep_fleet_deadlines(sessions)
     assert calls == [sessions]
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+async def test_role_gated_fire_fetches_fresh_creator_facts(
+    db_session, db_session_factory, monkeypatch, allowed
+):  # type: ignore[no-untyped-def]
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    calls = []
+
+    async def fetch(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        calls.append(user_id)
+        return Membership(is_member=True, role_ids=("123",) if allowed else ())
+
+    resolver = CachedMembershipResolver(fetch)
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=None,
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(invoker_role_ids=("123",)),
+        membership_resolver=resolver,
+    )
+    assert calls == ["U_DEST"]
+    if allowed:
+        assert seen and after.last_result_tail == "Weekly summary: all green."
+    else:
+        assert not seen and after.last_error == "invoker_not_allowed"

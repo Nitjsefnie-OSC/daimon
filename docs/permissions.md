@@ -218,3 +218,26 @@ in the new shape on its next change, so no migration runs.
 The invoker allowlist, the Teams guests counted as members, read-only DM
 memory, environments, budgets and operator tokens are not
 channel or agent rules. They say who may act and who may change the rules.
+
+## Discord invoker roles
+
+A tenant's durable access policy can contain `invoker_role_ids`. A current
+server admin, a user listed in `invoker_user_ids`, or a verified member with
+any listed role may start turns. The user and role lists form a union. Both
+lists empty means open. Writer and agent rules still apply independently.
+Private guild-bound access also requires current server membership. Role
+matching uses IDs, so renaming a role does not change access.
+
+Set roles with repeatable `daimon tenants access-policy set discord GUILD_ID
+--invoker-role ROLE_ID`. This replaces the role list; `--clear-invoker-roles`
+clears only that list. `access-policy get` and its `--json` output show IDs.
+IDs must be Discord snowflakes; the guild's own ID (`@everyone`) is refused.
+Slack and Teams reject nonempty role lists, including invalid stored policies;
+their user allowlists retain their existing behaviour.
+
+Ordinary checks cache positive membership for at most 30 seconds and absence
+for five seconds. Member updates/removals invalidate gateway evidence
+immediately. Without member events, role revocation can take up to 30 seconds
+to affect an ordinary cached check. Lookup failures never extend a grant;
+expired evidence fails closed. Private result delivery requires a live lookup, including Discord MCP replies
+and transcript reads.

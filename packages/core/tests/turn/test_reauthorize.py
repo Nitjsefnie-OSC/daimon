@@ -44,6 +44,7 @@ async def _admit(db_session_factory, tmp_path: Path, tenant, *, role=Role.USER, 
         now=_NOW,
         role=role,
         is_dm=is_dm,
+        verified_membership=True,
     )
     return deps, admission
 
@@ -274,3 +275,83 @@ async def test_an_external_participant_is_refused_once_their_channel_is_no_longe
     with pytest.raises(AdmissionDenied) as exc_info:
         await reauthorize(deps, admission)
     assert exc_info.value.reason == "external_participant"
+
+
+async def test_role_removed_after_admission_refuses_reauthorization(
+    db_session, db_session_factory, tmp_path
+):  # type: ignore[no-untyped-def]
+    from dataclasses import replace
+
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(invoker_role_ids=("123",))
+    )
+    facts = [Membership(is_member=True, role_ids=("123",))]
+
+    async def fetch(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        return facts[0]
+
+    resolver = CachedMembershipResolver(fetch)
+    deps = replace(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        membership_resolver=resolver,
+    )
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="member-1",
+        channel_id="chan-1",
+        now=_NOW,
+    )
+    facts[0] = Membership(is_member=True)
+    resolver.invalidate(tenant.id, tenant.external_id, "member-1")
+    with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+        await reauthorize(deps, admission)
+
+
+async def test_concurrent_role_admissions_do_not_need_nested_pool_connections(
+    db_session, db_engine, tmp_path
+):  # type: ignore[no-untyped-def]
+    import asyncio
+    from dataclasses import replace
+
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(invoker_role_ids=("123",))
+    )
+
+    async def fetch(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(0)
+        return Membership(is_member=True, role_ids=("123",))
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    deps = replace(
+        _deps(
+            sessionmaker=factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        membership_resolver=CachedMembershipResolver(fetch),
+    )
+    async with asyncio.timeout(10):
+        admissions = await asyncio.gather(
+            *(
+                admit(
+                    deps,
+                    tenant_id=tenant.id,
+                    platform="discord",
+                    external_user_id=user,
+                    channel_id="chan-1",
+                    now=_NOW,
+                )
+                for user in ("one", "two")
+            )
+        )
+    assert len(admissions) == 2

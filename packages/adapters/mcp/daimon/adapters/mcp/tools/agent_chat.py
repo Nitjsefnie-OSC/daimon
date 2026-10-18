@@ -24,7 +24,7 @@ Headless loop (primitives plus the bounded ``ask`` convenience tool):
 - ``list_events`` returns the transcript; the caller reads the reply from the
   ``agent.message`` events. Agents run ``permission_policy=always_allow``
   (``specs.py``), so sessions reach idle without tool confirmations.
-  Read-only, not gated.
+  Read-only; Discord human callers pass a live membership/invoker check before delivery.
 - ``list_sessions`` enumerates this agent's sessions for resume. Read-only,
   not gated.
 - ``ask`` starts a turn, polls until idle for at most two minutes, and returns
@@ -82,6 +82,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _admission_recheck,  # pyright: ignore[reportPrivateUsage]
     _auth,  # pyright: ignore[reportPrivateUsage]
     _check_admission,  # pyright: ignore[reportPrivateUsage]
+    _policy_gate,  # pyright: ignore[reportPrivateUsage]
     _refused,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._pagination import Page
@@ -961,6 +962,20 @@ async def _get_turn_cost_impl(
     }
 
 
+async def _require_live_result_access(runtime: McpRuntime, auth: AuthIdentity) -> None:
+    """A private Discord result requires current membership, even after a long turn."""
+    if auth.platform == "discord" and auth.platform_user_id is not None:
+        await _policy_gate(
+            auth,
+            sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
+            tool_name="list_events",
+            agent_names=None,
+            pin_exempt=False,
+            require_fresh=True,
+        )
+
+
 async def _list_events_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1002,6 +1017,7 @@ async def _list_events_impl(
     cursor = await list_events_page(
         runtime.client, handle, query=list_kwargs, scope=mcp_scope(auth)
     )
+    await _require_live_result_access(runtime, auth)
     return Page[SessionEventOut](
         items=[
             SessionEventOut.model_validate(event.model_dump(mode="json")) for event in cursor.data
@@ -1075,6 +1091,7 @@ async def _deliver_turn_charts_impl(
     cache_key = (handle, turn_started_at.isoformat())
     cached = _delivery_cache.get(cache_key)
     if cached is not None:
+        await _require_live_result_access(runtime, auth)
         return cached
 
     delivery = await deliver_hosted_charts(
@@ -1099,6 +1116,7 @@ async def _deliver_turn_charts_impl(
         earliest = min(chart.expires_at for chart in result.chart_urls)
         ttl = min(ttl, (earliest - dt.datetime.now(dt.UTC)).total_seconds())
     _delivery_cache.put(cache_key, result, ttl_seconds=ttl)
+    await _require_live_result_access(runtime, auth)
     return result
 
 
@@ -1192,6 +1210,7 @@ async def _ask_impl(
                 )
                 if (observation := current_outcome.get()) is not None:
                     observation.finish(reason=TerminationReason.COMPLETED)
+                await _require_live_result_access(runtime, auth)
                 return AskResult(
                     handle=handle,
                     message=delivery.message,
@@ -1254,7 +1273,11 @@ def register_agent_chat_tools(
             return await pin_names(auth)
 
         return _admission_recheck(
-            auth, sessionmaker=runtime.session_factory, tool_name=tool_name, agent_names=names
+            auth,
+            sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
+            tool_name=tool_name,
+            agent_names=names,
         )
 
     @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
@@ -1307,6 +1330,7 @@ def register_agent_chat_tools(
         auth = await _check_admission(
             ctx,
             sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
             billing_config=billing_config,
             tool_name="start_turn",
             agent_names=pin_names,
@@ -1321,14 +1345,16 @@ def register_agent_chat_tools(
     ) -> AskResult:
         """Ask one question and wait for the final answer and any chart images. Starts a
         persistent turn, waits up to about 120 seconds for idle, and
-        returns the final text plus a resumable handle. Chart images are
-        embedded by default; short-lived download links are added when private
+        returns the final text plus a resumable handle. Discord callers need live
+        server membership and invoker-policy access before reply delivery. Chart
+        images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
         continue that conversation instead of starting a new one.
         """
         auth = await _check_admission(
             ctx,
             sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
             billing_config=billing_config,
             tool_name="ask",
             agent_names=pin_names,
@@ -1359,6 +1385,7 @@ def register_agent_chat_tools(
         auth = await _check_admission(
             ctx,
             sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
             billing_config=billing_config,
             tool_name="continue_turn",
             agent_names=pin_names,
@@ -1439,6 +1466,8 @@ def register_agent_chat_tools(
         types: list[str] | None = None,
     ) -> Page[SessionEventOut]:
         """List a session's events — the transcript.
+
+        Discord callers must still pass a live membership and invoker-policy check.
 
         The agent's reply is in the ``agent.message`` events. Call this once
         ``get_session`` reports the session is idle to read what the agent said.

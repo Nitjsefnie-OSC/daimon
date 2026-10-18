@@ -27,11 +27,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 class AccessPolicyUnreadable(UserFacingError):
     """The stored policy does not parse; callers must refuse, never assume open."""
 
-    def __init__(self, *, tenant_id: uuid.UUID) -> None:
+    def __init__(self, *, tenant_id: uuid.UUID, detail: str | None = None) -> None:
         # Adapters render this text as-is, so it names no tenant id.
         super().__init__(
-            "this workspace's access settings can't be read, so no turn was started; "
-            "ask an admin to fix them"
+            detail
+            or (
+                "this workspace's access settings can't be read, so no turn was started; "
+                "ask an admin to fix them"
+            )
         )
         self.tenant_id = tenant_id
 
@@ -151,7 +154,22 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
         payload = {**cast("dict[str, Any]", payload), "enabled_backends": record.enabled_backends}
     try:
         # JSON null, an array or a string fail validation like a bad field does.
-        return TenantAccessPolicy.model_validate(payload)
+        policy = TenantAccessPolicy.model_validate(payload)
+        if policy.invoker_role_ids:
+            tenant = await session.get(Tenant, tenant_id)
+            if (
+                tenant is None
+                or tenant.platform != "discord"
+                or tenant.external_id in policy.invoker_role_ids
+            ):
+                raise AccessPolicyUnreadable(
+                    tenant_id=tenant_id,
+                    detail=(
+                        "this workspace has unsupported Discord role access settings; "
+                        "ask an admin to fix them"
+                    ),
+                )
+        return policy
     except ValidationError as exc:
         raise AccessPolicyUnreadable(tenant_id=tenant_id) from exc
 
@@ -161,11 +179,27 @@ async def set_access_policy(
 ) -> None:
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
+    if policy.invoker_role_ids:
+        tenant = await session.get(Tenant, tenant_id)
+        if (
+            tenant is None
+            or tenant.platform != "discord"
+            or tenant.external_id in policy.invoker_role_ids
+        ):
+            raise ValueError(
+                "Discord roles require a Discord tenant and cannot include @everyone (guild id)"
+            )
     payload = policy.model_dump(mode="json")
     backends = payload.pop("enabled_backends")
     # Leave empty keys out, so a build from before them still reads a row
     # that sets none of them.
-    for key in ("channel_rules", "category_rules", "agent_rules", "member_guest_ids"):
+    for key in (
+        "channel_rules",
+        "category_rules",
+        "agent_rules",
+        "member_guest_ids",
+        "invoker_role_ids",
+    ):
         if not payload.get(key):
             payload.pop(key, None)
     await session.execute(

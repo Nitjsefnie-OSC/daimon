@@ -2055,3 +2055,21 @@ existing progress card while it waits behind the tenant cap. The same card
 returns to ordinary progress when the slot is granted. Stop, queue limits and
 FIFO admission are unchanged, and the card displays no tenant identities or
 queue counts. Drained follow-up turns keep their existing card wording.
+
+## Current Discord membership evidence
+
+The pure authorization subject carries platform role IDs and verified tenant
+membership. Admission and reauthorization use these facts for the tenant's
+invoker policy. `daimon.core.membership.MembershipResolver.resolve(tenant_id,
+guild_id, user_id, require_fresh=False)` is the shared asynchronous boundary.
+`Membership` reports membership (true, false, or unknown), current role IDs,
+and current server-admin permissions. Callers select a registered tenant's
+guild; internal account UUIDs never substitute for Discord user IDs.
+
+The Discord adapter timestamps gateway facts at ingress, before queue waits;
+queued or replayed message snapshots cannot restore revoked roles. Its live
+SDK fetch refreshes guild role/owner metadata as well as the member. MCP and scheduler hosts use the core Discord REST transport
+with the existing bot credential, without importing the Discord adapter.
+The shared cache keys by tenant, guild, and user, shares concurrent fetches,
+and discards results invalidated while in flight. `require_fresh=True` bypasses
+completed cache entries. Unknown evidence cannot satisfy a role gate.

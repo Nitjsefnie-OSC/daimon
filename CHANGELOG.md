@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Gate Discord turns and routine owners by configured role IDs, with current membership checks for MCP, scheduled fires, and private delivery. Configure roles with `daimon tenants access-policy set --invoker-role`.
+
 ### Fixed
 
 - Switching providers preserves supported MCP tools when a sibling needs confirmation; unavailable tools require explicit consent and remain blocked.

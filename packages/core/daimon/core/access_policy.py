@@ -109,8 +109,9 @@ class TenantAccessPolicy(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    # Platform user ids allowed to start a turn. Empty means everyone may.
+    # Platform user and Discord role ids form a union; both empty means open.
     invoker_user_ids: tuple[str, ...] = ()
+    invoker_role_ids: tuple[str, ...] = ()
     # Channel, Discord thread or Slack ``channel:ts`` id -> its rule; a thread
     # also follows its channel's. Open rules are not kept.
     channel_rules: dict[str, ChannelRule] = Field(default_factory=dict)
@@ -125,6 +126,19 @@ class TenantAccessPolicy(BaseModel):
     # Only read while `teams.restrict_guests` is on.
     member_guest_ids: tuple[str, ...] = ()
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
+
+    @field_validator("invoker_role_ids")
+    @classmethod
+    def _role_snowflakes(cls, ids: tuple[str, ...]) -> tuple[str, ...]:
+        if any(
+            not value.isascii()
+            or not value.isdecimal()
+            or not 0 < int(value) < 2**64
+            or str(int(value)) != value
+            for value in ids
+        ):
+            raise ValueError("invoker_role_ids must contain Discord snowflakes")
+        return tuple(dict.fromkeys(ids))
 
     @field_validator("enabled_backends")
     @classmethod
@@ -155,13 +169,39 @@ class TenantAccessPolicy(BaseModel):
 OPEN_ACCESS_POLICY = TenantAccessPolicy()
 
 
+def server_admin_bypasses_invoker_gate(*, is_admin: bool) -> bool:
+    """The single server-admin exemption from the invoker policy.
+
+    Callers supply live native server permissions; persisted roles and token
+    claims cannot establish Discord admin evidence for a membership check.
+    """
+    return is_admin
+
+
 def is_invoker_allowed(
-    policy: TenantAccessPolicy, *, external_user_id: str, is_admin: bool
+    policy: TenantAccessPolicy,
+    *,
+    external_user_id: str,
+    is_admin: bool,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
 ) -> bool:
-    """Whether this user may start a turn. Admins always may, so they can't lock themselves out."""
-    if is_admin or not policy.invoker_user_ids:
+    """Apply the user/role union and the current server-admin exemption.
+
+    Unknown membership cannot match a role policy. An explicit nonmember
+    cannot invoke, even through a user exception or admin flag.
+    """
+    if policy.invoker_role_ids and verified_membership is not True:
+        return False
+    if verified_membership is False:
+        return False
+    if server_admin_bypasses_invoker_gate(is_admin=is_admin):
         return True
-    return external_user_id in policy.invoker_user_ids
+    if not (policy.invoker_user_ids or policy.invoker_role_ids):
+        return True
+    return external_user_id in policy.invoker_user_ids or bool(
+        set(role_ids) & set(policy.invoker_role_ids)
+    )
 
 
 DM_SCOPE_PREFIX = "dm:"

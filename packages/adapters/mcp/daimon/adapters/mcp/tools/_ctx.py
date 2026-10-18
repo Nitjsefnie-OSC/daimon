@@ -11,6 +11,8 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
 from daimon.core.authz import Action, AgentRef, Surface, authorize, build_subject
 from daimon.core.billing import BillingConfig, is_over_cap
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.membership import MembershipResolver
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import agent_permissions, any_agent_rules, any_own_readers
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -82,9 +84,11 @@ async def _policy_gate(
     auth: AuthIdentity,
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
+    membership_resolver: MembershipResolver | None = None,
     tool_name: str,
     agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None,
     pin_exempt: bool,
+    require_fresh: bool = False,
 ) -> str | None:
     """The access-policy half of ``_admit``: the agent pin, then the invoker allowlist.
 
@@ -107,14 +111,27 @@ async def _policy_gate(
 
     # The hub admin exemption needs no agent lookup (`authorize` allows it
     # before reading names), so skip the lookup for it unless the budget needs
-    # it (below). The stored role is read again here, so a re-check also sees
-    # a demotion saved meanwhile.
+    # it (below). Discord membership supplies current native admin evidence;
+    # other platforms retain their existing trusted identity signals.
+    live_subject = None
+    if (
+        auth.platform == "discord" or bool(policy.invoker_role_ids)
+    ) and auth.platform_user_id is not None:
+        live_subject = await resolve_subject(
+            sessionmaker,
+            membership_resolver,
+            tenant_id=auth.tenant_id,
+            user_id=auth.platform_user_id,
+            require_fresh=require_fresh,
+        )
     hub_admin = (
         pin_exempt
         and auth.platform_user_id is not None
         and account is not None
         and account.role is Role.ADMIN
     )
+    if live_subject is not None:
+        hub_admin = pin_exempt and live_subject.is_admin
     names: tuple[str | None, ...] = ()
     gated = any_agent_rules(policy) or any_own_readers(policy)
     # An isolated channel's own agent is charged to that channel, so the
@@ -137,7 +154,28 @@ async def _policy_gate(
             and account is not None
             and account.role is Role.ADMIN
         )
+        if live_subject is not None:
+            hub_admin = pin_exempt and live_subject.is_admin
         gated = any_agent_rules(policy) or any_own_readers(policy)
+    is_discord = auth.platform == "discord" or bool(policy.invoker_role_ids)
+    is_admin = (
+        auth.is_admin or (account is not None and account.role is Role.ADMIN)
+    ) and not is_discord
+    subject = mcp_subject(auth, is_admin=is_admin)
+    if auth.platform_user_id is not None and is_discord:
+        subject = (
+            live_subject
+            if live_subject is not None and agent_names is None
+            else await resolve_subject(
+                sessionmaker,
+                membership_resolver,
+                tenant_id=auth.tenant_id,
+                user_id=auth.platform_user_id,
+                require_fresh=require_fresh,
+            )
+        )
+    if live_subject is not None:
+        hub_admin = pin_exempt and subject.is_admin
     decision = (
         authorize(
             policy,
@@ -183,13 +221,12 @@ async def _policy_gate(
     owner = agent_permissions(policy, names).home if names else None
     if auth.platform_user_id is None:
         return owner
-    is_admin = auth.is_admin or (account is not None and account.role is Role.ADMIN)
     start = authorize(
         policy,
-        subject=mcp_subject(auth, is_admin=is_admin),
+        subject=subject,
         action=Action.START_TURN,
     )
-    if not start:
+    if not start or (live_subject is not None and subject.verified_membership is not True):
         record_authz_denial(Action.START_TURN, start.reason)
         log.info(
             "mcp.admission_denied",
@@ -210,6 +247,7 @@ def _admission_recheck(  # pyright: ignore[reportUnusedFunction]
     auth: AuthIdentity,
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
+    membership_resolver: MembershipResolver | None = None,
     tool_name: str,
     agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None,
     pin_exempt: bool = False,
@@ -228,6 +266,7 @@ def _admission_recheck(  # pyright: ignore[reportUnusedFunction]
         await _policy_gate(
             auth,
             sessionmaker=sessionmaker,
+            membership_resolver=membership_resolver,
             tool_name=tool_name,
             agent_names=agent_names,
             pin_exempt=pin_exempt,
@@ -240,6 +279,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     auth: AuthIdentity,
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
+    membership_resolver: MembershipResolver | None = None,
     billing_config: BillingConfig | None,
     tool_name: str,
     agent_names: Callable[[], Awaitable[tuple[str | None, ...]]] | None = None,
@@ -257,9 +297,9 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       a fallback that bills this path.
       It skips billing only: when ``agent_names`` is given its turn is still
       held to an agent pin (below), with no admin exemption.
-    - Otherwise checks the tenant's invoker allowlist first, exempting an
-      account whose stored role is admin (the hub pins ``is_admin=False``, so
-      the stored role is the only admin signal every caller has). A refusal,
+    - Otherwise checks the tenant's user/role invoker policy. Discord resolves
+      membership and native admin permissions, using the shared bounded cache;
+      stored roles and token admin claims cannot grant that exemption. A refusal,
       or a policy that can't be read, raises a ``TERMINAL ERROR:`` ``ToolError``.
     - Then, when ``agent_names`` is given and the tenant pins any agent,
       refuses a turn on a pinned agent outside its pin. An MCP turn has no
@@ -269,9 +309,8 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
       security gate, not a billing one: it is enforced for no-platform bearer
       and agent-key identities too, before the unbilled return below, with no
       admin exemption. Only the hub passes ``pin_exempt``, for a caller
-      whose stored role is admin (`_session_access.load_hub_subject`;
-      refreshed by the person's next platform turn); its reply reaches only
-      them.
+      who is an admin (`_session_access.load_hub_subject`, with current
+      membership evidence for Discord); its reply reaches only them.
       ``agent_names`` is called only when a pin exists, so the agent lookup it
       may need costs nothing on unpinned tenants.
     - Then runs ``is_over_balance`` then ``is_over_cap``, then the channel
@@ -291,6 +330,7 @@ async def _admit(  # pyright: ignore[reportUnusedFunction]
     owner = await _policy_gate(
         auth,
         sessionmaker=sessionmaker,
+        membership_resolver=membership_resolver,
         tool_name=tool_name,
         agent_names=agent_names,
         pin_exempt=pin_exempt,
@@ -356,6 +396,7 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
     ctx: Context,
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
+    membership_resolver: MembershipResolver | None = None,
     billing_config: BillingConfig | None,
     tool_name: str,
     agent_names: Callable[[AuthIdentity], Awaitable[tuple[str | None, ...]]] | None = None,
@@ -370,6 +411,7 @@ async def _check_admission(  # pyright: ignore[reportUnusedFunction]
     return await _admit(
         auth,
         sessionmaker=sessionmaker,
+        membership_resolver=membership_resolver,
         billing_config=billing_config,
         tool_name=tool_name,
         agent_names=None if agent_names is None else names,

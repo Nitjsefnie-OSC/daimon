@@ -181,3 +181,55 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
 
 def test_command_is_registered_as_dm_me() -> None:
     assert DirectMessageCog.dm.name == "dm-me"
+
+
+async def test_role_loss_while_dm_runs_prevents_private_result_delivery(
+    db_session_factory, monkeypatch
+):  # type: ignore[no-untyped-def]
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.access_policy import set_access_policy
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, workspace_id=str(_GUILD))
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account.id,
+            route_key="5",
+            external_user_id="999",
+            workspace_id=str(_GUILD),
+            source_channel_id=str(_PARENT),
+        )
+        await set_access_policy(
+            session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_role_ids=("123",))
+        )
+    monkeypatch.setattr(dm_module, "reply_to_dm", AsyncMock(return_value="private secret"))
+    member = MagicMock()
+    member.guild_permissions.administrator = False
+    member.guild_permissions.manage_guild = False
+    guild = MagicMock()
+    guild.owner_id = 1
+    guild.fetch_member = AsyncMock(return_value=member)
+    bot = MagicMock()
+    bot.draining = False
+    bot.runtime.sessionmaker = db_session_factory
+    bot.runtime.turn_deps.membership_resolver = CachedMembershipResolver(
+        AsyncMock(return_value=Membership(is_member=True))
+    )
+    bot.get_guild.return_value = guild
+    bot.turn_queue = TurnQueue(
+        platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
+    )
+    message = MagicMock()
+    message.author.bot = False
+    message.author.id = 999
+    message.channel = MagicMock(spec=discord.DMChannel)
+    message.channel.id = 5
+    message.channel.send = AsyncMock()
+    message.content = "hello"
+    await DirectMessageCog(bot).on_message(message)
+    sent = [call.args[0] for call in message.channel.send.await_args_list]
+    assert sent and all("private secret" not in text for text in sent)
+    assert "No private result was delivered" in sent[-1]

@@ -18,6 +18,7 @@ from daimon.adapters.discord.checks import (
     is_member_guild_admin,
     require_registered_guild,
 )
+from daimon.core.authz import Action, authorize
 from daimon.core.config import Settings
 from daimon.core.direct_messages import (
     reply_to_dm,
@@ -29,6 +30,8 @@ from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.membership_subject import resolve_subject
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set_dm_enabled
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
@@ -248,6 +251,21 @@ class DirectMessageCog(commands.Cog):
             finally:
                 ticket.release()
             if answer is not None:
+                subject = await resolve_subject(
+                    runtime.sessionmaker,
+                    runtime.turn_deps.membership_resolver,
+                    tenant_id=conversation.tenant_id,
+                    user_id=str(message.author.id),
+                    require_fresh=True,
+                )
+                async with runtime.sessionmaker() as session:
+                    policy = await load_access_policy(session, tenant_id=conversation.tenant_id)
+                if subject.verified_membership is not True or not authorize(
+                    policy, subject=subject, action=Action.START_TURN
+                ):
+                    raise DaimonError(
+                        "Your server access could not be verified. No private result was delivered."
+                    )
                 for start in range(0, len(answer), 1900):
                     await message.channel.send(
                         answer[start : start + 1900],
