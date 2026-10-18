@@ -76,15 +76,36 @@ def test_microsoft_send_is_not_asked_unless_selected() -> None:
     )
 
 
-def test_card_names_the_recipients_and_subject() -> None:
+def test_card_shows_every_recipient_location_and_body_without_details() -> None:
+    """Who and what goes out is in the always-visible text, never truncated."""
+    long_cc = "a.very.long.mailbox.name.for.an.optional.attendee@subsidiary.example.com"
     prompt = prompt_for_tool_call(
-        _call(action="create_event", start="2026-09-15T10:00", end="2026-09-15T11:00"),
+        _call(
+            action="create_event",
+            start="2026-09-15T10:00",
+            end="2026-09-15T11:00",
+            cc=["bob@example.com", long_cc],
+            location="Room 4",
+            body="Agenda:\n  budget review",
+        ),
         requester_platform_user_id="requester",
         now=datetime.now(UTC),
     )
+    shown = prompt.consequence or ""
     assert prompt.title == 'Send invite "Notes"?', "the card must say what goes out"
-    assert "To: ada@example.com" in prompt.detail_lines, "the card must list the recipients"
+    assert shown.startswith("It goes out from your Microsoft account."), "sent as the person"
+    assert "To: ada@example.com" in shown, "the card must list the required attendees"
+    assert f"Optional: bob@example.com, {long_cc}" in shown, "every cc address, untruncated"
+    assert "Where: Room 4" in shown, "an invite shows where"
+    assert "Message: Agenda: budget review" in shown, "the card previews the body"
     assert any(line.startswith("When: ") for line in prompt.detail_lines), "an invite shows when"
-    assert prompt.consequence == "It goes out from your Microsoft account.", (
-        "the card must say it is sent as the person"
+
+
+def test_mail_card_labels_cc_recipients() -> None:
+    """A mail's cc list is shown as Cc."""
+    prompt = prompt_for_tool_call(
+        _call(cc=["eve@example.com"], body="Hi"),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
     )
+    assert "Cc: eve@example.com" in (prompt.consequence or ""), "mail cc must be visible"

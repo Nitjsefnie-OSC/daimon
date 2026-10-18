@@ -282,12 +282,22 @@ def prompt_for_tool_call(
         action = f'Send {noun} "{subject}"'
         title = f"{action}?"
         denied_action = f"{noun.capitalize()} not sent"
-        consequence = "It goes out from your Microsoft account."
+        # Shown in full outside Details: the person approves exactly who and what.
+        body_text = " ".join(str(data.get("body") or "").split())
+        location = data.get("location")
         detail_lines = (
-            f"To: {_short(_recipients(data.get('to')))}",
-            f"Subject: {_short(subject)}",
-            *((f"When: {_short(f'{data.get("start")} to {data.get("end")}')}",) if invite else ()),
+            f"To: {_recipients(data.get('to'))}",
+            *(
+                (f"{'Optional' if invite else 'Cc'}: {_recipients(data.get('cc'))}",)
+                if data.get("cc")
+                else ()
+            ),
+            f"Subject: {subject}",
+            *((f"When: {data.get('start')} to {data.get('end')}",) if invite else ()),
+            *((f"Where: {location}",) if invite and location else ()),
+            f"Message: {_short(body_text, limit=400) or '(empty)'}",
         )
+        consequence = "\n".join(("It goes out from your Microsoft account.", *detail_lines))
     elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
         agent = str(data.get("agent_name") or data.get("agent") or "agent")
         if not name:
