@@ -89,6 +89,7 @@ async def set_working_repo_impl(
                 agent_id=agent_id,
                 repo_name=selected,
                 account_id=auth.account_id,
+                agent_name=agent.name,
             )
         except ValueError as error:
             raise ToolError(str(error)) from error

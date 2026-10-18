@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- One agent can now use repos from several GitHub accounts or orgs (up to 12); each gets its own token covering exactly the granted repos.
+
 - **People from another organisation get none of the agent's credentials.**
   A Teams external participant or guest answered in a `readers: own`
   channel used to get the agent's keys as a mounted `.env` and its shared

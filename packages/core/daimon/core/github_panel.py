@@ -11,7 +11,12 @@ from daimon.core.native_admins import AdminCaller, read_stored_admin
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
-from daimon.core.stores.github_access import SERVER_WIDE_GRANT_MESSAGE
+from daimon.core.stores.github_access import (
+    SERVER_WIDE_GRANT_MESSAGE,
+    InstallationLimitError,
+    ReadOnlyMultiInstallationError,
+    SessionVaultBudgetError,
+)
 from daimon.core.stores.github_connect import (
     PINNED_AGENT_MESSAGE,
     admin_account_for_platform_user,
@@ -129,6 +134,10 @@ _PUBLIC_ERRORS = frozenset(
 
 def safe_github_error(error: ValueError) -> str:
     """Keep internal access and storage terminology off chat screens."""
+    if isinstance(
+        error, (InstallationLimitError, SessionVaultBudgetError, ReadOnlyMultiInstallationError)
+    ):
+        return str(error)
     message = str(error)
     return message if message in _PUBLIC_ERRORS else "GitHub didn't answer. Try again in a minute."
 

@@ -11,7 +11,7 @@ import structlog
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     build_app_jwt,
-    get_app_installation_account,
+    get_app_installation_details,
     list_installation_repositories,
     mint_installation_listing_token,
 )
@@ -81,11 +81,16 @@ async def drain_github_installation_reconciliations(
                 github_app.app_id,
                 now=int(current_time.timestamp()),
             )
-            installation_state = await get_app_installation_account(
-                http_client,
-                jwt=app_jwt,
-                installation_id=job.installation_id,
-            )
+            try:
+                installation_state = await get_app_installation_details(
+                    http_client,
+                    jwt=app_jwt,
+                    installation_id=job.installation_id,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                installation_state = None
             if installation_state is None:
                 repositories = None
             else:
@@ -120,6 +125,25 @@ async def drain_github_installation_reconciliations(
                         installation_state.suspended_at if installation_state is not None else None
                     ),
                     now=finished_at,
+                )
+                owner_before = (
+                    await installation_store.correct_github_app_owner(
+                        session,
+                        installation_id=job.installation_id,
+                        account_id=installation_state.account_id,
+                        account_login=installation_state.account_login,
+                    )
+                    if completed and installation_state is not None
+                    else None
+                )
+            if owner_before is not None and installation_state is not None:
+                _log.info(
+                    "github.installation_reconciliation.owner_corrected",
+                    installation_id=job.installation_id,
+                    old_account_login=owner_before[0],
+                    old_account_id=owner_before[1],
+                    account_login=installation_state.account_login,
+                    account_id=installation_state.account_id,
                 )
             _log.info(
                 "github.installation_reconciliation.finished",

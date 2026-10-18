@@ -49,7 +49,10 @@ from daimon.core.stores.accounts import get_account_with_tenant, has_external_ac
 from daimon.core.stores.domain import AccountIdentityRow, Role
 from daimon.core.stores.github_access import list_agent_repos
 from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
-from daimon.core.stores.github_request_actions import finish_confirmed_requests
+from daimon.core.stores.github_request_actions import (
+    finish_confirmed_requests,
+    lock_confirmed_request_repos,
+)
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.teams_graph import GraphClient, GraphUnavailable
@@ -2028,6 +2031,12 @@ def build_oauth_github_routes(
                     )
                     if not manages:
                         return _error("You can no longer manage this agent.", 403)
+                    prelocked_request_ids = await lock_confirmed_request_repos(
+                        session,
+                        tenant_id=invitation.tenant_id,
+                        approved_by_account_id=invitation.requester_account_id,
+                        extra_repo_ids={repo.repo_id for repo in repos},
+                    )
                     saved = await github_connect.confirm(
                         session,
                         state=state,
@@ -2038,7 +2047,7 @@ def build_oauth_github_routes(
                         expected_agent_snapshot=snapshot,
                     )
                     if saved:
-                        for detail in details:
+                        for detail in sorted(details, key=lambda item: item.installation_id):
                             await github_app_installations.upsert_github_app(
                                 session,
                                 installation_id=detail.installation_id,
@@ -2066,7 +2075,7 @@ def build_oauth_github_routes(
                             )
                         if repos:
                             await github_connect.activate_confirmed_agent(
-                                session, invitation=invitation, repos=repos
+                                session, invitation=invitation, repos=repos, repo_locks_held=True
                             )
                         if working_choice != "keep":
                             selected_name = (
@@ -2078,12 +2087,14 @@ def build_oauth_github_routes(
                                 agent_id=invitation.agent_id,
                                 repo_name=selected_name,
                                 account_id=invitation.requester_account_id,
+                                agent_name=invitation.agent_name,
                             )
                         if repos:
                             resumed_requests = await finish_confirmed_requests(
                                 session,
                                 tenant_id=invitation.tenant_id,
                                 approved_by_account_id=invitation.requester_account_id,
+                                prelocked_request_ids=prelocked_request_ids,
                             )
                             if not resumed_requests:
                                 await github_connect.queue_connect_followup(
@@ -2106,7 +2117,12 @@ def build_oauth_github_routes(
                 return _error(
                     "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
                 )
-            except github_access.SecondInstallationError as exc:
+            except (
+                github_connect.GrantReassignmentError,
+                github_access.InstallationLimitError,
+                github_access.SessionVaultBudgetError,
+                github_access.ReadOnlyMultiInstallationError,
+            ) as exc:
                 return _error(str(exc), 400, retry_confirm_url)
             except DBAPIError as exc:
                 if getattr(exc.orig, "sqlstate", None) in ("40001", "40P01"):
@@ -2244,6 +2260,12 @@ def build_oauth_github_routes(
                     return _error("You can no longer manage this agent.", 403, retry_confirm_url)
             try:
                 async with sessionmaker.begin() as session:
+                    prelocked_request_ids = await lock_confirmed_request_repos(
+                        session,
+                        tenant_id=invitation.tenant_id,
+                        approved_by_account_id=invitation.requester_account_id,
+                        extra_repo_ids={repo.repo_id for repo in repos},
+                    )
                     saved = await github_connect.confirm(
                         session,
                         state=state,
@@ -2267,7 +2289,7 @@ def build_oauth_github_routes(
                         ),
                     )
                     if saved:
-                        for detail in details:
+                        for detail in sorted(details, key=lambda item: item.installation_id):
                             await github_app_installations.upsert_github_app(
                                 session,
                                 installation_id=detail.installation_id,
@@ -2286,12 +2308,13 @@ def build_oauth_github_routes(
                                 now=datetime.now(UTC),
                             )
                         await github_connect.activate_confirmed_agent(
-                            session, invitation=invitation, repos=repos
+                            session, invitation=invitation, repos=repos, repo_locks_held=True
                         )
                         resumed_requests = await finish_confirmed_requests(
                             session,
                             tenant_id=invitation.tenant_id,
                             approved_by_account_id=invitation.requester_account_id,
+                            prelocked_request_ids=prelocked_request_ids,
                         )
                         if not resumed_requests:
                             await github_connect.queue_connect_followup(
@@ -2313,7 +2336,12 @@ def build_oauth_github_routes(
             except github_connect.PinnedAgentConnectionError:
                 await revoke_user_token(token)
                 return _error(github_connect.PINNED_AGENT_MESSAGE)
-            except github_access.SecondInstallationError as exc:
+            except (
+                github_connect.GrantReassignmentError,
+                github_access.InstallationLimitError,
+                github_access.SessionVaultBudgetError,
+                github_access.ReadOnlyMultiInstallationError,
+            ) as exc:
                 await revoke_user_token(token)
                 return _error(str(exc))
             except ValueError:

@@ -905,7 +905,9 @@ against the fingerprints stored on the mapping row; the outcome rides back on
 
 GitHub App mode uses the agent's live grants when assembling a turn. External
 askers get no App token. Each session gets one write token scoped to the agent's
-live repositories in one installation. The token is recorded before minting
+live repositories in each installation, with a separate token for each exact
+repository group. An agent can hold grants from up to 12 GitHub accounts or
+orgs. The token is recorded before minting
 and checked again after delivery. A repository is live when it remains in both
 the tenant-confirmed Connect set and the
 latest complete GitHub installation snapshot. Until the first refresh, the

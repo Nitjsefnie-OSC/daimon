@@ -342,6 +342,18 @@ github_session_token	SessionToken	UnsafeRemoved	violates:RemovedAccessInvalid	6	
 github_session_token	SessionToken	UnsafeLongLock	violates:NoNetworkUnderLock	5	-	grant lock held across GitHub mint
 github_session_token	GrantInstall	GrantSafe	clean	8	-	locked grants from both installations persist
 github_session_token	GrantInstall	GrantUnsafe	violates:CompletedGrantsPersist	31	-	stale read-then-write loses a completed cross-installation grant
+github_session_token	GrantCap	GrantCapSafe	clean	10	-	locked staging refuses a third distinct installation at the scaled cap of two
+github_session_token	GrantCap	GrantCapUnsafe	violates:WithinCap	8	-	staging without the cap admits a third installation
+github_session_token	GrantAdmission	GrantAdmissionBudgetSafe	clean	2	-	501st repo equivalent is refused before a third named token chunk exceeds the vault budget
+github_session_token	GrantAdmission	GrantAdmissionBudgetUnsafe	violates:WithinBudget	2	-	admitting a new chunk exceeds the vault budget
+github_session_token	GrantAdmission	GrantAdmissionReadSafe	clean	2	-	read-only A grant blocks adding B in multi mode
+github_session_token	GrantAdmission	GrantAdmissionReadUnsafe	violates:MultiWrite	2	-	adding B beside read-only A leaves a session that cannot mint
+github_grant_locks	GrantLocks	GrantLocksSafe	clean	56	-	tenant lock serializes batch activation, cross-agent confirmation and nested completion
+github_grant_locks	GrantLocks	GrantLocksCrossSafe	clean	20	-	tenant lock serializes opposing confirmation agent-lock orders
+github_grant_locks	GrantLocks	GrantLocksNestedSafe	clean	18	-	tenant lock serializes a late draft and nested request completion
+github_grant_locks	GrantLocks	GrantLocksBroken	deadlock	11	-	batch holds x and agent a while confirmation holds y
+github_grant_locks	GrantLocks	GrantLocksCrossBroken	deadlock	16	-	cross-agent confirmations hold opposite agent locks
+github_grant_locks	GrantLocks	GrantLocksNestedBroken	deadlock	11	-	nested completion finds late draft y after agent a lock
 github_session_token	MultiInstallation	MultiSafe	clean	5593	-	per-installation scope and expiry, rotation, B grant remint, helper read/return race
 github_session_token	MultiInstallation	MultiSingleToken	violates:GrantedReachable	3	-	guard removed but only one token leaves B unreachable
 github_session_token	MultiInstallation	MultiFallback	violates:ResultScoped	28	-	helper fallback returns A token for uncovered B repo
