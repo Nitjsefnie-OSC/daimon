@@ -19,7 +19,8 @@ Layout:
 Operator workflow: edit YAML → `daimon defaults apply`.
 
 The `daimon` agent also references Anthropic's built-in `docx`, `pptx` and
-`xlsx` skills (`type: anthropic`). They have no directory here; a backend
-other than Anthropic runs the agent without them.
+`xlsx` skills (`type: anthropic`), limited to Teams with `platforms: [teams]`.
+They have no directory here and stay off the agent itself: a Teams turn on
+the Anthropic backend adds them to its session (see `docs/defaults.md`).
 
 The default environment installs `gh` for repository work in GitHub App sessions.
