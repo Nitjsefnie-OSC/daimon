@@ -365,6 +365,34 @@ async def test_resolve_links_a_file_in_the_channels_folder_and_names_the_rest() 
     )
 
 
+async def test_resolve_links_a_file_read_without_an_etag_with_no_version() -> None:
+    """Graph leaving the eTag out costs only the version: the file is still linked."""
+    seen: list[httpx.Request] = []
+    shared = SharedFile("q3.xlsx", f"{LIBRARY}/Planning/q3.xlsx")
+    routes = {("GET", FILES_FOLDER): _ok(FOLDER_ITEM), **_file_routes(shared.content_url or "")}
+    item_path = "/v1.0/drives/b!drive-1/items/01Q3"
+    routes[("GET", item_path)] = _ok(
+        {
+            "id": "01Q3",
+            "parentReference": {"driveId": "b!drive-1", "id": "01FOLDER"},
+            "@microsoft.graph.downloadUrl": DOWNLOAD_URL,
+        }
+    )
+
+    media = await _files(_sharepoint(routes, seen)).resolve(
+        ChannelMedia(files=(shared,)), group_id=GROUP, channel_id=CHANNEL
+    )
+
+    assert media.files == (dataclasses.replace(shared, download_url=DOWNLOAD_URL),), (
+        "linked as before, with no version to offer a replace"
+    )
+    assert [r.url.path for r in seen] == [
+        FILES_FOLDER,
+        _shares(shared.content_url or ""),
+        item_path,
+    ], "no extra Graph call for the version"
+
+
 async def test_resolve_marks_shared_files_refused_without_the_permission() -> None:
     """No consent: the folder is refused, so each file is named as refused, never fetched."""
     seen: list[httpx.Request] = []

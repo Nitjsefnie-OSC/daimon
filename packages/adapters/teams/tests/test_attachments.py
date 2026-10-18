@@ -136,6 +136,9 @@ async def test_shared_file_is_linked_for_the_agent_without_a_download() -> None:
         )
 
     assert DOWNLOAD_URL in prepared.prefix and "`report.pdf`" in prepared.prefix
+    assert "replace_channel_file" not in prepared.prefix, (
+        "a file without a link and version is never offered for replacing"
+    )
 
 
 async def test_a_channel_file_line_names_the_link_and_version_a_replace_takes() -> None:
