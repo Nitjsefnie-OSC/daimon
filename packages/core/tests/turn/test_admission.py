@@ -42,6 +42,7 @@ from daimon.testing.ma import (
     build_fake_anthropic,
     list_response,
     resolved_agent_env_router,
+    skill_response,
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
@@ -1122,6 +1123,66 @@ async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
         "the platform's are marked, so a refused one can be left out at create"
     )
     assert admission.agent.skills == [], "the agent itself is never changed"
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_admit_adds_the_default_agents_microsoft_365_skill_on_teams_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    """A Teams turn of the seeded agent runs with the tenant's `microsoft-365` upload.
+
+    It is `platforms: [teams]` in `defaults/agents/daimon.yaml`, so it is found
+    by its seeded title and added after the Office built-ins, while a Slack or
+    Discord turn of the same agent adds no skill at all.
+    """
+    from daimon.core.defaults.loader import load_platform_skills
+    from daimon.core.defaults.metadata import (
+        MA_METADATA_KEY_MANAGED,
+        tenant_scoped_display_title,
+    )
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    router = resolved_agent_env_router(
+        ma_agent(
+            id="ag_1",
+            name="daimon",
+            tenant_id=tenant.id,
+            metadata={MA_METADATA_KEY_MANAGED: "true"},
+        ),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    title = tenant_scoped_display_title(tenant_id=tenant.id, name="microsoft-365")
+    router.add(
+        "GET",
+        r"/v1/skills",
+        lambda request, match: list_response([skill_response("skill_m365", title)]),
+    )
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        platform_skills=load_platform_skills(Path(__file__).resolve().parents[4] / "defaults"),
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform=platform,
+        external_user_id="user-1",
+        channel_id="chan-1",
+        is_dm=False,
+        now=_NOW,
+    )
+
+    teams = platform == "teams"
+    assert [(s.type, s.skill_id) for s in admission.channel_skills if s.type == "custom"] == (
+        [("custom", "skill_m365")] if teams else []
+    ), "only a Teams turn adds the seeded microsoft-365 upload"
+    assert ("skill_m365" in admission.platform_skill_ids) is teams, (
+        "it is marked as the platform's, so a refused one can be left out at create"
+    )
+    assert admission.agent.skills == [], "the agent itself never carries it"
 
 
 @pytest.mark.parametrize(

@@ -403,8 +403,9 @@ setting off the routes answer 404 and nothing is subscribed.
   notebook.
 - **Office skills.** A Teams turn of the default agent adds Anthropic's
   built-in `docx`, `pptx` and `xlsx` skills to its session (Anthropic backend
-  only; see `platforms` in [Defaults](defaults.md)). They count toward the
-  20-skill session limit, so such a channel adds at most 6 skills of its own.
+  only; see `platforms` in [Defaults](defaults.md)). They and the
+  `microsoft-365` skill count toward the 20-skill session limit, so such a
+  channel adds at most 5 skills of its own.
 - **Updating a channel file.** A file in the channel's Files folder reaches
   the agent with its SharePoint link and version (its eTag) beside the
   download link. `replace_channel_file` saves an edited file over it as a new
@@ -603,6 +604,10 @@ so, with any `Retry-After` wait, and nothing retries on its own. A client
 secret Entra refuses (`invalid_client`, for example once it expires) is
 reported as a setup problem for an administrator and logged as
 `microsoft_accounts.app_rejected`.
+
+A Teams turn of the default agent adds the `microsoft-365` skill, which
+tells the agent when and how to use these tools (Anthropic backend only, like
+the Office skills); Slack and Discord sessions never get it.
 
 The tools, all Teams-only and limited to an allowlist of Graph v1.0 paths:
 

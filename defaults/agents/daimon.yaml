@@ -202,8 +202,6 @@ skills:
     skill_id: exploratory-data-analysis
   - type: custom
     skill_id: eda-storytelling
-  - type: custom
-    skill_id: microsoft-365
   # Anthropic's built-in Office skills: edit Word, PowerPoint and Excel files
   # without losing formatting, comments or tracked changes. Teams only: they
   # stay off the agent and are added to the sessions of Teams turns.
@@ -215,6 +213,10 @@ skills:
     platforms: [teams]
   - type: anthropic
     skill_id: xlsx
+    platforms: [teams]
+  # Guides the per-person Microsoft 365 tools, which exist only on Teams.
+  - type: custom
+    skill_id: microsoft-365
     platforms: [teams]
 tools:
   - type: agent_toolset_20260401

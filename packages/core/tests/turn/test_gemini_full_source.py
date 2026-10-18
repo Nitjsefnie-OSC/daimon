@@ -678,9 +678,7 @@ async def test_full_default_preparation_and_fresh_followup_turns(full, request):
     assert {
         tool["type"] for tool in native["tools"] if tool["type"] != "mcp_server"
     } == expected_tools
-    assert len(native["base_environment"]["sources"]) == len(canonical.target_spec.skills), (
-        "each default skill needs its own source"
-    )
+    assert len(native["base_environment"]["sources"]) == 11
     assert all(s["type"] == "gcs" for s in native["base_environment"]["sources"])
     selected = await read_preparation_counterpart(scope_channel_runtimes(request)[0])
     assert selected.verified_counterpart == selected.counterpart

@@ -119,17 +119,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `microsoft_send` then work on their files, Excel workbooks, mail,
   calendar and OneNote as them. Mail, calendar and notes stay in their 1:1
   chat, every email or invite waits for their Approve, and `privacy` →
-  Disconnect Microsoft removes the saved account. The default agent gets a
-  `microsoft-365` skill. See [Teams](docs/teams.md#microsoft-account-optional).
+  Disconnect Microsoft removes the saved account. Teams sessions of the
+  default agent add a `microsoft-365` skill; Slack and Discord are unchanged.
+  See [Teams](docs/teams.md#microsoft-account-optional).
 - **Agents edit Office files and update Teams channel files in place.** On
   Teams, the default agent's sessions add Anthropic's built-in `docx`, `pptx`
   and `xlsx` skills; other backends run without them, and Slack and Discord
-  are unchanged. They count toward the 20-skill session limit, so a Teams
-  channel answered by the default agent now adds at most 6 skills of its own,
-  down from 9; adding a seventh is refused, and extras added earlier are
-  left out of its turns, logged once rather than on every turn. Live Teams
-  sessions of the default agent are replaced once after upgrading, since
-  their skills change.
+  are unchanged. They and the Teams-only `microsoft-365` skill count toward
+  the 20-skill session limit, so a Teams channel answered by the default
+  agent now adds at most 5 skills of its own, down from 9; adding a sixth is
+  refused, and extras added earlier are left out of its turns, logged once
+  rather than on every turn. Live Teams sessions of the default agent are
+  replaced once after upgrading, since their skills change.
   On Teams, the new `replace_channel_file` tool saves an edited file over one
   in the channel's Files folder as a new version, so "update the deck" no
   longer leaves `deck 1.pptx` behind. It writes only at the version the agent

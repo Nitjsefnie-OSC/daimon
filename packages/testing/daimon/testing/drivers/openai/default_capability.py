@@ -79,10 +79,8 @@ class OpenAIDefaultCapabilityTransport:
         self.native_events = native_events
         self.requests: list[httpx.Request] = []
         self._uploads: list[SkillUpload] = []
-        # Use realistic long provider IDs, so the default pins require chunking.
-        self.skill_ids = tuple(
-            "skill_" + "x" * 42 + f"{n:02d}" for n in range(len(manifest.skills))
-        )
+        # Use realistic long provider IDs, so all eleven pins require chunking.
+        self.skill_ids = tuple("skill_" + "x" * 42 + f"{n:02d}" for n in range(11))
         self._names = tuple(skill.name for skill in manifest.skills)
         self._agent: Object | None = None
         self._session: Object | None = None

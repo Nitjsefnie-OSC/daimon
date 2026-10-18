@@ -211,7 +211,7 @@ async def session(ma: GeminiManagedAgents, pins: tuple[SkillRef, ...], *, key: s
 
 
 @pytest.mark.asyncio
-async def test_all_twelve_full_default_bundles_reach_sdk_as_pinned_gcs_directories(
+async def test_all_eleven_full_default_bundles_reach_sdk_as_pinned_gcs_directories(
     defaults: dict[str, SkillUpload],
 ) -> None:
     publisher, storage = OfflinePublisher(), MemoryStorage()
@@ -246,7 +246,7 @@ async def test_all_twelve_full_default_bundles_reach_sdk_as_pinned_gcs_directori
                 skill = await ma.skills.create(SCOPE, bundle, key=name)
                 assert skill.latest_version is not None
                 pins.append(skill.latest_version)
-            assert len(pins) == len(publisher.calls) == 12
+            assert len(pins) == len(publisher.calls) == 11
             assert captured == []  # Native Interactions I/O starts at the turn.
             assert (
                 sum(len(file.content) for file in defaults["pymc-artifact-style"].files)
@@ -275,7 +275,7 @@ async def test_all_twelve_full_default_bundles_reach_sdk_as_pinned_gcs_directori
                 "sources": expected,
             }
             assert b'"type": "inline"' not in captured[0].content
-            assert len(publisher.calls) == 12
+            assert len(publisher.calls) == 11
 
 
 @pytest.mark.asyncio

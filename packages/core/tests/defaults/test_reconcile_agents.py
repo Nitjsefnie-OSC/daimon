@@ -1279,8 +1279,9 @@ async def test_platform_limited_skills_stay_off_the_seeded_agent_and_its_spec_ha
     shipped = next(spec for spec in load_agent_specs(root) if spec.name == "daimon")
     limited = [ref for ref in shipped.skills if ref.platforms is not None]
     assert [(ref.type, ref.skill_id, ref.platforms) for ref in limited] == [
-        ("anthropic", name, ("teams",)) for name in ("docx", "pptx", "xlsx")
-    ], "the Office built-ins are the default agent's Teams-only skills"
+        *(("anthropic", name, ("teams",)) for name in ("docx", "pptx", "xlsx")),
+        ("custom", "microsoft-365", ("teams",)),
+    ], "the Office built-ins and microsoft-365 are the default agent's Teams-only skills"
     without = shipped.model_copy(
         update={"skills": [ref for ref in shipped.skills if ref.platforms is None]}
     )

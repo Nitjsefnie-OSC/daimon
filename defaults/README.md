@@ -25,5 +25,6 @@ the Anthropic backend adds them to its session (see `docs/defaults.md`).
 
 The default environment installs `gh` for repository work in GitHub App sessions.
 
-The default agent carries `microsoft-365`, which guides the per-person
-Microsoft 365 tools in Teams ([Teams](../docs/teams.md#microsoft-account-optional)).
+`microsoft-365` guides the per-person Microsoft 365 tools
+([Teams](../docs/teams.md#microsoft-account-optional)). It is limited to Teams
+the same way, so the agent and Slack and Discord sessions never carry it.

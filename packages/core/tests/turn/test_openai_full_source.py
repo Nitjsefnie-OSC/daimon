@@ -448,7 +448,7 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
 ):
     request, plan, canonical, wire, token, *_ = full_openai
     assert canonical.target_spec.declared_drops == ("memory",)
-    assert len(canonical.target_spec.skills) == 12
+    assert len(canonical.target_spec.skills) == 11
     assert tuple(tool.name for tool in canonical.target_spec.tools) == ("bash",)
     assert any(len(body) > 2_000_000 for body in wire.skills.values())
     runtime = build_openai_runtime(canonical)
@@ -486,7 +486,7 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
         assert outcome.state.error is None and not outcome.recovered
     assert len(wire.posts) == 1
     body = wire.posts[0]
-    assert len(body["environment"]["skills"]) == 12
+    assert len(body["environment"]["skills"]) == 11
     mcp = body["agent"]["tools"][0]
     assert mcp["transport"]["authorization"] == "Bearer " + token
     assert mcp["allowed_tools"] == ["search_tools", "call_tool"]
