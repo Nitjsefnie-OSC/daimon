@@ -2727,6 +2727,61 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
     assert not transport.requests and not transport.violations
 
 
+async def test_shared_projection_lists_agent_tokens_but_no_caller_vault(
+    db_preflight, db_nullpool_engine
+):
+    from daimon.core.channel_backend import load_backend_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.stores import agent_mcp_credentials as credentials
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.ma_transport import ScriptedTransport
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    owner = uuid.uuid4()
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        agent = ma_agent(id="agent-resources", tenant_id=str(tenant.id), name="source")
+        identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+        credential = await credentials.upsert_credential(
+            db,
+            tenant_id=tenant.id,
+            agent_id=identity,
+            mcp_server_url="https://source.example.test",
+            encrypted_token=b"private-ciphertext",
+        )
+    transport = ScriptedTransport()
+    async with transport.client() as client:
+        source = await load_backend_agent(
+            client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
+        )
+        projected = await project_session_resources(
+            source,
+            agent=agent,
+            environment=ma_environment(tenant_id=str(tenant.id)),
+            session_factory=sessions,
+            tenant_id=tenant.id,
+            agent_uuid=identity,
+            account_id=None,
+            hide_personal_for=owner,
+            resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(owner)),
+            memory_read_only=True,
+            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            mcp_settings=McpSettings(
+                public_url=HttpUrl("https://mcp.example.test/mcp"), jwt_secret=SecretStr("test-jwt")
+            ),
+        )
+    assert {
+        resource.credential_ref
+        for resource in projected.resource_requirements
+        if resource.credential_ref is not None
+        and not resource.credential_ref.startswith("agent-env:")
+    } == {f"agent-mcp:{credential.id}"}
+    assert not transport.requests and not transport.violations
+
+
 async def worker_source_context(
     db_nullpool_engine,
     *,

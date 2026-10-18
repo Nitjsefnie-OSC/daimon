@@ -127,7 +127,11 @@ can no longer run is refused. A shared session carries no caller's
 credentials (no personal vault, MCP identity or GitHub user grant), so the
 agent must run in app mode, otherwise the turn is refused as
 `backend_unsupported`; and every MCP server someone connected through their
-own OAuth sign-in is left off it, whoever writes. Each turn's usage is still
+own OAuth sign-in is left off it, whoever writes. The agent's agent-wide
+MCP tokens still reach it: they are kept in a vault of the thread's own
+(`daimon-shared:<owner>:<agent>`), which holds nothing else and is brought
+in line with the stored tokens on each turn by a member of the
+organisation. Each turn's usage is still
 recorded against the person who wrote it. Admission reads whether any
 revision of the channel ever shared in the same statement as the revision
 itself, so an unconfigured channel and a channel that never shared read

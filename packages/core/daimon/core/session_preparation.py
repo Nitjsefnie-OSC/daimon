@@ -1117,15 +1117,12 @@ async def _prepare_session_for_turn_locked(
 
         assert recorded is not None, "an in-place path always has a recorded snapshot"
         applying: tuple[UpdateOp, ...] = decision.ops if isinstance(decision, UpdateInPlace) else ()
-        if admission.shared_owner is None and not any(
-            isinstance(op, RemirrorVaultCredentials) for op in applying
-        ):
+        if not any(isinstance(op, RemirrorVaultCredentials) for op in applying):
             # Every reused session has re-mirrored the caller's vault on every
             # turn since that path existed; a compatible session keeps doing so.
+            # A shared thread re-mirrors its own vault instead: it never takes
+            # any one caller's (`apply_update_ops`).
             applying = (*applying, RemirrorVaultCredentials())
-        if admission.shared_owner is not None:
-            # A shared thread's workspace never takes any one caller's vault.
-            applying = tuple(op for op in applying if not isinstance(op, RemirrorVaultCredentials))
 
         async def run_ops() -> AppliedOps | SessionBusy:
             return await apply_update_ops(
