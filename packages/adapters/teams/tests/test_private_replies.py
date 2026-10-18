@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+import structlog
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.card_actions import edit_origin_card, text_card
 from daimon.adapters.teams.commands import (
@@ -17,6 +19,7 @@ from daimon.adapters.teams.commands import (
     parse_command,
 )
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.lifecycle import send_error_details
 from daimon.adapters.teams.private_replies import (
     NOT_YET_PRIVATE,
     UNSHOWN,
@@ -222,6 +225,91 @@ async def test_setup_in_a_channel_keeps_the_1_1_chat(
     [(_, pointer, _), (where, _, _)] = sender.sent
     assert pointer.text == ANSWERED_IN_CHAT.format(name="setup") and _is_private(pointer)
     assert where == "a:direct" and [inbound.kind for inbound in seen] == ["dm"]
+
+
+class _RefusesThread(FakeSender):
+    """Bot Framework answering the channel thread 400 with an error body, the 1:1 chat fine."""
+
+    async def send(
+        self, conversation_id: str, activity: MessageActivityInput, *, service_url: str | None
+    ) -> Any:
+        if conversation_id != THREAD_ID:
+            return await super().send(conversation_id, activity, service_url=service_url)
+        self.sent.append((conversation_id, activity.model_copy(deep=True), service_url))
+        request = httpx.Request("POST", f"https://teams.test/conversations/{conversation_id}")
+        body = {"error": {"code": "BadArgument", "message": "secret text"}}
+        response = httpx.Response(400, json=body, request=request)
+        raise httpx.HTTPStatusError("refused", request=request, response=response)
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_refused_pointer_still_gets_the_1_1_answer(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender, seen = _RefusesThread(), list[TeamsInbound]()
+    runtime = build_teams_runtime(db_session_factory)
+    replies = _replies(sender, seen, runtime=runtime, direct=_Direct())
+    with structlog.testing.capture_logs() as logs:
+        await replies.run(_channel("setup"), TENANT, ("setup", ""))
+    assert [inbound.kind for inbound in seen] == ["dm"]
+    assert sender.sent[-1][0] == "a:direct" and sender.sent[-1][1].text == "answer"
+    [failed] = [log for log in logs if log["event"] == "teams.notice.pointer_failed"]
+    assert failed["status"] == 400 and failed["error_code"] == "BadArgument"
+    assert "secret text" not in json.dumps(logs, default=str)
+
+
+async def test_a_refused_pointer_without_a_1_1_chat_still_raises() -> None:
+    seen: list[TeamsInbound] = []
+    for direct in (None, _NoChat()):
+        replies = _replies(_RefusesThread(), seen, direct=cast(Any, direct))
+        with pytest.raises(httpx.HTTPStatusError):
+            await replies.run(_channel("setup"), TENANT, ("setup", ""))
+    assert seen == []
+
+
+class _NoChat(_Direct):
+    async def member(self, conversation_id: str, aad_object_id: str) -> str | None:
+        raise httpx.ConnectError("no chat")
+
+
+def _status_error(content: bytes | str, status: int = 400) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://teams.test")
+    response = httpx.Response(status, content=content, request=request)
+    return httpx.HTTPStatusError("x", request=request, response=response)
+
+
+def _code(code: object) -> bytes:
+    return json.dumps({"error": {"code": code}}).encode()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"not json",
+        b"{}",
+        b"[]",
+        json.dumps({"error": "BadArgument"}).encode(),
+        _code("has space"),
+        _code("A" * 65),
+        _code("1Starts"),
+        _code(7),
+    ],
+)
+def test_an_unusable_error_body_gives_no_code(content: bytes) -> None:
+    assert send_error_details(_status_error(content)) == (400, None)
+
+
+def test_a_code_and_status_are_read_from_the_body() -> None:
+    assert send_error_details(_status_error(_code("BotNotInConversationRoster"), 403)) == (
+        403,
+        "BotNotInConversationRoster",
+    )
+    assert send_error_details(_status_error(_code("A" * 64)))[1] == "A" * 64
+
+
+def test_a_non_http_error_has_no_details() -> None:
+    assert send_error_details(httpx.ConnectError("x")) == (None, None)
+    assert send_error_details(TimeoutError()) == (None, None)
 
 
 @pytest.mark.usefixtures("provisioned_tenant")

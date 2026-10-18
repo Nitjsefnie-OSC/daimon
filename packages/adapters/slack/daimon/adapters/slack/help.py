@@ -32,7 +32,7 @@ _BODY = """\
 /github       Connect GitHub repos
 /memory       What the agent remembers
 /routines     Scheduled jobs
-/dm           Continue privately (an admin turns it on)
+/dm-me        Continue privately (an admin turns it on)
 /billing      Your usage and credit
 /privacy      See, export or delete your data
 /help         This list\

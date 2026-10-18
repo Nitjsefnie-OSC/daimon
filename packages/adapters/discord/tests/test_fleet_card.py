@@ -1792,3 +1792,34 @@ async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
             == 1
         )
         assert not transport.violations
+
+
+async def test_real_runtime_ordinary_turn_without_fleet_root_has_no_card(discord_frozen_root):
+    """With fleet enabled, a normal turn of this thread renders no fleet card and
+    never refuses: its own turn intent exists but no fleet root was frozen."""
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores.turn_card_intents import create_turn_card_intent
+
+    deps, _, _, intent, _, _, _, _ = discord_frozen_root
+    async with deps.sessionmaker.begin() as db:
+        ordinary = await create_turn_card_intent(
+            db,
+            tenant_id=intent.tenant_id,
+            platform="discord",
+            thread_id=intent.thread_id,
+            channel_id=intent.channel_id,
+            turn_token=UUID(int=991),
+        )
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = int(intent.thread_id), 50
+    thread.guild.id = 60
+    send = AsyncMock()
+    shared = FleetOrchestrator(HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal("1")))
+    card = DiscordFleetCardFactory.from_runtime(shared, deps)(
+        thread, 123, send, AsyncMock(), turn_card_intent_id=ordinary.id
+    )
+    assert card is not None
+    assert await card.refresh() is False
+    assert await card.allow_sealed_responses() is True
+    assert await card.allow_summary() is True
+    send.assert_not_awaited()

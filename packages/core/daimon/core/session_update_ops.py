@@ -169,16 +169,20 @@ async def _replace_env_file(
     tenant_id: uuid.UUID,
     agent_uuid: uuid.UUID,
     scope: Scope,
+    is_external: bool = False,
 ) -> SessionSnapshot:
     """Swap the session's `.env` for the agent's current secrets, in place.
 
     Delete-then-add, in that order: MA rejects a second resource at an occupied
     mount path (P0.f/P3.a), and the vacated path is visible to the same turn
     (P3.c). An agent whose last secret was removed keeps no `.env` at all,
-    which is what a fresh session for it would mount.
+    which is what a fresh session for it would mount, as does an external
+    caller's.
     """
     async with sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
+    if is_external:
+        rows = []
     if snapshot.github_mode == "app":
         rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
 
@@ -296,6 +300,7 @@ async def apply_update_ops(
                     tenant_id=tenant_id,
                     agent_uuid=agent_uuid,
                     scope=scope,
+                    is_external=is_external,
                 )
                 applied.append("env_file")
             case ReplaceToolsAndMcpServers():
@@ -305,6 +310,7 @@ async def apply_update_ops(
                     agent_id=agent_uuid,
                     account_id=account_id,
                     server_urls={server.name: server.url for server in agent.mcp_servers},
+                    is_external=is_external,
                 )
                 public_url = None if mcp.public_url is None else str(mcp.public_url)
                 tools = session_tools(
@@ -361,7 +367,10 @@ async def apply_update_ops(
                     unavailable_repos=snapshot.unavailable_repos,
                     config=agent_github_app or GithubAppSettings(),
                     fernet=fernet,
+                    installation_ids=op.installation_ids,
                 )
+                issued_at = int(now.timestamp())
+                legacy_issued_at = issued_at
                 snapshot = snapshot.model_copy(
                     update={
                         "repo_urls": tuple(
@@ -370,19 +379,34 @@ async def apply_update_ops(
                             if url not in access.excluded_repo_urls
                         ),
                         "token_repo_urls": access.token_repo_urls,
+                        "token_scopes": access.token_scopes,
+                        "token_issued_at_by_installation": {
+                            installation_id: min(
+                                token.issued_at or issued_at
+                                for token in access.tokens
+                                if token.installation_id == installation_id
+                            )
+                            for installation_id in {scope[0] for scope in access.token_scopes}
+                        },
                         **refreshed_unavailable_state(
                             snapshot, access.excluded_repo_urls, now=dt.datetime.now(dt.UTC)
                         ),
-                        "repo_token_issued_at": int(now.timestamp()),
+                        "repo_token_issued_at": legacy_issued_at,
                     }
                 )
                 applied.append("repo_token_age")
             case RemirrorVaultCredentials():
-                if fernet is not None and mcp.public_url is not None and mcp.jwt_secret is not None:
+                # The organisation's tokens never reach an external caller's vault.
+                if (
+                    not is_external
+                    and fernet is not None
+                    and mcp.public_url is not None
+                    and mcp.jwt_secret is not None
+                ):
                     await sync_agent_mcp_credentials(
                         anthropic,
                         sessionmaker=sessionmaker,
-                        fernet=fernet,
+                        fernet=cast(MultiFernet, fernet),
                         tenant_id=tenant_id,
                         agent_id=agent_uuid,
                         account_id=account_id,

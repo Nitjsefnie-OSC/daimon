@@ -10,7 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The GitHub repo editor now refuses saves over 256 KiB, gives up listing your GitHub repos after 60 seconds, and keeps your ticked repos when Try again follows a GitHub error.
+- **People from another organisation get none of the agent's credentials.**
+  A Teams external participant or guest answered in a `readers: own`
+  channel used to get the agent's keys as a mounted `.env` and its shared
+  MCP tokens in their vault, though their tool calls were already
+  restricted. Their sessions now carry neither: a server only a shared
+  token reaches is left off unless they sign in to it themselves, and their
+  own sign-ins still work. A session that may hold those credentials is
+  replaced, not reused, the next time such a person is answered in it,
+  without carrying its work.
+
+- A Teams channel command whose "answered in your 1:1 chat" notice Teams refuses is still answered in the 1:1 chat. Failed sends now log Teams' error code.
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
+- Revoked GitHub token records are now deleted 7 days after they expire and unused ones 1 hour after, while live tokens and the security audit log are kept.
+- `/dm` is now `/dm-me` on Slack and Discord, including `/dm-me enable` and `/dm-me disable`. Slack reserves `/dm` for its own command, so a Slack app could not offer it. Its replies read as one line for what happened and one for what to do; a DM closed because its channel was sealed now says to keep working in that channel.
 - GitHub connection confirmation now checks the requester's live Discord, Slack, or Teams admin status before saving repository access.
 - Channel admins are removed. Grants no longer give any rights; server and workspace admins are unchanged. Stored grant rows are kept until a later release drops them.
 - Offer “Opus 5.5 fast” as a separate model choice for new Managed Agents sessions, with twice the standard token rates.

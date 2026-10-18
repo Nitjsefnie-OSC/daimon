@@ -31,7 +31,7 @@ from daimon.adapters.teams.commands import (
 )
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import TeamsInbound
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender, send_error_details
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
 from daimon.core.memory_view import parse_memory_args
@@ -82,8 +82,8 @@ def _recipient(inbound: TeamsInbound) -> Account | None:
 
 
 def _refused(event: str, exc: Exception) -> None:
-    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-    log.info(event, reason=type(exc).__name__, status=status)
+    status, error_code = send_error_details(exc)
+    log.info(event, reason=type(exc).__name__, status=status, error_code=error_code)
 
 
 @dataclasses.dataclass
@@ -221,9 +221,21 @@ class PrivateReplies:
                 # Otherwise nothing shown yet: answered in full in the 1:1 chat.
         chat = await self._direct_chat(inbound)
         pointer = ANSWERED_IN_CHAT if chat else CHANNEL_POINTER
-        await self.tell_sender(inbound, pointer.format(name=name))
         if chat is None:
+            await self.tell_sender(inbound, pointer.format(name=name))
             return
+        # The answer goes to the 1:1 chat, so the pointer is a courtesy: a refused
+        # or timed-out one (it may have landed) must not withhold the answer.
+        try:
+            await self.tell_sender(inbound, pointer.format(name=name))
+        except TEAMS_SEND_ERRORS as exc:
+            status, error_code = send_error_details(exc)
+            log.info(
+                "teams.notice.pointer_failed",
+                reason=type(exc).__name__,
+                status=status,
+                error_code=error_code,
+            )
         routed = await route_to_setup(self._runtime.sessionmaker, chat, tenant_id)
         await self._invoke(name, args, routed, tenant_id, send=self._public(routed), asked=inbound)
 

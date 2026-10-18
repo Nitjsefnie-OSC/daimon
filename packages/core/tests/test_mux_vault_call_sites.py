@@ -356,13 +356,16 @@ async def test_oauth_conflict_retries_the_same_requests_and_access_checks(resour
 
 async def test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callbacks():
     rows = [environment("old", "GH_TOKEN_OLD")]
-    # One GH_TOKEN per session, whatever credential name the token was issued under.
-    created = environment("new", "GH_TOKEN")
+    alias = cast(dict[str, Any], environment("new", "GH_TOKEN"))
+    copilot = credential(
+        "copilot", {"type": "static_bearer", "mcp_server_url": GITHUB_COPILOT_MCP_URL}
+    )
     replies = [
         ("GET", "/v1/vaults/vault/credentials", 200, page(rows)),
-        ("POST", "/v1/vaults/vault/credentials", 200, created),
         ("DELETE", "/v1/vaults/vault/credentials/old", 200, {}),
+        ("POST", "/v1/vaults/vault/credentials", 200, alias),
         ("GET", "/v1/vaults/vault/credentials", 200, page([])),
+        ("POST", "/v1/vaults/vault/credentials", 200, copilot),
     ]
     old, new = script(replies), script(replies)
     access = AppSessionAccess(
@@ -371,6 +374,7 @@ async def test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callb
     mutations, delivered = [], []
     async with old.client() as before, new.client() as after:
         _ = [row async for row in before.beta.vaults.credentials.list(vault_id="vault")]
+        await before.beta.vaults.credentials.delete("old", vault_id="vault")
         await before.beta.vaults.credentials.create(
             vault_id="vault",
             auth={
@@ -384,8 +388,15 @@ async def test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callb
                 "injection_location": {"header": True, "body": False},
             },
         )
-        await before.beta.vaults.credentials.delete("old", vault_id="vault")
         _ = [row async for row in before.beta.vaults.credentials.list(vault_id="vault")]
+        await before.beta.vaults.credentials.create(
+            vault_id="vault",
+            auth={
+                "type": "static_bearer",
+                "mcp_server_url": GITHUB_COPILOT_MCP_URL,
+                "token": "dummy-app",
+            },
+        )
         await add_app_credentials(
             after,
             vault_id="vault",
@@ -396,8 +407,8 @@ async def test_app_credentials_keep_environment_nulls_cleanup_and_delivery_callb
         )
     equal_requests(old, new)
     assert [request.body for request in new.requests] == [request.body for request in old.requests]
-    assert mutations == [True, True]
-    assert delivered == ["dummy-app"]
+    assert mutations == [True] * 3
+    assert delivered == ["dummy-app"] * 2
 
 
 async def test_env_upload_call_site_keeps_multipart_filename_type_bytes_and_ttl(

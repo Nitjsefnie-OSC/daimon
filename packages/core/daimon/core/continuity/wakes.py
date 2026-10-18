@@ -316,6 +316,26 @@ async def _decide_worker_finished(
     *,
     started: bool = False,
 ) -> ContinuationDecision | None:
+    decision, reason = await _worker_finished_verdict(sessionmaker, row, now, started=started)
+    if decision is None or decision.action != "dispatch":
+        # A deferred wake retries silently otherwise; name why it did not dispatch.
+        log.info(
+            "fleet.worker_finished_deferred",
+            continuation_id=str(row.id),
+            started=started,
+            action=None if decision is None else decision.action,
+            reason=reason,
+        )
+    return decision
+
+
+async def _worker_finished_verdict(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    row: TaskContinuationRow,
+    now: datetime,
+    *,
+    started: bool = False,
+) -> tuple[ContinuationDecision | None, str]:
     """Re-read the frozen root before normal runner admission; this grants no send.
 
     Missing or stale durable facts defer. The adapter retains its per-thread
@@ -330,11 +350,11 @@ async def _decide_worker_finished(
                 getattr(retained, key) != getattr(row, key)
                 for key in (*ContinuationRequest.model_fields, "id")
             ):
-                return None
+                return None, "row_changed"
             if retained.status not in {"pending", "claimed"}:
-                return None
+                return None, "row_not_open"
             if (retained.started_at is not None) != started:
-                return None
+                return None, "start_state_differs"
             if started and (
                 retained.status != "claimed"
                 or not row.lease_owner
@@ -344,9 +364,9 @@ async def _decide_worker_finished(
                 or retained.lease_expires_at is None
                 or retained.lease_expires_at <= now
             ):
-                return None
+                return None, "start_lease_differs"
             if retained.available_at is None or retained.available_at > now:
-                return None
+                return None, "not_available"
             parsed = FrozenWorkerBatch.model_validate_json(retained.requested_work or "")
             run, workers = await fleet.run_status(
                 db, tenant_id=row.tenant_id, run_id=parsed.run_id, for_update=True
@@ -354,9 +374,9 @@ async def _decide_worker_finished(
             batch = _retained_batch(run, workers, retained)
             members = [worker for worker in workers if worker.id in batch.worker_ids]
             if run.status != "running" or now >= run.deadline_at:
-                return None
+                return None, "run_not_running"
             if not run_settled(replace(run, quorum=batch.quorum), members):
-                return None
+                return None, "batch_not_settled"
             identity = await accounts.get_account_with_tenant(
                 db, account_id=run.orchestrator_account_id
             )
@@ -366,7 +386,7 @@ async def _decide_worker_finished(
                 or identity.platform != run.platform
                 or identity.platform_user_id != row.requester_external_user_id
             ):
-                return None
+                return None, "requester_changed"
             slot = Slot(
                 thread=ThreadRef(
                     channel=ChannelRef(
@@ -386,7 +406,7 @@ async def _decide_worker_finished(
                 or binding.legacy_account_id != slot.account_id
                 or binding.native_refs.get("session") != batch.session_id
             ):
-                return None
+                return None, "binding_changed"
             projection = await mux_state.projection(db, batch.session_id)
             if (
                 projection is None
@@ -398,7 +418,7 @@ async def _decide_worker_finished(
                 or projection.gaps
                 or projection.state == "terminated"
             ):
-                return None
+                return None, "projection_unusable"
             lease = await mux_state.active_lease(db, slot)
             live = await thread_sessions.get_live_thread_session(
                 db,
@@ -412,22 +432,26 @@ async def _decide_worker_finished(
                 or live.channel_id != run.channel_id
                 or live.ma_agent_id != row.target_ma_agent_id
             ):
-                return None
+                return None, "live_session_changed"
             if not started and live is not None and live.active_turn_message_id is not None:
-                return ContinuationDecision(action="skip_turn_running")
+                return ContinuationDecision(action="skip_turn_running"), "live_turn_marker"
             if not started and (
                 projection.state != "idle" or projection.active_root_turn is not None or lease
             ):
-                return ContinuationDecision(action="skip_turn_running")
-    except (FleetConflict, ValidationError, ValueError):
-        return None
+                return ContinuationDecision(action="skip_turn_running"), (
+                    f"projection_busy state={projection.state} "
+                    f"active_root_turn={projection.active_root_turn is not None} "
+                    f"lease={lease is not None}"
+                )
+    except (FleetConflict, ValidationError, ValueError) as error:
+        return None, "invalid_state:" + type(error).__name__
     summary = ", ".join(f"{worker.id}:{worker.status}" for worker in members[:5])
     seed = (
         f"Resume fleet run {run.id}; frozen batch {row.idempotency_key} is ready "
         f"at threshold {batch.quorum}/{len(members)}. Worker state excerpt: {summary}. "
         "Re-read fleet_status and validate fleet_collect; readiness does not certify success."
     )[:MAX_REQUESTED_WORK]
-    return ContinuationDecision(action="dispatch", seed_user_message=seed)
+    return ContinuationDecision(action="dispatch", seed_user_message=seed), "dispatch"
 
 
 async def arm_worker_finished(

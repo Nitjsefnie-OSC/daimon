@@ -1174,7 +1174,7 @@ class SlackApp:
             # Log req.type for unknown commands so the envelope type can be
             # confirmed from staging logs.
             cmd: str = str(payload.get("command") or "")
-            if cmd == "/dm":
+            if cmd == "/dm-me":
                 self._spawn(handle_dm_command(self.runtime, payload))
             elif cmd == "/help":
                 self._spawn(handle_help_command(self.runtime, payload))

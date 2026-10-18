@@ -2101,3 +2101,45 @@ async def test_run_watch_keeps_counted_first_input_live_until_owner_finished(sm,
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_run_watch_retries_one_slow_read_without_cancelling_workers(sm, monkeypatch):
+    # Staging r13/r14 (2026-10-18): one budget read exceeded the 2s timeout while
+    # sibling admissions held the run lock, and every registered worker was cancelled.
+    from daimon.core import channel_budget
+
+    parent, _ = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    cancelled = {a.id: asyncio.Event()}
+    finished = asyncio.Event()
+    original = channel_budget.produce_fleet_budget
+    calls = 0
+
+    async def slow_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(1)
+        result = await original(*args, **kwargs)
+        if calls >= 3:
+            finished.set()
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(channel_budget, "produce_fleet_budget", slow_once)
+        await asyncio.wait_for(
+            watch_fleet_budget(
+                sessionmaker=sm,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=finished,
+                poll_interval=0.01,
+                read_timeout=0.1,
+            ),
+            3,
+        )
+    assert calls >= 3 and not cancelled[a.id].is_set()
+    assert (await read(sm, parent, a)).worker_exposure_usd == 1

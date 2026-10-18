@@ -1,8 +1,9 @@
 """Pure translation of Managed Agents records and best-effort previews.
 
 A normalizer is local to a chronological walk. Anthropic has no root-turn ID;
-the host can supply its operation identity, otherwise the first running record
-anchors it. Never infer an interruption from an interrupt input or its receipt.
+the host can supply its operation identity, otherwise the turn's first running
+record or input anchors it until the turn ends. Never infer an interruption from
+an interrupt input or its receipt.
 """
 
 from collections.abc import Mapping
@@ -117,7 +118,10 @@ class EventNormalizer:
                 name, payload = "native.event_start", data
                 event_id = f"{event_id}:preview:start"
         elif native_type == "user.message":
-            self.root_turn_id = self._host_root_turn_id or event_id
+            # Managed Agents can record status_running before the user.message that
+            # started the turn; the first record of a turn anchors it, so a later
+            # input never renames the turn the running record already opened.
+            self.root_turn_id = self._host_root_turn_id or self.root_turn_id or event_id
             payload = {"input_id": event_id, "content": _content(data["content"])}
         elif native_type == "agent.message":
             item = event_id
@@ -192,11 +196,11 @@ class EventNormalizer:
                         }
                     )
                 payload = {"actions": actions}
-            elif reason in {"end_turn", "retries_exhausted"}:
+            elif reason in {"end_turn", "budget_reached", "retries_exhausted"}:
                 name = "session.turn_ended"
                 payload = {
                     "root_turn_id": self.root_turn_id or event_id,
-                    "outcome": "completed" if reason == "end_turn" else "errored",
+                    "outcome": "errored" if reason == "retries_exhausted" else "completed",
                     "native_reason": reason,
                 }
             else:
