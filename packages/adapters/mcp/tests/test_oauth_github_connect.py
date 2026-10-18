@@ -1089,7 +1089,7 @@ def test_editor_stages_remove_undo_and_summarizes_every_change() -> None:
     assert 'data-action="remove" aria-label="Remove Hidden repo"' in body
     assert 'data-action="remove" aria-label="Remove lab/visible"' in body
     assert 'data-action="undo" aria-label="Undo removal of lab/visible"' in body
-    assert "Will be removed when you save" in body
+    assert 'isRemoved ? "− To remove"' in body
     assert "removed.delete(id);" in body
     assert '"Not saved yet: " + parts.join(", ")' in body
     assert 'parts.push("change working repo")' in body
@@ -1097,7 +1097,8 @@ def test_editor_stages_remove_undo_and_summarizes_every_change() -> None:
     assert "cancel.hidden = !!parts.length;" in body
     assert "save.hidden = !parts.length;" in body
     assert "Change working repo" in body
-    assert "<small>Already connected</small>" in body
+    assert 'data-action="working"' not in body
+    assert "✓ Added" in body
 
 
 def test_editor_hides_unlisted_private_grants_even_under_truncated_owner() -> None:
@@ -1362,7 +1363,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         assert (await save(hidden)).status_code == 200  # No-op keeps the invitation.
         added = await save(hidden, repo=["101", "102"])
         assert added.status_code == 200
-        assert "Editor can use 2 repos." in added.text
+        assert "Editor can read and change these 2 repos." in added.text
         async with sessionmaker() as session:
             grants = await github_access.list_agent_repos(
                 session, tenant_id=tenant_id, agent_id=agent_id
@@ -1372,16 +1373,21 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
             102: "write",
         }
         replay = await save(hidden, repo=["101", "102"])
-        assert replay.status_code == 200 and "Editor can use 2 repos." in replay.text
+        assert (
+            replay.status_code == 200 and "Editor can read and change these 2 repos." in replay.text
+        )
 
         state, hidden, rendered = await page()
-        assert "Repos for this agent" in rendered
+        assert "Can read and change" in rendered
         assert "Read only" not in rendered and "Read and write" not in rendered
         assert (await save(hidden, repo="101")).status_code == 403
         assert (await save(hidden, repo="103", access_103="admin")).status_code == 400
         assert (await save(hidden, repo="103", access_103=["read", "write"])).status_code == 400
         working = await save(hidden, working="101")
-        assert working.status_code == 200 and "Editor can use 2 repos." in working.text
+        assert (
+            working.status_code == 200
+            and "Editor can read and change these 2 repos." in working.text
+        )
 
         admin_ids.clear()
         with monkeypatch.context() as pending_patch:
@@ -1409,11 +1415,13 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         state, hidden, rendered = await page()
         mixed = await save(hidden, repo="103", remove="101", working="103")
         assert mixed.status_code == 200
-        assert "repo-101" not in mixed.text and "Editor can use 1 repo." in mixed.text
+        assert "repo-101" not in mixed.text
+        assert "Editor can read and change this repo." in mixed.text
 
         state, hidden, rendered = await page()
         cleared = await save(hidden, working="clear")
-        assert cleared.status_code == 200 and "Editor can use 1 repo." in cleared.text
+        assert cleared.status_code == 200
+        assert "Editor can read and change this repo." in cleared.text
 
         state, hidden, rendered = await page()
         async with sessionmaker.begin() as session:
@@ -1874,7 +1882,7 @@ async def test_editor_mixed_owner_save_is_atomic_and_binds_each_installation(
         },
     )
     assert mixed.status_code == 200
-    assert "Editor can use 3 repos." in mixed.text
+    assert "Editor can read and change these 3 repos." in mixed.text
     for owner in ("org-a", "org-b", "editor"):
         assert owner in mixed.text
     assert "org-c" not in mixed.text
@@ -2064,6 +2072,9 @@ def test_noscript_large_owner_list_uses_one_access_field() -> None:
     ).body.decode()
     fallback = page.split("<noscript><section", 1)[1].split("</noscript>", 1)[0]
     assert fallback.count('name="repo"') == 6000
+    footer = page.split('<div class="gh-editor-footer"', 1)[1].split("</form>", 1)[0]
+    assert footer.startswith("><div class=\"gh-editor-footer-inner\">")
+    assert '<button id="save-repos" class="gh-primary" type="submit">Save changes</button>' in footer
     assert re.search(r'name="access_\d+"', fallback) is None
     assert page.count('name="access" value="write"') == 1
     # Every checkbox can be checked without parse_qs reaching max_num_fields.
@@ -2167,7 +2178,7 @@ async def test_failed_save_retry_form_keeps_state_and_the_ticked_repos(
     editor_env.details_down = False
     retried = await _submit(editor_env.browser, form.group(1), carried)
     assert retried.status_code == 200
-    assert "Editor can use 2 repos." in retried.text
+    assert "Editor can read and change these 2 repos." in retried.text
     assert await editor_env.saved_repo_ids() == [101, 102]
 
 

@@ -609,7 +609,10 @@ def _visibility_digest(installations: Sequence[_Installation]) -> str:
 
 
 def _saved_agent_page(
-    name: str, grants: list[github_access.AgentRepo], visible_ids: set[int] | None = None
+    name: str,
+    grants: list[github_access.AgentRepo],
+    visible_ids: set[int] | None = None,
+    back_url: str | None = "https://discord.com/app",
 ) -> Response:
     groups: dict[str, list[github_access.AgentRepo]] = {}
     for repo in grants:
@@ -622,19 +625,24 @@ def _saved_agent_page(
         '<div class="gh-status-icon">'
         + icon("circle-check")
         + "</div>"
-        + f'<p class="gh-status-line">{html.escape(name)} can use '
-        + f"{_repo_count(len(grants))}.</p>"
-        + '<p class="gh-action-line">You can close this tab.</p>'
+        + f'<p class="gh-status-line">{html.escape(name)} can read and change '
+        + ("this repo." if len(grants) == 1 else f"these {_repo_count(len(grants))}.")
+        + "</p>"
         + '<div class="gh-saved-groups">'
         + "".join(
-            f'<section class="gh-owner-group"><h2>{html.escape(owner)}</h2>'
+            f'<section class="gh-owner-group"><h2 class="gh-owner-heading">'
+            f'<span class="gh-owner-avatar-fallback">{html.escape(owner[:1].upper())}</span>'
+            f"{html.escape(owner)}</h2>"
             + "".join(
                 '<div class="gh-saved-row">'
+                + f'<span class="gh-row-icon">{icon("book-marked")}</span>'
+                + '<span class="gh-saved-name">'
                 + (
                     html.escape(repo.full_name.partition("/")[2])
                     if repo.repo_id in (visible_ids or set())
                     else "Hidden repo"
                 )
+                + "</span>"
                 + (" <span>Working repo</span>" if repo.is_working_repo else "")
                 + "</div>"
                 for repo in repos
@@ -643,8 +651,16 @@ def _saved_agent_page(
             for owner, repos in ordered
         )
         + "</div>"
+        + (
+            '<a class="gh-primary gh-back-discord" href="'
+            + html.escape(back_url, quote=True)
+            + '">Back to Discord</a>'
+            if back_url
+            else ""
+        )
+        + '<p class="gh-action-line">You can close this tab.</p>'
     )
-    return github_page(title="Repos saved", body_html=body, heading_icon=True)
+    return github_page(title="Repos saved", body_html=body, kind="saved")
 
 
 _EDITOR_SCRIPT = """
@@ -704,6 +720,7 @@ _EDITOR_SCRIPT = """
     row.dataset.repoId = id;
     row.dataset.name = name;
     row.dataset.added = "true";
+    row.dataset.workingEligible = "true";
     row.querySelector(".gh-row-name").textContent = name.split("/").slice(1).join("/");
     row.querySelector(".gh-remove-action").setAttribute("aria-label", "Remove " + name);
     const repoInput = row.querySelector('input[name="repo"]');
@@ -731,29 +748,32 @@ _EDITOR_SCRIPT = """
         if (isAdding) accessInput.value = staged.get(id);
       }
       row.querySelector(".gh-working-badge").hidden = isRemoved || working !== id;
-      row.querySelector(".gh-pending-label").textContent =
-        isRemoved ? "Will be removed when you save" :
-        isAdding ? "Will be added when you save" :
-        working === id && working !== initialWorking ? "Working repo when you save" : "";
+      const pending = row.querySelector(".gh-pending-label");
+      pending.textContent = isRemoved ? "− To remove" : isAdding ? "+ To add" : "";
+      pending.hidden = !isRemoved && !isAdding;
       const removeButton = row.querySelector(".gh-remove-action");
       const undoButton = row.querySelector(".gh-undo-action");
       if (removeButton) removeButton.hidden = isRemoved;
       if (undoButton) undoButton.hidden = !isRemoved;
-      const action = row.querySelector(".gh-working-action");
-      if (action) action.querySelector(".gh-working-action-label").textContent =
-        working === id ? "Change working repo" :
-        working === null ? "Choose working repo" : "Use as working repo";
     }
     for (const group of list.querySelectorAll(".gh-owner-group")) {
       group.hidden = !group.querySelector(".gh-agent-row");
     }
     workingCard.hidden = rows().length === 0;
     const chosenRow = rowFor(working);
-    workingCardName.textContent = chosenRow ?
-      (chosenRow.dataset.name || "Hidden repo") : "None chosen";
+    workingCardName.replaceChildren();
+    if (chosenRow?.dataset.name) {
+      const [owner, ...repo] = chosenRow.dataset.name.split("/");
+      const ownerName = document.createElement("span");
+      ownerName.className = "gh-working-owner";
+      ownerName.textContent = owner + "/";
+      workingCardName.append(ownerName, document.createTextNode(repo.join("/")));
+    } else {
+      workingCardName.textContent = chosenRow ? "Hidden repo" : "None chosen";
+    }
     changeWorking.textContent = chosenRow ? "Change" : "Choose";
     changeWorking.disabled = !rows().some(row =>
-      !removed.has(row.dataset.repoId) && row.querySelector(".gh-working-action"));
+      !removed.has(row.dataset.repoId) && row.dataset.workingEligible === "true");
     const workingOwner = chosenRow?.closest(".gh-owner-group")?.dataset.owner;
     const groups = [...list.querySelectorAll(".gh-owner-group")];
     groups.sort((a, b) => {
@@ -773,6 +793,15 @@ _EDITOR_SCRIPT = """
     if (workingChanged) parts.push("change working repo");
     document.getElementById("selection-status").textContent =
       parts.length ? "Not saved yet: " + parts.join(", ") : "No changes to save";
+    document.querySelector(".gh-editor-footer").hidden = !parts.length;
+    document.getElementById("dock-add").textContent = added ? "+ " + added + " to add" : "";
+    document.getElementById("dock-add").hidden = !added;
+    document.getElementById("dock-remove").textContent = removedCount ?
+      "− " + removedCount + " to remove" : "";
+    document.getElementById("dock-remove").hidden = !removedCount;
+    document.querySelector("#dock-working span").textContent = workingChanged ?
+      "New working repo: " + (chosenRow?.dataset.name?.split("/").pop() || "None") : "";
+    document.getElementById("dock-working").hidden = !workingChanged;
     const empty = list.querySelector(".gh-editor-empty");
     if (empty) empty.hidden = rows().length > 0;
     document.getElementById("discard-repos").hidden = !parts.length;
@@ -822,7 +851,12 @@ _EDITOR_SCRIPT = """
         if (option.dataset.owner !== previousOwner) {
           const heading = document.createElement("h3");
           heading.className = "gh-selected-owner";
-          heading.textContent = option.dataset.owner;
+          const ownerButton = ownerButtons.find(button =>
+            button.dataset.owner === option.dataset.owner);
+          heading.innerHTML = (ownerButton?.querySelector(
+            ".gh-owner-avatar, .gh-owner-avatar-fallback")?.outerHTML || "") +
+            '<span></span>';
+          heading.querySelector("span:last-child").textContent = option.dataset.owner;
           option.before(heading);
           previousOwner = option.dataset.owner;
         }
@@ -836,18 +870,18 @@ _EDITOR_SCRIPT = """
     document.getElementById("owner-picker-count").textContent = count + " selected";
     document.getElementById("owner-stage-repos").disabled = count === 0;
     document.getElementById("owner-stage-repos").textContent = stage.textContent;
+    ownerChoice.querySelector(".gh-dialog-footer").hidden = count === 0;
     for (const button of ownerButtons) {
       const n = options.filter(o => o.dataset.owner === button.dataset.owner &&
         checkbox(o).checked).length;
       button.querySelector(".gh-owner-selected").textContent = n ? n + " selected" : "";
     }
-    selectShown.textContent = "Select all " + shown + " shown";
+    selectShown.textContent = "Select all " + shown;
+    document.getElementById("shown-count").textContent = "Showing " + shown + " of " +
+      options.filter(o => o.dataset.owner === activeOwner).length;
     selectShown.hidden = selectedOnly;
     selectShown.disabled = shown === 0;
     clearSelection.disabled = count === 0;
-    for (const button of dialog.querySelectorAll(".gh-owner-all")) {
-      button.hidden = selectedOnly;
-    }
     showSelected.disabled = count === 0;
     showSelected.textContent = selectedOnly ? "Show all" : "Selected (" + count + ")";
   }
@@ -857,7 +891,7 @@ _EDITOR_SCRIPT = """
     resetPicker();
     ownerChoice.hidden = activeOwner !== null;
     ownerSheet.hidden = activeOwner === null;
-    backOwners.hidden = readyOwners().length <= 1;
+    backOwners.hidden = activeOwner === null || readyOwners().length <= 1;
     dialog.showModal();
     if (activeOwner && window.innerWidth >= 768) search.focus();
   });
@@ -865,6 +899,7 @@ _EDITOR_SCRIPT = """
     activeOwner = owner;
     ownerChoice.hidden = true;
     ownerSheet.hidden = false;
+    backOwners.hidden = readyOwners().length <= 1;
     ownerTitle.textContent = "Add " + owner + " repos";
     resetPicker();
     if (window.innerWidth >= 768) search.focus();
@@ -922,6 +957,7 @@ _EDITOR_SCRIPT = """
   }
   backOwners.addEventListener("click", () => {
     activeOwner = null; ownerChoice.hidden = false; ownerSheet.hidden = true;
+    backOwners.hidden = true;
     ownerTitle.textContent = "Add repos"; updatePicker();
   });
   document.getElementById("close-repo-picker").addEventListener("click", () => dialog.close());
@@ -963,19 +999,6 @@ _EDITOR_SCRIPT = """
     for (const option of options) checkbox(option).checked = false;
     rememberPicker();
   });
-  for (const button of dialog.querySelectorAll(".gh-owner-all")) {
-    button.addEventListener("click", () => {
-      search.value = "";
-      for (const option of options) {
-        option.hidden = false;
-        if (option.dataset.installation === button.dataset.installation) {
-          checkbox(option).checked = true;
-        }
-      }
-      document.getElementById("no-search-results").hidden = true;
-      rememberPicker();
-    });
-  }
   search.addEventListener("input", () => {
     updatePicker();
     document.getElementById("no-search-results").hidden = options.some(o => !o.hidden);
@@ -1006,7 +1029,7 @@ _EDITOR_SCRIPT = """
   function showWorkingPicker(selectedId) {
     workingSelect.replaceChildren();
     for (const choice of rows().filter(item =>
-      !removed.has(item.dataset.repoId) && item.querySelector(".gh-working-action"))) {
+      !removed.has(item.dataset.repoId) && item.dataset.workingEligible === "true")) {
       workingSelect.add(new Option(choice.dataset.name, choice.dataset.repoId));
     }
     workingSelect.add(new Option("No working repo", "clear"));
@@ -1135,11 +1158,9 @@ def _agent_editor_page(
                 f'<img class="gh-owner-avatar{" gh-owner-avatar--person" if is_person else ""}" '
                 f'src="{esc(item.avatar_url, quote=True)}" alt="">'
             )
-        return (
-            '<span class="gh-owner-avatar-fallback">'
-            + icon("user" if is_person else "building")
-            + "</span>"
-        )
+        initial = esc(item.owner_login[:1].upper()) if item else "?"
+        shape = " gh-owner-avatar--person" if is_person else ""
+        return f'<span class="gh-owner-avatar-fallback{shape}">{initial}</span>'
 
     snapshot_digest = hashlib.sha256(snapshot.encode()).hexdigest()
     visibility = _visibility_digest(installations)
@@ -1166,7 +1187,6 @@ def _agent_editor_page(
     repairable = [repo for repo in grants if repo.repo_id in usable and repo.repo_id in needed]
     working = next((repo for repo in grants if repo.is_working_repo), None)
     may_change_working = True
-    place = _place_label(platform)
     owner_by_login = {item.owner_login.casefold(): item for item in installations}
     past_cap_ids = {
         repo.repo_id
@@ -1216,13 +1236,8 @@ def _agent_editor_page(
         for repo in available
     ]
     parts = [
-        f'<p class="gh-status-line">{len(grants)} '
-        f"{'repo' if len(grants) == 1 else 'repos'} connected.</p>"
-        + (
-            '<p class="gh-action-line">Add a repo, then choose its working repo.</p>'
-            if not grants
-            else '<p class="gh-action-line">Add repos or change the working repo.</p>'
-        ),
+        f'<div class="gh-editor-chips"><span>Can read and change</span><span>{len(grants)} '
+        f"{'repo' if len(grants) == 1 else 'repos'}</span></div>",
         '<form id="github-connect-form" class="gh-editor" method="post" '
         f'data-working="{working.repo_id if working else ""}" '
         f'data-may-change-working="{str(may_change_working).lower()}" '
@@ -1239,11 +1254,6 @@ def _agent_editor_page(
         f'value="{_snapshot_signature(state, invitation_hash, visibility, secret)}">',
         '<input type="hidden" name="access" value="write">',
         '<input id="working-input" type="hidden" name="working" value="keep" disabled>',
-        f'<div class="gh-context">{platform_mark(platform)}'
-        f"<span>{place}: {esc(workspace)}</span></div>",
-        '<div class="gh-editor-toolbar"><h2>Repos for this agent</h2>',
-        '<button id="open-repo-picker" class="gh-add-button gh-js" type="button">'
-        f"{icon('plus')}Add repos</button></div>",
     ]
     if pending_installation is not None and pending_installation.found:
         organization = pending_installation.account_login
@@ -1261,7 +1271,10 @@ def _agent_editor_page(
     if selection_error:
         parts.append(f'<p class="gh-inline-error" role="alert">{esc(selection_error)}</p>')
     working_name = (
-        esc(working.full_name)
+        '<span class="gh-working-owner">'
+        + esc(working.full_name.partition("/")[0])
+        + "/</span>"
+        + esc(working.full_name.partition("/")[2])
         if working and working.repo_id in usable
         else "Hidden repo"
         if working
@@ -1320,11 +1333,16 @@ def _agent_editor_page(
             parts.append(
                 f'<article class="gh-agent-row" data-repo-id="{repo.repo_id}" '
                 f'data-name="{data_name}" '
+                f'data-working-eligible="{str(editable and repo.status == "active").lower()}" '
                 f'data-access="{repo.ceiling_access}">'
                 '<div class="gh-row-top"><span class="gh-row-icon">'
                 + icon("book-marked" if editable else "lock")
-                + '</span><strong class="gh-row-name">'
-                f'{repo_name}</strong><div class="gh-row-actions gh-js">'
+                + '</span><span class="gh-row-content"><strong class="gh-row-name">'
+                f'{repo_name}</strong><span class="gh-working-badge"'
+                + ("" if repo.is_working_repo else " hidden")
+                + f">{icon('pin')}Working repo</span>"
+                + '<span class="gh-pending-label" aria-live="polite" hidden></span>'
+                + '</span><div class="gh-row-actions gh-js">'
             )
             parts.append(
                 '<button class="gh-row-action gh-remove-action" type="button" '
@@ -1335,26 +1353,7 @@ def _agent_editor_page(
                 f'aria-label="Undo removal of {action_name}" '
                 f"hidden>{icon('undo-2')}Undo</button>"
             )
-            if editable and may_change_working and repo.status == "active":
-                parts.append(
-                    '<button class="gh-row-action gh-working-action" type="button" '
-                    'data-action="working">'
-                    f'{icon("pin")}<span class="gh-working-action-label">'
-                    + (
-                        "Change working repo"
-                        if repo.is_working_repo
-                        else "Choose working repo"
-                        if working is None
-                        else "Use as working repo"
-                    )
-                    + "</span></button>"
-                )
             parts.append('</div></div><div class="gh-row-meta">')
-            parts.append(
-                f'<span class="gh-working-badge"{"" if repo.is_working_repo else " hidden"}>'
-                f"{icon('pin')}Working repo</span>"
-                '<span class="gh-pending-label" aria-live="polite"></span>'
-            )
             if repo.status != "active":
                 parts.append('<span class="gh-repo-state">Unavailable</span>')
             parts.append("</div>")
@@ -1377,21 +1376,8 @@ def _agent_editor_page(
             parts.append("</article>")
         parts.append("</div></section>")
     parts.append("</div>")
-    if not grants or not options:
-        parts.append(
-            '<p class="gh-editor-install">Missing a repo? Add it to the Daimon GitHub '
-            'App on GitHub. <a href="'
-            + esc(install_url, quote=True)
-            + '">Open GitHub setup</a></p>'
-        )
     parts.append(
-        '<details class="gh-access-help"><summary>'
-        f"{icon('info')}How this works</summary>"
-        "<p>The working repo opens in the agent's workspace. The agent can read and change "
-        "connected repos. Access also depends on the person asking and their GitHub permissions."
-        + (" Clients can see what this agent shares." if clients_present else "")
-        + (" Setup is incomplete until the required repos are connected." if missing_names else "")
-        + "</p></details>"
+        '<button id="open-repo-picker" class="gh-add-button gh-js" type="button">Add repos</button>'
     )
     owner_choice_rows: list[str] = []
     for item in installations:
@@ -1404,11 +1390,17 @@ def _agent_editor_page(
             '<button class="gh-owner-button" type="button" '
             f'data-owner="{esc(item.owner_login, quote=True)}"'
             + (" disabled" if disabled else "")
-            + f">{owner_avatar(item)}<span>{esc(item.owner_login)}</span>"
-            + (f"<small>{count} {'repo' if count == 1 else 'repos'} added</small>" if count else "")
+            + f'>{owner_avatar(item)}<span class="gh-owner-login">{esc(item.owner_login)}</span>'
+            + (
+                f'<small class="gh-owner-added">{count} '
+                f"{'repo' if count == 1 else 'repos'} added</small>"
+                if count
+                else ""
+            )
             + '<small class="gh-owner-selected"></small>'
             + ("<small>Paused on GitHub</small>" if item.state == "suspended" else "")
             + ("<small>Could not load repos.</small>" if item.fetch_state == "error" else "")
+            + icon("chevron-right")
             + "</button>"
         )
         if item.fetch_state == "error":
@@ -1420,25 +1412,26 @@ def _agent_editor_page(
             )
     parts.append(
         '<dialog id="repo-picker" class="gh-repo-dialog" aria-labelledby="repo-picker-title">'
-        '<div class="gh-dialog-head"><h2 id="repo-picker-title">Add repos</h2>'
+        '<div class="gh-dialog-head">'
+        '<button id="back-repo-owners" class="gh-link-button" type="button" hidden>'
+        f"{icon('chevron-left')}Back</button>"
+        '<h2 id="repo-picker-title">Add repos</h2>'
         '<button id="close-repo-picker" class="gh-dialog-close" type="button" '
         f'aria-label="Close add repos">{icon("x")}</button></div>'
         '<div id="repo-owner-choice" class="gh-owner-choice">'
-        "<p>The agent can read and change the repos you add.</p>"
+        f"<p>{esc(agent_name)} can read and change the repos you add.</p>"
         + "".join(owner_choice_rows)
-        + '<p class="gh-dialog-link">Not listed? <a href="'
+        + '<p class="gh-dialog-link gh-not-listed">Not listed? <a class="gh-add-button" href="'
         + esc(install_url, quote=True)
         + '">Open GitHub setup</a></p>'
-        '<div class="gh-dialog-footer"><span id="owner-picker-count">0 selected</span>'
+        '<div class="gh-dialog-footer" hidden><span id="owner-picker-count">0 selected</span>'
         '<button id="owner-clear-selection" class="gh-link-button" '
         'type="button">Clear selection</button>'
         '<button id="owner-stage-repos" class="gh-primary" '
         'type="button" disabled>Add 0 repos</button>'
         "</div></div>"
         '<div id="repo-owner-sheet">'
-        '<button id="back-repo-owners" class="gh-link-button" type="button">Back</button>'
-        '<p class="gh-status-line gh-dialog-copy">The agent can read and change these repos.</p>'
-        '<p class="gh-action-line gh-dialog-copy">Choose repos, then review your changes.</p>'
+        '<span class="gh-sheet-chip">Can read and change</span>'
         + "".join(
             f'<p class="gh-owner-truncated gh-dialog-copy" '
             f'data-owner="{esc(item.owner_login, quote=True)}" hidden>'
@@ -1449,19 +1442,12 @@ def _agent_editor_page(
         + f'<div class="gh-dialog-search">{icon("search")}'
         '<input id="search-repos" class="gh-search" type="search" '
         'aria-label="Search repos" placeholder="Search repos" autocomplete="off"></div>'
-        '<div class="gh-dialog-link gh-dialog-bulk">'
+        '<div class="gh-dialog-link gh-dialog-bulk"><span id="shown-count"></span>'
         '<button id="select-shown" class="gh-link-button" type="button">'
-        f"Select all {len(options)} shown</button>"
+        f"Select all {len(options)}</button>"
         '<button id="show-selected-repos" class="gh-link-button" type="button" '
         'aria-pressed="false" disabled>Selected (0)</button>'
         '<button id="clear-selection" class="gh-link-button" type="button">Clear selection</button>'
-        + "".join(
-            f'<button class="gh-link-button gh-owner-all" type="button" '
-            f'data-installation="{installation.id}">'
-            f"Everything in {esc(installation.owner_login)}</button>"
-            for installation in installations
-            if any(option.installation_id == installation.id for option in options)
-        )
         + "</div>"
         '<div class="gh-dialog-choices">'
     )
@@ -1481,7 +1467,7 @@ def _agent_editor_page(
             + '</span><input class="gh-picker-toggle" type="checkbox"'
             + (" checked" if option.repo_id == requested_id else "")
             + ">"
-            f"<span>{esc(option.name.partition('/')[2])}"
+            f'<span class="gh-picker-name">{esc(option.name.partition("/")[2])}'
             + ("<small>Finish setup</small>" if option.repair else "")
             + ("<small>Required to finish setup</small>" if required_write else "")
             + "</span></label></div>"
@@ -1493,15 +1479,12 @@ def _agent_editor_page(
             f'<div class="gh-picker-choice gh-picker-connected" '
             f'data-owner="{esc(repo.full_name.partition("/")[0], quote=True)}" '
             f'data-name="{esc(repo.full_name, quote=True)}">'
-            f"{icon('circle-check')}<span>{esc(repo.full_name.partition('/')[2])}"
-            "<small>Already connected</small></span></div>"
+            f'<span class="gh-row-icon">{icon("book-marked")}</span>'
+            f'<span class="gh-picker-name">{esc(repo.full_name.partition("/")[2])}'
+            "</span><small>✓ Added</small></div>"
         )
     parts.append(
         '<p id="no-search-results" hidden>No matching repos.</p></div>'
-        + '<p class="gh-dialog-link">Missing a repo? Add it to the Daimon GitHub App '
-        + 'on GitHub. <a href="'
-        + esc(install_url, quote=True)
-        + '">Open GitHub setup</a></p>'
         '<div class="gh-dialog-footer"><span id="picker-count">Not saved yet. Save changes '
         "after adding to the list.</span>"
         '<button id="stage-repos" class="gh-primary" type="button" disabled>Add to list</button>'
@@ -1522,22 +1505,16 @@ def _agent_editor_page(
     parts.append(
         '<template id="added-row-template"><article class="gh-agent-row">'
         '<div class="gh-row-top"><span class="gh-row-icon">'
-        f'{icon("book-marked")}</span><strong class="gh-row-name"></strong>'
+        f'{icon("book-marked")}</span><span class="gh-row-content">'
+        '<strong class="gh-row-name"></strong>'
+        '<span class="gh-working-badge" hidden>Working repo</span>'
+        '<span class="gh-pending-label" aria-live="polite" hidden></span></span>'
         '<div class="gh-row-actions">'
         f'<button class="gh-row-action gh-remove-action" type="button" data-action="remove">'
         f"{icon('trash-2')}Remove</button>"
         '<button class="gh-row-action gh-undo-action" type="button" data-action="undo" hidden>'
-        f"{icon('undo-2')}Undo</button>"
-        + (
-            '<button class="gh-row-action gh-working-action" type="button" '
-            f'data-action="working">{icon("pin")}'
-            '<span class="gh-working-action-label">Choose working repo</span></button>'
-            if may_change_working
-            else ""
-        )
-        + '</div></div><div class="gh-row-meta">'
-        f'<span class="gh-working-badge" hidden>{icon("pin")}Working repo</span>'
-        '<span class="gh-pending-label" aria-live="polite"></span></div>'
+        f"{icon('undo-2')}Undo</button>" + '</div></div><div class="gh-row-meta">'
+        "</div>"
         '<input type="hidden" name="repo" disabled>'
         "</article></template>"
     )
@@ -1585,7 +1562,10 @@ def _agent_editor_page(
     parts.append(
         '<div class="gh-editor-footer"><div class="gh-editor-footer-inner">'
         '<div><strong id="selection-status" aria-live="polite">No changes to save</strong>'
-        '<small id="save-help">Changes apply when you save.</small></div>'
+        '<div class="gh-dock-chips"><span id="dock-add" hidden></span>'
+        '<span id="dock-remove" hidden></span>'
+        f'<span id="dock-working" hidden>{icon("pin")}<span></span></span></div>'
+        '<small id="save-help" hidden></small></div>'
         '<div class="gh-editor-footer-actions">'
         '<button id="discard-repos" class="gh-editor-discard gh-js" type="button" hidden>'
         "Discard changes</button>"
@@ -2059,7 +2039,14 @@ def build_oauth_github_routes(
                 else []
             )
         if invitation.agent_id is not None:
-            return _saved_agent_page(invitation.agent_name or "Agent", agent_grants, visible_ids)
+            back_url = (
+                f"https://discord.com/channels/{requester.external_id}"
+                if requester is not None and requester.platform == "discord"
+                else None
+            )
+            return _saved_agent_page(
+                invitation.agent_name or "Agent", agent_grants, visible_ids, back_url
+            )
         back = _back_to_chat(requester.platform, requester.external_id) if requester else ""
         return _already_connected_page(
             invitation.connected_repo_count,

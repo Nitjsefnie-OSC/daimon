@@ -418,3 +418,111 @@
 @media(max-width:600px){
   .gh-editor .gh-editor-cancel:not([hidden]){display:inline-flex;grid-area:1/2;justify-self:end;align-self:center}
 }
+
+/* Approved warm picker tokens and one-line row anatomy. */
+html:has(.gh-editor),html:has(.gh-flow--saved){font-feature-settings:"cv11","ss01"}
+body:has(.gh-editor),body:has(.gh-flow--saved){background:#f7f6f2;color:#1c1b18}
+.web-main:has(.gh-editor),.web-main:has(.gh-flow--saved){background:#f7f6f2}
+.gh-flow:has(.gh-editor),.gh-flow--saved{--background:#fcfbf8;--foreground:#1c1b18;--primary:#1c1b18;--primary-foreground:#fcfbf8;--muted:#f1efe9;--muted-foreground:#5f5c54;--border:#e6e3dc;--input:#85817a;--ring:#2b6cb0;color:#1c1b18}
+.gh-flow:has(.gh-editor) :focus-visible,.gh-flow--saved :focus-visible{outline:2px solid #2b6cb0;outline-offset:2px}
+.gh-flow:has(.gh-editor) .gh-repo-dialog{background:#fff;border-radius:4px}
+.gh-flow:has(.gh-editor) .gh-dialog-head{position:relative;flex-direction:column;align-items:flex-start;justify-content:flex-start}
+.gh-flow:has(.gh-editor) .gh-dialog-head .gh-dialog-close{position:absolute;right:20px;top:18px}
+.gh-flow:has(.gh-editor) .gh-repo-dialog::backdrop{background:#1c1b1826}
+.gh-editor-chips{display:flex;gap:8px;margin:14px 0 18px}
+.gh-editor-chips span,.gh-sheet-chip{display:inline-flex;align-items:center;min-height:24px;padding:0 8px;border:1px solid #e6e3dc;border-radius:4px;background:#fcfbf8;color:#1c1b18;font-size:13px;font-weight:500}
+.gh-flow:has(.gh-editor) .gh-connected-list{border-radius:4px}
+.gh-flow:has(.gh-editor) #open-repo-picker{display:inline-flex;margin-top:16px}
+.gh-flow:has(.gh-editor) .gh-add-button{border-color:#85817a;border-radius:4px;background:#fcfbf8;color:#1c1b18}
+.gh-flow:has(.gh-editor) .gh-agent-row{display:block;min-height:56px;padding:16px;border:0;background:#fcfbf8}
+.gh-flow:has(.gh-editor) .gh-agent-row:not(:last-child)::after{content:"";position:absolute;bottom:0;left:0;right:0;border-bottom:1px solid #e6e3dc}
+.gh-flow:has(.gh-editor) .gh-agent-row.gh-added-row,.gh-flow:has(.gh-editor) .gh-agent-row.gh-removed-row{background:#fcfbf8}
+.gh-flow:has(.gh-editor) .gh-row-top{display:flex;align-items:flex-start;gap:0;min-height:24px;width:100%}
+.gh-flow:has(.gh-editor) .gh-row-icon{width:20px;height:24px;margin-right:12px}
+.gh-flow:has(.gh-editor) .gh-row-content{display:flex;flex:1;flex-wrap:wrap;align-items:center;gap:0 8px;min-width:0;line-height:24px}
+.gh-flow:has(.gh-editor) .gh-row-name{display:inline;font-size:16px;line-height:24px;font-weight:400;color:#1c1b18}
+.gh-flow:has(.gh-editor) .gh-removed-row .gh-row-name{color:#1c1b18;text-decoration:line-through;text-decoration-color:#5f5c54}
+.gh-flow:has(.gh-editor) .gh-row-actions{height:24px;margin-left:8px}
+.gh-flow:has(.gh-editor) .gh-row-action{min-height:44px;padding:0 4px;border-radius:4px;color:#5f5c54;white-space:nowrap}
+.gh-flow:has(.gh-editor) .gh-row-meta:empty{display:none}
+.gh-flow:has(.gh-editor) .gh-row-meta{margin:0 0 0 32px;line-height:24px}
+.gh-flow:has(.gh-editor) .gh-working-badge,.gh-flow:has(.gh-editor) .gh-pending-label{display:inline-flex;align-items:center;min-height:24px;padding:0 6px;border-radius:4px;font-size:13px;font-weight:500;line-height:24px;white-space:nowrap}
+.gh-flow:has(.gh-editor) .gh-working-badge{background:#ebe8e1;color:#5f5c54}
+.gh-flow:has(.gh-editor) .gh-pending-label{background:#e1f0e2;color:#11624f}
+.gh-flow:has(.gh-editor) .gh-removed-row .gh-pending-label{background:#f4d8d2;color:#a12a2a}
+.gh-flow:has(.gh-editor) .gh-working-card{height:auto;min-height:56px;padding:5px 16px 5px 14px}
+.gh-flow:has(.gh-editor) .gh-working-card{align-items:flex-start;padding-top:15px;padding-bottom:15px}
+.gh-flow:has(.gh-editor) .gh-working-card>.web-icon{height:24px;width:20px;padding:2px 0}
+.gh-flow:has(.gh-editor) .gh-working-card>span{line-height:24px}
+.gh-flow:has(.gh-editor) .gh-working-card>strong{line-height:24px}
+.gh-flow:has(.gh-editor) .gh-working-card>.gh-add-button{margin-top:-10px;margin-bottom:-10px}
+.gh-flow:has(.gh-editor) .gh-working-owner{color:#5f5c54}
+.gh-flow:has(.gh-editor) .gh-owner-heading{height:40px;min-height:40px;padding:8px 16px}
+.gh-flow:has(.gh-editor) .gh-owner-avatar-fallback{border-radius:4px}
+.gh-flow:has(.gh-editor) .gh-owner-avatar-fallback,.gh-flow--saved .gh-owner-avatar-fallback{background:#f1efe9;color:#5f5c54;font-size:12px;font-weight:600}
+.gh-flow:has(.gh-editor) .gh-owner-group[data-person=true] .gh-owner-avatar-fallback{border-radius:50%}
+.gh-flow:has(.gh-editor) .gh-owner-button{flex-wrap:nowrap;background:#fcfbf8}
+.gh-flow:has(.gh-editor) .gh-owner-login{flex:1;min-width:0;overflow-wrap:anywhere}
+.gh-flow:has(.gh-editor) .gh-owner-added,.gh-flow:has(.gh-editor) .gh-owner-selected{flex:none;padding:2px 7px;border-radius:4px;background:#ebe8e1;color:#5f5c54;font-size:13px}
+.gh-flow:has(.gh-editor) .gh-owner-selected:not(:empty){background:#e1f0e2;color:#11624f!important}
+.gh-flow:has(.gh-editor) .gh-owner-selected:empty{display:none}
+.gh-flow:has(.gh-editor) .gh-owner-button>.web-icon{width:16px;height:16px}
+.gh-flow:has(.gh-editor) .gh-not-listed{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.gh-flow:has(.gh-editor) .gh-not-listed a{text-decoration:none}
+.gh-flow:has(.gh-editor) #back-repo-owners{margin:0 0 8px;padding:0;text-decoration:none;justify-content:flex-start}
+.gh-flow:has(.gh-editor) #back-repo-owners .web-icon{width:16px;height:16px}
+.gh-flow:has(.gh-editor) .gh-sheet-chip{margin:0 24px 14px}
+.gh-flow:has(.gh-editor) .gh-dialog-bulk{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:8px 24px}
+.gh-flow:has(.gh-editor) .gh-dialog-bulk #shown-count{margin-right:auto;color:#5f5c54;font-size:13px}
+.gh-flow:has(.gh-editor) .gh-dialog-bulk .gh-link-button{min-height:36px;padding:0 10px;border:1px solid #85817a;border-radius:4px;text-decoration:none}
+.gh-flow:has(.gh-editor) .gh-dialog-bulk #clear-selection{display:none}
+.gh-flow:has(.gh-editor) .gh-dialog-bulk:has(#show-selected-repos[aria-pressed=true]) #clear-selection{display:inline-flex}
+.gh-flow:has(.gh-editor) .gh-picker-choice{height:auto;min-height:56px;padding:16px;border:0;border-top:1px solid #e6e3dc;border-radius:0;background:#fcfbf8}
+.gh-flow:has(.gh-editor) .gh-picker-choice:has(input:checked){padding:16px;border:0;border-top:1px solid #e6e3dc;border-radius:0;background:#fcfbf8}
+.gh-flow:has(.gh-editor) .gh-picker-label{display:flex;align-items:center;gap:0;min-height:24px;font-weight:400}
+.gh-flow:has(.gh-editor) .gh-picker-label .gh-row-icon{margin-right:12px}
+.gh-flow:has(.gh-editor) .gh-picker-name{flex:1;min-width:0;font-size:16px;font-weight:400;color:#1c1b18;line-height:24px}
+.gh-flow:has(.gh-editor) .gh-picker-label input{order:3;margin-left:8px;accent-color:#1c1b18}
+.gh-flow:has(.gh-editor) .gh-picker-connected{gap:0}
+.gh-flow:has(.gh-editor) .gh-picker-connected small{margin-left:8px;color:#11624f}
+.gh-flow:has(.gh-editor) .gh-selected-owner{display:flex;align-items:center;gap:12px;height:40px;margin:0;padding:8px 16px;background:#f1efe9;color:#5f5c54;font-size:14px;font-weight:500}
+.gh-flow:has(.gh-editor) .gh-dialog-choices{padding:0 24px}
+.gh-flow:has(.gh-editor) .gh-dialog-search input{border-color:#85817a;border-radius:4px}
+.gh-flow:has(.gh-editor) .gh-dialog-search:has(input:focus-visible){outline:2px solid #2b6cb0;outline-offset:2px;border-radius:4px}
+.gh-flow:has(.gh-editor) .gh-dialog-search input:focus-visible{outline:none}
+.gh-flow:has(.gh-editor) .gh-editor-footer{right:16px;bottom:16px;left:16px;max-width:800px;margin:auto;border:1px solid #e6e3dc;border-radius:4px;background:#fff;box-shadow:0 1px 2px #1c1b1810,0 12px 28px -6px #1c1b1829,0 28px 56px -16px #1c1b182e}
+.gh-flow:has(.gh-editor) .gh-editor-footer[hidden],.gh-flow:has(.gh-editor) .gh-dialog-footer[hidden]{display:none!important}
+.gh-flow:has(.gh-editor) .gh-dock-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:5px}
+.gh-flow:has(.gh-editor) .gh-dock-chips span{padding:2px 7px;border-radius:4px;background:#ebe8e1;color:#5f5c54;font-size:13px}
+.gh-flow:has(.gh-editor) #dock-working{display:inline-flex;align-items:center;gap:4px}
+.gh-flow:has(.gh-editor) #dock-working .web-icon{width:14px;height:14px}
+.gh-flow:has(.gh-editor) #dock-working span{padding:0;background:none;color:inherit}
+.gh-flow:has(.gh-editor) #dock-add{background:#e1f0e2;color:#11624f}
+.gh-flow:has(.gh-editor) #dock-remove{background:#f4d8d2;color:#a12a2a}
+.gh-flow--saved{max-width:720px;margin:auto}
+.gh-flow--saved{display:flex;flex-direction:column;align-items:flex-start}
+.gh-flow--saved .gh-status-icon{order:-1}
+.gh-flow--saved .gh-status-icon .web-icon{width:40px;height:40px;color:#11624f}
+.gh-flow--saved .gh-saved-groups{width:100%;border-radius:4px;background:#fcfbf8}
+.gh-flow--saved .gh-saved-groups h2{height:40px;background:#f1efe9;color:#5f5c54}
+.gh-flow--saved .gh-saved-row{min-height:56px;color:#1c1b18}
+.gh-flow--saved .gh-saved-row{display:flex;align-items:center;padding:16px;line-height:24px}
+.gh-flow--saved .gh-saved-name{flex:1;min-width:0;margin-left:0;overflow-wrap:anywhere;font-size:16px;font-weight:400;color:#1c1b18}
+.gh-flow--saved .gh-row-icon{width:20px;height:24px;margin-left:0;margin-right:12px;color:#5f5c54}
+.gh-flow--saved .gh-row-icon .web-icon{width:16px;height:16px;stroke-width:1.5}
+.gh-flow--saved .gh-back-discord{margin-top:24px;background:#1c1b18;color:#fcfbf8;border-radius:4px}
+body:has(.gh-editor) .web-header,body:has(.gh-flow--saved) .web-header{background:#f7f6f2;border-color:#e6e3dc}
+body:has(.gh-editor) .web-context,body:has(.gh-flow--saved) .web-context{border-radius:4px}
+body:has(.gh-editor) :focus-visible,body:has(.gh-flow--saved) :focus-visible{outline:2px solid #2b6cb0;outline-offset:2px}
+@media(max-width:600px){
+ .gh-flow:has(.gh-editor) .gh-row-top{display:flex;flex-direction:row;align-items:flex-start}
+ .gh-flow:has(.gh-editor) .gh-agent-row{padding:16px}
+ .gh-flow:has(.gh-editor) .gh-row-content{flex:1}
+ .gh-flow:has(.gh-editor) .gh-row-actions{flex-wrap:nowrap}
+ .gh-flow:has(.gh-editor) .gh-row-meta{margin-left:32px}
+ .gh-flow:has(.gh-editor) .gh-repo-dialog{border-radius:4px 4px 0 0}
+ .gh-flow:has(.gh-editor) .gh-dialog-choices{padding:0 20px}
+ .gh-flow:has(.gh-editor) .gh-editor-footer{left:8px;right:8px;bottom:8px}
+ .gh-flow:has(.gh-editor) .gh-editor-footer-inner{display:flex;flex-wrap:wrap}
+ .gh-flow:has(.gh-editor) .gh-editor-footer-actions{display:flex}
+}
