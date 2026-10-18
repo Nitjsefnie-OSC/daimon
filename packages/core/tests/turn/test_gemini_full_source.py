@@ -659,7 +659,8 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
     indirect=True,
     ids=["root-concrete", "root-latest", "gated-mcp-tool"],
 )
-async def test_full_default_preparation_and_fresh_followup_turns(full):
+async def test_full_default_preparation_and_fresh_followup_turns(full, request):
+    gated = request.node.callspec.params["full"]
     assert isinstance(full, tuple), "full source could not retain its authority"
     request, plan, canonical, native, calls, posts, token, *_ = full
     assert len(canonical.target_spec.skills) == 11
@@ -725,9 +726,10 @@ async def test_full_default_preparation_and_fresh_followup_turns(full):
         assert body["system_instruction"] == canonical.target_spec.system
         assert token in json.dumps(body["tools"])
         remote = next(tool for tool in body["tools"] if tool["type"] == "mcp_server")
-        assert set(remote["allowed_tools"][0]["tools"]) == set(
-            canonical.target_spec.mcp_servers[0].tool_policy["allowed_tools"]
+        expected_mcp = (
+            set(GATED_CATALOGUE) - {"add_skill"} if gated else {"search_tools", "call_tool"}
         )
+        assert set(remote["allowed_tools"][0]["tools"]) == expected_mcp
     assert token not in json.dumps(native) and token not in plan.model_dump_json()
     assert (
         "offline-storage-token" not in json.dumps(native)
