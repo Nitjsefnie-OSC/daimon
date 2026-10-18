@@ -1410,13 +1410,18 @@ async def bind_session_impl(
             # Worker intent retains the root's ownership stamps. The native
             # allocation needs its own resolver identity, even when the source
             # is cloned or allocation succeeds before dispatch is interrupted.
-            from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+            from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 
             worker_name = persistence.slot.thread.thread_id.replace("/", "-")
             native_spec = worker.spec.model_copy(
                 update={
                     "name": worker_name,
-                    "metadata": {**(worker.spec.metadata or {}), MA_METADATA_KEY_NAME: worker_name},
+                    "metadata": {
+                        **(worker.spec.metadata or {}),
+                        MA_METADATA_KEY_NAME: worker_name,
+                        # A runtime worker is not a removed seeded default.
+                        MA_METADATA_KEY_MANAGED: "false",
+                    },
                 }
             )
 

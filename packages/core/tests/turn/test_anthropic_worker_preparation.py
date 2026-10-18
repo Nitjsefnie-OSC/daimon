@@ -468,7 +468,12 @@ async def test_worker_allocation_keeps_fresh_mentions_on_original_agent(native_w
     )
     expected_name = f"fleet-{claimed.run_id}-{claimed.ordinal}"
     assert payload["name"] == payload["metadata"][MA_METADATA_KEY_NAME] == expected_name
-    assert payload["metadata"] == {**root.spec.metadata, MA_METADATA_KEY_NAME: expected_name}
+    assert payload["metadata"] == {
+        **root.spec.metadata,
+        MA_METADATA_KEY_NAME: expected_name,
+        "daimon_managed": "false",
+    }
+    assert root.spec.metadata["daimon_managed"] == "true"
     assert root.spec.metadata[MA_METADATA_KEY_NAME] != expected_name
 
     async def unexpected_apply():
@@ -484,3 +489,16 @@ async def test_worker_allocation_keeps_fresh_mentions_on_original_agent(native_w
         cache=new_resolver_cache(),
     )
     assert selected == request.admission.agent.id
+
+    from daimon.core.defaults.sweep import sweep_removed_agents
+
+    # Scheduler startup must not archive the live worker as a deleted default.
+    assert (
+        await sweep_removed_agents(
+            request.deps.anthropic,
+            present_names={root.spec.metadata[MA_METADATA_KEY_NAME]},
+            tenant_id=request.tenant_id,
+            dry_run=False,
+        )
+        == []
+    )
