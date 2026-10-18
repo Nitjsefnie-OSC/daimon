@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--since", default="5m", help="read window, for example 30s, 5m, 1h")
     parser.add_argument("--after", help="wait for bot messages after this message id")
     parser.add_argument("--timeout", type=float, default=60.0, help="wait timeout in seconds")
-    args = parser.parse_args(argv)
+    args = parser.parse_intermixed_args(argv)
     if args.command != "send" and (args.text is not None or args.to is not None):
         parser.error("text and --to require send")
     if args.command != "login" and (args.manual or args.access_flow):
