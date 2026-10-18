@@ -317,7 +317,11 @@ adopts the same queue and card; stale writes queued by the old lifecycle are
 dropped. A defensive repair reasserts the final render if a stale completion is
 detected. The bot's outer error boundary finishes the card through the same
 lifecycle. Long answers keep their summary on the last chunk, and failed turns
-preserve sealed answer text before showing the error card. Process death loses
+preserve sealed answer text before showing the error card. Discord limits a turn
+to five answer messages, reserving one for the terminal answer or error card.
+Excess sealed or final prose is combined into `answer.txt` on that final message,
+with a notice and a warning in the logs. Consecutive identical answer blocks
+and text consisting entirely of pseudo tool calls are suppressed. Process death loses
 the in-memory queue: a request already sent to Discord may still arrive after
 the new process edits an orphaned card to its restarted notice.
 
