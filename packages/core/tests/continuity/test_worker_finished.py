@@ -60,11 +60,13 @@ from daimon.testing.ma import build_fake_anthropic
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
+from mux.drivers.anthropic.normalize import EventNormalizer
 from mux.state.journal import JournalEntry
 from mux.state.lease import Slot
 from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 _NOW = datetime(2026, 10, 12, 18, tzinfo=UTC)
 
@@ -818,7 +820,51 @@ async def test_live_root_turn_defers_and_keeps_the_same_wait(pooled, busy):
             now=_NOW,
         )
         await store.release_lease(lease)
-    assert (await decide_worker_finished(pooled, row, _NOW)).action == "skip_turn_running"
+    with capture_logs() as logs:
+        assert (await decide_worker_finished(pooled, row, _NOW)).action == "skip_turn_running"
+    deferred = [entry for entry in logs if entry["event"] == "fleet.worker_finished_deferred"]
+    assert [entry["action"] for entry in deferred] == ["skip_turn_running"]
+    expected = "live_turn_marker" if busy == "legacy" else "projection_busy"
+    assert deferred[0]["reason"].startswith(expected)
+    assert deferred[0]["continuation_id"] == str(row.id)
+
+
+async def test_a_deferred_wake_names_why_it_did_not_dispatch(pooled):
+    run, row, _, _, _ = await _ready_root(pooled)
+    with capture_logs() as logs:
+        assert await decide_worker_finished(pooled, row, run.deadline_at) is None
+    assert [(entry["action"], entry["reason"]) for entry in logs] == [(None, "run_not_running")]
+
+
+async def test_root_turn_recorded_running_before_its_input_still_wakes(pooled):
+    # Staging r11 (2026-10-18): Managed Agents recorded status_running before the
+    # user.message that opened the root turn. The journal must fold the end_turn so
+    # the projection returns to idle and the finished workers wake the root.
+    run, row, store, slot, ref = await _ready_root(pooled)
+    lease = await store.acquire_lease(
+        slot, holder="root", turn_id="root", now=_NOW, ttl=timedelta(minutes=5)
+    )
+    normalizer = EventNormalizer(ref)
+    records = [
+        {"type": "session.status_running", "id": "sevt_running"},
+        {"type": "user.message", "id": "sevt_input", "content": [{"type": "text", "text": "go"}]},
+        {"type": "session.status_idle", "id": "sevt_idle", "stop_reason": {"type": "end_turn"}},
+    ]
+    entries = [
+        JournalEntry(
+            source_key=record["id"],
+            event=normalizer.normalize(
+                {**record, "processed_at": _NOW.isoformat()}, observed_at=_NOW
+            ),
+        )
+        for record in records
+    ]
+    await store.append_events(ref, entries, fence=lease, cursor="sevt_idle", now=_NOW)
+    await store.release_lease(lease)
+    async with pooled() as db:
+        projection = await mux_state.projection(db, ref.id)
+    assert projection.state == "idle" and projection.active_root_turn is None
+    assert (await decide_worker_finished(pooled, row, _NOW)).action == "dispatch"
 
 
 async def _start_root_wait(pooled, row):
