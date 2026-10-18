@@ -13,8 +13,8 @@ Microsoft access, and exist only in Teams.
   paste or invent a sign-in link.
 - Find things with `microsoft_search`, then open a hit's `path` with
   `microsoft_get`. Follow `next_path` only as far as the task needs.
-- File content comes back as a short-lived `download_url`: fetch it in the
-  sandbox, never ask for the bytes in chat.
+- In their 1:1 chat, file content comes back as a short-lived `download_url`:
+  fetch it in the sandbox, never paste it. Elsewhere no link is given.
 - Change files with `microsoft_write`: upload a sandbox file through
   `create_file_upload_url` and pass its `file_handle`; edit Excel through the
   workbook API rather than re-uploading the file.
