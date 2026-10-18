@@ -16,10 +16,10 @@ from qa.live.teams.config import TeamsQaConfig
 from qa.live.teams.tokens import TokenStore
 
 BASE = "https://graph.microsoft.com/v1.0"
-READ = ["ChannelMessage.Read.All", "offline_access"]
-SEND = ["ChannelMessage.Send", "offline_access"]
-TARGET = ["Team.ReadBasic.All", "Channel.ReadBasic.All", "User.Read", "offline_access"]
-CHAT = ["Chat.ReadWrite", "User.Read", "offline_access"]
+READ = ["ChannelMessage.Read.All"]
+SEND = ["ChannelMessage.Send"]
+TARGET = ["Team.ReadBasic.All", "Channel.ReadBasic.All", "User.Read"]
+CHAT = ["Chat.ReadWrite", "User.Read"]
 
 
 class GraphRequestError(RuntimeError):

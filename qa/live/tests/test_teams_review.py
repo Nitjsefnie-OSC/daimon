@@ -40,8 +40,11 @@ def test_consented_scopes_only() -> None:
         "Team.ReadBasic.All",
         "Channel.ReadBasic.All",
     }
-    assert CHAT == ["Chat.ReadWrite", "User.Read", "offline_access"]
-    assert set(CHAT + READ + SEND + TARGET) <= approved
+    requested = set(CHAT + READ + SEND + TARGET)
+    assert CHAT == ["Chat.ReadWrite", "User.Read"]
+    assert requested <= approved
+    # MSAL adds these itself and rejects them when a caller passes them.
+    assert not requested & {"offline_access", "openid", "profile"}
 
 
 @pytest.mark.asyncio
