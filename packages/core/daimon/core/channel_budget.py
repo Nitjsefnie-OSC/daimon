@@ -48,6 +48,7 @@ from mux.profiles import get_profile
 from mux.state.lease import Slot
 from mux.state.operations import OperationRecord, request_digest
 from pydantic import JsonValue
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -928,6 +929,12 @@ async def _reserve_fleet_worker(
 
 #: Consecutive slow budget reads tolerated before a run's workers are cancelled.
 BUDGET_READ_TIMEOUT_LIMIT = 3
+#: Seconds the tenant fleet lock may stay held by admissions before the watch fails closed.
+BUDGET_LOCK_BUSY_LIMIT_S = 10.0
+
+
+class _BudgetLockBusy(Exception):
+    """The tenant fleet lock is held by a writer; this poll is skipped, not failed."""
 
 
 async def watch_fleet_budget(
@@ -957,6 +964,7 @@ async def watch_fleet_budget(
     if not all(math.isfinite(v) and v > 0 for v in (poll_interval, timeout)):
         raise ValueError("budget poll and read timeout must be positive finite durations")
     timeouts = 0
+    busy_since: float | None = None
     try:
         while not finished.is_set():
             started = asyncio.get_running_loop().time()
@@ -964,6 +972,16 @@ async def watch_fleet_budget(
             try:
                 async with asyncio.timeout(timeout):
                     async with sessionmaker.begin() as session:
+                        # Admissions hold the tenant fleet lock while they work; a
+                        # passive refresh must not queue behind them. Try it first
+                        # (re-entrant for lock_budget below); a held lock is busy,
+                        # not unavailable usage.
+                        acquired = await session.scalar(
+                            text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+                            {"key": f"fleet:{uuid.UUID(parent.fleet.scope.tenant_id)}"},
+                        )
+                        if not acquired:
+                            raise _BudgetLockBusy
                         usages = await produce_fleet_budget(
                             session,
                             parent=parent,
@@ -972,6 +990,20 @@ async def watch_fleet_budget(
                         )
                         if any(worker_id not in usages for worker_id, _ in watched):
                             raise FleetConflict("watched worker is unavailable")
+            except _BudgetLockBusy:
+                now = asyncio.get_running_loop().time()
+                busy_since = busy_since if busy_since is not None else now
+                if now - busy_since < BUDGET_LOCK_BUSY_LIMIT_S:
+                    await asyncio.sleep(poll_interval)
+                    continue
+                log.warning(
+                    "fleet.budget_read_unavailable",
+                    reason="lock_busy",
+                    error_class="BudgetLockBusy",
+                )
+                for event in cancelled.values():
+                    event.set()
+                return "usage_unavailable"
             except TimeoutError:
                 # One slow read (e.g. while sibling admissions hold the run lock)
                 # is not unavailable usage: retry, and fail closed only after
@@ -997,7 +1029,7 @@ async def watch_fleet_budget(
                 for event in cancelled.values():
                     event.set()
                 return "usage_unavailable"
-            timeouts = 0
+            timeouts, busy_since = 0, None
             for worker_id, event in watched:
                 usage = usages.get(worker_id)
                 if event.is_set() or usage is None:
