@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- OpenAI agents with native web search and host-bound MCP now accept the provider's echoed default search fields and empty credential carriers during readback. Nondefault search controls and nonempty native credentials remain refused.
+
 - Fleet workers get distinct names, so later mentions keep reaching the original agent. Defaults updates leave live workers alone.
 - OpenAI agent switching names unsupported URL fetching as an explicit consented loss while preserving other source tools and skills.
 - Discord turns cap answer output at five messages, combine excess prose into an attachment, and suppress repeated blocks and pure tool-call markup.
