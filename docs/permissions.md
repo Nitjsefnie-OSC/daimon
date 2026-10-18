@@ -19,19 +19,38 @@ key, or an agent acting in a conversation on an admin's behalf, is refused. They
 are inactive until both `DAIMON_TOOL_SAFETY__ENABLED` and
 `DAIMON_TOOL_SAFETY__AGENT_RULES` are true.
 
-An agent-wide `deny` on one of Daimon's own tools (`daimon-mcp/<tool>`) is
-enforced by the MCP server. When a chat or routine session of that agent calls
-the tool, directly or through `call_tool`, the server refuses it before the tool
-runs, whatever the rule's scope. An agent-wide `deny` on `daimon-mcp/*` denies
-all of Daimon's tools for that agent, including tools added later: the server
-refuses every call from the agent's session, `search_tools` and `call_tool`
-included. Wildcards are recognised only for `daimon-mcp`, and only as an
-agent-wide `deny`; `allow`, `ask` and channel-scoped `*` rules, and `*` on other
-servers, do nothing. A rule must name the agent's own Daimon endpoint; a server
-that merely carries the name `daimon-mcp` at another URL is not matched. If the
-server cannot read the rules, it refuses the call. Operator tokens and agent keys
-are not affected. `ask`, `allow` and channel rules on Daimon's own tools are not
-applied yet.
+Daimon's own tools take rules too, under the key `daimon-mcp/<tool>` (the
+tool's own name, not `call_tool`). Two layers enforce them.
+
+The MCP server enforces an agent-wide `deny`. When a chat or routine session of
+that agent calls the tool, directly or through `call_tool`, the server refuses
+it before the tool runs, whatever the rule's scope. An agent-wide `deny` on
+`daimon-mcp/*` denies all of Daimon's tools for that agent, including tools
+added later: the server refuses every call from the agent's session,
+`search_tools` and `call_tool` included. Wildcards are recognised only for
+`daimon-mcp`, and only as an agent-wide `deny`; `allow`, `ask` and
+channel-scoped `*` rules, and `*` on other servers, do nothing. A rule must
+name the agent's own Daimon endpoint; a server that merely carries the name
+`daimon-mcp` at another URL is not matched. If the server cannot read the
+rules, it refuses the call. Operator tokens and agent keys are not affected.
+
+The turn driver applies `ask`, `deny` and channel rules, which the server cannot
+(it has no card and does not know the channel). Most chat sessions reach Daimon's
+tools through the `call_tool` proxy, so a session whose agent has any `ask` or
+`deny` rule on a Daimon tool, agent-wide or in any channel, asks before every
+`call_tool` call and before each tool a rule names; the driver then reads the
+tool inside the call and the rule that fits the channel. `deny` refuses the
+call, `ask` waits for a card in chat and refuses in a routine, and a call with
+no rule or an `allow` rule runs with no card. An agent-wide `daimon-mcp/*`
+`deny` also makes the driver refuse every proxied call, with the same message as
+any other deny. The rule set is read when a turn starts, so a rule added or
+cleared reaches the session on the next turn. A rule never loosens a gate
+Daimon already has: `add_skill` with a reviewed preview and the publish tools of
+an agent that asks before publishing still wait for their card, and the
+operator's deny list still comes first. An agent `deny` wins over those cards.
+These cards do not offer **Always allow**. A session on a backend that cannot
+hold these asks (Gemini, OpenAI) refuses the turn, naming the rule, instead of
+running them unasked.
 
 With both settings on, a card for a third-party MCP write classified as needing
 approval also has **Always allow**. A current workspace admin can press it to

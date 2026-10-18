@@ -18,6 +18,7 @@ from daimon.core.confirmation import ApprovedConfirmation, ConfirmationAnswer, C
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     OPEN_TOOL_SAFETY,
+    ResolvedAgentToolRule,
     ToolCall,
     ToolSafetyPolicy,
 )
@@ -55,12 +56,22 @@ def _cast(fa: FakeAnthropic) -> AsyncAnthropic:
     return cast(AsyncAnthropic, fa)
 
 
-def _script(fa: FakeAnthropic, *tool_uses: tuple[str, str, str]) -> None:
-    """One stream: the tool uses, a pause on all of them, then a finished turn."""
+def _script(
+    fa: FakeAnthropic,
+    *tool_uses: tuple[str, str, str],
+    inputs: dict[str, dict[str, object]] | None = None,
+) -> None:
+    """One stream: the tool uses, a pause on all of them, then a finished turn.
+
+    `inputs` gives a tool use's input by its id; the default is a title.
+    """
     events: list[YieldEvent] = [
         YieldEvent(
             make_mcp_tool_use(
-                event_id=tu_id, name=tool, mcp_server_name=server, input={"title": "Bug"}
+                event_id=tu_id,
+                name=tool,
+                mcp_server_name=server,
+                input=(inputs or {}).get(tu_id, {"title": "Bug"}),
             )
         )
         for tu_id, server, tool in tool_uses
@@ -918,3 +929,148 @@ async def test_the_card_expiry_setting_reaches_the_publish_only_path() -> None:
     assert len(prompts) == 1
     lifetime = prompts[0].expires_at - before
     assert timedelta(seconds=85) <= lifetime <= timedelta(seconds=95)
+
+
+def _proxied(inner: str, **arguments: object) -> dict[str, object]:
+    return {"name": inner, "arguments": arguments}
+
+
+async def test_a_denied_daimon_tool_behind_call_tool_is_refused_and_an_unruled_one_runs() -> None:
+    fa = FakeAnthropic()
+    _script(
+        fa,
+        ("tu_denied", DAIMON_SERVER_NAME, "call_tool"),
+        ("tu_free", DAIMON_SERVER_NAME, "call_tool"),
+        inputs={
+            "tu_denied": _proxied("hubspot_update_objects", title="Renewal"),
+            "tu_free": _proxied("get_session"),
+        },
+    )
+    policy = ToolSafetyPolicy(enabled=True, agent_rules=True)
+    looked_up: list[str] = []
+    prompts: list[ConfirmationPrompt] = []
+
+    async def rules_for(call: ToolCall) -> ResolvedAgentToolRule | None:
+        looked_up.append(call.key)
+        return (
+            ResolvedAgentToolRule(rule="deny")
+            if call.tool_name == "hubspot_update_objects"
+            else None
+        )
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    final = await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="update the deal",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=chat_tool_confirmation(
+            policy,
+            requester_platform_user_id="U1",
+            confirm=card,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            rules_for=rules_for,
+        ),
+    )
+
+    assert final.error is None
+    sent = _confirmations(fa)
+    assert [(e["tool_use_id"], e["result"]) for e in sent] == [
+        ("tu_denied", "deny"),
+        ("tu_free", "allow"),
+    ]
+    assert "daimon-mcp/hubspot_update_objects" in str(sent[0]["deny_message"])
+    assert looked_up == [
+        "daimon-mcp/hubspot_update_objects",
+        "daimon-mcp/get_session",
+    ], "the rule is looked up under the tool inside call_tool, not call_tool"
+    assert prompts == [], "no card for a refusal or for a call with no rule"
+
+
+async def test_an_ask_rule_on_a_daimon_tool_behind_call_tool_waits_for_the_card() -> None:
+    fa = FakeAnthropic()
+    _script(
+        fa,
+        ("tu_ask", DAIMON_SERVER_NAME, "call_tool"),
+        inputs={"tu_ask": _proxied("hubspot_update_objects", title="Renewal")},
+    )
+    policy = ToolSafetyPolicy(enabled=True, agent_rules=True)
+    prompts: list[ConfirmationPrompt] = []
+    clicked = asyncio.Event()
+
+    async def rules_for(_call: ToolCall) -> ResolvedAgentToolRule | None:
+        return ResolvedAgentToolRule(rule="ask")
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        await clicked.wait()
+        return "approved"
+
+    turn = asyncio.create_task(
+        run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="update the deal",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+            tool_confirmation=chat_tool_confirmation(
+                policy,
+                requester_platform_user_id="U1",
+                confirm=card,
+                trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+                rules_for=rules_for,
+            ),
+        )
+    )
+    for _ in range(200):
+        if prompts:
+            break
+        await asyncio.sleep(0.005)
+
+    assert [p.title for p in prompts] == ['Hubspot update objects "Renewal"?']
+    assert _confirmations(fa) == [], "nothing is confirmed before the click"
+    clicked.set()
+    final = await turn
+    assert final.error is None
+    assert _confirmations(fa) == [
+        {"type": "user.tool_confirmation", "result": "allow", "tool_use_id": "tu_ask"}
+    ]
+
+
+async def test_an_unattended_run_refuses_an_ask_ruled_daimon_tool_behind_call_tool() -> None:
+    fa = FakeAnthropic()
+    _script(
+        fa,
+        ("tu_ask", DAIMON_SERVER_NAME, "call_tool"),
+        inputs={"tu_ask": _proxied("hubspot_update_objects")},
+    )
+
+    async def rules_for(_call: ToolCall) -> ResolvedAgentToolRule | None:
+        return ResolvedAgentToolRule(rule="ask")
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="nightly",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=headless_tool_confirmation(
+            ToolSafetyPolicy(enabled=True, agent_rules=True),
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            rules_for=rules_for,
+        ),
+    )
+
+    [sent] = _confirmations(fa)
+    assert sent["result"] == "deny" and sent["tool_use_id"] == "tu_ask"
+    assert "daimon-mcp/hubspot_update_objects" in str(sent["deny_message"])

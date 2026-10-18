@@ -195,6 +195,17 @@ async def test_fresh_preparation_creates_empty_slot_but_cannot_replace_binding(h
     assert not host.transport.requests and not host.ancillary.requests
 
 
+def _causes(error: BaseException) -> list[tuple[str, ...]]:
+    """`missing` of every UnsupportedCapability in the cause chain."""
+    found: list[tuple[str, ...]] = []
+    while error is not None:
+        missing = getattr(error, "missing", None)
+        if isinstance(missing, tuple):
+            found.append(missing)
+        error = error.__cause__ or error.__context__  # type: ignore[assignment]
+    return found
+
+
 @pytest.mark.parametrize("failure", ["runtime", "deployment", "tenant", "sealed", "revision"])
 async def test_missing_or_foreign_dependencies_refuse_before_provider_factory(
     host: Host,
@@ -309,7 +320,7 @@ async def test_two_host_turns_bill_actual_interactions_and_journal_under_fence(h
     ] == ["first", "second"]
 
 
-@pytest.mark.parametrize("failure", ["runtime", "model", "shared", "publishing"])
+@pytest.mark.parametrize("failure", ["runtime", "model", "shared", "publishing", "daimon_rules"])
 async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
     host: Host, failure: str
 ) -> None:
@@ -342,11 +353,16 @@ async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
         # Independently prove the preparation boundary also refuses a stale or
         # manually supplied admission, rather than relying on the first gate.
         admission = replace(admission, backend_revision=revision)
+    elif failure == "daimon_rules":
+        # A rule that makes daimon's own tools ask is a gate this backend cannot hold.
+        admission = replace(admission, daimon_rule_tools=frozenset({"get_session"}))
     else:
         admission = replace(admission, asks_before_publishing=True)
     with pytest.raises(AdmissionDenied) as refusal:
         await prepare(host, admission)
     assert refusal.value.reason == "backend_unsupported"
+    if failure == "daimon_rules":
+        assert ("daimon_tool_rules",) in _causes(refusal.value), "the log names the rule gap"
     assert not opened and not host.transport.requests and not host.ancillary.requests
 
 

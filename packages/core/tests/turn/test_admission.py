@@ -521,6 +521,64 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     )
 
 
+async def test_admit_reads_the_daimon_tools_the_agent_has_ask_or_deny_rules_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    from daimon.core.authz import Subject
+    from daimon.core.stores import agent_tool_rules
+    from daimon.core.tool_safety import ToolSafetyPolicy
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    for key, rule in (
+        ("daimon-mcp/hubspot_update_objects", "ask"),
+        ("daimon-mcp/get_session", "allow"),
+        ("linear/create_issue", "deny"),
+    ):
+        await agent_tool_rules.set_rule(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id="ag_1",
+            agent_name="daimon",
+            tool_key=key,
+            server_url="https://mcp.example/mcp",
+            rule=rule,  # type: ignore[arg-type]
+            set_by="admin",
+            actor=Subject(is_admin=True),
+        )
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    admitted: dict[str, frozenset[str]] = {}
+    for label, policy in (
+        ("rules on", ToolSafetyPolicy(enabled=True, agent_rules=True)),
+        ("rules off", ToolSafetyPolicy(enabled=True)),
+        ("safety off", ToolSafetyPolicy()),
+    ):
+        admission = await admit(
+            replace(deps, tool_safety=policy),
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+        admitted[label] = admission.daimon_rule_tools
+    assert admitted == {
+        "rules on": frozenset({"hubspot_update_objects"}),
+        "rules off": frozenset(),
+        "safety off": frozenset(),
+    }
+
+
 async def test_admit_gate_order_config_bail_wins_over_over_balance(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

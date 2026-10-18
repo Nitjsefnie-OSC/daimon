@@ -30,6 +30,15 @@ Three questions, each a total function of its arguments:
   `unattended_writes` allows. Daimon's `PUBLISH_TOOLS` ask too in a session
   that asks before publishing (an agent with a rule, `AgentPermissions.publishes`),
   tool safety on or off.
+- Agent tool rules reach daimon's own tools too (`agent_rules` on). A rule
+  `daimon-mcp/<tool>` of `ask` or `deny` makes the session ask on that tool
+  and on the `call_tool` proxy (`daimon_rule_tools`), and the driver reads the
+  call through the proxy (`unwrap_daimon_call`) to apply the rule: `deny`
+  refuses, `ask` waits for the card (refused when nobody is here), and a call
+  with no rule, or an `allow` rule, runs without a card. Precedence on a
+  daimon tool: the operator's deny of a confirmed write, then an agent `deny`,
+  then the fixed gates (`PUBLISH_TOOLS`, `CONFIRMED_DAIMON_TOOLS`), then an
+  agent `ask`. A rule never loosens a fixed gate.
 
 With `enabled=False` (the default) nothing else changes: every toolset stays
 `always_allow` and every call is allowed, which is the behaviour before this
@@ -44,7 +53,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -62,13 +71,24 @@ __all__ = [
     "VerdictReason",
     "backend_switch_tools",
     "classify_tool",
+    "daimon_endpoint",
     "decide_tool_call",
     "has_confirmation_gate",
     "heal_reserved_server",
+    "unwrap_daimon_call",
     "session_tools_for_policy",
     "toolset_permission_policy",
     "trusted_servers_for",
 ]
+
+#: The search transform's proxy: a chat identity lists `search_tools`,
+#: `call_tool` and the `APPROVAL_TOOLS`, and runs everything else as
+#: `call_tool(name=<tool>, arguments=<input>)`.
+PROXY_TOOL_NAME = "call_tool"
+SEARCH_TOOL_NAME = "search_tools"
+#: `daimon-mcp/*`: an agent-wide `deny` on every daimon tool. Never a tool name:
+#: it gates the proxy, but gets no config of its own.
+WILDCARD_TOOL = "*"
 
 ToolEffect = Literal["read", "write"]
 PermissionPolicyType = Literal["always_allow", "always_ask"]
@@ -318,7 +338,8 @@ class ToolSafetyPolicy(BaseModel):
         default=False,
         exclude_if=lambda value: not value,
         description=(
-            "Apply workspace-admin tool rules for individual agents and third-party MCP tools. "
+            "Apply workspace-admin tool rules for individual agents and MCP tools: third-party "
+            "tools, and Daimon's own daimon-mcp/<tool> (ask and deny). "
             "Off by default; stored rules remain editable but inactive until enabled."
         ),
     )
@@ -475,6 +496,40 @@ def is_publish_call(call: ToolCall, trusted_servers: frozenset[str]) -> bool:
     return call.server_name in trusted_servers and call.tool_name in PUBLISH_TOOLS
 
 
+def unwrap_daimon_call(call: ToolCall, trusted_servers: frozenset[str]) -> ToolCall:
+    """The tool a daimon `call_tool` proxy call runs, as a call of its own.
+
+    Managed Agents pauses and reports the proxy by its own name; the rule key,
+    the operator keys and the card are about the tool inside. A call on any
+    other server, a direct daimon call, or a proxy call whose `name` is not a
+    plain tool name comes back unchanged (the last is then looked up, and
+    refused or allowed, as `call_tool` itself).
+    """
+    if call.server_name not in trusted_servers or call.tool_name != PROXY_TOOL_NAME:
+        return call
+    inner = call.input.get("name")
+    if (
+        not isinstance(inner, str)
+        or not inner
+        or "/" in inner
+        or inner in {PROXY_TOOL_NAME, SEARCH_TOOL_NAME}
+    ):
+        return call
+    arguments = call.input.get("arguments")
+    forwarded = cast("dict[str, object]", arguments) if isinstance(arguments, dict) else {}
+    return call.model_copy(update={"tool_name": inner, "input": dict(forwarded)})
+
+
+def daimon_endpoint(public_url: str | None) -> dict[str, str]:
+    """The deployment's own endpoint under the reserved name, for rule lookups.
+
+    The session talks to this address whatever URL the agent's `daimon-mcp`
+    entry names (`heal_reserved_server`), so a rule bound to it is about the
+    server that really ran. Empty without a `public_url`.
+    """
+    return {DAIMON_SERVER_NAME: public_url} if public_url else {}
+
+
 def trusted_servers_for(public_url: str | None) -> frozenset[str]:
     """The servers exempt from gating in a session: the built-in daimon server,
     and only when this deployment runs one (`public_url` set).
@@ -540,7 +595,30 @@ def decide_tool_call(
     A trusted server's call is a write only when `CONFIRMED_DAIMON_TOOLS` says so.
     A trusted `PUBLISH_TOOLS` call pauses only in a session that asks before
     publishing, so it asks (or, unattended, is refused) even with the policy off.
+
+    `call` is the tool itself: a daimon `call_tool` proxy call is unwrapped
+    first (`unwrap_daimon_call`). With `agent_rules` on, an `agent_rule` on a
+    trusted call is read like a third party's, except that it can only tighten
+    what daimon already enforces: `deny` wins over the fixed gates (not over an
+    operator deny of a confirmed write), `ask` pauses a tool that would
+    otherwise run, and `allow`, or no rule, leaves the fixed gates as they are.
     """
+    trusted = call.server_name is not None and call.server_name in trusted_servers
+    trusted_rule = agent_rule if trusted and policy.enabled and policy.agent_rules else None
+    if trusted_rule is not None and trusted_rule.rule == "deny":
+        confirmed = _confirmed_daimon_write(call, confirmed_tools=confirmed_tools)
+        assert call.server_name is not None
+        if confirmed and _listed(
+            policy.denied, server_name=call.server_name, tool_name=call.tool_name
+        ):
+            return ToolVerdict(outcome="deny", effect="write", reason="denied_by_operator")
+        return ToolVerdict(
+            outcome="deny",
+            effect="write"
+            if confirmed or is_publish_call(call, trusted_servers)
+            else classify_tool(policy, server_name=call.server_name, tool_name=call.tool_name),
+            reason="agent_rule_deny",
+        )
     if is_publish_call(call, trusted_servers):
         if attended:
             return ToolVerdict(outcome="ask", effect="write", reason="publish_needs_confirmation")
@@ -567,6 +645,14 @@ def decide_tool_call(
         )
     elif _confirmed_daimon_write(call, confirmed_tools=confirmed_tools):
         effect = "write"
+    elif trusted_rule is not None and trusted_rule.rule == "ask":
+        return ToolVerdict(
+            outcome="ask" if attended else "deny",
+            effect=classify_tool(policy, server_name=call.server_name, tool_name=call.tool_name),
+            reason="agent_rule_ask",
+        )
+    elif trusted_rule is not None:
+        return ToolVerdict(outcome="allow", effect="read", reason="agent_rule_allow")
     else:
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
     if _listed(policy.denied, server_name=call.server_name, tool_name=call.tool_name):
@@ -616,6 +702,7 @@ def session_tools_for_policy(
     trusted_servers: frozenset[str] = frozenset(),
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    daimon_rule_tools: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]] | None:
     """`tools` (SDK params dicts) with every toolset's policy set, or `None`.
 
@@ -627,6 +714,11 @@ def session_tools_for_policy(
     except for its `CONFIRMED_DAIMON_TOOLS`, which ask, and with
     `asks_before_publishing` its `PUBLISH_TOOLS`; with the policy off only
     publish and explicitly selected confirmed-tool configs are written.
+    With the policy and `agent_rules` on, `daimon_rule_tools` (the daimon tools
+    an agent rule asks or denies on, any channel) ask as well, and so does the
+    `call_tool` proxy that reaches most of them; `search_tools` never asks. The
+    wildcard `*` (an agent-wide deny of every daimon tool) gates the proxy only. An
+    agent with no such rule gets exactly the tools it got before.
     Every config written here is complete
     (`enabled` and `permission_policy`), so the session reports back exactly
     what was sent and its tools hash the same on the next bind.
@@ -637,10 +729,16 @@ def session_tools_for_policy(
     """
     if not policy.enabled and not asks_before_publishing and not confirmed_tools:
         return None
+    rule_asked = (
+        {PROXY_TOOL_NAME, *daimon_rule_tools} - {SEARCH_TOOL_NAME, WILDCARD_TOOL}
+        if daimon_rule_tools and policy.enabled and policy.agent_rules
+        else set[str]()
+    )
     asked = (
         *(sorted(_always_confirmed_tools()) if policy.enabled else ()),
         *sorted(confirmed_tools),
         *(sorted(PUBLISH_TOOLS) if asks_before_publishing else ()),
+        *sorted(rule_asked),
     )
     changed = False
     out: list[dict[str, Any]] = []

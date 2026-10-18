@@ -1367,8 +1367,9 @@ is replaced. Off keeps every tool auto-approved.
 
 `bool` · optional · default `False`
 
-Apply workspace-admin tool rules for individual agents and third-party MCP tools. Off by
-default; stored rules remain editable but inactive until enabled.
+Apply workspace-admin tool rules for individual agents and MCP tools: third-party tools,
+and Daimon's own daimon-mcp/&lt;tool&gt; (ask and deny). Off by default; stored rules
+remain editable but inactive until enabled.
 
 ### `DAIMON_TOOL_SAFETY__EFFECTS`
 

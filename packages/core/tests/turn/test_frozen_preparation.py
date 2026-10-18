@@ -461,6 +461,53 @@ async def test_malformed_retained_preparation_is_typed_refused_without_sdk_io(ro
     assert len(transport.requests) == before
 
 
+async def test_a_root_retained_before_daimon_rule_tools_existed_still_reads(root_turn):
+    """Facts written before an admission field existed read as that field's default."""
+    from copy import deepcopy
+    from decimal import Decimal
+
+    from daimon.core._models import MuxOperation
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores.fleet import WorkerPool
+    from sqlalchemy import select, update
+
+    deps, _, _, _, origin, _, _, _ = root_turn
+    parent = await retained(root_turn)
+    async with deps.sessionmaker.begin() as db:
+        row = (
+            await db.execute(
+                select(MuxOperation).where(
+                    MuxOperation.tenant_id == origin.tenant_id,
+                    MuxOperation.key == "fleet_root:" + str(origin.id) + ":root:0",
+                )
+            )
+        ).scalar_one()
+        record = deepcopy(row.record)
+        facts = record["result"]["preparation"]["admission"]
+        assert facts.pop("daimon_rule_tools") == []
+        await db.execute(
+            update(MuxOperation)
+            .where(
+                MuxOperation.tenant_id == row.tenant_id,
+                MuxOperation.account_id == row.account_id,
+                MuxOperation.key == row.key,
+            )
+            .values(record=record)
+        )
+    ports = HostFleetPorts(
+        deps.sessionmaker,
+        prices={},
+        markup=Decimal("1"),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+    )
+    try:
+        source = await ports.capture_source(parent)
+        assert source.source.ref == parent.source_agents[0]
+    finally:
+        await ports.close()
+
+
 @pytest.mark.parametrize("mode", ["unrestricted", "limited"])
 def test_environment_sdk_facade_preserves_represented_network_packages_and_dates(mode):
     from daimon.core.mux_compat import sdk_environment, source_environment_record

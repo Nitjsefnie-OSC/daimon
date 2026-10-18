@@ -50,6 +50,10 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or request.session_account_id != admission.account_id
     ):
         raise ScopeViolation(request.thread_id, "Gemini preparation differs from admission")
+    if admission.daimon_rule_tools:
+        # Daimon tool rules need an approval pause this backend does not have.
+        # Refused before any key, transport or journal is touched.
+        raise UnsupportedCapability(("daimon_tool_rules",), PROFILE)
     target = request.worker.spec if request.worker is not None else request.target_spec
     # Shared ownership, seals, mounts and transfer require a separate complete
     # deployment adapter. Never silently drop those obligations in this slice.

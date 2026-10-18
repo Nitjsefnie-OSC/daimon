@@ -918,6 +918,7 @@ async def _prepare_session_for_turn_locked(
             memory_read_only=admission.memory_read_only,
             asks_before_publishing=admission.asks_before_publishing,
             confirmed_tools=backend_switch_tools_for_turn(deps),
+            daimon_rule_tools=admission.daimon_rule_tools,
             channel_skills=admission.channel_skills,
         )
         if fresh_start:
@@ -1150,6 +1151,7 @@ async def _prepare_session_for_turn_locked(
                 now=moment,
                 asks_before_publishing=admission.asks_before_publishing,
                 confirmed_tools=backend_switch_tools_for_turn(deps),
+                daimon_rule_tools=admission.daimon_rule_tools,
                 mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,
             )
 

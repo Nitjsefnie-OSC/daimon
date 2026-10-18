@@ -83,6 +83,9 @@ _ADMISSION_FACTS = {
     not in ("agent", "environment", "observation", "backend_counterpart", "backend_agent_revision")
 }
 
+#: Admission facts a root retained before they existed read as their default.
+_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools"})
+
 log = structlog.get_logger(__name__)
 
 
@@ -1083,8 +1086,10 @@ async def read_frozen_preparation(
         try:
             facts = root.preparation
             admission_facts = facts["admission"]
-            if not isinstance(admission_facts, dict) or set(admission_facts) != set(
-                _ADMISSION_FACTS
+            if not isinstance(admission_facts, dict) or not (
+                set(_ADMISSION_FACTS) - _LEGACY_ADMISSION_FACTS
+                <= set(admission_facts)
+                <= set(_ADMISSION_FACTS)
             ):
                 raise WorkerSpecRefused("origin", "unbound")
             retained_source = Agent.model_validate_json(json.dumps(facts["source"]))
@@ -1103,6 +1108,7 @@ async def read_frozen_preparation(
                 **{
                     name: adapter.validate_json(json.dumps(admission_facts[name]))
                     for name, adapter in _ADMISSION_FACTS.items()
+                    if name in admission_facts
                 },
             )
             request = ProviderPreparationRequest(

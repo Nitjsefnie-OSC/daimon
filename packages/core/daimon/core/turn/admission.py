@@ -98,6 +98,7 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.tenant_balance import is_over_balance
+from daimon.core.turn.approvals import daimon_rule_tools_for
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -193,6 +194,10 @@ class Admission:
     # The turn's agent may not publish freely (`AgentPermissions.publishes`): its
     # session's publish tools wait for the requester's Approve on a card.
     asks_before_publishing: bool = False
+    # Daimon tools this agent has an ask or deny rule on, read when the turn is
+    # admitted (empty while rules are off): their session tools wait for the
+    # driver's decision, so the set is part of the tools the session is bound to.
+    daimon_rule_tools: frozenset[str] = frozenset()
     # The channel or thread itself is sealed (DM memory policy aside). Callers
     # that copy content out of the channel, such as /dm-me, must refuse.
     source_sealed: bool = False
@@ -767,6 +772,7 @@ async def admit_impl(
             grant=grant,
             memory_read_only=memory_read_only,
             asks_before_publishing=_asks_before_publishing(policy, grant),
+            daimon_rule_tools=daimon_rule_tools,
             source_sealed=source_sealed,
             origin_channel_id=channel_id,
             origin_thread_id=thread_id,
@@ -944,6 +950,11 @@ async def admit_impl(
 
     mark("channel_skills")
 
+    daimon_rule_tools = await daimon_rule_tools_for(
+        deps.sessionmaker, deps.tool_safety, tenant_id=tenant_id, agent_id=agent.id
+    )
+    mark("daimon_rule_tools")
+
     if deps.agent_backends:
         await resolve_preference()
 
@@ -957,6 +968,7 @@ async def admit_impl(
         backend=backend,
         memory_read_only=memory_read_only,
         asks_before_publishing=_asks_before_publishing(policy, grant),
+        daimon_rule_tools=daimon_rule_tools,
         source_sealed=source_sealed,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
@@ -1317,6 +1329,12 @@ async def capture_backend_source(
                 grant=grant,
                 memory_read_only=_memory_read_only(policy, grant, bool(seals)),
                 asks_before_publishing=_asks_before_publishing(policy, grant),
+                daimon_rule_tools=await daimon_rule_tools_for(
+                    deps.sessionmaker,
+                    deps.tool_safety,
+                    tenant_id=context.tenant_id,
+                    agent_id=actual.id,
+                ),
                 source_sealed=bool(seals),
                 origin_channel_id=context.channel_id,
                 origin_thread_id=context.thread_id,

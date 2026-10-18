@@ -80,8 +80,17 @@ from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import fleet as fleet_store
 from daimon.core.stores.mux_state import PostgresStateStore, database_clock
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, trusted_servers_for
-from daimon.core.turn.approvals import agent_rule_lookup, headless_tool_confirmation
+from daimon.core.tool_safety import (
+    OPEN_TOOL_SAFETY,
+    ToolSafetyPolicy,
+    daimon_endpoint,
+    trusted_servers_for,
+)
+from daimon.core.turn.approvals import (
+    agent_rule_lookup,
+    daimon_rule_tools_for,
+    headless_tool_confirmation,
+)
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
@@ -407,6 +416,13 @@ async def run_turn_impl(
             agent=agent,
             environment=environment,
             mcp_settings=mcp_settings,
+            daimon_rule_tools=(
+                await daimon_rule_tools_for(
+                    session_factory, tool_safety, tenant_id=tenant_id, agent_id=agent.id
+                )
+                if session_factory is not None
+                else frozenset()
+            ),
             account_id=account_id,
             tenant_id=tenant_id,
             agent_uuid=agent_uuid,
@@ -487,6 +503,11 @@ async def run_turn_impl(
                         tenant_id=tenant_id,
                         agent_id=agent_id,
                         server_urls={s.name: s.url for s in session.agent.mcp_servers},
+                        also_urls=daimon_endpoint(
+                            str(mcp_settings.public_url)
+                            if mcp_settings is not None and mcp_settings.public_url is not None
+                            else None
+                        ),
                         channel_id=origin_place.channel_id if origin_place is not None else None,
                     )
                     if tool_safety.enabled

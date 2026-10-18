@@ -10,7 +10,12 @@ from typing import Literal
 from daimon.core._models import AgentToolRuleHistoryRecord, AgentToolRuleRecord, Tenant
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
-from daimon.core.tool_safety import ResolvedAgentToolRule, stricter_agent_tool_rule
+from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
+    WILDCARD_TOOL,
+    ResolvedAgentToolRule,
+    stricter_agent_tool_rule,
+)
 from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -161,6 +166,39 @@ async def deny_rules_for_trusted_tool(
         )
     ).all()
     return [_view(row) for row in rows]
+
+
+async def daimon_rule_tools(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str
+) -> frozenset[str]:
+    """Names of daimon's own tools this agent has a non-null ask or deny rule on.
+
+    Any scope, agent-wide or channel, any channel: a chat session names no
+    channel until a call arrives, so the session asks on every tool any channel
+    could restrict and the driver applies the rule that fits the call. One
+    indexed read per bind. A row whose key is not `daimon-mcp/<tool>` is not
+    daimon's and is not counted. `*` appears only for an agent-wide `deny` of
+    `daimon-mcp/*` (`WILDCARD_TOOL`), the one wildcard that means something;
+    any other `*` row is ignored.
+    """
+    prefix = f"{DAIMON_SERVER_NAME}/"
+    rows = await session.execute(
+        select(
+            AgentToolRuleRecord.tool_key, AgentToolRuleRecord.channel_id, AgentToolRuleRecord.rule
+        ).where(
+            AgentToolRuleRecord.tenant_id == tenant_id,
+            AgentToolRuleRecord.agent_id == agent_id,
+            AgentToolRuleRecord.rule.in_(("ask", "deny")),
+            AgentToolRuleRecord.tool_key.startswith(prefix),
+        )
+    )
+    names: set[str] = set()
+    for key, channel_id, rule in rows:
+        name = key.removeprefix(prefix)
+        if not name or (name == WILDCARD_TOOL and (rule != "deny" or channel_id is not None)):
+            continue
+        names.add(name)
+    return frozenset(names)
 
 
 async def set_rule(
