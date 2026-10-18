@@ -19,7 +19,7 @@ from typing import cast
 import yaml
 from daimon.core.errors import DefaultsError
 from daimon.core.scope import DeploymentDefault
-from daimon.core.specs import AgentSpec, EnvironmentSpec, SkillSpec, SystemConfigSpec
+from daimon.core.specs import AgentSpec, EnvironmentSpec, SkillRef, SkillSpec, SystemConfigSpec
 from pydantic import ValidationError
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(?P<frontmatter>.*?)\n---\s*\n(?P<body>.*)$", re.DOTALL)
@@ -49,6 +49,22 @@ def load_agent_specs(root: Path) -> list[AgentSpec]:
             )
         specs.append(spec)
     return specs
+
+
+def load_platform_skills(defaults_root: Path) -> dict[str, tuple[SkillRef, ...]]:
+    """Each default agent's platform-limited skills (`SkillRef.platforms`), by agent name.
+
+    Read once per process for admission, which adds them to sessions on those
+    platforms. Empty when `defaults_root` has no `agents/` directory.
+    """
+    agents_root = defaults_root / "agents"
+    if not agents_root.is_dir():
+        return {}
+    return {
+        spec.name: limited
+        for spec in load_agent_specs(agents_root)
+        if (limited := tuple(ref for ref in spec.skills if ref.platforms is not None))
+    }
 
 
 def load_environment_specs(root: Path) -> list[EnvironmentSpec]:
