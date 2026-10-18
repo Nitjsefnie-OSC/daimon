@@ -299,7 +299,7 @@ async def test_policy_revocation_and_disable_refuse_existing_dm(db_session, db_s
     assert not created and not streams
     async with db_session_factory.begin() as session:
         await set_dm_enabled(session, tenant_id=tenant.id, enabled=False)
-    with pytest.raises(DaimonError, match="disabled"):
+    with pytest.raises(DaimonError, match="Daimon DMs are off here"):
         await _reply(deps, route, message_id="2", role=Role.ADMIN)
     assert not created
 
@@ -1701,9 +1701,7 @@ async def test_dm_source_sealed_during_recovery_is_quarantined(
     monkeypatch.setattr(dm_module, "run_prepared_turn", recovery_finds_seal)
 
     events_before = len(sent)
-    with pytest.raises(
-        DaimonError, match=r"This DM was started from a channel that is now private"
-    ):
+    with pytest.raises(DaimonError, match=r"This DM was closed because its channel"):
         await _reply(deps, route, message_id="2")
     assert len(sent) == events_before
     async with db_session_factory() as session:
