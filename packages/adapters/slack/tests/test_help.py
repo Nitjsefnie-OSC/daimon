@@ -35,7 +35,7 @@ def test_build_help_blocks_contains_all_commands_and_at_bot_entrypoint() -> None
     all_text = str(blocks)
 
     commands = _manifest_commands()
-    assert "/memory" in commands and "/dm" in commands
+    assert "/memory" in commands and "/dm-me" in commands
     for cmd in commands:
         assert f"{cmd} " in all_text, (
             f"/help must list the manifest command {cmd!r} "

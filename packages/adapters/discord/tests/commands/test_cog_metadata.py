@@ -14,6 +14,7 @@ import inspect
 import pytest
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
 from daimon.adapters.discord.commands.billing import BillingCog
+from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.discord.commands.github import GitHubCog
 from daimon.adapters.discord.commands.help import HelpCog
 from daimon.adapters.discord.commands.here import HereCog
@@ -127,6 +128,12 @@ def test_routines_slash_uses_require_registered_guild() -> None:
     assert "@require_registered_guild" in src, (
         "routines.py must keep @require_registered_guild on the /routines handler"
     )
+
+
+def test_direct_message_cog_registers_dm_me_not_dm() -> None:
+    """Slack reserves /dm, so both platforms use /dm-me; Discord keeps no /dm alias."""
+    names = _all_app_command_names(DirectMessageCog)
+    assert names == {"dm-me"}, f"DirectMessageCog must register only /dm-me; got {names!r}"
 
 
 def test_billing_cog_registers_billing_slash() -> None:

@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import io
 import json
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -54,9 +56,9 @@ from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, Reconnec
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
+    TextBlock,
     ToolUseBlock,
     TurnState,
-    extract_final_response,
     extract_sealed_responses,
 )
 from daimon.core.turn.termination import TerminationReason, termination_reason
@@ -108,6 +110,33 @@ _REPAIR_EDIT_S = 120.0
 # ephemeral draft on the status card. Calibrated on real sessions: the
 # largest narration block was 429 chars, the smallest swallowed answer 542.
 _SEALED_RESPONSE_MIN_CHARS = 500
+# Reserve one of the five answer messages for the terminal answer/card.
+_MAX_ANSWER_MESSAGES = 5
+_OUTPUT_COLLAPSED_NOTICE = "Additional output was combined into the attached answer.txt."
+_TOOL_MARKUP_NOTICE = "The model returned tool-call markup without an answer."
+_TOOL_CALL_MARKUP = re.compile(
+    r"<(?P<tag>invoke_[\w:.-]+|tool_call|tool_use|function_call)\b[^>]*>"
+    r".*?(?:</(?P=tag)\s*>|</?$)",
+    re.DOTALL,
+)
+
+
+def _pure_tool_markup(text: str) -> bool:
+    """Recognise whole pseudo calls, including a truncated final closing tag.
+
+    Match only known call-shaped tags; HTML, code examples with surrounding
+    prose and ordinary angle brackets are still valid answer text.
+    """
+    text = text.strip()
+    position = 0
+    while position < len(text):
+        match = _TOOL_CALL_MARKUP.match(text, position)
+        if match is None:
+            return False
+        position = match.end()
+        while position < len(text) and text[position].isspace():
+            position += 1
+    return bool(text)
 
 
 class _CardWriteSequencer:
@@ -467,6 +496,11 @@ class DiscordTurnLifecycle:
         self._on_replacement = on_replacement
         self._first_post_attempted: bool = False
         self._persisted_sealed_indices: set[int] = set()
+        self._sealed_lock = asyncio.Lock()
+        self._sealed_message_count = 0
+        self._last_sealed_text: str | None = None
+        self._deferred_sealed_text: list[str] = []
+        self._output_limit_logged = False
         self._was_answered: bool = False
         # A continuity notice that belongs ABOVE the answer it explains. The
         # answer is an in-place edit of the embed posted at mention time, so a
@@ -1093,29 +1127,78 @@ class DiscordTurnLifecycle:
         # Intermediate sealed text is not that summary, even on failure.
         if self._fleet_card is not None and not await self._fleet_card.allow_sealed_responses():
             return
-        for index, text in extract_sealed_responses(
-            state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
-        ):
-            if index in self._persisted_sealed_indices:
-                continue
-            self._persisted_sealed_indices.add(index)
-            use_name_prefix = (
-                self._fallback_active is not None
-                and self._fallback_active()
-                and not self._name_prefix_sent
-            )
-            if use_name_prefix:
-                self._name_prefix_sent = True
-            chunks = (
-                _split_with_name_prefix(text, self._agent_name)
-                if use_name_prefix
-                else split_for_discord_safe(text)
-            )
-            for chunk in chunks:
-                await self._send_message(
-                    content=chunk, allowed_mentions=discord.AllowedMentions.none()
+        async with self._sealed_lock:
+            for index, text in extract_sealed_responses(
+                state.content, min_chars=_SEALED_RESPONSE_MIN_CHARS
+            ):
+                if index in self._persisted_sealed_indices:
+                    continue
+                self._persisted_sealed_indices.add(index)
+                previous = self._last_sealed_text
+                self._last_sealed_text = text.strip()
+                if _pure_tool_markup(text) or text.strip() == previous:
+                    log.warning("turn.sealed_response_suppressed", block_index=index)
+                    continue
+                use_name_prefix = (
+                    self._fallback_active is not None
+                    and self._fallback_active()
+                    and not self._name_prefix_sent
                 )
-            log.info("turn.sealed_response_posted", block_index=index, chars=len(text))
+                chunks = (
+                    _split_with_name_prefix(text, self._agent_name)
+                    if use_name_prefix
+                    else split_for_discord_safe(text)
+                )
+                # Defer a whole block rather than split it across the live
+                # thread and attachment. Count actual Discord messages.
+                if (
+                    self._deferred_sealed_text
+                    or self._sealed_message_count + len(chunks) >= _MAX_ANSWER_MESSAGES
+                ):
+                    self._deferred_sealed_text.append(text)
+                    self._log_output_limit()
+                    continue
+                if use_name_prefix:
+                    self._name_prefix_sent = True
+                for chunk in chunks:
+                    self._sealed_message_count += 1
+                    await self._send_message(
+                        content=chunk, allowed_mentions=discord.AllowedMentions.none()
+                    )
+                log.info("turn.sealed_response_posted", block_index=index, chars=len(text))
+
+    def _log_output_limit(self) -> None:
+        if not self._output_limit_logged:
+            self._output_limit_logged = True
+            log.warning(
+                "turn.answer_message_limit",
+                turn_id=str(self._turn_id),
+                limit=_MAX_ANSWER_MESSAGES,
+            )
+
+    @staticmethod
+    def _overflow_file(text: str) -> discord.File:
+        return discord.File(io.BytesIO(text.encode("utf-8")), filename="answer.txt")
+
+    def _final_response(self, state: TurnState) -> str:
+        # Collapse adjacent identical final text blocks before joining them.
+        last_tool = max(
+            (i for i, block in enumerate(state.content) if isinstance(block, ToolUseBlock)),
+            default=-1,
+        )
+        texts: list[str] = []
+        previous = self._last_sealed_text
+        for block in state.content[last_tool + 1 :]:
+            if isinstance(block, TextBlock):
+                text = block.text.strip()
+                if not text or text != previous:
+                    texts.append(block.text)
+                previous = text
+        text = "".join(texts)
+        if _pure_tool_markup(text):
+            log.warning("turn.final_tool_markup_suppressed", turn_id=str(self._turn_id))
+            text = "" if self._unprompted else _TOOL_MARKUP_NOTICE
+        return text
 
     def _note_discord_time(self, snowflake: object) -> None:
         if isinstance(snowflake, int) and (
@@ -1146,9 +1229,17 @@ class DiscordTurnLifecycle:
             if self._thread_stopped():
                 self._skip_terminal()
                 return
-            if self._fleet_card is not None and not await self._fleet_card.allow_summary():
-                self._terminal = True
-                return
+            if self._fleet_card is not None:
+                allowed, notice = await self._fleet_card.summary_gate()
+                if not allowed:
+                    if notice is None:
+                        self._terminal = True
+                        return
+                    # Never deliver the root's unreviewed final or sealed text.
+                    self._state = update_activity(self._state, state)
+                    state = dataclasses.replace(
+                        state, content=[TextBlock(kind="text", text=notice)]
+                    )
             await self._deliver_success(state)
         finally:
             self._mark_ended()
@@ -1157,7 +1248,10 @@ class DiscordTurnLifecycle:
     async def _deliver_success(self, state: TurnState) -> None:
         self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)
-        if self._unprompted and not extract_final_response(state.content):
+        response_text = self._final_response(state)
+        if self._deferred_sealed_text:
+            response_text = "\n\n".join([*self._deferred_sealed_text, response_text])
+        if self._unprompted and not response_text:
             # No final answer on a turn nobody asked for: leave the thread as
             # it was. A tool trail with nothing to say is noise here, not a
             # "done" state worth keeping (unlike a mention, where the caller
@@ -1167,7 +1261,6 @@ class DiscordTurnLifecycle:
             await self._discard_embed()
             log.info("turn.terminal_success", has_text=False, unprompted=True)
             return
-        response_text = extract_final_response(state.content)
         cancelled = state.termination == TerminationReason.INTERRUPTED
         notify = (
             self._notify_on_completion
@@ -1249,15 +1342,56 @@ class DiscordTurnLifecycle:
                 replied_user=False,
             )
             response_text = f"<@{self._requester_id}>\n{response_text}"
-        original_response_text = response_text
-        response_text, table_files = await render_discord_tables(
-            response_text, enabled=self._render_tables
+        collapsed_notice = "\n\n".join(
+            part
+            for part in (
+                _OUTPUT_COLLAPSED_NOTICE,
+                "Stopped.\nSend a message to start again." if cancelled else None,
+                degraded_notice,
+                self.answer_prefix,
+            )
+            if part
         )
+        # Notices can include operator-provided text or many dropped servers.
+        # Their complete text is in the file; keep the visible notice bounded.
+        if len(collapsed_notice) > 1800:
+            collapsed_notice = collapsed_notice[:1750] + "…\nFull details are in answer.txt."
+        if notify:
+            collapsed_notice = f"<@{self._requester_id}>\n{collapsed_notice}"
+        if use_name_prefix:
+            collapsed_notice = fallback_name_prefix(self._agent_name, collapsed_notice)
+        overflow_files: list[discord.File] = []
+        remaining = _MAX_ANSWER_MESSAGES - self._sealed_message_count
+        preview_chunks = (
+            _split_with_name_prefix(response_text, self._agent_name)
+            if use_name_prefix
+            else split_for_discord_safe(response_text)
+        )
+        if self._deferred_sealed_text or len(preview_chunks) > remaining:
+            self._log_output_limit()
+            overflow_files = [self._overflow_file(response_text)]
+            response_text = collapsed_notice
+            use_name_prefix = False
+        original_response_text = response_text
+        table_files: list[discord.File] = []
+        if not overflow_files:
+            response_text, table_files = await render_discord_tables(
+                response_text, enabled=self._render_tables
+            )
         chunks = (
             _split_with_name_prefix(response_text, self._agent_name)
             if use_name_prefix
             else split_for_discord_safe(response_text)
         )
+
+        # Table links can expand a short source beyond the remaining budget.
+        if len(chunks) > remaining:
+            self._log_output_limit()
+            for file in table_files:
+                file.close()
+            table_files = []
+            overflow_files = [self._overflow_file(original_response_text)]
+            chunks = [collapsed_notice]
 
         summary = self._terminal_embed
         # A pinged answer's card shows no summary until the answer carries it.
@@ -1290,7 +1424,7 @@ class DiscordTurnLifecycle:
         self._delivered_answer_chunk_ids.clear()
         try:
             try:
-                await deliver_first(chunks[0], table_files)
+                await deliver_first(chunks[0], [*overflow_files, *table_files])
             except discord.HTTPException as exc:
                 if not table_files:
                     raise
@@ -1300,7 +1434,7 @@ class DiscordTurnLifecycle:
                     if use_name_prefix
                     else split_for_discord_safe(original_response_text)
                 )
-                await deliver_first(chunks[0], [])
+                await deliver_first(chunks[0], overflow_files)
             self._revealed_first_chunk = chunks[0]
             self._summary_ref = self._message_ref
             # Overflow: subsequent chunks posted as new messages, the summary under the last.
@@ -1446,7 +1580,7 @@ class DiscordTurnLifecycle:
                 key=f"spend_limit:{limit}",
                 message=f"Anthropic spend limit reached: {limit} (tenant {self._tenant_id})",
             )
-        if self._unprompted and self._message_ref is None:
+        if self._unprompted and self._message_ref is None and not self._deferred_sealed_text:
             # Same rule as an empty answer: an unprompted turn that never
             # spoke does not announce its own failure into the thread.
             self._terminal = True
@@ -1477,6 +1611,13 @@ class DiscordTurnLifecycle:
         self._state = update(self._state, EmbedEvent(kind="error", label=label))
         self._state = dataclasses.replace(self._state, notice=body, notice_title=label)
         await self._flush_terminal()
+        if self._deferred_sealed_text:
+            await self._edit_message(
+                self._message_ref,
+                content=_OUTPUT_COLLAPSED_NOTICE,
+                attachments=[self._overflow_file("\n\n".join(self._deferred_sealed_text))],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         log.warning(
             "turn.terminal_failure",
             error=str(err),

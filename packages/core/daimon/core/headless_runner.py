@@ -54,6 +54,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Literal
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -79,8 +80,17 @@ from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import fleet as fleet_store
 from daimon.core.stores.mux_state import PostgresStateStore, database_clock
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, trusted_servers_for
-from daimon.core.turn.approvals import agent_rule_lookup, headless_tool_confirmation
+from daimon.core.tool_safety import (
+    OPEN_TOOL_SAFETY,
+    ToolSafetyPolicy,
+    daimon_endpoint,
+    trusted_servers_for,
+)
+from daimon.core.turn.approvals import (
+    agent_rule_lookup,
+    daimon_rule_tools_for,
+    headless_tool_confirmation,
+)
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
@@ -372,6 +382,16 @@ async def run_turn_impl(
         "headless-unrecorded" if usage_record_factory is None else None
     )
 
+    # Read once for the session's tools and for the run's decider; the agent's
+    # id is the one its rules are keyed by.
+    daimon_rule_tools = (
+        await daimon_rule_tools_for(
+            session_factory, tool_safety, tenant_id=tenant_id, agent_id=agent_id
+        )
+        if session_factory is not None
+        else frozenset[str]()
+    )
+
     async def _assemble_session() -> BetaManagedAgentsSession:
         scope = (
             resource_scope(
@@ -406,6 +426,7 @@ async def run_turn_impl(
             agent=agent,
             environment=environment,
             mcp_settings=mcp_settings,
+            daimon_rule_tools=daimon_rule_tools,
             account_id=account_id,
             tenant_id=tenant_id,
             agent_uuid=agent_uuid,
@@ -486,6 +507,11 @@ async def run_turn_impl(
                         tenant_id=tenant_id,
                         agent_id=agent_id,
                         server_urls={s.name: s.url for s in session.agent.mcp_servers},
+                        also_urls=daimon_endpoint(
+                            str(mcp_settings.public_url)
+                            if mcp_settings is not None and mcp_settings.public_url is not None
+                            else None
+                        ),
                         channel_id=origin_place.channel_id if origin_place is not None else None,
                     )
                     if tool_safety.enabled
@@ -494,6 +520,7 @@ async def run_turn_impl(
                     and tenant_id is not None
                     else None
                 ),
+                daimon_rules=bool(daimon_rule_tools),
                 trusted_servers=trusted_servers_for(
                     str(mcp_settings.public_url)
                     if mcp_settings is not None and mcp_settings.public_url is not None
@@ -526,6 +553,8 @@ async def commit_worker_transition(
     parent: WorkerPermissions,
     worker: FleetWorker,
     action: Callable[[AsyncSession, FleetWorker], Awaitable[FleetWorker]] | None = None,
+    *,
+    failure_code: Literal["preparation_refused", "dispatch_refused"] = "preparation_refused",
 ) -> FleetWorker:
     async with request.deps.sessionmaker.begin() as db:
         graph, _ = await fleet_store.lock_budget(
@@ -536,22 +565,35 @@ async def commit_worker_transition(
         )
         latest = {row.id: row for _, rows in graph for row in rows}.get(worker.id)
         if latest is None or latest.run_id != worker.run_id:
-            raise FleetConflict("worker transition claim missing")
+            raise FleetConflict("worker transition claim missing", reason="claim_missing")
         if action is None:
-            if (
-                (worker.status, worker.binding_id, worker.turns_used) != ("starting", None, 0)
-                or latest.error_code not in (None, "stop_requested")
-                or replace(latest, version=worker.version, error_code=worker.error_code) != worker
-            ):
-                raise FleetConflict("worker preparation claim changed")
-            updated = await fleet_store.finish(
-                db,
-                tenant_id=worker.tenant_id,
-                worker_id=worker.id,
-                expected_version=latest.version,
-                status="failed",
-                error_code="preparation_refused",
-            )
+            if latest.status in TERMINAL:
+                updated = latest  # Preserve a concurrent completion/sweep's terminal result.
+            else:
+                dispatch_changed = (
+                    latest.status not in ("starting", "running")
+                    or latest.attempts != worker.attempts
+                    or latest.version < worker.version
+                )
+                if failure_code == "preparation_refused" and (
+                    (worker.status, worker.binding_id, worker.turns_used) != ("starting", None, 0)
+                    or latest.error_code not in (None, "stop_requested")
+                    or replace(latest, version=worker.version, error_code=worker.error_code)
+                    != worker
+                ):
+                    # The claim changed but is still this attempt's: end it under the
+                    # same-attempt check rather than leave it running.
+                    failure_code = "dispatch_refused"
+                if dispatch_changed:
+                    raise FleetConflict("worker preparation claim changed", reason="claim_changed")
+                updated = await fleet_store.finish(
+                    db,
+                    tenant_id=worker.tenant_id,
+                    worker_id=worker.id,
+                    expected_version=latest.version,
+                    status="failed",
+                    error_code=failure_code,
+                )
         else:
             updated = await action(db, latest)
         if updated.status in TERMINAL:
@@ -596,11 +638,24 @@ async def run_worker(
         or (revision.backend, revision.profile) != (worker.backend, worker.profile)
         or request.worker.spec.model.id != worker.model
     ):
-        raise FleetConflict("worker dispatch requires its actual admitted pool claim")
-    request.worker.limits.require_native_dispatch(request.now())
-    store = deps.state_store
-    if not isinstance(store, PostgresStateStore):
-        raise FleetConflict("worker input requires its actual PostgreSQL journal owner")
+        raise FleetConflict(
+            "worker dispatch requires its actual admitted pool claim",
+            reason="admission_claim_invalid",
+        )
+    resolved_worker = request.worker
+    resolved_worker.limits.require_native_dispatch(request.now())
+    # A missing optional journal is composed from the host transaction owner,
+    # just as ordinary binding does; an injected foreign owner must never be replaced.
+    store = (
+        deps.state_store if deps.state_store is not None else PostgresStateStore(deps.sessionmaker)
+    )
+    if not isinstance(store, PostgresStateStore) or not store.owns_sessions(deps.sessionmaker):
+        raise FleetConflict(
+            "worker input requires its actual PostgreSQL journal owner",
+            reason="journal_owner_mismatch",
+        )
+    deps = replace(deps, state_store=store)
+    request = replace(request, deps=deps)
     commit_transition = functools.partial(commit_worker_transition, request, parent, worker)
     claim, native_started = worker, False
     try:
@@ -614,13 +669,14 @@ async def run_worker(
             source = await capture_preparation_source(source_request)
             definition: Agent | AgentSpec = AgentSpec.model_validate(worker.spec)
             overrides = None
-            if request.worker.source_agent is not None:
-                if source.source is None or request.worker.source_agent != (
+            if resolved_worker.source_agent is not None:
+                if source.source is None or resolved_worker.source_agent != (
                     source.source.ref,
                     source.source.revision,
                 ):
                     raise FleetConflict(
-                        "worker clone source no longer matches its admitted lineage"
+                        "worker clone source no longer matches its admitted lineage",
+                        reason="source_lineage_changed",
                     )
                 definition = source.source
                 overrides = AgentPatch.model_validate(worker.spec)
@@ -632,9 +688,9 @@ async def run_worker(
                 backend=BackendConfig.model_validate(
                     revision.model_dump(include=set(BackendConfig.model_fields))
                 ),
-                resources=request.worker.resources,
-                environment=request.worker.environment,
-                limits=request.worker.limits,
+                resources=resolved_worker.resources,
+                environment=resolved_worker.environment,
+                limits=resolved_worker.limits,
             )
             resolved = normalize(policy=policy, now=request.now(), captured_source=source)
             if (
@@ -643,7 +699,10 @@ async def run_worker(
                 or resolved.limits.deadline != worker.deadline_at
                 or resolved.limits.max_turns != worker.max_turns
             ):
-                raise FleetConflict("worker intent no longer resolves under current root authority")
+                raise FleetConflict(
+                    "worker intent no longer resolves under current root authority",
+                    reason="intent_changed",
+                )
             async with deps.sessionmaker.begin() as db:
                 usage = await admit_fleet_worker(
                     db,
@@ -658,12 +717,17 @@ async def run_worker(
                     result_contract=worker.result_contract,
                 )
             if not usage.admitted or usage.worker.id != worker.id:
-                raise FleetConflict("worker financial admission refused")
+                raise FleetConflict(
+                    "worker financial admission refused", reason="financial_admission_refused"
+                )
             run, current = usage.run, usage.worker
             claim = replace(worker, reserved_usd=current.reserved_usd)
             slot = worker_slot(run, current)
             if slot.thread.channel != revision.channel:
-                raise FleetConflict("worker private slot differs from its admitted channel")
+                raise FleetConflict(
+                    "worker private slot differs from its admitted channel",
+                    reason="private_slot_mismatch",
+                )
             prepared: PreparedTurn | None = None
             binding: ProviderBinding | None = None
             archived: set[str] = set()
@@ -686,7 +750,10 @@ async def run_worker(
                         normalize(policy=policy, now=request.now(), captured_source=source).digest
                         != worker.spec_digest
                     ):
-                        raise FleetConflict("worker source intent changed before native dispatch")
+                        raise FleetConflict(
+                            "worker source intent changed before native dispatch",
+                            reason="source_intent_changed",
+                        )
                     return await require_admission(db, policy=policy, binding=binding)
 
             async def guard() -> None:
@@ -695,7 +762,9 @@ async def run_worker(
                     raise asyncio.CancelledError
                 fresh = await recapture()
                 if not fresh.admitted:
-                    raise FleetConflict("worker financial admission refused")
+                    raise FleetConflict(
+                        "worker financial admission refused", reason="financial_admission_refused"
+                    )
                 remaining_s(bound, now=request.now(), refuse_expired=True)
                 if cancel.is_set():
                     raise asyncio.CancelledError
@@ -766,7 +835,10 @@ async def run_worker(
                 nonlocal current
                 persistence = current_persistence.get()
                 if persistence is None or prepared is None or prepared.session_ref is None:
-                    raise FleetConflict("worker result requires its active owned journal")
+                    raise FleetConflict(
+                        "worker result requires its active owned journal",
+                        reason="result_journal_missing",
+                    )
                 pointer = await persistence.publish_worker_result(
                     run, current, prepared.session_ref, accepted_event_ids=state.seen_event_ids
                 )
@@ -800,9 +872,15 @@ async def run_worker(
                         )
                     )
                 if key != primary + "0":
-                    raise FleetConflict("worker input retry requires reconciliation")
+                    raise FleetConflict(
+                        "worker input retry requires reconciliation",
+                        reason="input_reconciliation_required",
+                    )
                 if scope != resolved.permissions.fleet.scope or fence is None or fence.slot != slot:
-                    raise FleetConflict("worker input claim differs from its owned private slot")
+                    raise FleetConflict(
+                        "worker input claim differs from its owned private slot",
+                        reason="input_claim_mismatch",
+                    )
                 remaining_s(bound, now=request.now(), refuse_expired=True)
                 if cancel.is_set():
                     raise asyncio.CancelledError
@@ -820,7 +898,8 @@ async def run_worker(
 
             async def reseed() -> str:
                 raise FleetConflict(
-                    "worker recovery requires reconciliation, never a fresh session"
+                    "worker recovery requires reconciliation, never a fresh session",
+                    reason="recovery_reconciliation_required",
                 )
 
             with store.checking_claims(claim_input):
@@ -838,7 +917,8 @@ async def run_worker(
                         )
                     if retained != revision or origin != "agent":
                         raise FleetConflict(
-                            "worker retained revision no longer authorizes preparation"
+                            "worker retained revision no longer authorizes preparation",
+                            reason="retained_revision_changed",
                         )
                     allocation = TurnPersistence(
                         store,
@@ -904,7 +984,8 @@ async def run_worker(
                         or current.status != "succeeded"
                     ):
                         raise FleetConflict(
-                            "worker did not produce an authoritative successful result"
+                            "worker did not produce an authoritative successful result",
+                            reason="result_not_successful",
                         )
                     return current
                 finally:

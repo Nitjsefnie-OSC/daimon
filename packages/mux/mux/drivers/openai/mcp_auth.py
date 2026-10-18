@@ -98,7 +98,16 @@ def _non_mcp_tool(native: Object) -> Object:
     """Rebuild only the exact native shapes admitted by this driver."""
     kind = native.get("type")
     if kind in ("web_search", "tool_search", "programmatic_tool_calling"):
-        if set(native) != {"type"}:
+        # A saved web_search created with only its type echoes these defaults.
+        # Admit exactly those defaults; configured search controls remain unsupported.
+        defaults: Object = (
+            {"mode": "live", "context_size": "medium", "allowed_domains": None, "location": None}
+            if kind == "web_search"
+            else {}
+        )
+        if set(native) - {"type", *defaults} or any(
+            native[key] != value for key, value in defaults.items() if key in native
+        ):
             raise ValueError("undeclared builtin tool fields")
         return {"type": kind}
     allowed = {"type", "name", "description", "parameters", "strict", "defer_loading"}
@@ -148,8 +157,13 @@ def _validate_native_auth(tools: Sequence[Object]) -> None:
                 "connection_origin",
                 "allowed_tools",
                 "required",
+                "credential_id",
+                "request_metadata",
             }
-            or set(transport) - {"type", "server_url"}
+            or set(transport) - {"type", "server_url", "headers"}
+            or native.get("credential_id") is not None
+            or native.get("request_metadata", {}) != {}
+            or transport.get("headers", {}) != {}
             or transport.get("type") != "http"
             or not _destination(transport.get("server_url"))
             or native.get("connection_origin") not in (None, "service")

@@ -56,6 +56,7 @@ def build_fleet_view(
     workers: Sequence[FleetWorker],
     *,
     collected: bool = False,
+    blocked: bool = False,
 ) -> discord.ui.LayoutView:
     """Render only canonical scoped rows; no specs, excerpts or native handles."""
     if (
@@ -69,7 +70,7 @@ def build_fleet_view(
         "applied"
         if collected
         else "refused"
-        if run.status in ("cancelled", "failed")
+        if blocked or run.status in ("cancelled", "failed")
         else "received"
     )
     facts = tuple(
@@ -99,7 +100,13 @@ def build_fleet_view(
     card = PostedCard(
         kind="fleet",
         state=state,
-        headline="Fleet — collected" if collected else f"Fleet — {run.status}",
+        headline=(
+            "Fleet — collected"
+            if collected
+            else "Fleet — blocked"
+            if blocked
+            else f"Fleet — {run.status}"
+        ),
         facts=facts,
         buttons=buttons,
         footer=(
@@ -252,6 +259,8 @@ class DiscordFleetCardFactory:
         from daimon.core.mux_backend import resource_scope
         from daimon.core.native_admins import load_live_subject, load_stored_subject
         from daimon.core.stores.identity import find_platform_principal
+        from daimon.core.stores.mux_state import get_fleet_root_operation
+        from daimon.core.stores.turn_card_intents import get_turn_card_intent
         from daimon.core.turn.runtime_manifest import read_frozen_root
         from mux.errors import ScopeViolation
         from sqlalchemy.exc import SQLAlchemyError
@@ -291,13 +300,32 @@ class DiscordFleetCardFactory:
                             caller=admin_caller(interaction.user),
                         )
                     )
+                scope = resource_scope(
+                    tenant_id=str(tenant_id),
+                    account_id=str(original.account_id),
+                    authorization_id="discord-fleet-card",
+                )
+                if run_id is None:
+                    # This thread's own turn that never froze a fleet root has no
+                    # fleet card. The durable intent and root records prove that
+                    # absence; the render task has no live persistence context.
+                    # Unknown or foreign intents still go through the refusing path.
+                    async with deps.sessionmaker() as db:
+                        own = await get_turn_card_intent(db, id=intent_id)
+                        frozen = await get_fleet_root_operation(
+                            db, scope, intent_id=intent_id, check_intent_owner=True
+                        )
+                    if (
+                        own is not None
+                        and own.tenant_id == tenant_id
+                        and own.platform == "discord"
+                        and own.thread_id == str(thread.id)
+                        and frozen is None
+                    ):
+                        return None
                 result = await read_frozen_root(
                     deps,
-                    resource_scope(
-                        tenant_id=str(tenant_id),
-                        account_id=str(original.account_id),
-                        authorization_id="discord-fleet-card",
-                    ),
+                    scope,
                     intent_id=intent_id,
                     run_id=run_id,
                     now=datetime.now(UTC),
@@ -424,12 +452,18 @@ class DiscordFleetCard:
         return parent, policy, run, workers
 
     def _render(
-        self, run: FleetRun, workers: tuple[FleetWorker, ...], *, collected: bool = False
+        self,
+        run: FleetRun,
+        workers: tuple[FleetWorker, ...],
+        *,
+        collected: bool = False,
+        blocked: bool = False,
     ) -> discord.ui.LayoutView:
         return build_fleet_view(
             run,
             workers,
             collected=collected,
+            blocked=blocked,
         )
 
     async def refresh(self) -> bool:
@@ -533,18 +567,48 @@ class DiscordFleetCard:
                 return False
 
     async def allow_summary(self) -> bool:
-        """Gate the existing orchestrator answer on authoritative collect/review."""
+        """Compatibility gate for callers that only need disclosure authority."""
+        allowed, _ = await self.summary_gate(render=self._message is not None)
+        return allowed
+
+    async def summary_gate(self, *, render: bool = True) -> tuple[bool, str | None]:
+        """Allow reviewed text, or supply a status-only explanation of a blocked run."""
         async with self._lock:
             try:
                 snapshot = await self._snapshot(None)
                 if snapshot is None:
-                    return True
+                    return True, None
                 parent, policy, run, workers = snapshot
                 reply = await self._service.collect(parent, policy, run_id=run.id)
             except (FleetRefused, WorkerSpecRefused):
-                return False
+                return False, None
             ready = reply.get("status") == "ready"
-            if ready and self._message is not None:
-                view = self._render(run, workers, collected=True)
+            blocked = reply.get("status") == "blocked"
+            if render and (blocked or (ready and self._message is not None)):
+                # Collect can observe rows newer than the initial snapshot.
+                try:
+                    run, workers = await self._service.read_snapshot(parent, policy, run.id)
+                    view = self._render(run, workers, collected=ready, blocked=blocked)
+                except (FleetRefused, WorkerSpecRefused):
+                    return False, None
                 await self._display(view)
-            return ready
+            notice = None
+            if blocked:
+                facts = [
+                    f"{_literal(row.role, 60)}: {row.status.replace('_', ' ')}"
+                    for row in sorted(workers, key=lambda row: row.ordinal)
+                ]
+                # Keep complete role/status pairs within one Discord message.
+                retained: list[str] = []
+                for fact in facts:
+                    if len("; ".join(retained + [fact])) > 1400:
+                        break
+                    retained.append(fact)
+                if len(retained) < len(facts):
+                    retained.append(f"+{len(facts) - len(retained)} more")
+                details = "; ".join(retained)
+                notice = "Fleet run didn't finish. "
+                if details:
+                    notice += details + ". "
+                notice += "No reviewed result to share."
+            return ready, notice

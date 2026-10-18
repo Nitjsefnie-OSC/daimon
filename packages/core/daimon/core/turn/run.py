@@ -54,7 +54,7 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
     transfer_active_turn,
 )
-from daimon.core.tool_safety import trusted_servers_for
+from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.approvals import (
     agent_rule_lookup,
@@ -644,9 +644,18 @@ async def _replace_dead_session_locked(
                 # seal added since, or a replacement built writable that the
                 # current decision makes read-only, makes this turn wait (rolls
                 # back the dead-mark) so the next turn rebuilds it read-only.
+                # So does one built with the agent's keys for a caller from
+                # another organisation.
                 current = await reauthorize(deps, admission)
                 snapshot = live.effective_config
                 writable = snapshot is None or not snapshot.memory_read_only
+                if (admission.is_external or current.is_external) and (
+                    snapshot is None or not snapshot.is_external
+                ):
+                    raise SessionBusyError(
+                        pending_reasons=("external_caller",),
+                        retry_after=datetime.now(UTC) + timedelta(seconds=1),
+                    )
                 if current.origin_seal_ids != admission.origin_seal_ids or (
                     current.memory_read_only and writable
                 ):
@@ -956,12 +965,14 @@ async def run_prepared_turn_impl(
         trusted_servers=trusted_servers_for(deps.public_url),
         asks_before_publishing=prepared.admission.asks_before_publishing,
         confirmed_tools=confirmed_tools,
+        daimon_rules=bool(prepared.admission.daimon_rule_tools),
         rules_for=(
             agent_rule_lookup(
                 deps.sessionmaker,
                 tenant_id=tenant_id,
                 agent_id=str(prepared.admission.agent.id),
                 server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+                also_urls=daimon_endpoint(deps.public_url),
                 channel_id=channel_for_tool_rules(
                     platform=platform,
                     channel_id=prepared.admission.origin_channel_id,

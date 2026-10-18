@@ -457,3 +457,48 @@ Observer fingerprints include components so component-only edits remain visible.
 This card-only extraction does not add component footer text to answer matching:
 anchored answers still match the whole content after removing only a recorded
 QA-agent subtext header.
+
+## Teams persona driver
+
+The separate operator driver lives in `qa/live/teams`. Copy
+`qa/live/teams/config.example.json` to a private location outside the repository,
+replace only its synthetic values. The built-in `routines-admin`,
+`routines-member`, `billing-admin`, and `billing-member` journeys select the sole
+persona with the required role. The JSON is strict; unknown fields fail validation.
+Point `--config` or `DAIMON_TEAMS_QA_CONFIG` to that private file. `token_dir`
+must be outside the checkout and is mode 0700; each persona cache is mode 0600.
+
+```bash
+uv run python -m qa.live.teams login --config /private/teams-qa.json --persona admin
+uv run python -m qa.live.teams login --config /private/teams-qa.json --persona member
+uv run python -m qa.live.teams status --config /private/teams-qa.json --persona admin
+uv run python -m qa.live.teams verify-target --config /private/teams-qa.json --persona admin
+uv run python -m qa.live.teams smoke --config /private/teams-qa.json \
+  --all --results /private/results --go
+uv run python -m qa.live.teams logout --config /private/teams-qa.json --persona admin
+```
+
+Before running `login`, sign in to Teams web once as each persona and open the
+bot's 1:1 chat. The driver finds that existing chat from a message sent by the
+configured bot app. It never creates a chat or installs an app. `login` defaults
+to manual paste and requires a terminal. Open the printed URL in
+a private window, sign in as the named persona, then paste the full address bar
+URL at the hidden prompt. The localhost page failing to load is expected. The
+optional `--access-flow` path uses a one-shot localhost listener; install its
+saved flow first with `install-flow`. Normal operations acquire tokens silently;
+an expired or invalid grant requires another explicit login. `status` prints
+metadata only. `logout` deletes the local cache;
+also revoke the session in My Sign-ins or delete the app grant to revoke remote
+access. `smoke` is live and requires `--go`; `--all` runs the four journeys
+serially and writes one private summary JSON. `routines-admin` checks for the
+"New routine" action; `routines-member` checks its absence. `billing-admin`
+checks for "Add credit"; `billing-member` checks for the refusal text and
+absence of credit actions. These checks inspect the returned cards; they do
+not click buttons or exercise dialogs. Each journey sends one plain-text
+command to its persona's existing bot chat. Admin and member must resolve to
+different access-token identities. A recent persona message without a later
+bot response makes the chat fail the 30-second quiet check before any post.
+`verify-target` still checks the
+team and channel before any command is sent. Offline tests use fake MSAL and
+`httpx.MockTransport`. The driver does not delete messages or change team
+membership, so clean up messages manually if needed.

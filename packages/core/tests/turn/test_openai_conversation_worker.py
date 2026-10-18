@@ -346,6 +346,7 @@ async def test_worker_task_logs_original_failure_without_exception_payload(
             "run_id": str(parent.fleet.run_id),
             "worker_id": first["worker_id"],
             "error_class": failure.__name__,
+            "causes": [{"type": "RuntimeError" if failure is RuntimeError else "redacted"}],
             "log_level": "warning",
         }
     ]

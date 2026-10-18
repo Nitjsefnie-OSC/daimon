@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints, overload
 from uuid import UUID
 
+import structlog
 from daimon.core.errors import DaimonError, TurnError
 from daimon.core.neutral_resources import (
     AgentFleetGrant,
@@ -28,7 +29,13 @@ from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMo
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, ResourceRef, Scope, SkillRef
 from mux.contracts.profile import Capability
-from mux.contracts.resources import AgentSpec, EnvironmentSpec, ProviderBinding, ResourceBinding
+from mux.contracts.resources import (
+    AgentSpec,
+    EnvironmentSpec,
+    ProviderBinding,
+    ResourceBinding,
+    ToolSpec,
+)
 from mux.errors import MuxError, UnsupportedCapability
 from mux.profiles import backend_selection, get_profile, native_agent_tools
 from mux.state.operations import OperationRecord, request_digest
@@ -75,6 +82,11 @@ _ADMISSION_FACTS = {
     if name
     not in ("agent", "environment", "observation", "backend_counterpart", "backend_agent_revision")
 }
+
+#: Admission facts a root retained before they existed read as their default.
+_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools", "daimon_rules_need_driver"})
+
+log = structlog.get_logger(__name__)
 
 
 async def read_agent_fleet_grant(
@@ -778,24 +790,49 @@ async def resume_prepared_root(
     from daimon.core.continuity.wakes import FrozenWorkerBatch, require_worker_finished_root
     from daimon.core.stores import mux_state
     from daimon.core.turn.persistence import current_persistence
+    from daimon.core.turn.prepare import admitted_session_scope
     from daimon.core.turn_origin import current_origin_id
+
+    def refuse(reason: str) -> WorkerSpecRefused:
+        # One closed, log-safe name per failed condition; the refusal itself is unchanged.
+        log.warning("fleet.resume_root_refused", reason=reason, continuation_id=str(row.id))
+        return WorkerSpecRefused("origin", "unbound")
 
     persistence, origin_id = current_persistence.get(), current_origin_id.get()
     source, grant = prepared._source, prepared.admission.grant  # pyright: ignore[reportPrivateUsage]
-    if not (deps.fleet_enabled and persistence and origin_id and source and grant):
-        raise WorkerSpecRefused("origin", "unbound")
-    if (
-        prepared.admission.shared_owner is not None
-        or prepared._scope != persistence.scope  # pyright: ignore[reportPrivateUsage]
-        or source.resource_scope != persistence.scope
-        or row.tenant_id != UUID(persistence.scope.tenant_id)
-        or row.requester_account_id != UUID(persistence.scope.account_id)
-        or prepared.session_account_id != prepared.admission.account_id
-        or grant.subject.platform_user_id != row.requester_external_user_id
-        or row.started_at is None
-        or not row.lease_owner
+    for missing, reason in (
+        (not deps.fleet_enabled, "fleet_disabled"),
+        (persistence is None, "no_persistence"),
+        (origin_id is None, "no_origin"),
+        (source is None, "no_captured_source"),
+        (grant is None, "no_grant"),
     ):
-        raise WorkerSpecRefused("origin", "unbound")
+        if missing:
+            raise refuse(reason)
+    assert persistence is not None and source is not None and grant is not None
+    # An ordinary Anthropic turn carries no prepared scope: its persistence adopts
+    # the admitted scope, exactly as the root's first turn froze it.
+    expected_scope = (
+        prepared._scope  # pyright: ignore[reportPrivateUsage]
+        or admitted_session_scope(
+            prepared.admission, tenant_id=row.tenant_id, session_id=prepared.ma_session_id
+        )
+    )
+    for failed, reason in (
+        (prepared.admission.shared_owner is not None, "shared_owner"),
+        (expected_scope != persistence.scope, "prepared_scope"),
+        (source.resource_scope != persistence.scope, "source_scope"),
+        (row.tenant_id != UUID(persistence.scope.tenant_id), "tenant"),
+        (row.requester_account_id != UUID(persistence.scope.account_id), "requester_account"),
+        (prepared.session_account_id != prepared.admission.account_id, "session_account"),
+        (grant.subject.platform_user_id != row.requester_external_user_id, "grant_subject"),
+        (row.started_at is None, "not_started"),
+        (not row.lease_owner, "no_lease"),
+    ):
+        if failed:
+            raise refuse(reason)
+    # Narrowing only: each case was refused above.
+    assert origin_id is not None and row.lease_owner is not None and row.started_at is not None
 
     async def claim() -> None:
         await require_worker_finished_root(
@@ -1049,8 +1086,10 @@ async def read_frozen_preparation(
         try:
             facts = root.preparation
             admission_facts = facts["admission"]
-            if not isinstance(admission_facts, dict) or set(admission_facts) != set(
-                _ADMISSION_FACTS
+            if not isinstance(admission_facts, dict) or not (
+                set(_ADMISSION_FACTS) - _LEGACY_ADMISSION_FACTS
+                <= set(admission_facts)
+                <= set(_ADMISSION_FACTS)
             ):
                 raise WorkerSpecRefused("origin", "unbound")
             retained_source = Agent.model_validate_json(json.dumps(facts["source"]))
@@ -1069,6 +1108,7 @@ async def read_frozen_preparation(
                 **{
                     name: adapter.validate_json(json.dumps(admission_facts[name]))
                     for name, adapter in _ADMISSION_FACTS.items()
+                    if name in admission_facts
                 },
             )
             request = ProviderPreparationRequest(
@@ -1383,7 +1423,13 @@ async def _capture_source_capabilities(
     from daimon.core.stores.domain import SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
-    from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
+    from mux.drivers.anthropic.schemas import (
+        AGENT_TOOLS_NAMESPACE,
+        AgentToolsConfig,
+        MCPToolset,
+        agent_tools,
+        mcp_permissions,
+    )
     from mux.profiles import represented_execution_tools
     from sqlalchemy.exc import SQLAlchemyError
 
@@ -1521,10 +1567,21 @@ async def _capture_source_capabilities(
             if frozenset(inputs.mcp_tools) != catalogue:
                 raise ValueError("MCP representation must preserve the exact source catalogue")
             tools = tuple(spec.tools or ())
+            permissions = {name: "auto" for name in catalogue}
             for extension in spec.extensions or ():
                 if extension.namespace == AGENT_TOOLS_NAMESPACE:
-                    tools = agent_tools(extension).intent(
-                        exact=True, mcp_catalogues={DAIMON_SERVER_NAME: catalogue}
+                    native = agent_tools(extension)
+                    mcps = [tool for tool in native.tools if isinstance(tool, MCPToolset)]
+                    if len(mcps) != 1 or mcps[0].mcp_server_name != DAIMON_SERVER_NAME:
+                        raise ValueError("unrepresented MCP toolset")
+                    permissions = mcp_permissions(mcps[0], catalogue)
+                    tools = (
+                        *AgentToolsConfig(
+                            tools=[
+                                tool for tool in native.tools if not isinstance(tool, MCPToolset)
+                            ]
+                        ).intent(exact=True),
+                        ToolSpec(name=DAIMON_SERVER_NAME, kind="mcp_toolset"),
                     )
             if not any(
                 tool.kind == "mcp_toolset"
@@ -1533,8 +1590,29 @@ async def _capture_source_capabilities(
                 for tool in tools
             ):
                 raise ValueError("source has no enabled daimon-mcp toolset")
+            if not any(permission == "auto" for permission in permissions.values()):
+                raise ValueError("source has no automatically executable MCP tools")
+            # URL fetching has no native hosted-Agents tool. Keep the exact
+            # source capability visible as a consented loss instead of silently
+            # treating shell HTTP execution as the provider's fetch tool.
+            unavailable_builtin_tools = (
+                ("builtin_tool:web_fetch",)
+                if profile.provider == "openai"
+                and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
+                else ()
+            )
             mapped_tools = represented_execution_tools(
-                profile, tuple(tool for tool in tools if tool.kind != "mcp_toolset")
+                profile,
+                tuple(
+                    tool
+                    for tool in tools
+                    if tool.kind != "mcp_toolset"
+                    and not (
+                        unavailable_builtin_tools
+                        and tool.kind == "builtin"
+                        and tool.name == "web_fetch"
+                    )
+                ),
             )
             if any(
                 tool.kind == "mcp_toolset"
@@ -1572,10 +1650,23 @@ async def _capture_source_capabilities(
                 or set(inputs.mcp_tools) != set(allowed)
             ):
                 raise ValueError("MCP representation expands the source allowlist")
+            # Hosted Agents MCP currently has no approval request/response
+            # protocol (unlike Responses). Keep confirmation-gated tools out
+            # of its executable allowlist and require explicit per-tool loss
+            # consent. Never convert `ask` into `auto` or drop sibling tools.
+            unavailable_mcp_tools = tuple(
+                f"mcp_tool:{DAIMON_SERVER_NAME}:{name}"
+                for name, permission in sorted(permissions.items())
+                if permission == "ask"
+            )
             connection = servers[0].model_copy(
                 update={
                     "credential_ref": reference,
-                    "tool_policy": {"allowed_tools": list(inputs.mcp_tools)},
+                    "tool_policy": {
+                        "allowed_tools": [
+                            name for name in inputs.mcp_tools if permissions[name] == "auto"
+                        ]
+                    },
                 }
             )
             if {item.source.id for item in inputs.skills} != {s.id for s in spec.skills or ()}:
@@ -1660,6 +1751,8 @@ async def _capture_source_capabilities(
                     source_pin=pin,
                     target=target,
                     credential_refs=(reference,),
+                    unavailable_mcp_tools=unavailable_mcp_tools,
+                    unavailable_builtin_tools=unavailable_builtin_tools,
                     environment=inputs.environment,
                 )
             )
@@ -1889,6 +1982,9 @@ def classify_source_obligations(
         and resources == source.resource_requirements
     )
     missing: set[str] = set()
+    if represented is not None:
+        missing.update(set(represented.unavailable_mcp_tools) - set(drops))
+        missing.update(set(represented.unavailable_builtin_tools) - set(drops))
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
     source_tools = tuple(spec.tools or ())

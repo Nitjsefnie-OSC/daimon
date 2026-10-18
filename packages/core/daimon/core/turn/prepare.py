@@ -43,7 +43,7 @@ from daimon.core.channel_backend import BackendUnsupported
 from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import confirmed_tools_for_turn
 from daimon.core.credential_env import assemble_env_bytes
-from daimon.core.github_app_session import AppSessionAccess
+from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, retrieve_agent, sdk_agent
@@ -54,6 +54,7 @@ from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, Ma
 from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
 from daimon.core.session_snapshot import (
     SessionSnapshot,
+    TokenScope,
     fingerprint_identity,
     fingerprint_mutable,
     hash_env_bytes,
@@ -72,8 +73,6 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_memory_stores import get_personal_memory_store_id
 from daimon.core.stores.domain import BackendAgent, TransferKind
-from daimon.core.stores.github_access import list_authorized_repos
-from daimon.core.stores.github_issued_tokens import list_session_tokens
 from daimon.core.stores.thread_sessions import (
     create_thread_session,
     get_live_thread_session,
@@ -107,6 +106,27 @@ if TYPE_CHECKING:
     from daimon.core.stores.neutral_catalog import AgentRevision
 
 log = structlog.get_logger(__name__)
+
+
+def _delivered_app_snapshot_state(
+    access: AppSessionAccess | None,
+) -> tuple[bool, tuple[str, ...], tuple[TokenScope, ...], dict[int, int]]:
+    """Use delivered token identity; later grant changes belong to compatibility."""
+    if access is None or not access.tokens:
+        return False, (), (), {}
+    multi_installation = any(token.chunk is not None for token in access.tokens)
+    if multi_installation != access.multi_installation:
+        raise ValueError("delivered App token labels disagree with the vault mode")
+    scopes = token_scopes_for_tokens(access.tokens, include=multi_installation)
+    issued_at = {
+        installation_id: min(
+            token.issued_at
+            for token in access.tokens
+            if token.installation_id == installation_id and token.issued_at is not None
+        )
+        for installation_id in {scope[0] for scope in scopes}
+    }
+    return True, access.token_repo_urls, scopes, issued_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,18 +421,20 @@ __all__ = [
 
 
 async def _env_bytes_sha256(
-    deps: TurnDeps, *, tenant_id: uuid.UUID, agent_uuid: uuid.UUID
+    deps: TurnDeps, *, tenant_id: uuid.UUID, agent_uuid: uuid.UUID, is_external: bool
 ) -> str | None:
     """Hash of the `.env` bytes `create_session` is about to mount, or None.
 
     Mirrors `credential_env.upload_env_and_mount`: the same tenant-scoped rows
     through the same `assemble_env_bytes`, and None for an agent with no
-    secrets (that agent gets no `.env` resource at all). Read BEFORE the
+    secrets or an external caller (neither gets a `.env` resource). Read BEFORE the
     session is created, deliberately — a key written while `create_session`
     runs then records as stale rather than as current, and a stale hash costs
     one redundant refresh, where a falsely-current one would leave the session
     silently running the old secrets.
     """
+    if is_external:
+        return None
     async with deps.sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
@@ -587,15 +609,19 @@ async def create_ma_session(
         else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     )
     github_mode = "app"
-    env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
+    env_sha256 = await _env_bytes_sha256(
+        deps, tenant_id=tenant_id, agent_uuid=agent_uuid, is_external=admission.is_external
+    )
     native_controls: _NativeBudgetArgs = {}
     if preparation is not None and preparation.native_budget_usd is not None:
         native_controls["native_budget_usd"] = preparation.native_budget_usd
     excluded_repo_urls: tuple[str, ...] = ()
+    delivered_app_access: AppSessionAccess | None = None
 
     def capture_app_access(access: AppSessionAccess) -> None:
-        nonlocal excluded_repo_urls
+        nonlocal excluded_repo_urls, delivered_app_access
         excluded_repo_urls = access.excluded_repo_urls
+        delivered_app_access = access
 
     ma_session = await create_session(
         deps.anthropic,
@@ -623,6 +649,7 @@ async def create_ma_session(
         tool_safety=deps.tool_safety,
         asks_before_publishing=admission.asks_before_publishing,
         confirmed_tools=confirmed_tools_for_turn(deps),
+        daimon_rule_tools=admission.daimon_rule_tools,
         slack_turn_context_id=admission.slack_turn_context_id,
         private_dm_id=admission.private_dm_id,
         budget_channel_id=admission.budget_channel_id,
@@ -650,33 +677,12 @@ async def create_ma_session(
     )
     # App tokens sit in the vault even when no working repo is mounted; record an
     # issue time only when this session was actually delivered some.
-    has_app_tokens = False
-    token_repo_urls: tuple[str, ...] = ()
-    if github_mode == "app":
-        async with deps.sessionmaker() as session:
-            delivered = [
-                row
-                for row in await list_session_tokens(session, session_id=ma_session.id)
-                if row.status == "delivered"
-            ]
-            has_app_tokens = bool(delivered)
-            if delivered:
-                names = {
-                    repo.repo_id: repo.repo_full_name
-                    for repo in await list_authorized_repos(
-                        session, tenant_id=tenant_id, agent_id=agent_uuid
-                    )
-                }
-                token_repo_urls = tuple(
-                    sorted(
-                        {
-                            f"https://github.com/{names[repo_id]}"
-                            for row in delivered
-                            for repo_id in row.repo_ids
-                            if repo_id in names
-                        }
-                    )
-                )
+    (
+        has_app_tokens,
+        token_repo_urls,
+        token_scopes,
+        token_issued_at_by_installation,
+    ) = _delivered_app_snapshot_state(delivered_app_access)
     snapshot = snapshot_from_created_session(
         ma_session,
         env_sha256=env_sha256,
@@ -697,9 +703,12 @@ async def create_ma_session(
         personal_memory_store_ids=(
             () if personal_memory_store_id is None else (personal_memory_store_id,)
         ),
+        is_external=admission.is_external,
     ).model_copy(
         update={
             "token_repo_urls": token_repo_urls,
+            "token_scopes": token_scopes,
+            "token_issued_at_by_installation": token_issued_at_by_installation,
             "unavailable_repos": tuple(
                 (url, dt.datetime.now(dt.UTC)) for url in excluded_repo_urls
             ),
@@ -1399,8 +1408,26 @@ async def bind_session_impl(
 
             backend = managed_agents(deps.anthropic, scope=scope)
 
+            # Worker intent retains the root's ownership stamps. The native
+            # allocation needs its own resolver identity, even when the source
+            # is cloned or allocation succeeds before dispatch is interrupted.
+            from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+
+            worker_name = persistence.slot.thread.thread_id.replace("/", "-")
+            native_spec = worker.spec.model_copy(
+                update={
+                    "name": worker_name,
+                    "metadata": {
+                        **(worker.spec.metadata or {}),
+                        MA_METADATA_KEY_NAME: worker_name,
+                        # A runtime worker is not a removed seeded default.
+                        MA_METADATA_KEY_MANAGED: "false",
+                    },
+                }
+            )
+
             async def create(key: str) -> Agent:
-                return await backend.agents.create(scope, worker.spec, key=key)
+                return await backend.agents.create(scope, native_spec, key=key)
 
             allocated = await persistence.mutate(
                 None,
@@ -1420,7 +1447,7 @@ async def bind_session_impl(
                 allocated.ref.account_scope_id,
                 scope,
             )
-            expected = agent_payload(worker.spec)
+            expected = agent_payload(native_spec)
             expected.update(
                 {name: expected.get(name) or [] for name in ("tools", "skills", "mcp_servers")}
             )

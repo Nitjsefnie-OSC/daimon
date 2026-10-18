@@ -226,6 +226,9 @@ config). The order is load-bearing and documented as such in the module:
    that turn alone (`turn_origins.is_external`, which the MCP verifier reads)
    and keeps the stored role. An external account's stored role is always
    `user`, and it administers no channel. `reauthorize` checks it again.
+   Their sessions mount no agent keys and get no agent-wide MCP token
+   (`SessionSnapshot.is_external`, identity, so a member's session is
+   replaced for them, never reused or carried over).
 5. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
@@ -241,7 +244,7 @@ config). The order is load-bearing and documented as such in the module:
 8. Balance gate — `tenant_balance.is_over_balance`.
 9. Monthly cap gate — `billing.is_over_cap`.
 10. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
-   parent channel, or for a DM the channel it was moved from with `/dm`
+   parent channel, or for a DM the channel it was moved from with `/dm-me`
    (`dm_source_channel_id`); skipped in an older DM or where the channel has
    no budget. A channel's own agent counts toward its home channel wherever an
    exempt caller runs it (`AgentPermissions.budget_channel`). The channel is
@@ -314,7 +317,11 @@ adopts the same queue and card; stale writes queued by the old lifecycle are
 dropped. A defensive repair reasserts the final render if a stale completion is
 detected. The bot's outer error boundary finishes the card through the same
 lifecycle. Long answers keep their summary on the last chunk, and failed turns
-preserve sealed answer text before showing the error card. Process death loses
+preserve sealed answer text before showing the error card. Discord limits a turn
+to five answer messages, reserving one for the terminal answer or error card.
+Excess sealed or final prose is combined into `answer.txt` on that final message,
+with a notice and a warning in the logs. Consecutive identical answer blocks
+and text consisting entirely of pseudo tool calls are suppressed. Process death loses
 the in-memory queue: a request already sent to Discord may still arrive after
 the new process edits an orphaned card to its restarted notice.
 
@@ -1058,6 +1065,16 @@ session's stable agent id, attached server URL and admitted parent channel.
 Agent-wide and matching channel rules combine by the stricter outcome. The
 operator deny list wins; a matching rule then decides before classification.
 A failed lookup asks in chat or refuses unattended. The flag is off by default.
+The driver also reads rules for Daimon's own trusted `daimon-mcp` server (see
+the paragraph on `call_tool` below), and an agent-wide `deny` on one of its
+tools is additionally enforced by
+`IdentityMiddleware` (`middleware/tool_rule_backstop.py`): for a chat-vault
+credential (`chat_agent_id` set, no `agent_id`) it reads the tenant's `deny`
+rows for the tool being invoked, which for a `call_tool` proxied call is the
+inner tool, and refuses when one belongs to the caller's agent and names this
+deployment's MCP URL. An agent-wide `deny` on `daimon-mcp/*` refuses every call from
+that agent's credential, `search_tools` and `call_tool` included. The same two settings
+gate it, and a failed read refuses.
 With `DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
 third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is
@@ -1095,15 +1112,33 @@ A pause shows one card per blocked call, and the driver sends one
 `user.tool_confirmation` event per call after its answer. An adapter that
 passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
-the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
-their `operation_policy` checks), except `add_skill`: its confirming call, the
+the same hook. Daimon's own `daimon-mcp` tools are not gated here by
+classification (they keep their `operation_policy` checks), except `add_skill`: its confirming call, the
 one naming a preview's `content_hash`, is sent `always_ask`, so it waits on
 the same card in chat and is always refused in a routine, whatever
 `unattended_writes` allows. Each bind compares a reused session's tools with
 the gated ones a new session would get and updates them in place, so a
 session started before tool safety was turned on is gated from its next turn,
-and a tools change never writes the agent's own `always_allow` back. The
-exemption holds only for the deployment's verified
+and a tools change never writes the agent's own `always_allow` back. An agent
+`ask` or `deny` rule on `daimon-mcp/<tool>` (see [Permissions](permissions.md))
+adds `call_tool` and each tool such a rule names to the asking set: admission
+reads the agent's rule tool names once per turn and again in `reauthorize`
+(`agent_tool_rules.daimon_rule_set`; no query unless both settings are on, and
+tool names outside `[A-Za-z0-9_.-]{1,128}` are skipped), and they enter the tools hash like
+`asks_before_publishing`, so a rule change updates the session on the next
+bind. The decider unwraps `call_tool` to the inner tool (`unwrap_daimon_call`)
+and looks the rule up under `daimon-mcp/<inner>`, against the agent's attached
+URL and the deployment's own; a call with no rule is allowed without a card.
+Precedence on a daimon tool: the operator deny of a confirmed write, an agent
+`deny`, the fixed gates (`add_skill` with a preview hash, the publish tools),
+then an agent `ask`; a rule never loosens a fixed gate. Gemini and OpenAI
+sessions, which cannot hold these asks, refuse a turn for an agent with an
+`ask` rule or a channel `deny` on a daimon tool (`daimon_rules_need_driver`);
+an agent-wide `deny` is the server's and does not block them. A daimon call that
+needs no rule lookup (the agent has none) is not looked up at all. An agent-wide `deny` on `daimon-mcp/*` adds `call_tool` to the
+asking set and the lookup returns that deny for every daimon call, so the
+driver refuses each proxied call too (the server refuses all of them anyway).
+The exemption holds only for the deployment's verified
 endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
 naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
 reserved name is gated like any other server. A pending card is owned by the
@@ -1252,7 +1287,7 @@ requester's DM, and sends no direct messages.
 C's own agents run, post and read; a caller with no executing agent, such as
 an operator token or the CLI, may still post into C. That is input, not a
 leak: the readers rule keeps C's messages readable only from inside it. A
-session that ran in a DM (a Slack IM, a Teams personal chat, or a `/dm`
+session that ran in a DM (a Slack IM, a Teams personal chat, or a `/dm-me`
 conversation) is private: admins never read it from the hub.
 
 Continuing a limited channel conversation from the hub stays refused for
@@ -1974,19 +2009,19 @@ no `admin` tag and a server baseline hides them from everyone else. A later
 ### Opt-in DM conversations
 
 DM conversations are disabled unless the tenant's separate `direct_message_policies`
-row enables them. Admins use `/dm enable` or `/dm disable`; the invoker allowlist
+row enables them. Admins use `/dm-me enable` or `/dm-me disable`; the invoker allowlist
 still applies through `admit(is_dm=True)` on every move and every private turn.
 Discord uses a live guild-member lookup and Slack checks the current workspace
 membership and role. No stored admin role grants access.
 
-`/dm` in a server/channel moves recent text context into a new private scope. This
+`/dm-me` in a server/channel moves recent text context into a new private scope. This
 selects the workspace explicitly; unselected DMs remain ignored. The scope uses a
 normal thread-agent binding, config cascade and per-account session mapping. Each
 new selection resets the scope, so a physical Discord DM shared across servers
 never contributes the previous server's private history. The live membership check
 is bound to that scope to prevent a concurrent selection from changing its authority.
 The context is escaped with the existing handoff builder and includes a source link.
-`/dm` refuses in a channel with limited readers or a Discord thread that has
+`/dm-me` refuses in a channel with limited readers or a Discord thread that has
 or sits under one, before any history is read: the DM sits outside the rule
 and can reach open channels. Admission reports this as `source_sealed`, and
 `start_dm` refuses it too. Slack's slash command carries no thread, so a Slack
@@ -1997,7 +2032,7 @@ row records its source channel and thread and, on Slack, the `channel:thread_ts`
 of every copied message. Every private turn re-checks them against the current
 rules. Once any of them has limited readers the DM is quarantined: the turn is refused,
 the conversation row (copied context and private history) is deleted, and the
-scope's provider sessions are retired and archived, so a fresh `/dm` is needed.
+scope's provider sessions are retired and archived, so a fresh `/dm-me` is needed.
 Rows from before provenance was recorded cannot prove their source open and
 are quarantined as soon as the tenant limits any readers.
 
@@ -2026,7 +2061,7 @@ The provenance thread ID remains the private scope ID, matching session mapping.
 
 The first version delivers text replies after completion. Attachments, streaming
 cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
-slash command carries recent channel messages. Run `/dm` again to reset or select
+slash command carries recent channel messages. Run `/dm-me` again to reset or select
 another channel. Disabling DMs prevents new turns, without cancelling a running turn.
 
 Slack consumes the same optional neutral-event tap for alternate-provider drafts. Its render task retains debounce and Cancel registration, and terminal callbacks replace the progress card and deregister Cancel. Foreign provider observations never become Anthropic display meters.

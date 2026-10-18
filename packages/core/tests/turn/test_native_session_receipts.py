@@ -42,11 +42,13 @@ def source_read_only(request):
 @pytest.fixture
 async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_only, request):
     from mux.contracts.ids import SkillRef
-    from mux.contracts.resources import ToolSpec
+    from mux.contracts.resources import AgentPatch, ToolSpec
 
     resolved_tools = None
     kwargs = {}
-    effort = getattr(request, "param", None) == "live_root_effort"
+    variant = getattr(request, "param", "")
+    paid_w1 = variant.startswith("paid_w1")
+    effort = paid_w1 or getattr(request, "param", None) == "live_root_effort"
     live = effort or getattr(request, "param", None) == "live_root_readback"
     if live or getattr(request, "param", None) == "resolved_readback":
         # Recorded response-only builtin types, reordered configs and resolved defaults.
@@ -118,6 +120,18 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             captured = await load_backend_agent(
                 client, sm, tenant_id=tenant, agent_name="source", actual_agent=source
             )
+    if variant in {"resolver_fresh", "clone_source"}:
+        from daimon.core.channel_backend import load_backend_agent
+
+        retained_environment = captured.environment
+        source = source.model_copy(
+            update={"metadata": {**source.metadata, "daimon_managed": "true"}}
+        )
+        async with ScriptedTransport().client() as client:
+            captured = await load_backend_agent(
+                client, sm, tenant_id=tenant, agent_name="source", actual_agent=source
+            )
+        captured = captured.model_copy(update={"environment": retained_environment})
     root = replace(
         old.permissions,
         fleet=replace(old.permissions.fleet, depth=0),
@@ -127,6 +141,9 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             update={"deadline": datetime.now(UTC) + timedelta(minutes=10)}
         ),
     )
+    if variant in {"resolver_fresh", "clone_source"}:
+        # Production worker intent inherits the complete root stamps.
+        root = replace(root, spec=root.spec.model_copy(update={"metadata": source.metadata}))
     async with sm.begin() as db:
         await access_policy.set_access_policy(db, tenant_id=tenant, policy=POLICY)
         await tenants.set_funding_mode(db, tenant_id=tenant, funding_mode="prepaid")
@@ -222,9 +239,41 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
         assert len(root.environment.packages["python"]) == 3
         assert root.environment.scope == "organization"
         resolved_tools = [capture["tools"][0]]
+    requested = root.spec
+    if paid_w1:
+        from mux.contracts.resources import AgentSpec
+
+        # Actual persisted W1 intent from r5; rebind ownership to this owned DB.
+        requested = AgentSpec.model_validate_json(
+            (
+                Path(__file__).resolve().parents[1] / "fixtures/i7_r5_persisted_w1_spec.json"
+            ).read_text()
+        ).model_copy(update={"metadata": root.spec.metadata})
+        if variant == "paid_w1_mcp":
+            requested = requested.model_copy(update={"declared_drops": ("mcp", "skills", "tools")})
+        elif variant == "paid_w1_memory":
+            requested = requested.model_copy(
+                update={"declared_drops": ("memory", "skills", "tools")}
+            )
+        elif variant == "paid_w1_sandbox":
+            requested = requested.model_copy(
+                update={"declared_drops": ("memory", "sandbox", "skills", "tools")}
+            )
+        resolved_tools = None  # The scripted ACK must echo this worker's compiled grant.
+    if variant == "clone_source":
+        assert captured.source is not None
+        root = replace(
+            root,
+            source_agents=(captured.source.ref,),
+            source_revisions=((captured.source.ref, captured.source.revision),),
+        )
+        requested = captured.source
     resolved = resolve_worker_spec(
         root,
-        root.spec,
+        requested,
+        overrides=AgentPatch.model_validate(root.spec.model_dump(mode="json"))
+        if variant == "clone_source"
+        else None,
         policy=POLICY,
         now=datetime.now(UTC),
         resources=root.resources,
@@ -302,6 +351,10 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                 native["agent"] = native["agent"].model_copy(
                     update={"metadata": payload.get("metadata")}
                 )
+                if variant in {"resolver_fresh", "clone_source"}:
+                    native["agent"] = native["agent"].model_copy(
+                        update={"created_at": source.created_at + timedelta(seconds=1)}
+                    )
                 if live:
                     native["agent"] = native["agent"].model_copy(
                         update={"execution_identity": capture["execution_identity"]}
@@ -310,9 +363,18 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                     raise httpx.ReadError("lost native ACK", request=call)
                 return httpx.Response(200, json=native["agent"].model_dump(mode="json"))
             native["session_posts"] = native.get("session_posts", 0) + 1
+            session_agent = native["agent"]
+            if isinstance(payload["agent"], dict):
+                session_agent = session_agent.model_copy(
+                    update={
+                        key: value
+                        for key, value in payload["agent"].items()
+                        if key in ("skills", "tools", "mcp_servers")
+                    }
+                )
             native["session"] = ma_session(
                 id="worker-session",
-                agent=native["agent"],
+                agent=session_agent,
                 environment_id=payload["environment_id"],
                 metadata=payload["metadata"],
                 resources=payload["resources"],
@@ -354,6 +416,13 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
 
     memory = make_fake_memory_store_handler(FakeMemoryStoreState())
     router.add("POST", r"/v1/memory_stores", lambda call, match: memory(call))
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda call, match: list_response(
+            [source.model_dump(mode="json"), native["agent"].model_dump(mode="json")]
+        ),
+    )
     router.add("POST", r"/v1/agents", resources)
     router.add("POST", r"/v1/sessions", resources)
     router.add("GET", r"/v1/agents/.*", resources)
@@ -448,6 +517,10 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
 
 @pytest.mark.parametrize("fault", [None, "lost_session_ack", "interrupted_proof"])
 async def test_session_receipt_public_caller_uses_real_scope_guard_and_sdk(native_worker, fault):
+    await _exercise_session_receipt(native_worker, fault)
+
+
+async def _exercise_session_receipt(native_worker, fault, *, native_path=False):
     from daimon.core.channel_budget import admit_fleet_worker, require_fleet_worker_admission
     from daimon.core.fleet import spawn_operation_key, worker_slot
     from daimon.core.mux_backend import managed_agents
@@ -472,17 +545,18 @@ async def test_session_receipt_public_caller_uses_real_scope_guard_and_sdk(nativ
             markup=request.deps.markup,
         )
     assert usage.admitted and usage.worker.id == claimed.id
-    source = await capture_preparation_source(request)
-    backend = managed_agents(request.deps.anthropic, scope=request.scope)
-    agent = await backend.agents.create(request.scope, resolved.spec, key="owned-test-agent")
-    executing = replace(
-        request.admission,
-        agent=sdk_agent(agent),
-        memory_read_only=True,
-        budget_channel_id=root.fleet.root.channel.channel_id,
-        origin_channel_id=root.fleet.root.channel.channel_id,
-        origin_thread_id=worker_slot(usage.run, claimed).thread.thread_id,
-    )
+    if not native_path:
+        source = await capture_preparation_source(request)
+        backend = managed_agents(request.deps.anthropic, scope=request.scope)
+        agent = await backend.agents.create(request.scope, resolved.spec, key="owned-test-agent")
+        executing = replace(
+            request.admission,
+            agent=sdk_agent(agent),
+            memory_read_only=True,
+            budget_channel_id=root.fleet.root.channel.channel_id,
+            origin_channel_id=root.fleet.root.channel.channel_id,
+            origin_thread_id=worker_slot(usage.run, claimed).thread.thread_id,
+        )
 
     async def fresh_guard():
         async with request.deps.sessionmaker.begin() as db:
@@ -497,7 +571,11 @@ async def test_session_receipt_public_caller_uses_real_scope_guard_and_sdk(nativ
             )
         assert verdict.admitted
 
-    selected = replace(request, admission=executing, source=source, before_native=fresh_guard)
+    selected = (
+        request
+        if native_path
+        else replace(request, admission=executing, source=source, before_native=fresh_guard)
+    )
     persistence = TurnPersistence(
         request.deps.state_store,
         None,
@@ -508,6 +586,23 @@ async def test_session_receipt_public_caller_uses_real_scope_guard_and_sdk(nativ
     )
 
     async def prepare():
+        if native_path:
+            from daimon.core.turn.prepare import bind_session_impl
+
+            return await bind_session_impl(
+                request.deps,
+                request.admission,
+                tenant_id=request.tenant_id,
+                platform=request.platform,
+                external_user_id=request.external_user_id,
+                thread_id=persistence.slot.thread.thread_id,
+                session_account_id=request.session_account_id,
+                reuse_existing=False,
+                deadline=request.deadline,
+                now=request.now,
+                worker=resolved,
+                before_native=fresh_guard,
+            )
         return await create_ma_session(
             request.deps, executing, tenant_id=request.tenant_id, preparation=selected
         )
@@ -530,7 +625,8 @@ async def test_session_receipt_public_caller_uses_real_scope_guard_and_sdk(nativ
         with persistence.activate():
             created = await persistence.run(prepare)
         assert created.ma_session_id == "worker-session"
-        assert created.snapshot.model_id == resolved.spec.model.id
+        if not native_path:
+            assert created.snapshot.model_id == resolved.spec.model.id
     receipt = await request.deps.state_store.get_operation(
         request.scope, spawn_operation_key(claimed.run_id, claimed.ordinal) + ":session_create:0"
     )
@@ -542,3 +638,63 @@ async def test_session_receipt_public_caller_uses_real_scope_guard_and_sdk(nativ
         sum(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests) == 1
     )
     assert not any(call.path.endswith("/events") for call in trace.requests)
+
+
+@pytest.mark.parametrize("source_read_only", [False, True], indirect=True)
+@pytest.mark.parametrize("native_worker", ["paid_w1", "paid_w1_mcp"], indirect=True)
+async def test_paid_w1_declared_tool_and_skill_losses_keep_native_memory_binding(native_worker):
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+
+    request, root, claimed, trace, controls = native_worker
+    request = replace(
+        request,
+        admission=replace(
+            request.admission,
+            channel_skills=(
+                BetaManagedAgentsCustomSkill(type="custom", skill_id="skill-live-0", version="1"),
+            ),
+        ),
+    )
+    native_worker = request, root, claimed, trace, controls
+    resolved = request.worker
+    assert resolved is not None
+    assert {"skills", "tools"} <= set(resolved.spec.declared_drops)
+    assert not resolved.spec.tools and not resolved.spec.skills and not resolved.spec.mcp_servers
+    assert resolved.permissions.memory_read_only is True
+    await _exercise_session_receipt(native_worker, None, native_path=True)
+    compiled = next(
+        json.loads(call.body)
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/agents"
+    )
+    assert compiled["tools"] == [] and compiled["skills"] == []
+    assert compiled["mcp_servers"] == []
+    assert compiled["model"]["speed"] == "standard"
+    assert compiled["model"]["effort"] == {"type": "medium"}
+    payload = next(
+        json.loads(call.body)
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/sessions"
+    )
+    assert len(payload["resources"]) == 1
+    assert payload["resources"][0]["memory_store_id"] == resolved.resources[0].resource.id
+    assert payload["resources"][0] == resolved.resources[0].native.value["resource"]
+    assert payload["resources"][0]["access"] == "read_only"
+    if isinstance(payload["agent"], dict):
+        assert not payload["agent"].get("skills")
+        assert not payload["agent"].get("tools")
+        assert not payload["agent"].get("mcp_servers")
+    else:
+        assert payload["agent"] == "new-worker"
+
+
+@pytest.mark.parametrize("native_worker", ["paid_w1_memory", "paid_w1_sandbox"], indirect=True)
+async def test_native_worker_resource_losses_refuse_before_session_allocation(native_worker):
+    from mux.errors import ScopeViolation
+
+    request, _, _, trace, _ = native_worker
+    assert not request.worker.resources
+    with pytest.raises(ScopeViolation, match="one granted warm memory mount required"):
+        await _exercise_session_receipt(native_worker, None, native_path=True)
+    assert any(call.path == "/v1/agents" and call.method == "POST" for call in trace.requests)
+    assert not any(call.path == "/v1/sessions" and call.method == "POST" for call in trace.requests)

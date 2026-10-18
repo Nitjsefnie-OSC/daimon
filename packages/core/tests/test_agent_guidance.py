@@ -9,12 +9,30 @@ idempotent or the spec hash never stabilises.
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 from daimon.core.agent_guidance import (
     CREDENTIAL_GUIDANCE_BLOCK,
     apply_credential_guidance,
 )
+
+
+def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:
+    paragraph = (
+        "If /mnt/session/uploads/github-repo.sh exists, your repos span multiple\n"
+        "GitHub organizations. For a repo outside the working repo's organization,\n"
+        "run `sh /mnt/session/uploads/github-repo.sh owner/repo <gh args...>`; to clone,\n"
+        "run `sh /mnt/session/uploads/github-repo.sh owner/repo clone [dir]` and use\n"
+        "that clone for later Git commands. Plain `gh` and `GH_TOKEN` cover the working\n"
+        "repo's organization.\n"
+    )
+    assert CREDENTIAL_GUIDANCE_BLOCK.count(paragraph) == 1
+    before = CREDENTIAL_GUIDANCE_BLOCK.replace(paragraph, "")
+    assert hashlib.sha256(before.encode()).hexdigest() == (
+        "f0cbfd773f6fd765d6812797f9f90ccfc4d35dcf1e626eecc486712cbf42ec2b"
+    )
+    assert apply_credential_guidance("base prompt").count(paragraph) == 1
 
 
 def test_prepends_block_when_absent() -> None:

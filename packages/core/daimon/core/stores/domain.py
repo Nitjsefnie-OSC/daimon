@@ -1140,6 +1140,8 @@ class SourceRepresentation(_Facts):
     source_pin: str = Field(pattern=r"^[0-9a-f]{64}$")
     target: AgentSpec
     credential_refs: tuple[str, ...] = ()
+    unavailable_mcp_tools: tuple[str, ...] = ()
+    unavailable_builtin_tools: tuple[str, ...] = ()
     environment: EnvironmentSpec | None = None
 
 

@@ -67,7 +67,7 @@ Agent removal tools: detach_mcp_server, remove_skill, remove_agent_key, list_age
 
 ## `agent_tool_rules`
 
-Admin tools for one agent's third-party MCP tool rules.
+Admin tools for one agent's MCP tool rules, third-party and Daimon's own.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |

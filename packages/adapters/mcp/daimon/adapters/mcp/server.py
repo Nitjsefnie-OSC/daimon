@@ -94,7 +94,7 @@ from daimon.adapters.mcp.tools.tidy import register_tidy_tools
 from daimon.adapters.mcp.tools.timers import register_timer_tools
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.uploads import build_upload_route
-from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR
+from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
@@ -284,6 +284,9 @@ def create_mcp_app(
         integrations=[StarletteIntegration()],
     )
     _validate_settings(effective_settings, skip_auth=auth is not None)
+    configure_environment_label(
+        name=effective_settings.environment.name, label=effective_settings.environment.label
+    )
 
     effective_sessionmaker = sessionmaker
     engine = None
@@ -377,6 +380,12 @@ def create_mcp_app(
         operator_rate_limiter=RateLimiter(
             max_requests=effective_settings.mcp.operator_calls_per_minute,
             window=timedelta(minutes=1),
+        ),
+        tool_safety=effective_settings.tool_safety,
+        public_url=(
+            str(effective_settings.mcp.public_url)
+            if effective_settings.mcp.public_url is not None
+            else None
         ),
     )
 
