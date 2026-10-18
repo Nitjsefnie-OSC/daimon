@@ -515,17 +515,6 @@ jobs:
               # breaks IAP SSH key writes (breaking this very refresh step).
               sudo docker image prune -af || true
             '
-          # Record only a healthy deploy so a failed refresh keeps the previous digest.
-          IMAGE="${{ steps.images.outputs.daimon }}"
-          if [[ "$IMAGE" != *@sha256:* ]]; then
-            IMAGE="${IMAGE%:*}@${{ steps.build_daimon.outputs.digest }}"
-          fi
-          if [[ ! "$IMAGE" =~ ^[a-z0-9][a-z0-9.-]*/[a-z0-9_./-]+@sha256:[0-9a-f]{64}$ ]]; then
-            echo "Invalid daimon image digest ref: $IMAGE" >&2
-            exit 1
-          fi
-          gcloud compute instances add-metadata ${{ vars.GCP_AR_REPO }}-workers \
-            --zone "$ZONE" --metadata "daimon-image=$IMAGE"
           date +%s > "$RUNNER_TEMP/workers-refreshed-at"
 
       - name: Wait for notebook-host VM refresh
@@ -563,6 +552,20 @@ jobs:
               echo "Invalid notebook-host image digest ref: $IMAGE" >&2
               exit 1
             fi
+          done
+          # The refresh gates report-host only; notebook-host must answer too
+          # before its digest becomes the boot image.
+          for i in $(seq 1 12); do
+            if curl -sf --max-time 5 "https://$NOTEBOOK_DOMAIN/health" >/dev/null; then
+              break
+            fi
+            if [ "$i" = "12" ]; then
+              gcloud compute instances add-metadata ${{ vars.GCP_AR_REPO }}-notebook \
+                --zone "$ZONE" --metadata "report-image=$REPORT_IMAGE"
+              echo "notebook-host not healthy after 60s; kept its previous boot digest" >&2
+              exit 1
+            fi
+            sleep 5
           done
           gcloud compute instances add-metadata ${{ vars.GCP_AR_REPO }}-notebook \
             --zone "$ZONE" --metadata "notebook-image=$NOTEBOOK_IMAGE,report-image=$REPORT_IMAGE"
@@ -675,6 +678,20 @@ jobs:
             sleep 60
             verify
           fi
+
+      - name: Record verified worker image
+        run: |
+          # Only after every gate above passed: a failed deploy keeps the previous boot digest.
+          IMAGE="${{ steps.images.outputs.daimon }}"
+          if [[ "$IMAGE" != *@sha256:* ]]; then
+            IMAGE="${IMAGE%:*}@${{ steps.build_daimon.outputs.digest }}"
+          fi
+          if [[ ! "$IMAGE" =~ ^[a-z0-9][a-z0-9.-]*/[a-z0-9_./-]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid daimon image digest ref: $IMAGE" >&2
+            exit 1
+          fi
+          gcloud compute instances add-metadata ${{ vars.GCP_AR_REPO }}-workers \
+            --zone "$ZONE" --metadata "daimon-image=$IMAGE"
 
       - name: Mark tested staging images promotable
         if: steps.images.outputs.prebuilt == 'true'
