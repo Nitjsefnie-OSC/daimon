@@ -78,8 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `xlsx` skills; other backends run without them, and Slack and Discord
   are unchanged. They count toward the 20-skill session limit, so a Teams
   channel answered by the default agent now adds at most 6 skills of its own,
-  down from 9; the most recently added ones past that are left out of its
-  turns, and logged once rather than on every turn.
+  down from 9; adding a seventh is refused, and extras added earlier are
+  left out of its turns, logged once rather than on every turn. Live Teams
+  sessions of the default agent are replaced once after upgrading, since
+  their skills change.
   On Teams, the new `replace_channel_file` tool saves an edited file over one
   in the channel's Files folder as a new version, so "update the deck" no
   longer leaves `deck 1.pptx` behind. It writes only at the version the agent
