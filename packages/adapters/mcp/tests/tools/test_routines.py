@@ -1885,3 +1885,66 @@ async def test_required_destination_on_authenticated_public_mcp_surface(
     assert requests == []
     async with committing_sessionmaker() as session:
         assert await list_routines_for_tenant(session, tenant_id=tenant.id) == []
+
+
+async def test_owner_dm_resolves_recipient_without_channel_lookup(
+    committing_sessionmaker, db_session, monkeypatch
+):
+    tenant = await make_tenant(db_session, platform="discord")
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(tenant_id=tenant.id, platform_user_id="123")
+    channel_lookup = AsyncMock(side_effect=AssertionError("DM recipients are not channels"))
+    monkeypatch.setattr(_routines_mod, "_resolve_discord_destination", channel_lookup)
+    row = await _create_routine_impl(
+        runtime,
+        auth,
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone="UTC",
+        trigger_message="summary",
+        destination_kind="dm",
+    )
+    assert row.destination_id == "123"
+    assert row.channel_id is None
+    fetched = await _get_routine_impl(runtime, auth, routine_id=row.id)
+    assert fetched.destination_kind == "dm" and fetched.destination_id == "123"
+    assert fetched.delivery_status is None
+    with pytest.raises(ToolError, match="authenticated owner"):
+        await _create_routine_impl(
+            runtime,
+            auth,
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone="UTC",
+            trigger_message="summary",
+            destination_kind="dm",
+            destination_id="999",
+        )
+    from daimon.core.stores.routines import record_result
+
+    async with committing_sessionmaker.begin() as session:
+        await record_result(session, row.id, tail="personal memory", error=None, delivery="pending")
+    admin = dataclasses.replace(auth, platform_user_id="999", is_admin=True)
+    owner_view = await _get_routine_impl(runtime, auth, routine_id=row.id)
+    admin_view = await _get_routine_impl(runtime, admin, routine_id=row.id)
+    assert owner_view.last_result_tail == "personal memory"
+    assert admin_view.last_result_tail is None and admin_view.delivery_payload is None
+    with pytest.raises(ToolError, match="authenticated owner"):
+        await _update_routine_impl(runtime, admin, routine_id=row.id, clear_destination=True)
+    with pytest.raises(ToolError, match="authenticated owner"):
+        await _update_routine_impl(runtime, admin, routine_id=row.id, destination_kind="dm")
+    channel_lookup.assert_not_awaited()
+    await client.close()
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams"])
+async def test_dm_writes_rejected_on_unsupported_platform(platform):
+    auth = _auth_identity(platform=platform, platform_user_id="123")
+    with pytest.raises(ToolError, match="only on Discord"):
+        await _routines_mod._check_destination(  # pyright: ignore[reportPrivateUsage]
+            MagicMock(), auth, kind="dm", destination_id=None
+        )

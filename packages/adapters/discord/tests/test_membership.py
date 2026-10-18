@@ -21,10 +21,8 @@ def _member():  # type: ignore[no-untyped-def]
     member.guild.unavailable = False
     member.guild_permissions.administrator = False
     member.guild_permissions.manage_guild = False
-    everyone = MagicMock(id=1)
-    everyone.is_default.return_value = True
-    role = MagicMock(id=123)
-    role.is_default.return_value = False
+    everyone = SimpleNamespace(id=1, is_default=lambda: True)
+    role = SimpleNamespace(id=123, is_default=lambda: False)
     member.roles = [everyone, role]
     return member
 

@@ -3052,7 +3052,9 @@ async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) 
     assert calls == expected, f"usage pass ran {calls} times with enabled={enabled}"
 
 
+@pytest.mark.parametrize("explicit_dm", [False, True])
 async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_memory(
+    explicit_dm: bool,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -3064,15 +3066,20 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     row = await create_routine(
         db_session,
-        created_by_user_id="u-owner",
+        created_by_user_id="123",
         agent_id="agent_z",
         agent_name="daimon",
         cron_expr="* * * * *",
         timezone_="UTC",
         trigger_message="trigger",
+        destination_kind="dm" if explicit_dm else None,
         next_fire_at=now - timedelta(minutes=1),
         tenant_id=tenant.id,
     )
+    if explicit_dm:
+        from daimon.core.stores.direct_messages import set_dm_enabled
+
+        await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
     await db_session.commit()
     fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
     calls: list[dict[str, object]] = []
@@ -3084,12 +3091,18 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
     async def fake_resolve(*args: object, **kwargs: object) -> str:
         return "agent_z"
 
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    async def member(tenant_id, guild_id, user_id):
+        return Membership(is_member=True)
+
     fire = await _build_fire(
         client=fake_client,
         sm=db_session_factory,
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
+        membership_resolver=CachedMembershipResolver(member) if explicit_dm else None,
     )
     posting = row.model_copy(
         update={"destination_kind": "channel", "destination_id": "chan-9", "channel_id": "chan-9"}
@@ -3189,3 +3202,67 @@ async def test_role_gated_fire_fetches_fresh_creator_facts(
         assert seen and after.last_result_tail == "Weekly summary: all green."
     else:
         assert not seen and after.last_error == "invoker_not_allowed"
+
+
+@pytest.mark.parametrize(
+    "mode", ["tenant_disabled", "outbound_disabled", "revoked", "unknown", "sealed"]
+)
+async def test_dm_fire_refuses_disabled_or_unverified_private_access(
+    db_session, db_session_factory, monkeypatch, mode
+):
+    from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        destination_kind="dm",
+        channel_id="456",
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=mode != "tenant_disabled")
+    if mode == "sealed":
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(channel_rules={"456": ChannelRule(readers="inside")}),
+        )
+    await db_session.commit()
+    settings = _make_test_settings(monkeypatch).model_copy(
+        update={
+            "direct_message_policies": {
+                tenant.id: DirectMessagePolicy(
+                    mode="disabled" if mode == "outbound_disabled" else "members"
+                )
+            }
+        }
+    )
+
+    async def member(*args):
+        return Membership(is_member=None if mode == "unknown" else mode != "revoked")
+
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=settings,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        membership_resolver=CachedMembershipResolver(member),
+    )
+    with unittest.mock.patch("daimon.adapters.scheduler.main.run_turn") as turn:
+        await fire(row)
+        turn.assert_not_called()
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None and after.last_error and after.delivery_status is None
+    await client.close()

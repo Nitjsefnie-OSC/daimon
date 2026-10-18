@@ -56,7 +56,7 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authori
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.permissions import any_agent_rules, any_own_readers, home_of
+from daimon.core.permissions import any_agent_rules, any_own_readers, home_of, limiting_ids_at
 from daimon.core.routine_delivery import destination_shape_error
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import ScopeContext
@@ -76,6 +76,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 class DeleteResult(BaseModel):
     deleted: bool
     routine_id: str
+
+
+def _routine_for_reader(auth: AuthIdentity, row: RoutineRow) -> RoutineRow:
+    """Admins can manage metadata without reading a personal-memory result."""
+    if row.destination_kind == "dm" and row.created_by_user_id != auth.platform_user_id:
+        return row.model_copy(
+            update={
+                "last_result_tail": None,
+                "delivery_payload": None,
+                "last_error": "Private routine run failed." if row.last_error is not None else None,
+            }
+        )
+    return row
 
 
 def _require_platform_user_id(auth: AuthIdentity) -> str:
@@ -287,6 +300,13 @@ async def _check_destination(
     Returns the channel the routine's spend is budgeted against: the
     destination's parent channel, or None without a destination.
     """
+    if kind == "dm":
+        if auth.platform != "discord":
+            raise ToolError("DM routines are supported only on Discord")
+        owner = _require_platform_user_id(auth)
+        if destination_id is not None and destination_id != owner:
+            raise ToolError("a DM routine can deliver only to its authenticated owner")
+        return None
     if (kind is None) != (destination_id is None):
         raise ToolError("destination_kind and destination_id must be given together")
     if kind is None or destination_id is None:
@@ -375,6 +395,18 @@ def _check_agent_pin(
     resolved agent and the supplied name, so a pin on any name it answers to
     holds (and a fact added to `AgentRef` reaches this check too).
     """
+    source_channel = (origin.parent_channel_id or origin.channel_id) if origin else None
+    if (
+        kind == "dm"
+        and origin is not None
+        and source_channel is not None
+        and limiting_ids_at(
+            policy,
+            channel_id=source_channel,
+            thread_id=origin.channel_id if origin.parent_channel_id else None,
+        )
+    ):
+        raise ToolError("A routine from a restricted source cannot deliver by DM.")
     target_channel_id: str | None = None
     if kind is not None and destination_id is not None:
         if kind == "channel":
@@ -417,7 +449,7 @@ def _saved_destination_channel(auth: AuthIdentity, row: RoutineRow) -> str | Non
     A Discord thread's parent needs the Discord API, so it reads as unknown:
     the scope check then falls back to the agent the caller is talking to.
     """
-    if row.destination_kind is None or row.destination_id is None:
+    if row.destination_kind in (None, "dm") or row.destination_id is None:
         return None
     if row.destination_kind == "channel":
         return row.destination_id
@@ -486,6 +518,10 @@ async def _create_routine_impl(
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
     next_fire_at = _compute_next_fire_at(cron_expr, timezone)
+    if destination_kind == "dm":
+        if destination_id is not None and destination_id != platform_user_id:
+            raise ToolError("a DM routine can deliver only to its authenticated owner")
+        destination_id = platform_user_id
     destination_channel_id = await _check_destination(
         runtime, auth, kind=destination_kind, destination_id=destination_id
     )
@@ -497,7 +533,7 @@ async def _create_routine_impl(
     async with runtime.session_factory() as session:
         policy = await _load_policy_for_save(session, tenant_id=tenant_id)
     budget_channel_id = destination_channel_id
-    if destination_kind is None:
+    if destination_kind in (None, "dm"):
         budget_channel_id = await origin_budget_channel(
             runtime.session_factory, auth, origin_context_id
         )
@@ -557,7 +593,11 @@ async def _list_routines_impl(
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
         rows = await routines_store.list_routines_for_tenant(session, tenant_id=tenant_id)
-    return [row for row in rows if _may_read(auth, row) and _sees_routine(caller, row)]
+    return [
+        _routine_for_reader(auth, row)
+        for row in rows
+        if _may_read(auth, row) and _sees_routine(caller, row)
+    ]
 
 
 async def _get_routine_impl(
@@ -575,7 +615,7 @@ async def _get_routine_impl(
         or not _sees_routine(await load_isolation_view(runtime, auth), row)
     ):
         raise ToolError("routine not found")
-    return row
+    return _routine_for_reader(auth, row)
 
 
 async def _update_routine_impl(
@@ -605,6 +645,22 @@ async def _update_routine_impl(
         if row is None or not _sees_routine(caller, row):
             raise ToolError("routine not found")
         _require_routine_owner(auth, row)
+        if (
+            row.destination_kind == "dm"
+            and (clear_destination or destination_kind is not None)
+            and row.created_by_user_id != auth.platform_user_id
+        ):
+            raise ToolError("only the authenticated owner can change private delivery")
+        if destination_kind == "dm":
+            if row.created_by_user_id != auth.platform_user_id or row.created_by_user_id is None:
+                raise ToolError("only the authenticated owner can select DM delivery")
+            destination_id = row.created_by_user_id
+            if row.destination_kind == "thread" and row.channel_id is None and row.destination_id:
+                new_destination_channel_id, _ = await _resolve_discord_destination(
+                    runtime, auth, kind="thread", destination_id=row.destination_id
+                )
+                if new_destination_channel_id is None:
+                    raise ToolError("The source thread's parent could not be resolved.")
         if clear_destination:
             destination_channel_id = None
         elif destination_id is not None:
@@ -701,7 +757,7 @@ async def _update_routine_impl(
         )
         if updated is None:
             raise ToolError("routine not found")
-        return updated
+        return _routine_for_reader(auth, updated)
 
 
 async def _delete_routine_impl(
@@ -737,16 +793,19 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_id: str | None = None,
         origin_context_id: str | None = None,
     ) -> RoutineRow:
-        """Create a routine in the caller's tenant partition.
+        """Create a recurring routine with optional channel, thread or owner-DM delivery.
 
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
 
-        ``destination_kind`` (``channel`` or ``thread``) and ``destination_id``
+        ``destination_kind`` (``channel``, ``thread`` or ``dm``) and ``destination_id``
         optionally name where each run's result goes. The run is told where,
         and if the agent does not post there itself, daimon posts the end of
         its final reply there. On Slack a thread is ``<channel id>:<thread
         ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
-        are in. A protected channel is refused. Without a destination the
+        are in. Discord ``dm`` delivers only to the authenticated owner; omit
+        ``destination_id`` to derive their user ID. Slack and Teams reject DM
+        destinations. Delivery status and failure reasons are returned by list/get.
+        A protected channel is refused. Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
         spend counts toward the destination channel's budget, or without a
         destination the budget of the channel named by ``origin_context_id``
@@ -815,7 +874,9 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_id: str | None = None,
         clear_destination: bool = False,
     ) -> RoutineRow:
-        """PATCH-update a routine. Only provided fields are changed.
+        """PATCH-update a routine, including owner-only Discord DM delivery.
+
+        Only provided fields are changed.
 
         ``destination_kind`` + ``destination_id`` set where results go (see
         ``create_routine``); ``clear_destination=true`` removes it, and the

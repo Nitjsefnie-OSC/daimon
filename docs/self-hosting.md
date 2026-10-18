@@ -1260,3 +1260,21 @@ For downgrade, stop the new readers before removing the column. Downgrade discar
 the selected agent names; record them first if they will be restored later. Existing
 DM enablement and conversation rows survive. Pending server selectors are ephemeral;
 a restart invalidates them and the person must send a new message.
+
+
+### Rolling out routine DM destinations
+
+Migration `0111_routine_dm_destination` expands the routine destination enum
+and constrains DM recipients to the non-null owner. Deploy compatible readers,
+scheduler and Discord posters before creating any `dm` rows; stop older
+writers and posters during a mixed-version rollout. Apply the migration before
+enabling the new destination in MCP, CLI or the Discord panel. It changes no
+existing routine destinations. Downgrade refuses while DM rows exist: owners
+must explicitly convert or remove them before reverting the schema.
+
+Routine DMs require tenant inbound DMs to be enabled as well as an outbound
+recipient policy permitting the owner. The scheduler and MCP use the existing
+Discord bot credentials for live membership resolution. A missing or failed
+membership lookup cannot authorize private delivery. Inspect routine
+`delivery_status` and `delivery_note` when a DM fails; do not manually reset an
+uncertain or partially sent claim to pending, because delivery is at most once.

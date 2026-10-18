@@ -690,3 +690,12 @@ async def test_full_result_is_queued_separately_from_marked_tail(db_session, del
     assert saved.last_result_tail.endswith("LAST COMPLETE PARAGRAPH.")
     assert "HEAD-ONLY" not in saved.last_result_tail
     assert saved.delivery_payload == (result if delivery == "pending" else None)
+
+
+def test_dm_controls_require_host_delivery_and_never_count_channel_tool_as_delivery() -> None:
+    row = _row(destination_kind="dm", destination_id="123", created_by_user_id="123")
+    text = render_routine_controls(row, platform="discord")
+    assert "Daimon delivers your final reply privately" in text
+    assert "Do not call messaging tools" in text
+    assert not agent_posted_to(TurnState(content=[_post_block("123")]), row)
+    assert delivery_target(row, platform="discord") is None

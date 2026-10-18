@@ -215,7 +215,7 @@ class TenantDependentCounts:
 CatchUpPolicy = Literal["skip", "run-once"]
 
 
-RoutineDestinationKind = Literal["channel", "thread"]
+RoutineDestinationKind = Literal["channel", "thread", "dm"]
 RoutineDeliveryStatus = Literal["pending", "claimed", "delivered", "skipped"]
 
 

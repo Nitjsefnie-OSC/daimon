@@ -36,7 +36,9 @@ def derive_state(row: RoutineRow) -> tuple[Glyph, int]:
         return "⏸", theme.COLOR_PAUSED
     if row.last_fired_at is None:
         return "⏳", theme.COLOR_BLURPLE
-    if row.last_error is not None:
+    if row.last_error is not None or (
+        row.destination_kind == "dm" and row.delivery_status == "skipped"
+    ):
         return "❌", theme.COLOR_RED
     return "✅", theme.COLOR_GREEN
 

@@ -1449,7 +1449,8 @@ admission before any of this runs.
   same driver under the same ceiling — but it calls neither `admit()` nor
   `bind_session()`. The scheduler runs the balance, cap and channel budget
   gates itself before each fire. A routine with a destination is told where its result
-  goes; if the agent does not post there, the row's outbox goes `pending` and
+  goes; owner-DM results always use the outbox. For a channel/thread destination,
+  the outbox is used when the agent does not post there itself. It goes `pending` and
   the chat adapter for the tenant's platform posts the result tail through
   its delivery poller (`daimon.core.routine_delivery`), after the access
   policy's writers and invoker checks. See [routines.md](routines.md).
@@ -2108,3 +2109,19 @@ with the existing bot credential, without importing the Discord adapter.
 The shared cache keys by tenant, guild, and user, shares concurrent fetches,
 and discards results invalidated while in flight. `require_fresh=True` bypasses
 completed cache entries. Unknown evidence cannot satisfy a role gate.
+
+
+### Owner-DM routine delivery
+
+Discord `/routines` includes an owner-only delivery choice and delivery failure
+reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
+the authenticated owner; the operator CLI has `routines create --destination dm`
+and a verifying dry-run. Slack and Teams explicitly reject DM writes.
+
+The scheduler runs a read-only headless turn and queues its final answer in
+the routine outbox. The Discord host checks live membership, tenant DM
+enablement, recipient policy and source restrictions before opening the
+owner's DM and before each chunk. Recipient IDs are never channel targets or
+budget sources. Notifications do not alter the selected cold-DM conversation
+or its model history. Delivery uses the existing at-most-once claim/settle
+leases, with no public fallback or automatic retry after an uncertain send.

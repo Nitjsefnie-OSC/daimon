@@ -449,8 +449,13 @@ class Routine(Base):
             "catch_up_policy IN ('skip', 'run-once')", name="ck_routines_catch_up_policy"
         ),
         CheckConstraint(
-            "destination_kind IS NULL OR destination_kind IN ('channel', 'thread')",
+            "destination_kind IS NULL OR destination_kind IN ('channel', 'thread', 'dm')",
             name="ck_routines_destination_kind",
+        ),
+        CheckConstraint(
+            "destination_kind IS DISTINCT FROM 'dm' OR "
+            "(created_by_user_id IS NOT NULL AND destination_id = created_by_user_id)",
+            name="ck_routines_dm_owner",
         ),
         CheckConstraint(
             "(destination_kind IS NULL) = (destination_id IS NULL)",

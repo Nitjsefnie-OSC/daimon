@@ -21,7 +21,9 @@ def derive_glyph(row: RoutineRow) -> Glyph:
         return "⏸"
     if row.last_fired_at is None:
         return "⏳"
-    if row.last_error is not None:
+    if row.last_error is not None or (
+        row.destination_kind == "dm" and row.delivery_status == "skipped"
+    ):
         return "❌"
     return "✅"
 

@@ -747,3 +747,49 @@ def test_panel_container_empty_roster_returns_container_with_hint() -> None:
         "empty-roster container must show the no-routines hint"
     )
     assert container.accent_colour is None, "empty-roster container must have no accent"
+
+
+@pytest.mark.parametrize("clicker", [123, 999])
+async def test_private_delivery_choice_belongs_to_owner_only(
+    db_session_factory, monkeypatch, clicker
+):
+    from daimon.adapters.discord.routines_panel import panel as panel_mod
+    from daimon.core.stores.routines import create_routine, get_routine
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        row = await create_routine(
+            session,
+            tenant_id=tenant.id,
+            created_by_user_id="123",
+            agent_id="ag",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="summary",
+        )
+    glyph, color = derive_state(row)
+    entry = RoutineEntry(
+        routine=row, agent_name="daimon", glyph=glyph, color=color, label="summary"
+    )
+    runtime = _make_runtime()
+    runtime.sessionmaker = db_session_factory
+    view = RoutinesPanelView(_make_state([entry]), runtime=runtime, allowed_user_id=clicker)
+    picker = next(
+        child for child in view.walk_children() if isinstance(child, panel_mod._DestinationPicker)
+    )
+    picker._values = ["dm"]
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.user.id = clicker
+    interaction.response.send_message = AsyncMock()
+    monkeypatch.setattr(panel_mod, "_rerender", AsyncMock())
+    await picker.callback(interaction)
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    assert after.destination_kind == ("dm" if clicker == 123 else None)
+    if clicker == 123:
+        assert after.destination_id == "123"
+    else:
+        assert "Only the routine owner" in interaction.response.send_message.await_args.args[0]

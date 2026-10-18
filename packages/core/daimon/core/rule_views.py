@@ -117,7 +117,7 @@ def routine_destination_channel(row: RoutineRow) -> str | None:
     was recorded falls back to the channel its destination id carries, or the
     id itself (a channel, or a Discord thread whose parent is unknown).
     """
-    if row.destination_kind is None or row.destination_id is None:
+    if row.destination_kind in (None, "dm") or row.destination_id is None:
         return None
     if row.channel_id:
         return row.channel_id
@@ -129,14 +129,15 @@ def routine_destination_channel(row: RoutineRow) -> str | None:
 def routine_answers_only_owner(row: RoutineRow) -> bool:
     """Whether a routine's result reaches nobody but its owner: its owner's DM.
 
-    A routine's result is posted to its destination (a channel or thread), or
-    by DM to its owner when it cannot post there. One with no destination and
-    no channel (made in a DM, or with no origin) posts nowhere: its result is
-    the owner's alone, read in their own DM or routine panels. Only such a
-    routine may read its owner's personal memory. Decided from the row at each
-    fire, so a destination added later stops it at the next run.
+    Explicit DM delivery reaches only the owner, even with a saved source
+    channel. A legacy routine with neither destination nor channel also keeps
+    its result private. Both may read the owner's personal memory read-only.
+    A channel/thread routine may fall back to a DM, but cannot read personal
+    memory because public delivery remains possible. Decided at every fire.
     """
-    return row.destination_kind is None and row.destination_id is None and row.channel_id is None
+    return row.destination_kind == "dm" or (
+        row.destination_kind is None and row.destination_id is None and row.channel_id is None
+    )
 
 
 def is_routine_parent_unknown(row: RoutineRow) -> bool:
@@ -231,6 +232,12 @@ def keeps_routine_inside(
     `parent_channel_id` once the destination's parent is resolved; until then a
     thread whose parent is unknown stays inside while any channel is kept to its own agents.
     """
+    if (
+        row.destination_kind == "dm"
+        and row.channel_id is not None
+        and limiting_ids_at(policy, channel_id=row.channel_id, thread_id=None)
+    ):
+        return True
     if channel_permissions(policy, channel_id=parent_channel_id).keeps_content:
         return True
     return channel_permissions(

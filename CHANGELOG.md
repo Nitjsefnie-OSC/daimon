@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Discord routines can deliver privately to their owner through MCP, the routines panel, or `daimon routines create --destination dm`. Delivery rechecks live access, respects tenant DM controls, and exposes failures without public fallback or automatic retries.
+
 - Discord can answer a first DM using an explicitly configured tenant agent, with a private server chooser when several servers qualify. Cold starts copy no channel history. Ineligible senders and revoked private access receive no reply; server switches reset the private scope.
 
 - Gate Discord turns and routine owners by configured role IDs, with current membership checks for MCP, scheduled fires, and private delivery. Configure roles with `daimon tenants access-policy set --invoker-role`.

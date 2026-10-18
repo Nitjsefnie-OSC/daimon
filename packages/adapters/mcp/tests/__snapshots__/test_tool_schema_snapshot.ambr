@@ -9,7 +9,8 @@
           <blank line>
           Runs as you, in that Daimon's workspace: it reads only what you can see
           and spends that workspace's credit. Pass ``handle`` from a previous
-          result to continue the same conversation. On timeout the error carries
+          result to continue the same conversation. Discord replies require live membership
+          and invoker-policy access at delivery. On timeout the error carries
           the handle; resume with it rather than asking again.
         ''',
         'parameters': dict({
@@ -113,7 +114,11 @@
         }),
       }),
       'list_events': dict({
-        'description': "A session's transcript. The Daimon's reply is in ``agent.message`` events.",
+        'description': '''
+          A session's transcript. The Daimon's reply is in ``agent.message`` events.
+          <blank line>
+          Discord callers must still pass a live membership and invoker-policy check.
+        ''',
         'parameters': dict({
           'additionalProperties': False,
           'properties': dict({
@@ -526,8 +531,9 @@
       'description': '''
         Ask one question and wait for the final answer and any chart images. Starts a
         persistent turn, waits up to about 120 seconds for idle, and
-        returns the final text plus a resumable handle. Chart images are
-        embedded by default; short-lived download links are added when private
+        returns the final text plus a resumable handle. Discord callers need live
+        server membership and invoker-policy access before reply delivery. Chart
+        images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
         continue that conversation instead of starting a new one.
       ''',
@@ -1949,16 +1955,19 @@
     }),
     'create_routine': dict({
       'description': '''
-        Create a routine in the caller's tenant partition.
+        Create a recurring routine with optional channel, thread or owner-DM delivery.
         <blank line>
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
         <blank line>
-        ``destination_kind`` (``channel`` or ``thread``) and ``destination_id``
+        ``destination_kind`` (``channel``, ``thread`` or ``dm``) and ``destination_id``
         optionally name where each run's result goes. The run is told where,
         and if the agent does not post there itself, daimon posts the end of
         its final reply there. On Slack a thread is ``<channel id>:<thread
         ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
-        are in. A protected channel is refused. Without a destination the
+        are in. Discord ``dm`` delivers only to the authenticated owner; omit
+        ``destination_id`` to derive their user ID. Slack and Teams reject DM
+        destinations. Delivery status and failure reasons are returned by list/get.
+        A protected channel is refused. Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
         spend counts toward the destination channel's budget, or without a
         destination the budget of the channel named by ``origin_context_id``
@@ -2022,6 +2031,7 @@
                 'enum': list([
                   'channel',
                   'thread',
+                  'dm',
                 ]),
                 'type': 'string',
               }),
@@ -3331,6 +3341,8 @@
     'list_events': dict({
       'description': '''
         List a session's events — the transcript.
+        <blank line>
+        Discord callers must still pass a live membership and invoker-policy check.
         <blank line>
         The agent's reply is in the ``agent.message`` events. Call this once
         ``get_session`` reports the session is idle to read what the agent said.
@@ -6494,7 +6506,9 @@
     }),
     'update_routine': dict({
       'description': '''
-        PATCH-update a routine. Only provided fields are changed.
+        PATCH-update a routine, including owner-only Discord DM delivery.
+        <blank line>
+        Only provided fields are changed.
         <blank line>
         ``destination_kind`` + ``destination_id`` set where results go (see
         ``create_routine``); ``clear_destination=true`` removes it, and the
@@ -6566,6 +6580,7 @@
                 'enum': list([
                   'channel',
                   'thread',
+                  'dm',
                 ]),
                 'type': 'string',
               }),
