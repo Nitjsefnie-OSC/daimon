@@ -1239,6 +1239,9 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
         assert delivery_kwargs["session_id"] == "sess-first-001"
         assert delivery_kwargs["channel_id"] == channel
         assert delivery_kwargs["thread_ts"] == thread_ts
+        assert delivery_kwargs["requester_user_id"] == event["user"], (
+            "the files name the person whose turn made them (#788)"
+        )
 
     # Assert thread_sessions row was created with platform="slack".
     async with db_session_factory() as s:

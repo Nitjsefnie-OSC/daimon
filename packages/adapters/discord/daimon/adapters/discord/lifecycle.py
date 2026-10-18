@@ -1371,6 +1371,24 @@ class DiscordTurnLifecycle:
         return AnswerMessage(message_id=self._summary_ref.id, edit=self._edit)
 
     @property
+    def requester_id(self) -> int | None:
+        """The Discord user whose turn this is, when the turn has one."""
+        return self._requester_id
+
+    def files_reply_to(self, channel_id: int) -> int | None:
+        """The message in ``channel_id`` a file posted apart from the answer replies to.
+
+        The person's own message when it is there, so the reply shows who asked
+        and what; otherwise the answer. A mention that opened a thread sits in
+        the parent channel, and a reply cannot cross channels.
+        """
+        trigger = self._trigger_message
+        if trigger is not None and trigger.channel.id == channel_id:
+            return trigger.id
+        answer = self.answer_message
+        return answer.message_id if answer is not None else None
+
+    @property
     def turn_window(self) -> tuple[int, int] | None:
         """Message ids bounding the turn's own posts: after its card, before its end."""
         card = self._initial_card_message_ref

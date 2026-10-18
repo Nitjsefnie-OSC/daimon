@@ -46,8 +46,13 @@ Files an agent saves under `/mnt/session/outputs` are uploaded to the Slack
 thread after an interactive turn completes (scheduled routines deliver
 nothing). Delivery runs in the background after the reply is posted — the
 adapter waits for Managed Agents to index newly written files, so files may
-arrive a few seconds after the reply. A successfully posted file is deleted
-from the session's file listing, so the listing only ever holds undelivered
+arrive a few seconds after the reply. Every delivery is labelled with the
+person whose turn made the files, in every thread, whether one person uses
+it or several: the first file posted (or the first oversize notice, if that
+comes first) carries "For @name", a mention, so that person is notified
+once per delivery. Files are labelled, not reordered: in a thread several
+people use, they can still appear after a later turn's answer. A
+successfully posted file is deleted from the session's file listing, so the listing only ever holds undelivered
 work and there is no delivery-receipt store to go stale. An interrupted
 delivery (a deploy restart mid-sweep) leaves the file listed and it goes out
 on the next turn; a crash between posting and deleting can re-post a file

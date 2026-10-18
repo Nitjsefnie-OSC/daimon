@@ -3,8 +3,8 @@
 A turn's files go onto its answer: the message that carries the summary line
 and the vote emoji. Each file is added by editing that message, so the answer
 stays the turn's last word. A file that cannot go there (the message is full,
-or the edit fails) is posted on its own below it, as before. A file over the
-guild's upload limit is kept in the session and announced once.
+or the edit fails) is posted on its own, as a reply to the turn that made it.
+A file over the guild's upload limit is kept in the session and announced once.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import asyncio
 import io
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -64,6 +65,28 @@ class AnswerMessage:
     edit: Callable[..., Awaitable[discord.Message | None]]
 
 
+def _attribution(
+    thread: discord.Thread, *, requester_id: int | None, reply_to: int | None
+) -> tuple[str | None, dict[str, Any]]:
+    """The mention, and the send kwargs, that tie a post to the turn that made it.
+
+    The sweep runs after the turn has let the thread go, so in a shared thread
+    a post can land after someone else's question. It replies to ``reply_to``
+    and names ``requester_id``, pinging nobody. A reply target deleted since
+    is dropped rather than failing the post.
+    """
+    mention = f"<@{requester_id}>" if requester_id is not None else None
+    kwargs: dict[str, Any] = {"allowed_mentions": discord.AllowedMentions.none()}
+    if reply_to is not None:
+        kwargs["reference"] = discord.MessageReference(
+            message_id=reply_to,
+            channel_id=thread.id,
+            guild_id=thread.guild.id,
+            fail_if_not_exists=False,
+        )
+    return mention, kwargs
+
+
 async def deliver_session_outputs(
     anthropic_client: AsyncAnthropic,
     thread: discord.Thread,
@@ -74,6 +97,8 @@ async def deliver_session_outputs(
     noticed_files: NoticedFiles | None = None,
     turn_window: tuple[int, int] | None = None,
     answer: AnswerMessage | None = None,
+    requester_id: int | None = None,
+    reply_to: int | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Attach session outputs to the turn's answer; leave failed uploads listed for retry.
@@ -83,9 +108,18 @@ async def deliver_session_outputs(
     bytes, counts as delivered and is cleared without a second copy.
     Without ``answer``, or when a file cannot be added to it, the file is
     posted on its own. A file over the guild's upload limit stays listed
-    and gets one notice per ``noticed_files`` lifetime.
+    and gets one notice per ``noticed_files`` lifetime. A file posted on its
+    own, and an oversize notice, reply to the message ``reply_to`` and name
+    the user ``requester_id``, whose turn made the file.
     """
     max_bytes = upload_limit(thread)
+    mention, attributed = _attribution(thread, requester_id=requester_id, reply_to=reply_to)
+    # With no turn to tie it to, a file posted on its own is the file alone.
+    file_attributed: dict[str, Any] = {}
+    if mention is not None:
+        file_attributed = {"content": f"For {mention}", **attributed}
+    elif reply_to is not None:
+        file_attributed = attributed
     already_posted: dict[tuple[str, int], list[discord.Attachment]] | None = None
     target = _AnswerTarget(thread, answer, session_id=session_id)
 
@@ -113,7 +147,10 @@ async def deliver_session_outputs(
         if await target.attach(file.content, name):
             return
         try:
-            await thread.send(file=discord.File(io.BytesIO(file.content), filename=name))
+            await thread.send(
+                file=discord.File(io.BytesIO(file.content), filename=name),
+                **file_attributed,
+            )
         except discord.Forbidden as exc:
             raise OutputPostingUnavailable("attach_files_forbidden") from exc
 
@@ -129,8 +166,7 @@ async def deliver_session_outputs(
             log.info("discord.output_delivery.skipped_already_posted", filename=name)
             return
         await thread.send(
-            render_oversize_notice(skipped, max_bytes=max_bytes),
-            allowed_mentions=discord.AllowedMentions.none(),
+            render_oversize_notice(skipped, max_bytes=max_bytes, for_whom=mention), **attributed
         )
 
     try:

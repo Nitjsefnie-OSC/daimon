@@ -865,6 +865,8 @@ class DaimonBot(commands.Bot):
                 noticed_files=self._noticed_output_files,
                 turn_window=lifecycle.turn_window if lifecycle is not None else None,
                 answer=lifecycle.answer_message if lifecycle is not None else None,
+                requester_id=lifecycle.requester_id if lifecycle is not None else None,
+                reply_to=lifecycle.files_reply_to(thread.id) if lifecycle is not None else None,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(

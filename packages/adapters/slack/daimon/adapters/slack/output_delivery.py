@@ -152,10 +152,35 @@ def _uploader(web_client: AsyncWebClient, *, size_bytes: int) -> AsyncWebClient:
     )
 
 
+class _SweepMention:
+    """The one mention a sweep makes of the person whose turn wrote its files.
+
+    The sweep runs after the turn has let the thread go, so in a shared thread
+    a file can land after someone else's question. The sweep's first post names
+    them; a Slack mention always pings, so the posts after it do not repeat it.
+    """
+
+    def __init__(self, requester_user_id: str | None) -> None:
+        self._mention = f"<@{requester_user_id}>" if requester_user_id else None
+
+    @property
+    def pending(self) -> str | None:
+        """The mention, until a post carrying it has gone out."""
+        return self._mention
+
+    def posted(self) -> None:
+        self._mention = None
+
+
 def _build_poster(
-    web_client: AsyncWebClient, *, channel_id: str, thread_ts: str
+    web_client: AsyncWebClient,
+    *,
+    channel_id: str,
+    thread_ts: str,
+    mention: _SweepMention | None = None,
 ) -> Callable[[DeliverableFile], Awaitable[None]]:
     async def post(file: DeliverableFile) -> None:
+        pending = mention.pending if mention is not None else None
         display_name = display_filename_for(file.filename, file.mime_type)
         try:
             # No content_type kwarg: files_upload_v2 forwards it into the
@@ -167,6 +192,7 @@ def _build_poster(
                 filename=display_name,
                 title=display_name,
                 content=file.content,
+                initial_comment=f"For {pending}" if pending else None,
             )
         except (SlackApiError, SlackRequestError) as err:
             code = _slack_error_code(err)
@@ -175,19 +201,29 @@ def _build_poster(
             # Anything else — including every SlackRequestError — is a
             # per-file failure the core engine isolates without deleting.
             raise
+        if mention is not None:
+            mention.posted()
 
     return post
 
 
 def _build_skip_notice(
-    web_client: AsyncWebClient, *, channel_id: str, thread_ts: str, max_bytes: int
+    web_client: AsyncWebClient,
+    *,
+    channel_id: str,
+    thread_ts: str,
+    max_bytes: int,
+    mention: _SweepMention | None = None,
 ) -> Callable[[SkippedFile], Awaitable[None]]:
     async def on_skip(skipped: SkippedFile) -> None:
+        pending = mention.pending if mention is not None else None
         await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel_id,
             thread_ts=thread_ts,
-            text=render_oversize_notice(skipped, max_bytes=max_bytes),
+            text=render_oversize_notice(skipped, max_bytes=max_bytes, for_whom=pending),
         )
+        if mention is not None:
+            mention.posted()
 
     return on_skip
 
@@ -202,21 +238,29 @@ async def deliver_session_outputs(
     notice_keys: NoticeKeys,
     team_id: str,
     noticed_files: NoticedFiles | None = None,
+    requester_user_id: str | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Sweep the session's outputs into the thread, degrading on abort codes.
+
+    ``requester_user_id`` is the Slack user whose turn wrote the files. The
+    sweep's first upload or oversize notice mentions them, once, because the
+    sweep finishes after the thread is free and can post under another
+    person's later turn.
 
     ``notice_keys`` is the instance-level bounded registry owned by ``SlackApp``,
     keyed per thread for notices and per workspace for the warning log.
     ``noticed_files`` records the kept oversize outputs already announced, so
     a file over the limit gets one notice rather than one per sweep.
     """
-    post = _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)
+    mention = _SweepMention(requester_user_id)
+    post = _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts, mention=mention)
     on_skip = _build_skip_notice(
         web_client,
         channel_id=channel_id,
         thread_ts=thread_ts,
         max_bytes=SLACK_MAX_BYTES_PER_FILE,
+        mention=mention,
     )
     try:
         await sweep_session_outputs(
