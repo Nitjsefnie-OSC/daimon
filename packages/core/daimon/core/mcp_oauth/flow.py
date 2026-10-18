@@ -14,6 +14,7 @@ import base64
 import hashlib
 import secrets
 from dataclasses import dataclass
+from typing import cast
 from urllib.parse import urlencode
 
 import httpx
@@ -28,6 +29,15 @@ from daimon.core.mcp_oauth.models import (
 
 class McpOAuthFlowError(DaimonError):
     """Registration or the code exchange was refused by the OAuth server."""
+
+
+class McpOAuthTokenRefusedError(McpOAuthFlowError):
+    """The token endpoint answered the code exchange with an error status."""
+
+    def __init__(self, message: str, *, error_code: str | None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        """The RFC 6749 `error` field, e.g. `invalid_client` for a wrong secret."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +169,19 @@ async def register_client(
         ) from err
 
 
+def _oauth_error_code(response: httpx.Response) -> str | None:
+    """The `error` field of an OAuth error body, or None when there is none."""
+    try:
+        body: object = response.json()
+    except ValueError:
+        return None
+    if isinstance(body, dict):
+        code = cast("dict[str, object]", body).get("error")
+        if isinstance(code, str):
+            return code[:80]
+    return None
+
+
 async def exchange_authorization_code(
     http: httpx.AsyncClient,
     *,
@@ -188,9 +211,10 @@ async def exchange_authorization_code(
             form["client_secret"] = client.client_secret
     response = await http.post(token_endpoint, data=form, headers=headers)
     if response.status_code != 200:
-        raise McpOAuthFlowError(
+        raise McpOAuthTokenRefusedError(
             f"token exchange at {token_endpoint} failed: "
-            f"{response.status_code} {response.text[:300]}"
+            f"{response.status_code} {response.text[:300]}",
+            error_code=_oauth_error_code(response),
         )
     try:
         return TokenResponse.model_validate(response.json())

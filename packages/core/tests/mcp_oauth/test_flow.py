@@ -10,6 +10,7 @@ import httpx
 import pytest
 from daimon.core.mcp_oauth.flow import (
     McpOAuthFlowError,
+    McpOAuthTokenRefusedError,
     build_authorization_url,
     exchange_authorization_code,
     generate_pkce,
@@ -191,6 +192,30 @@ async def test_exchange_raises_with_the_server_body_on_refusal() -> None:
             redirect_uri="https://d.example/cb",
             resource=None,
         )
+
+
+@pytest.mark.parametrize(
+    ("response", "code"),
+    [
+        (httpx.Response(401, json={"error": "invalid_client"}), "invalid_client"),
+        (httpx.Response(502, text="<html>bad gateway</html>"), None),
+    ],
+    ids=["oauth-error", "no-json"],
+)
+async def test_exchange_refusal_carries_the_oauth_error_code(
+    response: httpx.Response, code: str | None
+) -> None:
+    with pytest.raises(McpOAuthTokenRefusedError) as excinfo:
+        await exchange_authorization_code(
+            httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: response)),
+            token_endpoint=_AS.token_endpoint,
+            code="c",
+            code_verifier="v",
+            client=ClientRegistration(client_id="cid"),
+            redirect_uri="https://d.example/cb",
+            resource=None,
+        )
+    assert excinfo.value.error_code == code, "the route tells a bad client from other refusals"
 
 
 async def test_exchange_wraps_an_unusable_token_body_without_repeating_it() -> None:

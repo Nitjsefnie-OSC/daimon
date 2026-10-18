@@ -135,10 +135,24 @@ def match_preregistered_client(
     return client
 
 
+class McpOAuthClientConfigError(McpOAuthFlowError):
+    """A configured OAuth client does not fit the authorization server it matched."""
+
+
+def flow_uses_configured_client(
+    clients: Sequence[McpOAuthClientSettings], flow: McpOAuthFlowRow
+) -> bool:
+    """Whether the flow's client is a configured one rather than a registered one."""
+    if flow.client_id is None:
+        return False
+    server = canonical_mcp_url(flow.mcp_server_url)
+    return any(c.client_id == flow.client_id and server in c.mcp_servers for c in clients)
+
+
 def _on_client_host(client: McpOAuthClientSettings, url: str, *, what: str) -> str:
     """Refuse a discovered endpoint off the configured host: the secret and code go there."""
     if _https_host(url) != client.authorization_server_host:
-        raise McpOAuthFlowError(
+        raise McpOAuthClientConfigError(
             f"the discovered {what} {url} is not on {client.authorization_server_host}, "
             f"the host configured for OAuth client {client.client_id}; configure the "
             "endpoint on the client if it is meant to be used"
