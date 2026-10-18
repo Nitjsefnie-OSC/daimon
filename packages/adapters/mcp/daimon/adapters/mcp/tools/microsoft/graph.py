@@ -27,6 +27,7 @@ from daimon.adapters.mcp.tools.microsoft._person import (
     require_one_to_one,
     require_person,
 )
+from daimon.core.confirmation import SEND_BODY_LIMIT
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -357,6 +358,11 @@ async def microsoft_send_impl(
     origin_context_id: str,
 ) -> SendResult:
     graph, user_id = require_person(runtime, auth)
+    if len(body) > SEND_BODY_LIMIT:
+        raise ToolError(
+            f"Nothing was sent: body is {len(body):,} characters and the limit is "
+            f"{SEND_BODY_LIMIT:,}. Shorten it, or put the long part in a file and link it."
+        )
     origin = await require_one_to_one(
         runtime, auth, origin_context_id, what="Sending mail or invites"
     )

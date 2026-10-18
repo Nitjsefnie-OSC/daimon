@@ -639,6 +639,38 @@ async def test_send_mail_after_approval(
     assert b'"address":"ada@example.com"' in sent.replace(b" ", b""), "recipients must be sent"
 
 
+async def test_send_refuses_a_body_longer_than_the_card_shows(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card holds 8,000 characters of body; anything longer is never sent."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    origin = await _origin(committing_sessionmaker, auth, ONE_TO_ONE)
+
+    async def approved(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(graph_module, "session_card_gap", approved)
+    with pytest.raises(ToolError, match="8,001 characters and the limit is 8,000"):
+        await microsoft_send_impl(
+            _runtime(committing_sessionmaker, fake),
+            auth,
+            action="send_mail",
+            to=["ada@example.com"],
+            subject="Hi",
+            body="x" * 8001,
+            cc=[],
+            start=None,
+            end=None,
+            time_zone="UTC",
+            location=None,
+            origin_context_id=origin,
+        )
+    assert not fake.graph_requests, "a body the card could not show must not be sent"
+
+
 async def _saved(sm: async_sessionmaker[AsyncSession], auth: AuthIdentity) -> bool:
     async with sm() as session:
         row = await tokens_store.get_microsoft_user_token(

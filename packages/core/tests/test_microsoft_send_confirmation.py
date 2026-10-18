@@ -6,7 +6,11 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
 
-from daimon.core.confirmation import confirmed_tools_for_turn, prompt_for_tool_call
+from daimon.core.confirmation import (
+    SEND_BODY_LIMIT,
+    confirmed_tools_for_turn,
+    prompt_for_tool_call,
+)
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     OPEN_TOOL_SAFETY,
@@ -38,10 +42,23 @@ def _call(**data: object) -> ToolCall:
     )
 
 
+def _deps(*, configured: bool, tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY) -> TurnDeps:
+    return cast(
+        TurnDeps,
+        SimpleNamespace(
+            backend_selection_enabled=False, microsoft_send=configured, tool_safety=tool_safety
+        ),
+    )
+
+
 def test_turns_select_microsoft_send_only_when_configured() -> None:
-    on = cast(TurnDeps, SimpleNamespace(backend_selection_enabled=False, microsoft_send=True))
-    off = cast(TurnDeps, SimpleNamespace(backend_selection_enabled=False, microsoft_send=False))
-    assert "microsoft_send" in confirmed_tools_for_turn(on), "configured: sessions must ask"
+    on = confirmed_tools_for_turn(_deps(configured=True))
+    assert on == {"microsoft_send"}, "configured: sessions ask before sending, nothing else"
+    safe = confirmed_tools_for_turn(
+        _deps(configured=True, tool_safety=ToolSafetyPolicy(enabled=True))
+    )
+    assert safe == {"microsoft_send", "microsoft_write"}, "tool safety on: writes ask too"
+    off = _deps(configured=False, tool_safety=ToolSafetyPolicy(enabled=True))
     assert not confirmed_tools_for_turn(off), "unconfigured: nothing extra is asked"
 
 
@@ -98,7 +115,43 @@ def test_card_shows_every_recipient_location_and_body_without_details() -> None:
     assert f"Optional: bob@example.com, {long_cc}" in shown, "every cc address, untruncated"
     assert "Where: Room 4" in shown, "an invite shows where"
     assert "Message: Agenda: budget review" in shown, "the card previews the body"
-    assert any(line.startswith("When: ") for line in prompt.detail_lines), "an invite shows when"
+    assert "When: 2026-09-15T10:00 to 2026-09-15T11:00 (UTC)" in prompt.detail_lines, (
+        "an invite shows when, in which time zone"
+    )
+
+
+def test_card_shows_the_time_zone_the_invite_is_in() -> None:
+    prompt = prompt_for_tool_call(
+        _call(
+            action="create_event",
+            start="2026-09-15T10:00",
+            end="2026-09-15T11:00",
+            time_zone="Europe/Berlin",
+            body="Hi",
+        ),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    assert "When: 2026-09-15T10:00 to 2026-09-15T11:00 (Europe/Berlin)" in (
+        prompt.consequence or ""
+    ), "the person must see which zone the times are in"
+
+
+def test_long_body_is_previewed_and_given_in_full_behind_details() -> None:
+    """Nothing the person approves is cut: past the preview, Details has the rest."""
+    body = "\n".join(f"Line {n}: " + "word " * 20 for n in range(60))
+    prompt = prompt_for_tool_call(
+        _call(body=body), requester_platform_user_id="requester", now=datetime.now(UTC)
+    )
+    shown = prompt.consequence or ""
+    more = len(" ".join(body.split())) - 400
+    assert f"(+{more} more characters, see Details)" in shown, (
+        "the preview must say how much is left"
+    )
+    assert "Line 59" not in shown, "the visible text stays a preview"
+    details = "\n".join(prompt.detail_lines)
+    assert all(line in details for line in body.splitlines()), "Details must hold every body line"
+    assert len(body) < SEND_BODY_LIMIT, "the fixture must be a body the tool sends"
 
 
 def test_mail_card_labels_cc_recipients() -> None:
@@ -109,3 +162,46 @@ def test_mail_card_labels_cc_recipients() -> None:
         now=datetime.now(UTC),
     )
     assert "Cc: eve@example.com" in (prompt.consequence or ""), "mail cc must be visible"
+
+
+def _write(policy: ToolSafetyPolicy, *, attended: bool = True) -> str:
+    call = ToolCall(
+        tool_use_id="t2",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="microsoft_write",
+        input={"method": "PUT", "path": "/me/drive/items/i1/content", "file_handle": "h"},
+    )
+    selected = microsoft_send_tools(enabled=True, tool_safety_on=policy.enabled)
+    return decide_tool_call(
+        policy, call, attended=attended, trusted_servers=_TRUSTED, confirmed_tools=selected
+    ).outcome
+
+
+def test_microsoft_write_asks_only_with_tool_safety_on() -> None:
+    """A change to the person's files waits for the card where tool safety is on."""
+    on = ToolSafetyPolicy(enabled=True)
+    assert _write(on) == "ask", "tool safety on: an attended write must ask"
+    assert _write(on, attended=False) == "deny", "tool safety on: nobody to ask, so refused"
+    gated = session_tools_for_policy(
+        on,
+        _TOOLS,
+        trusted_servers=_TRUSTED,
+        confirmed_tools=microsoft_send_tools(enabled=True, tool_safety_on=True),
+    )
+    assert gated is not None and has_confirmation_gate(gated, tool_name="microsoft_write"), (
+        "tool safety on: the session must hold microsoft_write on always_ask"
+    )
+    assert _write(OPEN_TOOL_SAFETY) == "allow", "tool safety off: writes run as before"
+    off = session_tools_for_policy(
+        OPEN_TOOL_SAFETY,
+        _TOOLS,
+        trusted_servers=_TRUSTED,
+        confirmed_tools=microsoft_send_tools(enabled=True, tool_safety_on=False),
+    )
+    assert off is not None and not has_confirmation_gate(off, tool_name="microsoft_write"), (
+        "tool safety off: microsoft_write must not gain a gate"
+    )
+    absent = session_tools_for_policy(on, _TOOLS, trusted_servers=_TRUSTED)
+    assert absent is None or not has_confirmation_gate(absent, tool_name="microsoft_write"), (
+        "without Microsoft accounts no session gains a config for the absent tool"
+    )

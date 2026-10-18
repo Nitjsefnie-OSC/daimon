@@ -102,6 +102,7 @@ def register_microsoft_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
           page HTML as a string body; PATCH /me/onenote/pages/{id}/content with a
           JSON list of patch commands.
         Nothing else is accepted. Mail and invites go through microsoft_send.
+        Where tool safety is on, each call waits for the person's Approve.
         """
         return await microsoft_write_impl(
             runtime,
@@ -131,9 +132,10 @@ def register_microsoft_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Works only in their 1:1 chat with Daimon, and each call waits for them
         to press Approve on a card that shows the recipients and subject. body
-        is plain text. For create_event pass start and end as ISO 8601 local
-        times in time_zone (an IANA or Windows zone name); to are required
-        attendees, cc optional ones. Draft wording with them in chat first.
+        is plain text, at most 8,000 characters. For create_event pass start
+        and end as ISO 8601 local times in time_zone (an IANA or Windows zone
+        name); to are required attendees, cc optional ones. Draft wording with
+        them in chat first.
         """
         return await microsoft_send_impl(
             runtime,

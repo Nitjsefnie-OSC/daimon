@@ -352,5 +352,9 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
         "call_tool",
         "search_tools",
         # Unregistered here: backend selection and Microsoft accounts are off.
-        *(APPROVAL_TOOLS - backend_switch_tools(enabled=True) - microsoft_send_tools(enabled=True)),
+        *(
+            APPROVAL_TOOLS
+            - backend_switch_tools(enabled=True)
+            - microsoft_send_tools(enabled=True, tool_safety_on=True)
+        ),
     }

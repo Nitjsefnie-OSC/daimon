@@ -177,7 +177,10 @@ async def _recorded_as_gated(
                 confirmed_tools=backend_switch_tools(
                     enabled=backend_selection_enabled(runtime.settings.turn)
                 )
-                | microsoft_send_tools(enabled=runtime.settings.microsoft_accounts.configured),
+                | microsoft_send_tools(
+                    enabled=runtime.settings.microsoft_accounts.configured,
+                    tool_safety_on=runtime.settings.tool_safety.enabled,
+                ),
                 daimon_rule_tools=daimon_rule_tools,
             )
             if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
