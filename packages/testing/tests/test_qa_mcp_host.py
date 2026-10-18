@@ -20,13 +20,17 @@ from daimon.testing.qa_mcp_host import (
     QaHostError,
     RunBearer,
     build_host,
+    build_run,
+    build_shared_host,
     check_database,
     check_loopback,
     cleanup,
+    end_run,
     schema_exists,
     scrubbed_environment,
     serve,
 )
+from sqlalchemy import text
 from starlette.types import Message, Receive, Scope, Send
 
 NOW = dt.datetime(2026, 10, 10, 12, 0, tzinfo=dt.UTC)
@@ -370,3 +374,106 @@ def test_this_host_has_no_tunnel_and_refuses_a_manifest_that_names_one(tmp_path:
     )
     with pytest.raises(QaHostError, match="does not own"):
         Manifest.load(path)
+
+
+# A shared host: schema, tenant and account once; a token, bearer, gate and manifest per run
+
+
+async def _token_jtis(engine: Any) -> set[str]:
+    async with engine.connect() as conn:
+        return {str(row[0]) for row in await conn.execute(text("SELECT jti FROM mcp_tokens"))}
+
+
+async def test_runs_on_a_shared_host_get_their_own_credentials_and_inherit_no_rows(
+    tmp_path: Path,
+) -> None:
+    database_url = _database_url()
+    shared = await build_shared_host(database_url=database_url, port=0, root=tmp_path)
+    try:
+        first = await build_run(shared, port=0, root=tmp_path)
+        assert await _token_jtis(shared.engine) == {first.manifest.token_jti}
+        ended = await end_run(first)
+        assert ended.status == "cleaned" and first.bearer.revoked_marker.exists()
+        # Revoked, not dropped: the schema and the shared tenant outlive the run.
+        probe = build_test_engine(database_url, "public")
+        try:
+            assert await schema_exists(probe, shared.manifest.schema)
+        finally:
+            await probe.dispose()
+        async with shared.engine.connect() as conn:
+            revoked = await conn.scalar(
+                text("SELECT revoked_at FROM mcp_tokens WHERE jti = :j"),
+                {"j": first.manifest.token_jti},
+            )
+        assert revoked is not None
+        await end_run(first)  # idempotent
+
+        second = await build_run(shared, port=0, root=tmp_path)
+        # The first run's rows are gone; the second sees only its own.
+        assert await _token_jtis(shared.engine) == {second.manifest.token_jti}
+        async with shared.engine.connect() as conn:
+            assert await conn.scalar(text("SELECT count(*) FROM tenants")) == 1
+            assert await conn.scalar(text("SELECT count(*) FROM accounts")) == 1
+        assert first.manifest.run_id != second.manifest.run_id
+        assert first.manifest.token_jti != second.manifest.token_jti
+        assert first.bearer.token != second.bearer.token
+        assert first.gate is not second.gate
+        assert not second.bearer.revoked_marker.exists()
+        assert second.manifest.schema == first.manifest.schema == shared.manifest.schema
+        assert second.manifest.tenant_id == first.manifest.tenant_id == shared.manifest.tenant_id
+        await end_run(second)
+    finally:
+        await shared.engine.dispose()
+        await cleanup(shared.manifest.path(tmp_path), database_url=database_url)
+    probe = build_test_engine(database_url, "public")
+    try:
+        assert not await schema_exists(probe, shared.manifest.schema)
+    finally:
+        await probe.dispose()
+
+
+async def test_a_run_on_a_shared_host_serves_the_gate_and_cannot_drop_the_schema(
+    tmp_path: Path,
+) -> None:
+    database_url = _database_url()
+    shared = await build_shared_host(database_url=database_url, port=0, root=tmp_path)
+    try:
+        qa = await build_run(shared, port=0, root=tmp_path)
+        assert qa.tool_names == tuple(sorted(ALLOWED_TOOLS))
+        async with serve(qa) as url, httpx.AsyncClient(timeout=30) as client:
+            token = qa.bearer.token
+            await _rpc(client, url, token, dict(INIT_BODY))
+            described = await _rpc(
+                client,
+                url,
+                token,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "describe_agent", "arguments": {}},
+                },
+            )
+            assert "error" not in described, described
+            assert "qa-agent" in json.dumps(described)
+        assert qa.manifest.refused_egress == []
+        await end_run(qa)
+        # Only the schema's owner may drop it: a run's manifest is refused.
+        with pytest.raises(QaHostError, match="not this run's own"):
+            await cleanup(qa.manifest.path(tmp_path), database_url=database_url)
+        probe = build_test_engine(database_url, "public")
+        try:
+            assert await schema_exists(probe, shared.manifest.schema)
+        finally:
+            await probe.dispose()
+        # A run built by `build_host` owns its schema and has nothing to end.
+        owner = await build_host(database_url=database_url, port=0, root=tmp_path / "owner")
+        try:
+            with pytest.raises(QaHostError, match="shared host"):
+                await end_run(owner)
+        finally:
+            await owner.engine.dispose()
+            await cleanup(owner.manifest.path(tmp_path / "owner"), database_url=database_url)
+    finally:
+        await shared.engine.dispose()
+        await cleanup(shared.manifest.path(tmp_path), database_url=database_url)
