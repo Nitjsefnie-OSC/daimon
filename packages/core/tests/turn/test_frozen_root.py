@@ -48,6 +48,7 @@ from mux.errors import OperationConflict, ScopeViolation
 from mux.state.store import binding_slot
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from structlog.testing import capture_logs
 
 from ..test_fleet_permissions import POLICY, parent
 from .conftest import make_status_idle
@@ -1211,6 +1212,53 @@ async def test_started_completion_carries_original_run_across_two_real_turn_fram
     assert all(r["run_id"] == str(original.fleet.run_id) for r in locators)
 
 
+async def test_completion_bound_without_a_prepared_scope_resumes_the_original_root(root_turn):
+    # Staging r12 (2026-10-18): the Discord wake binds a fresh ordinary Anthropic turn,
+    # whose PreparedTurn carries no _scope; its persistence adopts the admitted scope.
+    # resume_prepared_root compared the missing _scope to that scope and refused.
+    deps, prepared, grants, intent, seed, scope, _, transport = root_turn
+    async with turn_origin(
+        deps.sessionmaker,
+        tenant_id=seed.tenant_id,
+        account_id=seed.account_id,
+        platform="discord",
+        parent_channel_id=seed.parent_channel_id,
+        thread_id=seed.thread_id,
+        responder_ma_agent_id=prepared.admission.agent.id,
+        responder_name=prepared.admission.agent.name,
+        role=Role.USER,
+        keep_fleet_root=True,
+    ) as origin:
+        grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
+        root_turn = (*root_turn[:4], origin, *root_turn[5:])
+        await run_root_input(root_turn)
+        original, _ = await read_frozen_root(
+            deps, scope, origin_id=origin.id, now=datetime.now(UTC)
+        )
+    async with deps.sessionmaker.begin() as db:
+        assert not await turn_card_intents.retire_turn_card_intent(
+            db, id=intent.id, expected_message_id=None, keep_fleet_root=True
+        )
+    fresh = replace(prepared, _scope=None)
+    value = (deps, fresh, *root_turn[2:])
+    row, _ = await completion_claim(value)
+    before = sum(r.method == "POST" and r.path.endswith("/events") for r in transport.requests)
+    with capture_logs() as logs:
+        async with wake_frame(value) as (current_intent, current_origin):
+            await run_root_input(value, intent_id=current_intent.id, completion=row)
+            carried, _ = await read_frozen_root(
+                deps,
+                scope,
+                origin_id=current_origin.id,
+                run_id=original.fleet.run_id,
+                now=datetime.now(UTC),
+            )
+    assert carried == original
+    assert not [entry for entry in logs if entry["event"] == "fleet.resume_root_refused"]
+    after = sum(r.method == "POST" and r.path.endswith("/events") for r in transport.requests)
+    assert after == before + 1
+
+
 @pytest.mark.parametrize(
     "change", ["unstarted", "owner", "attempt", "start", "expired", "account", "tenant", "session"]
 )
@@ -1263,8 +1311,13 @@ async def test_completion_claim_refuses_before_input_or_root_reservation(root_tu
             if change in {"unstarted", "account", "tenant"}
             else WorkerFinishedRootChanged
         )
-        with pytest.raises(expected):
+        with capture_logs() as logs, pytest.raises(expected):
             await persistence.run(attempt)
+        named = {"unstarted": "not_started", "account": "requester_account", "tenant": "tenant"}
+        if change in named:
+            assert [
+                entry["reason"] for entry in logs if entry["event"] == "fleet.resume_root_refused"
+            ] == [named[change]]
         async with deps.sessionmaker() as db:
             assert await mux_state.get_fleet_root_operation(db, scope, origin_id=origin.id) is None
     assert sum(r.method == "POST" for r in transport.requests) == before

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints, overload
 from uuid import UUID
 
+import structlog
 from daimon.core.errors import DaimonError, TurnError
 from daimon.core.neutral_resources import (
     AgentFleetGrant,
@@ -75,6 +76,8 @@ _ADMISSION_FACTS = {
     if name
     not in ("agent", "environment", "observation", "backend_counterpart", "backend_agent_revision")
 }
+
+log = structlog.get_logger(__name__)
 
 
 async def read_agent_fleet_grant(
@@ -778,24 +781,49 @@ async def resume_prepared_root(
     from daimon.core.continuity.wakes import FrozenWorkerBatch, require_worker_finished_root
     from daimon.core.stores import mux_state
     from daimon.core.turn.persistence import current_persistence
+    from daimon.core.turn.prepare import admitted_session_scope
     from daimon.core.turn_origin import current_origin_id
+
+    def refuse(reason: str) -> WorkerSpecRefused:
+        # One closed, log-safe name per failed condition; the refusal itself is unchanged.
+        log.warning("fleet.resume_root_refused", reason=reason, continuation_id=str(row.id))
+        return WorkerSpecRefused("origin", "unbound")
 
     persistence, origin_id = current_persistence.get(), current_origin_id.get()
     source, grant = prepared._source, prepared.admission.grant  # pyright: ignore[reportPrivateUsage]
-    if not (deps.fleet_enabled and persistence and origin_id and source and grant):
-        raise WorkerSpecRefused("origin", "unbound")
-    if (
-        prepared.admission.shared_owner is not None
-        or prepared._scope != persistence.scope  # pyright: ignore[reportPrivateUsage]
-        or source.resource_scope != persistence.scope
-        or row.tenant_id != UUID(persistence.scope.tenant_id)
-        or row.requester_account_id != UUID(persistence.scope.account_id)
-        or prepared.session_account_id != prepared.admission.account_id
-        or grant.subject.platform_user_id != row.requester_external_user_id
-        or row.started_at is None
-        or not row.lease_owner
+    for missing, reason in (
+        (not deps.fleet_enabled, "fleet_disabled"),
+        (persistence is None, "no_persistence"),
+        (origin_id is None, "no_origin"),
+        (source is None, "no_captured_source"),
+        (grant is None, "no_grant"),
     ):
-        raise WorkerSpecRefused("origin", "unbound")
+        if missing:
+            raise refuse(reason)
+    assert persistence is not None and source is not None and grant is not None
+    # An ordinary Anthropic turn carries no prepared scope: its persistence adopts
+    # the admitted scope, exactly as the root's first turn froze it.
+    expected_scope = (
+        prepared._scope  # pyright: ignore[reportPrivateUsage]
+        or admitted_session_scope(
+            prepared.admission, tenant_id=row.tenant_id, session_id=prepared.ma_session_id
+        )
+    )
+    for failed, reason in (
+        (prepared.admission.shared_owner is not None, "shared_owner"),
+        (expected_scope != persistence.scope, "prepared_scope"),
+        (source.resource_scope != persistence.scope, "source_scope"),
+        (row.tenant_id != UUID(persistence.scope.tenant_id), "tenant"),
+        (row.requester_account_id != UUID(persistence.scope.account_id), "requester_account"),
+        (prepared.session_account_id != prepared.admission.account_id, "session_account"),
+        (grant.subject.platform_user_id != row.requester_external_user_id, "grant_subject"),
+        (row.started_at is None, "not_started"),
+        (not row.lease_owner, "no_lease"),
+    ):
+        if failed:
+            raise refuse(reason)
+    # Narrowing only: each case was refused above.
+    assert origin_id is not None and row.lease_owner is not None and row.started_at is not None
 
     async def claim() -> None:
         await require_worker_finished_root(
