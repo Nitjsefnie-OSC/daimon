@@ -66,6 +66,33 @@ def test_single_installation_fingerprint_matches_pre_m1_golden() -> None:
         "8c98253a6a1f0b5cdf65465b1c52e7d069f80a12774ec295cf0ce8a81149e623"
     )
     assert "token_scopes" not in snapshot.model_dump(mode="json")
+    assert "github_repo_map_sha256" not in snapshot.model_dump(mode="json")
+    assert "github_repo_script_sha256" not in snapshot.model_dump(mode="json")
+
+
+def test_helper_map_changes_replace_a_multi_installation_session() -> None:
+    recorded = make_snapshot(
+        github_mode="app",
+        repo_url=None,
+        repo_branch=None,
+        token_scopes=((1, (101,)), (2, (201,))),
+        github_repo_map_sha256="old-map",
+        github_repo_script_sha256="script-v1",
+        repo_token_issued_at=int(NOW.timestamp()),
+    )
+    moved = recorded.model_copy(
+        update={
+            "token_scopes": ((1, (101, 201)),),
+            "github_repo_map_sha256": "new-map",
+        }
+    )
+    assert identity_change_reasons(recorded, moved) == ("repo_set", "github_helper")
+    assert isinstance(
+        decide_session_compatibility(
+            recorded=recorded, desired=moved, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+        ),
+        ReplaceSession,
+    )
 
 
 @pytest.mark.parametrize(

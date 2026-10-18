@@ -44,9 +44,12 @@ from daimon.core.agent_mcp_credentials import (
 )
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import (
+    github_repo_map_sha256,
+    github_repo_script_sha256,
     session_env_key,
     upload_env_and_mount,
     upload_git_identity_and_mount,
+    upload_github_repo_helpers_and_mount,
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -67,6 +70,7 @@ from daimon.core.github_app_session import (
     effective_app_grant_view,
     finish_app_delivery,
     prepare_app_access,
+    repo_credential_entries,
     resolve_bot_identity,
     revoke_app_access,
 )
@@ -1063,6 +1067,20 @@ async def create_session(
                 if on_app_access is not None:
                     on_app_access(app_access)
                 resources.extend(app_access.resources)
+                if app_access.multi_installation and any(
+                    token.credential_name.startswith("GH_TOKEN_I") for token in app_access.tokens
+                ):
+                    entries = repo_credential_entries(app_access)
+                    resources.extend(
+                        await upload_github_repo_helpers_and_mount(
+                            anthropic,
+                            session_factory,
+                            entries=entries,
+                            tenant_id=tenant_id,
+                        )
+                    )
+                    metadata["daimon_github_repo_map_sha256"] = github_repo_map_sha256(entries)
+                    metadata["daimon_github_repo_script_sha256"] = github_repo_script_sha256()
                 if app_access.tokens:
                     # Degrade-not-block: without it, commits just carry no preset author.
                     try:
