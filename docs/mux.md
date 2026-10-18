@@ -3398,3 +3398,17 @@ tools is refused rather than publishing an ambiguous empty allowlist. Existing u
 Anthropic permission policies retain their behavior.
 
 Provider contract: [Agents MCP connections](https://developers.openai.com/api/docs/guides/agents-api/tools/mcp).
+
+
+#### Native builtin defaults in hosted OpenAI source mappings
+
+Native toolsets with an enabled default can include `web_fetch` and `web_search`
+even when only the six file/shell tools appear in their explicit configs.
+Capture resolves those defaults rather than narrowing the source to the configs.
+OpenAI retains native web search and the existing file/shell execution mapping.
+Its hosted Agents profile has no native URL-fetch tool, so preview names
+`builtin_tool:web_fetch` as a loss and requires explicit acceptance through the
+normal chat-agent backend selection consent. The target instructions disclose
+that loss. The source remains unchanged, and the declaration does not waive any
+sibling capability. Hosted bash is not claimed to emulate the provider's native
+URL-fetch behavior; its existing execution and network authority are unchanged.
