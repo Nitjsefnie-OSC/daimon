@@ -11,7 +11,7 @@ import structlog
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     build_app_jwt,
-    get_app_installation_details,
+    get_app_installation_account,
     list_installation_repositories,
     mint_installation_listing_token,
 )
@@ -81,16 +81,11 @@ async def drain_github_installation_reconciliations(
                 github_app.app_id,
                 now=int(current_time.timestamp()),
             )
-            try:
-                installation_state = await get_app_installation_details(
-                    http_client,
-                    jwt=app_jwt,
-                    installation_id=job.installation_id,
-                )
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 404:
-                    raise
-                installation_state = None
+            installation_state = await get_app_installation_account(
+                http_client,
+                jwt=app_jwt,
+                installation_id=job.installation_id,
+            )
             if installation_state is None:
                 repositories = None
             else:
@@ -133,7 +128,9 @@ async def drain_github_installation_reconciliations(
                         account_id=installation_state.account_id,
                         account_login=installation_state.account_login,
                     )
-                    if completed and installation_state is not None
+                    if completed
+                    and installation_state is not None
+                    and installation_state.account_id is not None
                     else None
                 )
             if owner_before is not None and installation_state is not None:
