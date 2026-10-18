@@ -40,6 +40,8 @@ from daimon.core.handoff_context import (
     select_recent_turns,
 )
 from daimon.core.ma import replay_events
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
 from daimon.core.session_fence_retry import retry_fences
@@ -957,6 +959,7 @@ async def run_prepared_turn_impl(
             and get_profile(revision.profile).support_for("tool_confirmation") not in SUPPORTED
         ):
             confirmed_tools = frozenset()
+    prepared_source = prepared._source  # pyright: ignore[reportPrivateUsage]
     tool_confirmation = chat_tool_confirmation(
         deps.tool_safety,
         requester_platform_user_id=external_user_id,
@@ -1013,6 +1016,34 @@ async def run_prepared_turn_impl(
                 and getattr(deps.tool_safety, "agent_rules", False)
                 else None
             )
+        ),
+        annotations_for=(
+            mcp_annotation_lookup(
+                server_urls={
+                    s.name: s.url
+                    for s in prepared.admission.agent.mcp_servers
+                    if s.name in deps.tool_safety.trusted_annotations
+                },
+                token_for=agent_mcp_token_for(
+                    deps.sessionmaker,
+                    # A caller from another organisation gets none of the
+                    # agent's shared tokens, so none is used on their behalf.
+                    fernet=None if prepared.admission.is_external else deps.fernet,
+                    tenant_id=tenant_id,
+                    agent_id=(
+                        prepared_source.agent_id
+                        if prepared_source is not None
+                        else derive_agent_uuid(
+                            tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
+                        )
+                    ),
+                ),
+            )
+            # Only servers the operator trusts for annotations are read; with
+            # none trusted no catalogue is ever listed.
+            if getattr(deps.tool_safety, "enabled", False)
+            and getattr(deps.tool_safety, "trusted_annotations", ())
+            else None
         ),
     )
 

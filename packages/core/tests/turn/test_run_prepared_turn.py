@@ -36,6 +36,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
 from daimon.core._models import ThreadSession
 from daimon.core.config import McpSettings
 from daimon.core.errors import TurnError
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import usage_events
@@ -3121,3 +3122,125 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
         ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
     )
     assert result.allow and len(prompts) == 1, "the adapter's card hook answered the write"
+
+
+@pytest.mark.parametrize(
+    "trusted", [("bridge",), (), ("other",)], ids=["trusted", "empty", "other-server-trusted"]
+)
+@pytest.mark.parametrize("is_external", [False, True])
+async def test_a_chat_turn_reads_trusted_server_annotations_with_the_agent_token_unless_external(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    is_external: bool,
+    trusted: tuple[str, ...],
+) -> None:
+    """The production wiring: `run_prepared_turn` hands the decider a lookup that
+    reads a trusted server's catalogue, so a `readOnlyHint` read runs without
+    a card. A caller from another organisation's read carries no agent token.
+    With an empty `trusted_annotations`, or one naming another server, the
+    server is never listed and its name decides."""
+    from cryptography.fernet import Fernet, MultiFernet
+    from daimon.core import mcp_tool_annotations
+    from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
+    from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+
+    bridge_url = "https://bridge.example.com/mcp"
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-annotations",
+        ma_session_id="sess_annotations",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=trusted),
+        fernet=MultiFernet([Fernet(Fernet.generate_key())]),
+    )
+    admission = dataclasses.replace(
+        _admission(
+            account_id=account.id,
+            agent=ma_agent(
+                id="ag_1",
+                tenant_id=tenant.id,
+                mcp_servers=[{"name": "bridge", "type": "url", "url": bridge_url}],
+            ),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        is_external=is_external,
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_annotations",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    credential_reads: list[uuid.UUID] = []
+
+    async def _credentials(**kwargs: Any) -> tuple[ResolvedMcpCredential, ...]:
+        credential_reads.append(kwargs["agent_id"])
+        return (ResolvedMcpCredential(mcp_server_url=bridge_url, token="agent-wide", version="v"),)
+
+    tokens: list[str | None] = []
+
+    async def _catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
+        tokens.append(token)
+        return [{"name": "memory_flag_list", "annotations": {"readOnlyHint": True}}]
+
+    monkeypatch.setattr(mcp_tool_annotations, "resolve_agent_mcp_credentials", _credentials)
+    monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", _catalogue)
+    postures: list[object] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "denied"
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-annotations",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        confirm_write=card,
+    )
+
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(
+        ToolCall(tool_use_id="tu", server_name="bridge", tool_name="memory_flag_list")
+    )
+    if "bridge" not in trusted:
+        assert not result.allow and len(prompts) == 1, "the name decides: a noun-first write"
+        assert tokens == [] and credential_reads == [], "no tools/list for an untrusted server"
+        return
+    assert result.allow and prompts == [], "readOnlyHint ran the read without a card"
+    if is_external:
+        assert tokens == [None] and credential_reads == [], "no agent token for an outsider"
+    else:
+        assert tokens == ["agent-wide"]
+        assert credential_reads == [derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_1")]

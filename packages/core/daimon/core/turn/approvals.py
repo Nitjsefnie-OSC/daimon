@@ -15,7 +15,9 @@ state, and `build_decision_events` sends each call's own allow/deny.
 The decider builders are the policy shells over
 `daimon.core.tool_safety.decide_tool_call`. `unattended_decider` never waits
 on anyone; `interactive_decider` hands `ask` verdicts to the adapter's
-`ConfirmationHook`. Neither does I/O of its own — the hook is the only thing
+`ConfirmationHook`. Each takes optional lookups for the call's agent rule and
+the call's own MCP annotations (`daimon.core.mcp_tool_annotations`), read only
+when they could change the verdict. Neither does I/O of its own — the hook is the only thing
 that talks to a platform, and a hook that raises counts as a refusal."""
 
 from __future__ import annotations
@@ -37,11 +39,14 @@ from daimon.core.confirmation import (
 from daimon.core.stores import agent_tool_rules
 from daimon.core.tool_safety import (
     ResolvedAgentToolRule,
+    ToolAnnotations,
     ToolCall,
     ToolSafetyPolicy,
     ToolVerdict,
+    classify_tool,
     decide_tool_call,
     is_publish_call,
+    needs_annotations,
 )
 from daimon.core.turn.posture import (
     AutoApprove,
@@ -57,6 +62,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 log = structlog.get_logger(__name__)
 RuleLookup = Callable[[ToolCall], Awaitable[ResolvedAgentToolRule | None]]
 RuleCardFor = Callable[[ToolCall], ToolRuleCardReference | None]
+AnnotationLookup = Callable[[ToolCall], Awaitable[ToolAnnotations | None]]
 
 
 def channel_for_tool_rules(
@@ -114,6 +120,54 @@ async def _rule_for(
     except Exception as err:
         log.warning("tool_safety.rule_read_failed", tool=call.key, error=str(err))
         return None, True
+
+
+async def _annotations(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    trusted_servers: frozenset[str],
+    annotations_for: AnnotationLookup | None,
+) -> ToolAnnotations | None:
+    """The call's own MCP hints, only when they could change the verdict.
+
+    A lookup that raises answers `None`: the name decides, as without hints.
+    """
+    if annotations_for is None or not needs_annotations(
+        policy, call, trusted_servers=trusted_servers
+    ):
+        return None
+    try:
+        return await annotations_for(call)
+    except Exception as err:
+        log.warning("tool_safety.annotations_unavailable", tool=call.key, error=str(err))
+        return None
+
+
+def _log_annotation_allow(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    verdict: ToolVerdict,
+    hints: ToolAnnotations | None,
+    *,
+    attended: bool,
+) -> None:
+    """Record each call that runs as a read because its server said `readOnlyHint`.
+
+    `by_name` is what the name alone would have made it, so an audit can find
+    the calls the hint let through that would otherwise have asked.
+    """
+    if verdict.outcome != "allow" or verdict.reason != "read" or hints is None:
+        return
+    if hints.read_only_hint is not True or hints.destructive_hint is True:
+        return
+    log.info(
+        "tool_safety.annotation_read_allowed",
+        server=call.server_name,
+        tool=call.tool_name,
+        attended=attended,
+        hint="readOnlyHint",
+        by_name=classify_tool(policy, server_name=call.server_name or "", tool_name=call.tool_name),
+    )
 
 
 def _read_error_verdict(verdict: ToolVerdict, *, attended: bool) -> ToolVerdict:
@@ -280,6 +334,7 @@ def unattended_decider(
     trusted_servers: frozenset[str] = frozenset(),
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
+    annotations_for: AnnotationLookup | None = None,
 ) -> ToolCallDecider:
     """Decider for runs nobody is watching: reads run, writes are refused
     unless the operator allowed them there."""
@@ -288,16 +343,19 @@ def unattended_decider(
         if _is_unseen(call):
             return _unseen_refusal(call)
         rule, read_error = await _rule_for(policy, call, trusted_servers, rules_for)
+        hints = await _annotations(policy, call, trusted_servers, annotations_for)
         verdict = decide_tool_call(
             policy,
             call,
             attended=False,
             trusted_servers=trusted_servers,
+            annotations=hints,
             confirmed_tools=confirmed_tools,
             agent_rule=rule,
         )
         if read_error:
             verdict = _read_error_verdict(verdict, attended=False)
+        _log_annotation_allow(policy, call, verdict, hints, attended=False)
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -323,6 +381,7 @@ def interactive_decider(
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
     rule_card_for: RuleCardFor | None = None,
+    annotations_for: AnnotationLookup | None = None,
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
 
@@ -335,16 +394,19 @@ def interactive_decider(
         if _is_unseen(call):
             return _unseen_refusal(call)
         rule, read_error = await _rule_for(policy, call, trusted_servers, rules_for)
+        hints = await _annotations(policy, call, trusted_servers, annotations_for)
         verdict = decide_tool_call(
             policy,
             call,
             attended=True,
             trusted_servers=trusted_servers,
+            annotations=hints,
             confirmed_tools=confirmed_tools,
             agent_rule=rule,
         )
         if read_error:
             verdict = _read_error_verdict(verdict, attended=True)
+        _log_annotation_allow(policy, call, verdict, hints, attended=True)
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -418,6 +480,7 @@ def headless_tool_confirmation(
     *,
     trusted_servers: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
+    annotations_for: AnnotationLookup | None = None,
 ) -> ToolConfirmation:
     """Posture for a run nobody is watching (routines, smoke, transfers).
 
@@ -426,7 +489,12 @@ def headless_tool_confirmation(
     if not policy.enabled:
         return AutoApprove()
     return PolicyApproval(
-        decide=unattended_decider(policy, trusted_servers=trusted_servers, rules_for=rules_for)
+        decide=unattended_decider(
+            policy,
+            trusted_servers=trusted_servers,
+            rules_for=rules_for,
+            annotations_for=annotations_for,
+        )
     )
 
 
@@ -441,6 +509,7 @@ def chat_tool_confirmation(
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
     rule_card_for: RuleCardFor | None = None,
+    annotations_for: AnnotationLookup | None = None,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -460,6 +529,7 @@ def chat_tool_confirmation(
             confirmed_tools=confirmed_tools,
             rules_for=rules_for,
             rule_card_for=rule_card_for,
+            annotations_for=annotations_for,
         )
         if attended
         else unattended_decider(
@@ -467,6 +537,7 @@ def chat_tool_confirmation(
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
             rules_for=rules_for,
+            annotations_for=annotations_for,
         )
     )
     if not policy.enabled:

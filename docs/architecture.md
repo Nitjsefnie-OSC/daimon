@@ -1076,15 +1076,24 @@ third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is
 refused unless the operator allowed it there, and a write in chat waits for
 the requester to press Approve on a confirmation card. Read or write comes
-from an operator `DAIMON_TOOL_SAFETY__EFFECTS` pin, then the tool's MCP
-annotations, then its name: a plainly-read leading verb (`get_`, `search_`,
+from an operator `DAIMON_TOOL_SAFETY__EFFECTS` pin, then, for a server the
+operator lists in `DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS`, the tool's MCP
+annotations (`destructiveHint: true` or `readOnlyHint: false` is a write;
+`readOnlyHint: true` alone is a read), then its name: a plainly-read leading verb (`get_`, `search_`,
 `list_` and the like, or the report noun `briefing`) with no write or chaining
 word anywhere is a read, and everything else is a write. `ask` and `verify`
 read only in a question-and-answer shape (`ask_wiki_question`,
 `eap_verify_answer`); a bare `ask`, such as another Daimon's agent_chat `ask`,
 which starts a turn in that agent, stays a write. Managed Agents does not
-forward third-party annotations, so for attached servers the name and the
-operator pins are what decide; a misnamed write needs a pin. The card is a platform
+forward third-party annotations, so the decider reads them itself
+(`packages/core/daimon/core/mcp_tool_annotations.py`), only for trusted servers
+(the list is empty by default, and an unlisted server is never asked): on the
+first paused call to such a server in a turn it lists that server's tools once, with the agent-wide
+token stored for its URL or with none (never for a caller from another
+organisation). A failed or slow read, or a tool that sends no hints, leaves the
+name to decide; each annotation-based allow is logged at info. A `denied`
+entry still refuses the call, and a misnamed write on an untrusted server or
+one without hints needs a pin. The card is a platform
 hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
 (`packages/core/daimon/core/confirmation.py`), Discord, Slack and Teams each draw the
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,

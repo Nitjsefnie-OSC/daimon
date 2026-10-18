@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Third-party MCP tools that say they only read can stop asking for
+  approval, on servers you trust.** List a server in
+  `DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS` (e.g. `["bridge"]`) and, with tool
+  safety on, Daimon reads that server's own tool annotations (once per turn,
+  on the first paused call to it) and runs a tool marked `readOnlyHint: true`
+  as a read, so a noun-first read such as `memory_flag_list` no longer needs a
+  `DAIMON_TOOL_SAFETY__EFFECTS` pin; each such allow is logged. A tool also
+  marked `destructiveHint: true`, one marked `readOnlyHint: false`, and one
+  without the hint are never let through by annotations; an `effects` pin or a
+  `denied` entry still wins, and when the server cannot be read the tool name
+  decides as before. The list is empty by default: an unlisted server's
+  annotations are never fetched and its tools are classified by name only.
 - **People from another organisation get none of the agent's credentials.**
   A Teams external participant or guest answered in a `readers: own`
   channel used to get the agent's keys as a mounted `.env` and its shared
