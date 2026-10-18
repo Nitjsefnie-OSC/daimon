@@ -12,6 +12,7 @@ import discord
 
 SelectServer = Callable[[discord.Interaction, str], Awaitable[None]]
 SwitchServer = Callable[[discord.Interaction], Awaitable[None]]
+SWITCH_VIEW_SECONDS = 900
 
 
 class _PrivateControl(discord.ui.View):
@@ -118,8 +119,14 @@ class ServerSelector(_PrivateControl):
 
 
 class ServerSwitch(_PrivateControl):
-    def __init__(self, *, user_id: int, route_id: int, switch: SwitchServer) -> None:
-        super().__init__(timeout=None)
+    def __init__(
+        self, *, user_id: int, route_id: int, switch: SwitchServer, expire: Callable[[], None]
+    ) -> None:
+        super().__init__(timeout=SWITCH_VIEW_SECONDS)
+        self.expire = expire
+        # Bound retention even when sending the control fails before ViewStore
+        # starts its inactivity timer, or interactions keep refreshing it.
+        self._expiry = asyncio.get_running_loop().call_later(SWITCH_VIEW_SECONDS, self._expire)
         self.user_id = user_id
         self.route_id = route_id
         button = discord.ui.Button[ServerSwitch](
@@ -131,6 +138,17 @@ class ServerSwitch(_PrivateControl):
 
         button.callback = clicked
         self.add_item(button)
+
+    def stop(self) -> None:
+        self._expiry.cancel()
+        super().stop()
+
+    def _expire(self) -> None:
+        self.stop()
+        self.expire()
+
+    async def on_timeout(self) -> None:
+        self._expire()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id or interaction.channel_id != self.route_id:

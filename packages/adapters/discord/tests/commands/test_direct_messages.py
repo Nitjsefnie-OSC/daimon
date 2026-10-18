@@ -147,7 +147,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
         )
     monkeypatch.setattr(
         dm_module,
-        "reply_to_dm",
+        "reply_to_dm_result",
         AsyncMock(side_effect=AdmissionDenied(reason="channel_budget_exceeded")),
     )
     member = MagicMock()
@@ -159,6 +159,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
     bot = MagicMock()
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
+    bot.runtime.turn_deps.sessionmaker = db_session_factory
     from daimon.core.membership import CachedMembershipResolver, Membership
 
     bot.runtime.turn_deps.membership_resolver = CachedMembershipResolver(
@@ -211,7 +212,18 @@ async def test_role_loss_while_dm_runs_prevents_private_result_delivery(
         await set_access_policy(
             session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_role_ids=("123",))
         )
-    monkeypatch.setattr(dm_module, "reply_to_dm", AsyncMock(return_value="private secret"))
+    from .test_cold_direct_messages import private_reply
+
+    async def answer(deps, **kwargs):
+        from daimon.core.stores.direct_messages import get_conversation
+
+        async with db_session_factory() as session:
+            row = await get_conversation(
+                session, platform="discord", route_key="5", external_user_id="999"
+            )
+        return private_reply(row, "private secret")
+
+    monkeypatch.setattr(dm_module, "reply_to_dm_result", AsyncMock(side_effect=answer))
     member = MagicMock()
     member.guild_permissions.administrator = False
     member.guild_permissions.manage_guild = False
@@ -221,6 +233,7 @@ async def test_role_loss_while_dm_runs_prevents_private_result_delivery(
     bot = MagicMock()
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
+    bot.runtime.turn_deps.sessionmaker = db_session_factory
     bot.runtime.turn_deps.membership_resolver = CachedMembershipResolver(
         AsyncMock(
             side_effect=[Membership(is_member=True, role_ids=("123",)), Membership(is_member=True)]
@@ -241,4 +254,4 @@ async def test_role_loss_while_dm_runs_prevents_private_result_delivery(
     await DirectMessageCog(bot).on_message(message)
     sent = [call.args[0] for call in message.channel.send.await_args_list]
     assert not sent, "revoked access suppresses the private result without replying"
-    dm_module.reply_to_dm.assert_awaited_once()
+    dm_module.reply_to_dm_result.assert_awaited_once()

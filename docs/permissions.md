@@ -183,7 +183,9 @@ publishes.
 - **Server admins** are exempt where the output reaches them alone: their own
   DM and hub turns, and hub reads of sessions inside limited channels. They
   configure agents with rules from anywhere and see every agent listed.
-  Agent rules and `readers: own` still hold for them in channels, threads,
+  Discord cold-DM admission and all private Discord delivery enforce agent
+  pins and isolation even for admins. Agent rules and `readers: own` still
+  hold for them in channels, threads,
   routines and handoffs. Nothing writes where `writers` is `none`.
 - A **setup thread** under a `readers: own` channel answers as the built-in
   agent.
@@ -269,3 +271,12 @@ Explicit server switching starts empty private history in a new scope and retire
 the old session mapping. Routine notifications do not select a tenant or become
 history in the active DM conversation. `/dm-me` remains the explicit channel-context
 move, with its source sealing and budget checks.
+
+
+Private Discord delivery checks the answering agent's retained admission grant
+against the current `RUN_AGENT` and `DIRECT_MESSAGE` rules before every output
+chunk, with no admin exemption for agent pins or isolation. This applies to moved
+conversations too, whose source sealing remains independently enforced. Archiving,
+deleting or transferring the bound agent to another tenant, or an unreadable
+private access policy, suppresses replies without choosing a different tenant.
+Billing and operational notices remain separate from these silent access denials.
