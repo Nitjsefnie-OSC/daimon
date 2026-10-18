@@ -695,6 +695,8 @@ def test_access_policy_set_is_registered_with_its_flags() -> None:
         for flag in (*param.opts, *param.secondary_opts)
     }
     assert flags >= {
+        "--invoker-admin-bypass",
+        "--no-invoker-admin-bypass",
         "--invoker",
         "--dm-memory-read-only",
         "--add-member-guest",
@@ -978,3 +980,32 @@ async def test_invoker_roles_refuse_unsupported_platform(
             external_id="workspace",
             invoker_role=["222"],
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_invoker_admin_bypass_set_get(db_session_factory, stub_anthropic, platform):  # type: ignore[no-untyped-def]
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform=platform, workspace_id="111")
+    for bypass in (False, True):
+        await tenants_access_policy_set(
+            rt=rt,
+            console=_make_console(),
+            platform=platform,
+            external_id="111",
+            invoker_admin_bypass=bypass,
+        )
+        for as_json in (False, True):
+            console = _make_console()
+            await tenants_access_policy_get(
+                rt=rt,
+                console=console,
+                platform=platform,
+                external_id="111",
+                as_json=as_json,
+            )
+            output = _output(console)
+            if as_json:
+                assert json.loads(output)["invoker_admin_bypass"] is bypass
+            else:
+                assert f"invoker_admin_bypass: {str(bypass).lower()}" in output

@@ -222,9 +222,9 @@ channel or agent rules. They say who may act and who may change the rules.
 ## Discord invoker roles
 
 A tenant's durable access policy can contain `invoker_role_ids`. A current
-server admin, a user listed in `invoker_user_ids`, or a verified member with
-any listed role may start turns. The user and role lists form a union. Both
-lists empty means open. Writer and agent rules still apply independently.
+server admin (when `invoker_admin_bypass` is true), a user listed in
+`invoker_user_ids`, or a verified member with any listed role may start turns.
+The user and role lists form a union. Both lists empty means open. Writer and agent rules still apply independently.
 Private guild-bound access also requires current server membership. Role
 matching uses IDs, so renaming a role does not change access.
 
@@ -241,3 +241,10 @@ immediately. Without member events, role revocation can take up to 30 seconds
 to affect an ordinary cached check. Lookup failures never extend a grant;
 expired evidence fails closed. Private result delivery requires a live lookup, including Discord MCP replies
 and transcript reads.
+
+The platform-neutral `invoker_admin_bypass` defaults to true, including for old
+policies. Set `--no-invoker-admin-bypass` to require admins on Discord, Slack,
+and Teams to match the same invoker lists as other members; restore the pass
+with `--invoker-admin-bypass`. Both empty lists still mean open. This does not
+change writer rules or agent pin/isolation admin exemptions. Text and JSON
+`access-policy get` output include the switch.

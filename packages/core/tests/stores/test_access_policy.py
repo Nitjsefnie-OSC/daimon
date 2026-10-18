@@ -134,3 +134,19 @@ async def test_other_platforms_reject_role_writes_and_invalid_rows(
     )
     with pytest.raises(AccessPolicyUnreadable):
         await load_access_policy(db_session, tenant_id=tenant.id)
+
+
+async def test_admin_bypass_old_row_and_durable_switch(db_session: AsyncSession) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.execute(
+        text(
+            "INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, CAST(:p AS jsonb))"
+        ),
+        {"t": tenant.id, "p": '{"invoker_user_ids": ["u1"]}'},
+    )
+    policy = await load_access_policy(db_session, tenant_id=tenant.id)
+    assert policy.invoker_admin_bypass
+    updated = policy.model_copy(update={"invoker_admin_bypass": False})
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=updated)
+    db_session.expire_all()
+    assert await load_access_policy(db_session, tenant_id=tenant.id) == updated

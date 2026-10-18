@@ -112,6 +112,7 @@ class TenantAccessPolicy(BaseModel):
     # Platform user and Discord role ids form a union; both empty means open.
     invoker_user_ids: tuple[str, ...] = ()
     invoker_role_ids: tuple[str, ...] = ()
+    invoker_admin_bypass: bool = True
     # Channel, Discord thread or Slack ``channel:ts`` id -> its rule; a thread
     # also follows its channel's. Open rules are not kept.
     channel_rules: dict[str, ChannelRule] = Field(default_factory=dict)
@@ -169,13 +170,13 @@ class TenantAccessPolicy(BaseModel):
 OPEN_ACCESS_POLICY = TenantAccessPolicy()
 
 
-def server_admin_bypasses_invoker_gate(*, is_admin: bool) -> bool:
+def server_admin_bypasses_invoker_gate(policy: TenantAccessPolicy, *, is_admin: bool) -> bool:
     """The single server-admin exemption from the invoker policy.
 
     Callers supply live native server permissions; persisted roles and token
     claims cannot establish Discord admin evidence for a membership check.
     """
-    return is_admin
+    return is_admin and policy.invoker_admin_bypass
 
 
 def is_invoker_allowed(
@@ -195,7 +196,7 @@ def is_invoker_allowed(
         return False
     if verified_membership is False:
         return False
-    if server_admin_bypasses_invoker_gate(is_admin=is_admin):
+    if server_admin_bypasses_invoker_gate(policy, is_admin=is_admin):
         return True
     if not (policy.invoker_user_ids or policy.invoker_role_ids):
         return True

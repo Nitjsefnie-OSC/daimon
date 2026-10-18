@@ -355,3 +355,16 @@ async def test_concurrent_role_admissions_do_not_need_nested_pool_connections(
             )
         )
     assert len(admissions) == 2
+
+
+async def test_admin_bypass_disabled_after_admission(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    policy = TenantAccessPolicy(invoker_user_ids=("someone-else",))
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    deps, admission = await _admit(db_session_factory, tmp_path, tenant, role=Role.ADMIN)
+    await _set_policy(db_session, tenant, policy.model_copy(update={"invoker_admin_bypass": False}))
+    with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+        await reauthorize(deps, admission)
