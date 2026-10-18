@@ -38,15 +38,33 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("platform", "live_result", "repo_name", "principal_changed", "expected"),
+    ("platform", "live_result", "repo_name", "principal_changed", "manages", "expected"),
     [
-        ("slack", True, "owner/repo", False, "granted"),
-        ("slack", True, "owner/repo", True, "ask_admin"),
-        ("slack", False, "owner/repo", False, "ask_admin"),
-        ("teams", False, "owner/repo", False, "ask_admin"),
-        ("slack", AdminAttestationUnavailable("lookup failed"), "owner/repo", False, "sent"),
-        ("teams", AdminAttestationUnavailable("Graph lookup failed"), "owner/repo", False, "sent"),
-        ("slack", None, None, False, "sent"),
+        ("slack", True, "owner/repo", False, False, "granted"),
+        ("slack", True, "owner/repo", True, False, "ask_admin"),
+        ("slack", False, "owner/repo", False, False, "ask_admin"),
+        # A manager who is no longer admin can't instantly grant an all-agents repo.
+        ("slack", False, "owner/repo", False, True, "sent"),
+        ("teams", False, "owner/repo", False, False, "ask_admin"),
+        ("slack", AdminAttestationUnavailable("lookup failed"), "owner/repo", False, False, "sent"),
+        (
+            "teams",
+            AdminAttestationUnavailable("Graph lookup failed"),
+            "owner/repo",
+            False,
+            False,
+            "sent",
+        ),
+        ("discord", True, "owner/repo", False, False, "granted"),
+        (
+            "discord",
+            AdminAttestationUnavailable("lookup failed"),
+            "owner/repo",
+            False,
+            False,
+            "sent",
+        ),
+        ("slack", None, None, False, False, "sent"),
     ],
 )
 async def test_admin_fast_grant_requires_live_platform_standing(
@@ -55,6 +73,7 @@ async def test_admin_fast_grant_requires_live_platform_standing(
     live_result: bool | AdminAttestationUnavailable | None,
     repo_name: str | None,
     principal_changed: bool,
+    manages: bool,
     expected: str,
 ) -> None:
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
@@ -119,7 +138,7 @@ async def test_admin_fast_grant_requires_live_platform_standing(
     monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))
     monkeypatch.setattr(connect_tool, "resolve_setup_agent", AsyncMock(return_value=agent))
     monkeypatch.setattr(connect_tool, "require_app_eligible_agent", AsyncMock())
-    monkeypatch.setattr(connect_tool, "requester_manages_agent", AsyncMock(return_value=False))
+    monkeypatch.setattr(connect_tool, "requester_manages_agent", AsyncMock(return_value=manages))
     monkeypatch.setattr(connect_tool, "record_connect_request", AsyncMock())
     monkeypatch.setattr(connect_tool, "append_event", AsyncMock())
     repo = SimpleNamespace(
@@ -140,6 +159,10 @@ async def test_admin_fast_grant_requires_live_platform_standing(
     monkeypatch.setattr(connect_tool, "encrypt_token", Mock(return_value="encrypted"))
     monkeypatch.setattr(connect_tool, "_post_slack_connect_card", AsyncMock())
     monkeypatch.setattr(connect_tool, "_post_teams_connect_card", AsyncMock())
+    monkeypatch.setattr(
+        connect_tool, "create_discord_connect_intent", AsyncMock(return_value=uuid.uuid4())
+    )
+    monkeypatch.setattr(connect_tool, "_post_discord_connect_card", AsyncMock())
     runtime = SimpleNamespace(
         session_factory=SessionFactory(),
         settings=SimpleNamespace(
