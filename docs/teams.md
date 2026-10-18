@@ -548,17 +548,15 @@ permissions. Set `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID`, `__CLIENT_SECRET` and
 `DAIMON_CRYPTO__KEYS` and `DAIMON_MCP__PUBLIC_URL`; without them the tools are
 absent.
 
-Register a single-tenant app in the same Entra tenant. The same registration
-can also serve as a pre-registered OAuth client for Microsoft MCP servers;
-give it each redirect URI it needs.
+Register a single-tenant app in the same Entra tenant.
 
 1. Add a **Web** redirect URI `<root>/oauth/microsoft/callback`, where `<root>`
    is `DAIMON_MCP__PUBLIC_URL` without the trailing `/mcp`, and create a
    client secret.
 2. Under **API permissions**, add the Microsoft Graph **delegated**
-   permissions `User.Read`, `offline_access`, `Files.ReadWrite.All`,
-   `Sites.Read.All`, `Mail.Read`, `Mail.Send`, `Calendars.ReadWrite` and
-   `Notes.ReadWrite.All`. Grant admin consent, or let each person consent
+   permissions `openid`, `profile`, `User.Read`, `offline_access`,
+   `Files.ReadWrite.All`, `Sites.Read.All`, `Mail.Read`, `Mail.Send`,
+   `Calendars.ReadWrite` and `Notes.ReadWrite.All`. Grant admin consent, or let each person consent
    when they sign in if the tenant allows it.
 
 When a tool needs an account the person has not connected, the agent calls
@@ -573,16 +571,23 @@ again.
 The tools, all Teams-only and limited to an allowlist of Graph v1.0 paths:
 
 - **`microsoft_search`** and **`microsoft_get`** find and read files,
-  SharePoint lists and Excel workbooks. File content comes back as a
-  short-lived download link for the sandbox, never through the chat.
+  SharePoint lists and Excel workbooks. In the person's 1:1 chat, file
+  content comes back as a short-lived download link for the sandbox; no
+  pre-authenticated link is returned anywhere else, and sharing permissions
+  and thumbnails are refused.
 - **`microsoft_write`** uploads or replaces files, edits workbooks and
-  creates or updates OneNote pages. It cannot delete.
+  creates or updates OneNote pages. It has no delete or move call, but
+  replacing a file or a workbook call (clearing or deleting a range or sheet)
+  can still destroy data.
 - **`microsoft_send`** sends an email or a calendar invite, each time only
-  after the person presses Approve on a card showing the recipients and
-  subject, whether or not tool safety is on.
+  after the person presses Approve on a card showing every recipient, the
+  subject, time, location and the start of the message, whether or not tool
+  safety is on.
 
 Mail, calendar and OneNote are reachable only from the person's 1:1 chat
-with Daimon, never from a channel or group chat. Results are wrapped as
+with Daimon, never from a channel or group chat. The chat is the one recorded
+for the turn origin the agent passes, which must be a live turn of that
+person with that agent. Results are wrapped as
 untrusted content.
 
 Refresh tokens are stored Fernet-encrypted (`DAIMON_CRYPTO__KEYS`), one row
