@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Discord turns cap answer output at five messages, combine excess prose into an attachment, and suppress repeated blocks and pure tool-call markup.
+
 - GitHub's `pull_request_read` and `issue_read` tools now count as reads for tool safety, so reading a pull request no longer waits for an approval card. GitHub's write tools (`pull_request_review_write`, `merge_pull_request`, `mark_all_notifications_read` and the rest) still ask.
 
 - Switching providers preserves supported MCP tools when a sibling needs confirmation; unavailable tools require explicit consent and remain blocked.
