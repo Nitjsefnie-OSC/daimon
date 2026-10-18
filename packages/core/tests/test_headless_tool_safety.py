@@ -210,13 +210,15 @@ async def test_without_a_daimon_endpoint_the_reserved_name_is_gated_like_any_ser
     assert _policies(agent) == {"daimon-mcp": "always_ask", "linear": "always_ask"}
 
 
-async def test_routine_read_marked_read_only_by_its_server_runs(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("trusted", [("linear",), ()], ids=["trusted", "untrusted"])
+async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
+    monkeypatch: pytest.MonkeyPatch, trusted: tuple[str, ...]
 ) -> None:
-    """The production wiring: a routine's decider reads the attached server's
+    """The production wiring: a routine's decider reads a trusted server's
     catalogue, so a noun-first read the server marks `readOnlyHint` runs where
     its name alone would have been refused. With no database the read is
-    anonymous."""
+    anonymous. A server outside `trusted_annotations` is never listed and its
+    name decides."""
     from daimon.core import mcp_tool_annotations
 
     tokens: list[str | None] = []
@@ -261,9 +263,13 @@ async def test_routine_read_marked_read_only_by_its_server_runs(
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="list the flags",
-        tool_safety=ToolSafetyPolicy(enabled=True),
+        tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=trusted),
     )
 
     (sent,) = _confirmations(sends)
-    assert sent["result"] == "allow", "readOnlyHint made memory_flag_list a read"
-    assert tokens == [None]
+    if trusted:
+        assert sent["result"] == "allow", "readOnlyHint made memory_flag_list a read"
+        assert tokens == [None]
+    else:
+        assert sent["result"] == "deny", "the name decides: a noun-first read is a write"
+        assert tokens == [], "no tools/list for an untrusted server"

@@ -3156,7 +3156,7 @@ async def test_a_chat_turn_reads_server_annotations_with_the_agent_token_unless_
     router = _router(session_bodies=[], dead_session_ids=set())
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router),
-        tool_safety=ToolSafetyPolicy(enabled=True),
+        tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=("bridge",)),
         fernet=MultiFernet([Fernet(Fernet.generate_key())]),
     )
     admission = dataclasses.replace(

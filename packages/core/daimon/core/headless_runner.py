@@ -502,7 +502,11 @@ async def run_turn_impl(
                 ),
                 annotations_for=(
                     mcp_annotation_lookup(
-                        server_urls={s.name: s.url for s in session.agent.mcp_servers},
+                        server_urls={
+                            s.name: s.url
+                            for s in session.agent.mcp_servers
+                            if s.name in tool_safety.trusted_annotations
+                        },
                         # Without a database or tenant no stored credential can
                         # be resolved, so the catalogue is read anonymously.
                         token_for=(
@@ -517,7 +521,9 @@ async def run_turn_impl(
                             else no_mcp_token
                         ),
                     )
-                    if tool_safety.enabled
+                    # Only servers the operator trusts for annotations are
+                    # read; with none trusted no catalogue is ever listed.
+                    if tool_safety.enabled and tool_safety.trusted_annotations
                     else None
                 ),
                 trusted_servers=trusted_servers_for(

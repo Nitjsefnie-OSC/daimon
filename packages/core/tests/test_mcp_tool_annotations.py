@@ -24,7 +24,8 @@ from daimon.core.turn.approvals import AnnotationLookup, interactive_decider, un
 from pydantic import JsonValue
 from structlog.testing import capture_logs
 
-_ON = ToolSafetyPolicy(enabled=True)
+_ON = ToolSafetyPolicy(enabled=True, trusted_annotations=("bridge",))
+_UNTRUSTED = ToolSafetyPolicy(enabled=True)
 _BRIDGE_URL = "https://bridge.example.com/mcp"
 _SERVERS = {"bridge": _BRIDGE_URL}
 
@@ -114,6 +115,7 @@ def test_a_destructive_hint_beats_a_read_only_hint_and_a_read_name() -> None:
 async def test_an_operator_override_wins_over_annotations_both_ways(attended: bool) -> None:
     policy = ToolSafetyPolicy(
         enabled=True,
+        trusted_annotations=("bridge",),
         effects={"bridge/memory_flag_list": "write", "bridge/memory_flag_purge": "read"},
     )
     reads: list[str | None] = []
@@ -125,6 +127,49 @@ async def test_an_operator_override_wins_over_annotations_both_ways(attended: bo
     assert not (await decide(_call("memory_flag_list"))).allow, "override write beats readOnlyHint"
     assert (await decide(_call("memory_flag_purge"))).allow, "override read beats destructiveHint"
     assert reads == [], "an overridden tool never reads the server's catalogue"
+
+
+@pytest.mark.parametrize("attended", [True, False])
+async def test_a_denied_entry_beats_a_trusted_read_only_hint(attended: bool) -> None:
+    policy = ToolSafetyPolicy(
+        enabled=True, trusted_annotations=("bridge",), denied=("bridge/memory_flag_list",)
+    )
+    reads: list[str | None] = []
+    lookup = mcp_annotation_lookup(
+        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS, reads)
+    )
+    card = AsyncMock(return_value="approved")
+    decide = _deciders(policy, lookup, card)[attended]
+    assert not (await decide(_call("memory_flag_list"))).allow
+    card.assert_not_awaited()
+    assert reads == [], "a denied tool never reads the server's catalogue"
+
+
+@pytest.mark.parametrize("attended", [True, False])
+@pytest.mark.parametrize(
+    "policy",
+    [
+        _UNTRUSTED,
+        ToolSafetyPolicy(enabled=True, trusted_annotations=("some-other-server",)),
+    ],
+    ids=["default-empty", "other-server-trusted"],
+)
+async def test_an_untrusted_servers_annotations_are_never_read(
+    policy: ToolSafetyPolicy, attended: bool
+) -> None:
+    reads: list[str | None] = []
+    lookup = mcp_annotation_lookup(
+        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS, reads)
+    )
+    card = AsyncMock(return_value="denied")
+    decide = _deciders(policy, lookup, card)[attended]
+    with capture_logs() as logs:
+        assert not (await decide(_call("memory_flag_list"))).allow, (
+            "the name decides: a noun-first read is a write"
+        )
+        assert (await decide(_call("get_flag"))).allow, "a plain read name still runs"
+    assert reads == [], "no tools/list for a server outside trusted_annotations"
+    assert not [e for e in logs if e["event"] == "tool_safety.annotation_read_allowed"]
 
 
 @pytest.mark.parametrize("attended", [True, False])

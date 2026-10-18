@@ -1019,7 +1019,11 @@ async def run_prepared_turn_impl(
         ),
         annotations_for=(
             mcp_annotation_lookup(
-                server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+                server_urls={
+                    s.name: s.url
+                    for s in prepared.admission.agent.mcp_servers
+                    if s.name in deps.tool_safety.trusted_annotations
+                },
                 token_for=agent_mcp_token_for(
                     deps.sessionmaker,
                     # A caller from another organisation gets none of the
@@ -1035,7 +1039,10 @@ async def run_prepared_turn_impl(
                     ),
                 ),
             )
+            # Only servers the operator trusts for annotations are read; with
+            # none trusted no catalogue is ever listed.
             if getattr(deps.tool_safety, "enabled", False)
+            and getattr(deps.tool_safety, "trusted_annotations", ())
             else None
         ),
     )

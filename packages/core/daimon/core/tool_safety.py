@@ -274,8 +274,10 @@ class ToolAnnotations(BaseModel):
 
     MA does not forward a third-party server's annotations to daimon, so the
     approval deciders read them from the server's own `tools/list`
-    (`daimon.core.mcp_tool_annotations`). When that read fails, or the tool
-    carries no hints, these are absent and the name decides.
+    (`daimon.core.mcp_tool_annotations`), only for a server listed in
+    `ToolSafetyPolicy.trusted_annotations`. For any other server, or when that
+    read fails, or the tool carries no hints, these are absent and the name
+    decides.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -317,10 +319,22 @@ class ToolSafetyPolicy(BaseModel):
         description=(
             'Override the read/write class, e.g. {"linear/get_team": "read", "notion": '
             '"write"}. Keys are a server name or server/tool. Unlisted tools are classified '
-            "from the server's own MCP annotations when it sends them (readOnlyHint true is a "
-            "read unless destructiveHint is also true), otherwise from their name: a plain "
-            "get_, list_, search_ ... is a read; a compound name (get_or_create, "
-            "search_and_replace, run_query) and anything unknown is a write."
+            "from the server's own MCP annotations when the server is listed in "
+            "trusted_annotations and sends them (readOnlyHint true is a read unless "
+            "destructiveHint is also true), otherwise from their name: a plain get_, list_, "
+            "search_ ... is a read; a compound name (get_or_create, search_and_replace, "
+            "run_query) and anything unknown is a write."
+        ),
+    )
+    trusted_annotations: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            'MCP server names whose own tool annotations count, e.g. ["bridge"]. For a listed '
+            "server Daimon lists its tools once per turn and runs a tool marked readOnlyHint "
+            "true (without destructiveHint true) as a read, and one marked destructiveHint "
+            "true or readOnlyHint false as a write; each such auto-allow is logged. An "
+            "effects pin or a denied entry still wins. An unlisted server's annotations are "
+            "never read, so its tools are classified by name. Empty (the default) reads none."
         ),
     )
     denied: tuple[str, ...] = Field(
@@ -452,7 +466,8 @@ def needs_annotations(
     policy: ToolSafetyPolicy, call: ToolCall, *, trusted_servers: frozenset[str] = frozenset()
 ) -> bool:
     """Whether `decide_tool_call` would read `call`'s annotations: policy on, a
-    gated server, and no operator `effects` override for it.
+    gated server the operator trusts for annotations (`trusted_annotations`),
+    and no operator `effects` override or `denied` entry for it.
 
     Mirrors the guards in `decide_tool_call` before its `classify_tool` call
     (`policy.enabled`, a server, `_gated`) and the override check at the top of
@@ -464,7 +479,9 @@ def needs_annotations(
         policy.enabled
         and call.server_name is not None
         and _gated(call.server_name, trusted_servers)
+        and call.server_name in policy.trusted_annotations
         and _keyed(policy.effects, server_name=call.server_name, tool_name=call.tool_name) is None
+        and not _listed(policy.denied, server_name=call.server_name, tool_name=call.tool_name)
     )
 
 
