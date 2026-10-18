@@ -38,6 +38,7 @@ def _runtime() -> McpRuntime:
         tool_safety=POLICY,
         mcp=SimpleNamespace(public_url="https://mcp.example/mcp"),
         turn=SimpleNamespace(),
+        microsoft_accounts=SimpleNamespace(configured=False),
     )
     return cast(
         McpRuntime, SimpleNamespace(client=object(), session_factory=object(), settings=settings)
