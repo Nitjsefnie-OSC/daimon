@@ -62,6 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teams people can connect their own Microsoft 365.** With
+  `DAIMON_MICROSOFT_ACCOUNTS__*` set, `connect_microsoft` sends a private
+  sign-in card, and `microsoft_search`, `microsoft_get`, `microsoft_write`
+  and `microsoft_send` then work on their files, Excel workbooks, mail,
+  calendar and OneNote as them. Mail, calendar and notes stay in their 1:1
+  chat, every email or invite waits for their Approve, and `privacy` →
+  Disconnect Microsoft removes the saved account. The default agent gets a
+  `microsoft-365` skill. See [Teams](docs/teams.md#microsoft-account-optional).
+
 - **Self-host on OpenAI, with no Anthropic account at all.** `DAIMON_ANTHROPIC__API_KEY`
   is now optional; `docker compose up` and `daimon defaults apply` succeed
   without it. `daimon openai init` creates (or reuses) a project-scoped

@@ -178,7 +178,7 @@ chat) and after an @mention (channels) fill in a ready-made request to send.
 | `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Answered in a 1:1 chat instead of a channel whose readers are limited, it says so, since the answer would leave the channel. |
-| `privacy` | See, export or delete what Daimon stores about you. |
+| `privacy` | See, export or delete what Daimon stores about you, or disconnect your Microsoft account. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
 | `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`); Teams requests never go to Discord's or Slack's channel. The post links to where it was asked; requests go to the escalation channel. |
 
@@ -538,6 +538,58 @@ Nothing app-only lists the teams an app is in, so the adapter records each
 team when the app is added or anyone writes there; an older install shows up
 once someone writes in it. Adding the app posts a welcome (in the team's General
 channel, or the 1:1 chat); removing it from a team forgets that team.
+
+### Microsoft account (optional)
+
+Each person can connect their own Microsoft 365, so the agent reads and
+changes their files, mail, calendar and notes as them, with exactly their
+permissions. Set `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID`, `__CLIENT_SECRET` and
+`__TENANT_ID` (and `__AUTHORITY` for a national cloud), plus
+`DAIMON_CRYPTO__KEYS` and `DAIMON_MCP__PUBLIC_URL`; without them the tools are
+absent.
+
+Register a single-tenant app in the same Entra tenant. The same registration
+can also serve as a pre-registered OAuth client for Microsoft MCP servers;
+give it each redirect URI it needs.
+
+1. Add a **Web** redirect URI `<root>/oauth/microsoft/callback`, where `<root>`
+   is `DAIMON_MCP__PUBLIC_URL` without the trailing `/mcp`, and create a
+   client secret.
+2. Under **API permissions**, add the Microsoft Graph **delegated**
+   permissions `User.Read`, `offline_access`, `Files.ReadWrite.All`,
+   `Sites.Read.All`, `Mail.Read`, `Mail.Send`, `Calendars.ReadWrite` and
+   `Notes.ReadWrite.All`. Grant admin consent, or let each person consent
+   when they sign in if the tenant allows it.
+
+When a tool needs an account the person has not connected, the agent calls
+`connect_microsoft`, which sends a private card to their 1:1 chat. Its link
+works once, for ten minutes, and only for them: the account they sign in
+with must be the same Entra user in the same tenant, or nothing is saved.
+Conditional Access applies to that sign-in and to every token refresh; when
+a policy later demands a new sign-in (for example MFA or a compliant
+device), the saved account is dropped and the agent asks them to connect
+again.
+
+The tools, all Teams-only and limited to an allowlist of Graph v1.0 paths:
+
+- **`microsoft_search`** and **`microsoft_get`** find and read files,
+  SharePoint lists and Excel workbooks. File content comes back as a
+  short-lived download link for the sandbox, never through the chat.
+- **`microsoft_write`** uploads or replaces files, edits workbooks and
+  creates or updates OneNote pages. It cannot delete.
+- **`microsoft_send`** sends an email or a calendar invite, each time only
+  after the person presses Approve on a card showing the recipients and
+  subject, whether or not tool safety is on.
+
+Mail, calendar and OneNote are reachable only from the person's 1:1 chat
+with Daimon, never from a channel or group chat. Results are wrapped as
+untrusted content.
+
+Refresh tokens are stored Fernet-encrypted (`DAIMON_CRYPTO__KEYS`), one row
+per person; access tokens stay in memory. `privacy` → **Disconnect
+Microsoft** deletes the row, and deleting your data removes it too.
+Disconnecting does not revoke Microsoft's own sign-in sessions; people can
+do that from their Microsoft account page.
 
 ### Routines, pings and tables
 
