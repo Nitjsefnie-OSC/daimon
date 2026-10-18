@@ -67,6 +67,7 @@ class Wire:
         self.agent: Object = {}
         self.resolve_calls: list[tuple[object, str, str]] = []
         self.fail: str | None = None
+        self.echo_defaults = False
         self.secret = "fictional-per-user-bearer"
 
     async def resolve(self, scope: object, ref: str, destination: str) -> str:
@@ -81,6 +82,16 @@ class Wire:
         if request.url.path == "/v1/agents":
             body = json.loads(request.content)
             self.agent = {"id": "a", "created_at": 0, **body}
+            if self.echo_defaults:
+                tools = objects(self.agent["tools"])
+                tools[0].update(
+                    mode="live", context_size="medium", allowed_domains=None, location=None
+                )
+                tools[-1].update(
+                    credential_id=None, request_metadata={}, connection_origin="service"
+                )
+                tools[-1]["transport"] = {**object_json(tools[-1]["transport"]), "headers": {}}
+                self.agent["tools"] = list(tools)
             return httpx.Response(200, json=self.agent)
         if request.url.path == "/v1/agents/a":
             raw = deepcopy(self.agent)
@@ -133,10 +144,13 @@ class Wire:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("echo_defaults", [False, True])
 async def test_bearer_is_session_only_and_sdk_debug_logging_redacts_it(
     caplog: pytest.LogCaptureFixture,
+    echo_defaults: bool,
 ) -> None:
     wire = Wire()
+    wire.echo_defaults = echo_defaults
     caplog.set_level(logging.DEBUG, logger="openai")
     async with build_async_openai(
         transport=httpx.MockTransport(wire.handle),
@@ -194,8 +208,12 @@ async def test_bearer_is_session_only_and_sdk_debug_logging_redacts_it(
         "foreign_record",
     ],
 )
-async def test_failed_or_foreign_binding_refuses_before_session_write(failure: str) -> None:
+@pytest.mark.parametrize("echo_defaults", [False, True])
+async def test_failed_or_foreign_binding_refuses_before_session_write(
+    failure: str, echo_defaults: bool
+) -> None:
     wire = Wire()
+    wire.echo_defaults = echo_defaults
     async with build_async_openai(
         transport=httpx.MockTransport(wire.handle),
         api_key="offline-placeholder",
@@ -342,12 +360,20 @@ def test_eleven_long_skill_pins_and_mcp_intent_both_survive_agent_round_trip() -
     from .conftest import FakeTransport
 
     context = Context(FakeTransport(), "project", "openai.persistent_workspace", None)
-    pins = tuple(SkillRef(id="skill_" + "x" * 42 + str(n), version="1") for n in range(11))
+    pins = tuple(
+        SkillRef(id="skill_" + "x" * 42 + str(n), version="1", digest="a" * 64) for n in range(11)
+    )
     requested = spec().model_copy(update={"skills": pins})
     body = agent_body(requested, context)
     assert decode(body["metadata"]) == pins
     assert KEY in object_json(body["metadata"])
+    tools = objects(body["tools"])
+    tools[0].update(mode="live", context_size="medium", allowed_domains=None, location=None)
+    tools[-1].update(credential_id=None, request_metadata={}, connection_origin="service")
+    tools[-1]["transport"] = {**object_json(tools[-1]["transport"]), "headers": {}}
+    body["tools"] = list(tools)
     restored = agent_spec(body, context)
+    assert restored.tools == (ToolSpec(name="web_search", kind="builtin"),)
     assert restored.skills == pins and restored.mcp_servers == requested.mcp_servers
     assert len(object_json(body["metadata"])) <= 15
 
@@ -936,3 +962,41 @@ async def test_multiple_bound_servers_refuse_before_resolver_or_write(saved: boo
             assert unsupported.value.missing == ("single_bound_mcp_server",)
             assert wire.requests == []
     assert wire.resolve_calls == []
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("search", "mode", "cached"),
+        ("search", "context_size", "high"),
+        ("search", "allowed_domains", ["example.com"]),
+        ("search", "location", {"country": "US"}),
+        ("search", "unknown", None),
+        ("mcp", "credential_id", "foreign"),
+        ("mcp", "credential_id", ""),
+        ("mcp", "request_metadata", {"Authorization": "fictional-secret"}),
+        ("mcp", "request_metadata", None),
+        ("mcp", "unknown", None),
+        ("transport", "headers", {"Authorization": "fictional-secret"}),
+        ("transport", "headers", None),
+        ("transport", "authorization", "fictional-secret"),
+    ],
+)
+def test_live_defaults_do_not_admit_changed_controls_or_auth_carriers(
+    section: str, field: str, value: JsonValue
+) -> None:
+    from .conftest import FakeTransport
+
+    context = Context(FakeTransport(), "project", "openai.persistent_workspace", None)
+    body = agent_body(spec(), context)
+    tools = objects(body["tools"])
+    tools[0].update(mode="live", context_size="medium", allowed_domains=None, location=None)
+    tools[-1].update(credential_id=None, request_metadata={}, connection_origin="service")
+    transport = object_json(tools[-1]["transport"])
+    transport["headers"] = {}
+    changed = tools[0] if section == "search" else tools[-1] if section == "mcp" else transport
+    changed[field] = value
+    tools[-1]["transport"] = transport
+    body["tools"] = list(tools)
+    with pytest.raises(ValueError):
+        agent_spec(body, context)
