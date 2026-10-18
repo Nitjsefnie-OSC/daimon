@@ -83,8 +83,9 @@ _CHANGED = (
 )
 _REFUSED = (
     "SharePoint refused daimon the write to {name} (HTTP {status}), so nothing was changed: "
-    "a permission, a retention policy or a sensitivity label on the file can block an app's "
-    "write. Post your version as a new file with send_message instead"
+    "daimon's app needs the Files.ReadWrite.All application permission, and a retention "
+    "policy or a sensitivity label on the file can also block an app's write. Post your "
+    "version as a new file with send_message instead"
 )
 _UNCLEAR = (
     "saving {name} did not finish ({reason}); it may or may not have been saved. Read the "

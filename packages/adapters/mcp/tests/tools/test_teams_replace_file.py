@@ -235,7 +235,7 @@ async def test_a_file_changed_since_it_was_read_is_refused_before_any_write(
     [
         (423, "locked, most likely open in a desktop Office app"),
         (412, "changed since you read it"),
-        (403, r"HTTP 403\), so nothing was changed: a permission, a retention policy or a"),
+        (403, r"HTTP 403\), so nothing was changed: daimon's app needs the Files.ReadWrite.All"),
         (401, r"refused daimon the write to deck.pptx \(HTTP 401\)"),
         (400, r"did not save deck.pptx \(HTTP 400\); nothing was changed"),
         (500, r"did not finish \(HTTP 500\); it may or may not have been saved"),
