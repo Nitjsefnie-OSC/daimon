@@ -1197,6 +1197,16 @@ def test_blank_microsoft_accounts_variables_leave_the_feature_off(
     assert not settings.microsoft_accounts_enabled, "an unused feature must stay off"
 
 
+def test_blank_microsoft_authority_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _microsoft_env(monkeypatch, AUTHORITY="")
+    settings = load_settings(_env_file=None)
+    assert str(settings.microsoft_accounts.authority) == "https://login.microsoftonline.com/", (
+        "a blank authority must read as unset, not stop the service from starting"
+    )
+
+
 def test_partial_microsoft_accounts_setup_names_what_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

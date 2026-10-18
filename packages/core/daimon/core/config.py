@@ -28,6 +28,7 @@ from pydantic import (
     HttpUrl,
     PostgresDsn,
     SecretStr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -1129,6 +1130,9 @@ class CryptoSettings(BaseModel):
     )
 
 
+_ENTRA_AUTHORITY = HttpUrl("https://login.microsoftonline.com")
+
+
 class MicrosoftAccountsSettings(BaseModel):
     """Per-person Microsoft 365 access on Teams: the Entra app people sign in to.
 
@@ -1155,16 +1159,18 @@ class MicrosoftAccountsSettings(BaseModel):
         ),
     )
     authority: HttpUrl = Field(
-        default=HttpUrl("https://login.microsoftonline.com"),
+        default=_ENTRA_AUTHORITY,
         description="Microsoft identity platform host; change it only for a sovereign cloud.",
     )
 
-    @field_validator("client_id", "client_secret", "tenant_id", mode="before")
+    @field_validator("client_id", "client_secret", "tenant_id", "authority", mode="before")
     @classmethod
-    def _blank_is_unset(cls, value: object) -> object:
+    def _blank_is_unset(cls, value: object, info: ValidationInfo) -> object:
         # A compose file passing an empty variable through means "not set".
         raw = value.get_secret_value() if isinstance(value, SecretStr) else value
-        return None if isinstance(raw, str) and not raw.strip() else value
+        if not (isinstance(raw, str) and not raw.strip()):
+            return value
+        return _ENTRA_AUTHORITY if info.field_name == "authority" else None
 
     @field_validator("tenant_id")
     @classmethod
