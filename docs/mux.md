@@ -3378,8 +3378,8 @@ excludes the gated tool from its executable `allowed_tools`. Preview declares
 normal backend selection consent must explicitly accept that loss. The target
 instructions disclose it. Omitted loss consent refuses preparation; it never
 authorizes execution. Disabled source tools remain disabled without being
-reported as lost enabled capabilities. Existing unconfigured channels and native
+reported as lost enabled capabilities. A server with no automatically executable
+tools is refused rather than publishing an ambiguous empty allowlist. Existing unconfigured channels and native
 Anthropic permission policies retain their behavior.
 
-Provider contracts: [Agents MCP configuration](https://developers.openai.com/api/reference/resources/beta/subresources/agents/subresources/sessions/methods/create)
-and [Agents input events](https://developers.openai.com/api/reference/resources/beta/subresources/agents/subresources/sessions/subresources/events/methods/create).
+Provider contract: [Agents MCP connections](https://developers.openai.com/api/docs/guides/agents-api/tools/mcp).

@@ -570,3 +570,47 @@ async def test_confirmation_gated_mcp_tool_is_declared_without_losing_siblings(f
         environment=source.representations[0].environment,
     )
     assert "mcp_tool:daimon-mcp:add_skill" in missing
+    prepared = await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=False,
+    )
+    assert prepared.session_ref.provider == "openai"
+    assert len(wire.posts) == 1
+    assert wire.posts[0]["agent"]["tools"][0]["allowed_tools"] == ["search_tools", "call_tool"]
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("policy", ["disabled", "ask"])
+async def test_no_executable_mcp_tools_never_publishes_empty_allowlist(
+    full_openai, monkeypatch, policy
+):
+    request, _, _, wire, _, _, _, _, _, _, manifest = full_openai
+    from anthropic.types.beta import BetaManagedAgentsAgent
+
+    payload = request.admission.agent.model_dump(mode="json")
+    mcp = next(tool for tool in payload["tools"] if tool["type"] == "mcp_toolset")
+    mcp["default_config"] = {
+        "enabled": policy != "disabled",
+        "permission_policy": {"type": "always_ask" if policy == "ask" else "always_allow"},
+    }
+    mcp["configs"] = []
+    request = replace(
+        request,
+        source=None,
+        admission=replace(request.admission, agent=BetaManagedAgentsAgent.model_validate(payload)),
+    )
+    monkeypatch.delenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    source = await capture_preparation_source(request)
+    rows = json.loads(manifest.read_text())
+    rows[0]["source_capabilities"]["source_pin"] = source_preservation_pin(source)
+    manifest.write_text(json.dumps(rows))
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
+    represented = await capture_preparation_source(request, capability_preview=True)
+    assert represented.representations == ()
+    assert wire.posts == []

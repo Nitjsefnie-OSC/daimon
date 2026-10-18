@@ -1584,6 +1584,8 @@ async def _capture_source_capabilities(
                 for tool in tools
             ):
                 raise ValueError("source has no enabled daimon-mcp toolset")
+            if not any(permission == "auto" for permission in permissions.values()):
+                raise ValueError("source has no automatically executable MCP tools")
             mapped_tools = represented_execution_tools(
                 profile, tuple(tool for tool in tools if tool.kind != "mcp_toolset")
             )
