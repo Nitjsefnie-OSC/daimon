@@ -1,4 +1,4 @@
-"""Mocked permission tests for a live Teams turn's Cancel card."""
+"""Mocked permission tests for a running Teams turn's Cancel card."""
 
 from __future__ import annotations
 
