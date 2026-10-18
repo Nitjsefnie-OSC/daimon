@@ -3,7 +3,8 @@
 A path is relative to the v1.0 root and must match one of a few shapes under
 OneDrive, SharePoint sites, mail, calendar and OneNote. Anything else, any
 absolute URL, dot segment, encoded separator or unlisted query key is refused
-before a request is made. Mail, calendar and any OneNote path are personal:
+before a request is made. Checks run on the percent-decoded path, since Graph
+decodes it too; the path is sent as given. Mail, calendar and any OneNote path are personal:
 callers show them only in the person's 1:1 chat. Sharing permissions and
 thumbnails carry pre-authenticated links, so they are refused outright.
 """
@@ -13,7 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Literal
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, unquote
 
 from fastmcp.exceptions import ToolError
 
@@ -41,7 +42,7 @@ _QUERY_KEYS = frozenset(
 )
 # Their answers hold links anyone can open without signing in.
 _BEARER = frozenset({"permissions", "thumbnails"})
-_ENCODED = ("%2e", "%2f", "%5c", "%00", "%3f", "%23", "%25")
+_ESCAPES = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
 _DRIVE = r"/(?:me/drive|drives/[^/:]+|sites/[^/:]+/drive)"
 _ITEM = _DRIVE + r"/(?:root|items/[^/:]+)(?::/[^:]+:)?"
 _WRITES: tuple[tuple[frozenset[str], re.Pattern[str], WriteKind], ...] = (
@@ -64,7 +65,8 @@ _WRITES: tuple[tuple[frozenset[str], re.Pattern[str], WriteKind], ...] = (
 
 @dataclass(frozen=True, slots=True)
 class GraphPath:
-    path: str
+    path: str  # as given, still percent-encoded; what is sent
+    decoded: str  # what every check ran on
     query: tuple[tuple[str, str], ...]
     personal: bool
 
@@ -77,18 +79,36 @@ def _refuse(why: str) -> ToolError:
     )
 
 
+def _decode(path: str) -> str:
+    """`path` with escapes decoded; refused when one hides a separator or control."""
+
+    def decode_run(match: re.Match[str]) -> str:
+        text = unquote(match.group(), errors="strict")
+        if any(ch in "/\\?#%" or ord(ch) < 32 or 127 <= ord(ch) < 160 for ch in text):
+            raise _refuse("it encodes a slash, backslash, query, fragment, percent or control")
+        return text
+
+    try:
+        decoded = _ESCAPES.sub(decode_run, path)
+    except UnicodeDecodeError as err:
+        raise _refuse("it contains an escape that is not UTF-8") from err
+    if "%" in _ESCAPES.sub("", path):
+        raise _refuse("it contains a percent sign that is not an escape")
+    return decoded
+
+
 def parse_path(raw: str) -> GraphPath:
     """Split and check a path any tool may read; raise `ToolError` when refused."""
     if "://" in raw or raw.startswith("//") or not raw.startswith("/"):
         raise _refuse("only a path such as /me/drive/root/children is accepted, not a URL")
     if any(ch in raw for ch in "\\#") or any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
         raise _refuse("it contains a backslash, fragment or control character")
-    if any(code in raw.lower() for code in _ENCODED):
-        raise _refuse("it contains an encoded dot, slash, backslash, query or percent sign")
+    # Only the path is decoded here: parse_qsl decodes query values, checked by key below.
     path, _, query = raw.partition("?")
     if path.lower().startswith("/v1.0/"):
         path = path[len("/v1.0") :]
-    segments = path.split("/")[1:]
+    decoded = _decode(path)
+    segments = decoded.split("/")[1:]
     if any(segment.strip(":") in ("", ".", "..") for segment in segments):
         raise _refuse("it has an empty or dot segment")
     pairs = tuple(parse_qsl(query, keep_blank_values=True))
@@ -106,11 +126,11 @@ def parse_path(raw: str) -> GraphPath:
     onenote = "onenote" in lowered
     head = lowered[:2]
     if head[0] in ("drives", "sites"):
-        return GraphPath(path=path, query=pairs, personal=onenote)
+        return GraphPath(path=path, decoded=decoded, query=pairs, personal=onenote)
     if head[0] == "me" and len(head) == 2 and head[1] in _FILES:
-        return GraphPath(path=path, query=pairs, personal=onenote)
+        return GraphPath(path=path, decoded=decoded, query=pairs, personal=onenote)
     if head[0] == "me" and len(head) == 2 and head[1] in _PERSONAL:
-        return GraphPath(path=path, query=pairs, personal=True)
+        return GraphPath(path=path, decoded=decoded, query=pairs, personal=True)
     raise _refuse("it is outside the files, mail, calendar and notes this tool reaches")
 
 
@@ -120,7 +140,7 @@ def check_write(method: str, raw: str) -> tuple[GraphPath, WriteKind]:
     if target.query:
         raise _refuse("a write takes no query parameters")
     for methods, pattern, kind in _WRITES:
-        if method in methods and pattern.fullmatch(target.path):
+        if method in methods and pattern.fullmatch(target.decoded):
             return target, kind
     raise ToolError(
         f"Refused: {method} {target.path} is not a write this tool makes. It uploads or "

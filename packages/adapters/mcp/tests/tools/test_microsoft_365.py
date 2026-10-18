@@ -186,6 +186,9 @@ async def _connect(sm: async_sessionmaker[AsyncSession], auth: AuthIdentity) -> 
         ("/me/onenote/pages", True),
         ("/sites/s1/onenote/pages", True),
         ("/drives/d1/items/i1/workbook/worksheets", False),
+        ("/sites/s/%6Fnenote/pages", True),
+        ("/me/drive/root:/My%20Plan%C3%A9.docx:", False),
+        ("/me/messages?$skiptoken=abc%2Fdef", True),
     ],
 )
 def test_allowed_paths_are_classified(path: str, personal: bool) -> None:
@@ -213,6 +216,10 @@ def test_allowed_paths_are_classified(path: str, personal: bool) -> None:
         "/me/drive/items/i1/permissions",
         "/sites/s1/drive/items/i1/thumbnails",
         "/me/drive/root/children?$expand=permissions",
+        "/me/drive/items/X/%70ermissions",
+        "/drives/d/items/i/%74humbnails",
+        "/me/drive/root:/a%0Ab.docx:",
+        "/me/drive/root:/50%.docx:",
         "/me/drive/root?$expand=children($expand=Thumbnails)",
     ],
 )
@@ -248,11 +255,19 @@ def test_allowed_writes(method: str, path: str, kind: str) -> None:
         ("PATCH", "/sites/s1/lists/l1/items/1"),
         ("POST", "/me/drive/items/i1/workbook/x:/other.docx:/content"),
         ("PATCH", "/me/drive/items/i1/workbook/range(address='a/b:c')"),
+        ("POST", "/me/drive/items/i1/workbook/x%3A/other.docx%3a/content"),
     ],
 )
 def test_refused_writes(method: str, path: str) -> None:
     with pytest.raises(ToolError, match="Refused"):
         check_write(method, path)
+
+
+def test_encoded_names_are_checked_decoded_and_sent_as_given() -> None:
+    target = parse_path("/v1.0/me/drive/root:/My%20Plan%C3%A9.docx:?$skiptoken=abc%2Fdef")
+    assert target.decoded == "/me/drive/root:/My Plan\u00e9.docx:", "checks see the decoded name"
+    assert target.path == "/me/drive/root:/My%20Plan%C3%A9.docx:", "the request keeps the escapes"
+    assert target.query == (("$skiptoken", "abc/def"),), "query values arrive decoded"
 
 
 async def test_not_connected_asks_the_person_before_connecting(
