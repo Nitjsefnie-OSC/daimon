@@ -202,6 +202,8 @@ skills:
     skill_id: exploratory-data-analysis
   - type: custom
     skill_id: eda-storytelling
+  - type: custom
+    skill_id: microsoft-365
 tools:
   - type: agent_toolset_20260401
     configs:

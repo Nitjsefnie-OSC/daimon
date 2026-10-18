@@ -630,13 +630,15 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
 async def test_full_default_preparation_and_fresh_followup_turns(full):
     assert isinstance(full, tuple), "full source could not retain its authority"
     request, plan, canonical, native, calls, posts, token, *_ = full
-    assert len(canonical.target_spec.skills) == 11
+    assert len(canonical.target_spec.skills) == 12
     # Assert the native request carries the complete represented authority.
     expected_tools = {tool.name for tool in canonical.target_spec.tools}
     assert {
         tool["type"] for tool in native["tools"] if tool["type"] != "mcp_server"
     } == expected_tools
-    assert len(native["base_environment"]["sources"]) == 11
+    assert len(native["base_environment"]["sources"]) == len(canonical.target_spec.skills), (
+        "each default skill needs its own source"
+    )
     assert all(s["type"] == "gcs" for s in native["base_environment"]["sources"])
     selected = await read_preparation_counterpart(scope_channel_runtimes(request)[0])
     assert selected.verified_counterpart == selected.counterpart

@@ -19,3 +19,6 @@ Layout:
 Operator workflow: edit YAML → `daimon defaults apply`.
 
 The default environment installs `gh` for repository work in GitHub App sessions.
+
+The default agent carries `microsoft-365`, which guides the per-person
+Microsoft 365 tools in Teams ([Teams](../docs/teams.md#microsoft-account-optional)).

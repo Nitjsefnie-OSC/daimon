@@ -57,6 +57,7 @@ DEFAULT_SKILLS = (
     "data-cleaning",
     "exploratory-data-analysis",
     "eda-storytelling",
+    "microsoft-365",
 )
 BuiltinCapability = Literal["bash", "read", "edit", "grep", "glob", "write"]
 DEFAULT_TOOLS: tuple[BuiltinCapability, ...] = ("bash", "read", "edit", "grep", "glob", "write")
