@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- An agent-wide `deny` tool rule on one of Daimon's own tools (`daimon-mcp/<tool>`) now stops the call. The MCP server refuses it, directly or through `call_tool`, when that agent's chat or routine session makes it and tool rules are enabled. The rule used to be saved but never enforced for Daimon's own tools. An agent-wide `deny` on `daimon-mcp/*` denies all of Daimon's own tools for that agent, tools added later included, and `search_tools` and `call_tool` too; wildcards are recognised only for `daimon-mcp`, agent-wide and `deny`. The turn driver applies `ask` and channel rules on them (see Fixed).
+
 ### Fixed
+
+- GitHub's `pull_request_read` and `issue_read` tools now count as reads for tool safety, so reading a pull request no longer waits for an approval card. GitHub's write tools (`pull_request_review_write`, `merge_pull_request`, `mark_all_notifications_read` and the rest) still ask.
+
+- **Tool rules on Daimon's own tools are enforced.** An `ask` or `deny` rule
+  on `daimon-mcp/<tool>` was saved but never applied, because Daimon's own
+  server was exempt from rule lookups. A chat or routine session whose agent
+  has such a rule now pauses on `call_tool` and on the tools a rule names;
+  the driver reads the tool inside the call, refuses a `deny`, asks on a card
+  for an `ask` (refused in a routine), and lets every other call run without a
+  card. A rule added or cleared takes effect on the agent's next turn. An
+  agent `deny` also wins over `add_skill` and publish confirmations; no rule
+  loosens a confirmation or the operator's deny list. Applies when
+  `DAIMON_TOOL_SAFETY__ENABLED` and `DAIMON_TOOL_SAFETY__AGENT_RULES` are on.
+  An agent-wide `deny` on `daimon-mcp/*` also makes the driver refuse every
+  proxied call. Gemini and OpenAI turns for an agent with an `ask` rule or a
+  channel `deny` on a Daimon tool are refused rather than run unasked; an
+  agent-wide `deny` is enforced by the server and does not block them. A
+  tool that waits for Approve (`add_skill`, publish tools) sent through
+  `call_tool` is refused at once with a note to call it directly. `daimon-mcp/`
+  rule names outside `[A-Za-z0-9_.-]{1,128}` are no longer accepted.
 
 - Switching providers preserves supported MCP tools when a sibling needs confirmation; unavailable tools require explicit consent and remain blocked.
 

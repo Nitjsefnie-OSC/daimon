@@ -1076,6 +1076,16 @@ session's stable agent id, attached server URL and admitted parent channel.
 Agent-wide and matching channel rules combine by the stricter outcome. The
 operator deny list wins; a matching rule then decides before classification.
 A failed lookup asks in chat or refuses unattended. The flag is off by default.
+The driver also reads rules for Daimon's own trusted `daimon-mcp` server (see
+the paragraph on `call_tool` below), and an agent-wide `deny` on one of its
+tools is additionally enforced by
+`IdentityMiddleware` (`middleware/tool_rule_backstop.py`): for a chat-vault
+credential (`chat_agent_id` set, no `agent_id`) it reads the tenant's `deny`
+rows for the tool being invoked, which for a `call_tool` proxied call is the
+inner tool, and refuses when one belongs to the caller's agent and names this
+deployment's MCP URL. An agent-wide `deny` on `daimon-mcp/*` refuses every call from
+that agent's credential, `search_tools` and `call_tool` included. The same two settings
+gate it, and a failed read refuses.
 With `DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
 third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is
@@ -1113,15 +1123,33 @@ A pause shows one card per blocked call, and the driver sends one
 `user.tool_confirmation` event per call after its answer. An adapter that
 passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
-the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
-their `operation_policy` checks), except `add_skill`: its confirming call, the
+the same hook. Daimon's own `daimon-mcp` tools are not gated here by
+classification (they keep their `operation_policy` checks), except `add_skill`: its confirming call, the
 one naming a preview's `content_hash`, is sent `always_ask`, so it waits on
 the same card in chat and is always refused in a routine, whatever
 `unattended_writes` allows. Each bind compares a reused session's tools with
 the gated ones a new session would get and updates them in place, so a
 session started before tool safety was turned on is gated from its next turn,
-and a tools change never writes the agent's own `always_allow` back. The
-exemption holds only for the deployment's verified
+and a tools change never writes the agent's own `always_allow` back. An agent
+`ask` or `deny` rule on `daimon-mcp/<tool>` (see [Permissions](permissions.md))
+adds `call_tool` and each tool such a rule names to the asking set: admission
+reads the agent's rule tool names once per turn and again in `reauthorize`
+(`agent_tool_rules.daimon_rule_set`; no query unless both settings are on, and
+tool names outside `[A-Za-z0-9_.-]{1,128}` are skipped), and they enter the tools hash like
+`asks_before_publishing`, so a rule change updates the session on the next
+bind. The decider unwraps `call_tool` to the inner tool (`unwrap_daimon_call`)
+and looks the rule up under `daimon-mcp/<inner>`, against the agent's attached
+URL and the deployment's own; a call with no rule is allowed without a card.
+Precedence on a daimon tool: the operator deny of a confirmed write, an agent
+`deny`, the fixed gates (`add_skill` with a preview hash, the publish tools),
+then an agent `ask`; a rule never loosens a fixed gate. Gemini and OpenAI
+sessions, which cannot hold these asks, refuse a turn for an agent with an
+`ask` rule or a channel `deny` on a daimon tool (`daimon_rules_need_driver`);
+an agent-wide `deny` is the server's and does not block them. A daimon call that
+needs no rule lookup (the agent has none) is not looked up at all. An agent-wide `deny` on `daimon-mcp/*` adds `call_tool` to the
+asking set and the lookup returns that deny for every daimon call, so the
+driver refuses each proxied call too (the server refuses all of them anyway).
+The exemption holds only for the deployment's verified
 endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
 naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
 reserved name is gated like any other server. A pending card is owned by the

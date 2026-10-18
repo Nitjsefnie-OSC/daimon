@@ -54,7 +54,7 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
     transfer_active_turn,
 )
-from daimon.core.tool_safety import trusted_servers_for
+from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.approvals import (
     agent_rule_lookup,
@@ -965,12 +965,14 @@ async def run_prepared_turn_impl(
         trusted_servers=trusted_servers_for(deps.public_url),
         asks_before_publishing=prepared.admission.asks_before_publishing,
         confirmed_tools=confirmed_tools,
+        daimon_rules=bool(prepared.admission.daimon_rule_tools),
         rules_for=(
             agent_rule_lookup(
                 deps.sessionmaker,
                 tenant_id=tenant_id,
                 agent_id=str(prepared.admission.agent.id),
                 server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+                also_urls=daimon_endpoint(deps.public_url),
                 channel_id=channel_for_tool_rules(
                     platform=platform,
                     channel_id=prepared.admission.origin_channel_id,

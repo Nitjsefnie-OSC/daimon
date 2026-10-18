@@ -510,9 +510,13 @@ def session_tools(
     public_url: str | None,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    daimon_rule_tools: frozenset[str] = frozenset(),
 ) -> Sequence[MaTool]:
     """The tools a session for this caller runs: the visible ones, tool safety applied,
     and the publish tools asking first when the turn's agent may not publish freely.
+    `daimon_rule_tools` are the daimon tools an agent rule asks or denies on
+    (`agent_tool_rules.daimon_rule_tools`); they, and the `call_tool` proxy,
+    ask too, and an agent with none hashes as it always did.
 
     The one definition `create_session`, the bind-time drift check and the
     in-place update all use. Hashing or pushing the agent's raw tools instead
@@ -526,6 +530,7 @@ def session_tools(
         trusted_servers=trusted_servers_for(public_url),
         asks_before_publishing=asks_before_publishing,
         confirmed_tools=confirmed_tools,
+        daimon_rule_tools=daimon_rule_tools,
     )
     return visible if gated is None else _TOOLS.validate_python(gated)
 
@@ -570,6 +575,7 @@ def desired_snapshot(
     personal_memory_store_id: str | None = None,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    daimon_rule_tools: frozenset[str] = frozenset(),
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
     token_issued_at_by_installation: dict[int, int] | None = None,
@@ -626,6 +632,7 @@ def desired_snapshot(
                 public_url=public_url,
                 asks_before_publishing=asks_before_publishing,
                 confirmed_tools=confirmed_tools,
+                daimon_rule_tools=daimon_rule_tools,
             )
         ),
         mcp_servers_sha256=hash_mcp_servers(
