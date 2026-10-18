@@ -367,6 +367,12 @@ def create_mcp_app(
             max_requests=effective_settings.mcp.operator_calls_per_minute,
             window=timedelta(minutes=1),
         ),
+        tool_safety=effective_settings.tool_safety,
+        public_url=(
+            str(effective_settings.mcp.public_url)
+            if effective_settings.mcp.public_url is not None
+            else None
+        ),
     )
 
     owned_fleet_ports: HostFleetPorts | None = None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -130,6 +131,36 @@ async def get_for_call(
             resolved, ResolvedAgentToolRule.model_validate({"rule": row.rule, "scope": row.scope})
         )
     return resolved
+
+
+async def deny_rules_for_trusted_tool(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    tool_keys: Sequence[str],
+) -> list[AgentToolRule]:
+    """Every agent-wide `deny` row for any of `tool_keys` in a tenant, whichever agent holds it.
+
+    The MCP server cannot turn a chat credential's derived agent uuid back into
+    the Managed Agents id the rows are keyed by, so it reads the tenant's few
+    deny rows for these keys (the tool's own and the `daimon-mcp/*` wildcard)
+    and compares each by `derive_agent_uuid`. One query on
+    `uq_agent_tool_rules_global` (leading `tenant_id`). Channel rules are left
+    out: the server does not know the channel. Tombstones (`rule IS NULL`),
+    `allow` and `ask` rows are left out too. A deny holds in every scope, so
+    scope is not read.
+    """
+    rows = (
+        await session.scalars(
+            select(AgentToolRuleRecord).where(
+                AgentToolRuleRecord.tenant_id == tenant_id,
+                AgentToolRuleRecord.tool_key.in_(list(tool_keys)),
+                AgentToolRuleRecord.channel_id.is_(None),
+                AgentToolRuleRecord.rule == "deny",
+            )
+        )
+    ).all()
+    return [_view(row) for row in rows]
 
 
 async def set_rule(

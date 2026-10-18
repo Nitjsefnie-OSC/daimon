@@ -1061,6 +1061,15 @@ session's stable agent id, attached server URL and admitted parent channel.
 Agent-wide and matching channel rules combine by the stricter outcome. The
 operator deny list wins; a matching rule then decides before classification.
 A failed lookup asks in chat or refuses unattended. The flag is off by default.
+The driver skips rules for Daimon's own trusted `daimon-mcp` server. An
+agent-wide `deny` on one of its tools is enforced instead by
+`IdentityMiddleware` (`middleware/tool_rule_backstop.py`): for a chat-vault
+credential (`chat_agent_id` set, no `agent_id`) it reads the tenant's `deny`
+rows for the tool being invoked, which for a `call_tool` proxied call is the
+inner tool, and refuses when one belongs to the caller's agent and names this
+deployment's MCP URL. An agent-wide `deny` on `daimon-mcp/*` refuses every call from
+that agent's credential, `search_tools` and `call_tool` included. The same two settings
+gate it, and a failed read refuses.
 With `DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
 third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is
