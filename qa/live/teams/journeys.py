@@ -15,9 +15,11 @@ from qa.live.teams.evidence import Result, excerpt, timestamp
 from qa.live.teams.graph import (
     GraphTeamsDriver,
     NoBotChat,
+    PersonaCollision,
     PostOutcomeUnknown,
     bot_sender_id,
     graph_time,
+    user_sender_id,
 )
 
 
@@ -29,6 +31,7 @@ class CommandJourney:
     card_text: str
     required_action: str | None = None
     absent_actions: tuple[str, ...] = ()
+    exact_card_text: bool = False
 
 
 @dataclass(frozen=True)
@@ -40,7 +43,7 @@ class ResolvedJourney:
 BUILTIN_JOURNEYS = {
     "routines-admin": CommandJourney("admin", "routines", "allow", "Routines", "New routine"),
     "routines-member": CommandJourney(
-        "member", "routines", "refuse", "Routines", None, ("New routine",)
+        "member", "routines", "refuse", "Routines", "Refresh", ("New routine",), True
     ),
     "billing-admin": CommandJourney("admin", "billing", "allow", "", "Add credit"),
     "billing-member": CommandJourney(
@@ -98,15 +101,42 @@ def card_details(message: dict[str, Any]) -> tuple[set[str], set[str]]:
     return texts, titles
 
 
-def is_new(message: dict[str, Any], seen_ids: frozenset[str], since: datetime) -> bool:
-    """Exclude snapshot messages, including those inside the clock-skew window."""
+def is_new(message: dict[str, Any], seen_ids: frozenset[str], posted_at: datetime) -> bool:
+    """Require an unseen message no earlier than the server's post time."""
     created = graph_time(message.get("createdDateTime"))
     return (
         bool(message.get("id"))
         and str(message["id"]) not in seen_ids
         and created is not None
-        and created >= since - timedelta(seconds=10)
+        and created >= posted_at
     )
+
+
+class ChatNotQuiet(ValueError):
+    """A recent persona command has no later bot message in this chat."""
+
+
+def chat_is_quiet(
+    messages: list[dict[str, Any]], persona_oid: str, bot_app_id: str, now: datetime
+) -> bool:
+    """Require a bot response after every persona post in the last 30 seconds."""
+    bot_times = [
+        created
+        for item in messages
+        if bot_sender_id(item) == bot_app_id
+        if (created := graph_time(item.get("createdDateTime"))) is not None
+    ]
+    newest_bot = max(bot_times, default=None)
+    threshold = now - timedelta(seconds=30)
+    for item in messages:
+        if user_sender_id(item) != persona_oid:
+            continue
+        created = graph_time(item.get("createdDateTime"))
+        if created is None or (
+            created >= threshold and (newest_bot is None or newest_bot <= created)
+        ):
+            return False
+    return True
 
 
 async def run_journey(
@@ -119,11 +149,20 @@ async def run_journey(
     action_titles: list[str] = []
     spec = journey.spec
     try:
+        persona_oids = driver.require_distinct_personas()
         chat_id, old_messages = await driver.bot_chat(journey.persona)
+        if not chat_is_quiet(
+            old_messages, persona_oids[journey.persona], driver.config.bot_app_id, datetime.now(UTC)
+        ):
+            raise ChatNotQuiet("chat not quiet")
         chat_ids = frozenset(str(item["id"]) for item in old_messages if item.get("id"))
-        since = datetime.now(UTC)
-        message = await driver.post_chat_command(journey.persona, chat_id, spec.command, chat_ids)
+        message = await driver.post_chat_command(
+            journey.persona, chat_id, spec.command, old_messages
+        )
         posted_id = str(message["id"])
+        posted_at = graph_time(message.get("createdDateTime"))
+        if posted_at is None:
+            raise ValueError("posted message timestamp missing")
         deadline = driver.now() + timeout
         card = None
         delay = 1.0
@@ -133,7 +172,7 @@ async def run_journey(
                 (
                     item
                     for item in messages
-                    if is_new(item, chat_ids | {posted_id}, since)
+                    if is_new(item, chat_ids | {posted_id}, posted_at)
                     and bot_sender_id(item) == driver.config.bot_app_id
                     and bool(card_details(item)[0])
                 ),
@@ -160,7 +199,11 @@ async def run_journey(
         if not card_excerpt:
             card_excerpt = excerpt(" ".join(sorted(texts)))
         valid = (
-            any(spec.card_text in text for text in texts)
+            (
+                spec.card_text in texts
+                if spec.exact_card_text
+                else any(spec.card_text in text for text in texts)
+            )
             and (spec.required_action is None or spec.required_action in titles)
             and not any(action in titles for action in spec.absent_actions)
         )
@@ -186,6 +229,10 @@ async def run_journey(
         reason = "journey operation failed"
         if isinstance(exc, NoBotChat):
             reason = "no bot chat: sign in to Teams once as this persona"
+        elif isinstance(exc, ChatNotQuiet):
+            reason = "chat not quiet"
+        elif isinstance(exc, PersonaCollision):
+            reason = "admin and member token identities match"
         elif isinstance(exc, PostOutcomeUnknown):
             reason = "post outcome unknown"
         elif isinstance(exc, ValueError) and str(exc) == "bot chat ambiguous":
@@ -202,6 +249,8 @@ async def run_journey(
             "error",
             action_titles=action_titles,
             error_reason=(
-                reason if isinstance(exc, NoBotChat) else f"{type(exc).__name__}: {reason}"
+                reason
+                if isinstance(exc, (NoBotChat, ChatNotQuiet))
+                else f"{type(exc).__name__}: {reason}"
             ),
         )

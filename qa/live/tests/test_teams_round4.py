@@ -117,7 +117,7 @@ async def test_chat_command_posts_exact_text_once_and_reconciles(config: TeamsQa
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
         driver = GraphTeamsDriver(config, Tokens(), http, now=lambda: clock, sleep=sleep)  # type: ignore[arg-type]
-        result = await driver.post_chat_command("admin", "bot-chat", "routines", frozenset({"old"}))
+        result = await driver.post_chat_command("admin", "bot-chat", "routines", [old])
     assert result["id"] == "new" and clock == 6
     assert posts == [{"body": {"contentType": "text", "content": "routines"}}]
 
@@ -141,7 +141,7 @@ async def test_unconfirmed_chat_post_is_never_repeated(config: TeamsQaConfig) ->
     async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as http:
         driver = GraphTeamsDriver(config, Tokens(), http, now=lambda: clock, sleep=sleep)  # type: ignore[arg-type]
         with pytest.raises(PostOutcomeUnknown):
-            await driver.post_chat_command("admin", "bot-chat", "routines", frozenset())
+            await driver.post_chat_command("admin", "bot-chat", "routines", [])
     assert posts == 1 and clock == 30
 
 
@@ -158,15 +158,18 @@ async def test_billing_admin_card_requires_add_credit(config: TeamsQaConfig) -> 
         async def sleep(self, seconds: float) -> None:
             return None
 
+        def require_distinct_personas(self) -> dict[str, str]:
+            return {"admin": "synthetic-admin", "member": "synthetic-member"}
+
         async def bot_chat(self, persona: str) -> tuple[str, list[dict[str, Any]]]:
             return "bot-chat", []
 
         async def post_chat_command(
-            self, persona: str, chat_id: str, command: str, seen_ids: frozenset[str]
+            self, persona: str, chat_id: str, command: str, snapshot: list[dict[str, Any]]
         ) -> dict[str, str]:
             assert persona == "admin" and command == "billing" and chat_id == "bot-chat"
             self.posted = True
-            return {"id": "posted"}
+            return {"id": "posted", "createdDateTime": datetime.now(UTC).isoformat()}
 
         async def chat_messages(
             self, persona: str, chat_id: str, deadline: float | None = None

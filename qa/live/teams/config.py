@@ -47,6 +47,16 @@ class TeamsQaConfig(StrictModel):
             raise ValueError("at least one persona is required")
         if not all(re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in self.personas):
             raise ValueError("invalid persona name")
+        upns = [identity.upn.casefold() for identity in self.personas.values()]
+        if len(upns) != len(set(upns)):
+            raise ValueError("persona UPNs must be distinct")
+        oids = [
+            identity.expected_oid.casefold()
+            for identity in self.personas.values()
+            if identity.expected_oid is not None
+        ]
+        if len(oids) != len(set(oids)):
+            raise ValueError("persona object IDs must be distinct")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", self.company):
             raise ValueError("invalid company name")
         self.token_dir = target

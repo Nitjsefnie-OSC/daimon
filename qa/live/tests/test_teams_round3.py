@@ -174,15 +174,18 @@ class JourneyDriver:
     async def sleep(self, seconds: float) -> None:
         self.clock += seconds
 
+    def require_distinct_personas(self) -> dict[str, str]:
+        return {"admin": "synthetic-admin", "member": "synthetic-member"}
+
     async def bot_chat(self, persona: str) -> tuple[str, list[dict[str, Any]]]:
         return "bot-chat", self.cards
 
     async def post_chat_command(
-        self, persona: str, chat_id: str, text: str, seen_ids: frozenset[str]
+        self, persona: str, chat_id: str, text: str, snapshot: list[dict[str, Any]]
     ) -> dict[str, str]:
         assert chat_id == "bot-chat" and text == "routines"
         self.posted = True
-        return {"id": "posted"}
+        return {"id": "posted", "createdDateTime": datetime.now(UTC).isoformat()}
 
     async def read_replies(
         self, persona: str, message_id: str, deadline: float
@@ -258,7 +261,9 @@ async def test_full_card_text_is_checked_and_error_reason_is_safe(config: TeamsQ
         async def chat_messages(
             self, persona: str, chat_id: str, deadline: float | None = None
         ) -> list[dict[str, Any]]:
-            return [card] if self.posted else []
+            return (
+                [{**card, "createdDateTime": datetime.now(UTC).isoformat()}] if self.posted else []
+            )
 
     result = await run_journey(
         FreshDriver(config),

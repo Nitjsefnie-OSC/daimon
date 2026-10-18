@@ -155,6 +155,14 @@ class TokenStore:
             self.save(persona, cache)
         return secret
 
+    def access_oid(self, persona: str, scopes: list[str]) -> str:
+        """Read the object ID from the validated Graph access token."""
+        claims = token_claims(self.acquire(persona, scopes).value)
+        oid = claims.get("oid")
+        if not isinstance(oid, str) or not oid:
+            raise ReauthRequired(persona, "access token object claim missing")
+        return oid
+
     def status(self, persona: str) -> dict[str, Any]:
         """Return local cache metadata with no token material."""
         client, cache = self._client(persona)

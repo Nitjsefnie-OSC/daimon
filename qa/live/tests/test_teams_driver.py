@@ -397,6 +397,9 @@ async def test_routines_card_role_assertions(config: TeamsQaConfig) -> None:
         async def sleep(self, seconds: float) -> None:
             return None
 
+        def require_distinct_personas(self) -> dict[str, str]:
+            return {"admin": "synthetic-admin", "member": "synthetic-member"}
+
         async def bot_chat(self, persona: str) -> tuple[str, list[dict[str, object]]]:
             return "bot-chat", []
 
@@ -405,11 +408,11 @@ async def test_routines_card_role_assertions(config: TeamsQaConfig) -> None:
             persona: str,
             chat_id: str,
             text: str,
-            seen_ids: frozenset[str],
+            snapshot: list[dict[str, object]],
         ) -> dict[str, str]:
-            assert chat_id == "bot-chat" and text == "routines" and not seen_ids
+            assert chat_id == "bot-chat" and text == "routines" and not snapshot
             self.posted = True
-            return {"id": "posted"}
+            return {"id": "posted", "createdDateTime": datetime.now(UTC).isoformat()}
 
         async def read_replies(
             self, persona: str, message_id: str, deadline: float

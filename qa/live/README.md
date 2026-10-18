@@ -495,7 +495,10 @@ serially and writes one private summary JSON. `routines-admin` checks for the
 checks for "Add credit"; `billing-member` checks for the refusal text and
 absence of credit actions. These checks inspect the returned cards; they do
 not click buttons or exercise dialogs. Each journey sends one plain-text
-command to its persona's existing bot chat. `verify-target` still checks the
+command to its persona's existing bot chat. Admin and member must resolve to
+different access-token identities. A recent persona message without a later
+bot response makes the chat fail the 30-second quiet check before any post.
+`verify-target` still checks the
 team and channel before any command is sent. Offline tests use fake MSAL and
 `httpx.MockTransport`. The driver does not delete messages or change team
 membership, so clean up messages manually if needed.

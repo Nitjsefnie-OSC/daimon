@@ -38,6 +38,10 @@ class NoBotChat(GraphRequestError):
     """The persona has not established a one-on-one chat with the bot."""
 
 
+class PersonaCollision(GraphRequestError):
+    """The two role personas have the same Graph access-token identity."""
+
+
 def graph_time(value: object) -> datetime | None:
     """Parse a Graph timestamp without assuming its UTC spelling."""
     if not isinstance(value, str):
@@ -159,6 +163,20 @@ class GraphTeamsDriver:
         if not self.config.bot_app_id:
             raise ValueError("bot app identity missing")
 
+    def require_distinct_personas(self) -> dict[str, str]:
+        """Resolve both roles from access tokens before sending any command."""
+        by_role: dict[str, list[str]] = {"admin": [], "member": []}
+        for name, identity in self.config.personas.items():
+            by_role[identity.role].append(name)
+        if any(len(names) != 1 for names in by_role.values()):
+            raise PersonaCollision("admin and member personas required")
+        oids = {
+            name: self.tokens.access_oid(name, CHAT) for names in by_role.values() for name in names
+        }
+        if oids[by_role["admin"][0]].casefold() == oids[by_role["member"][0]].casefold():
+            raise PersonaCollision("persona identities match")
+        return oids
+
     async def bot_chat(self, persona: str) -> tuple[str, list[dict[str, Any]]]:
         """Find one existing 1:1 chat by a prior message from the bot app ID."""
         data = await self._request(persona, CHAT, "GET", "/me/chats?$filter=chatType eq 'oneOnOne'")
@@ -194,11 +212,20 @@ class GraphTeamsDriver:
         persona: str,
         chat_id: str,
         command: str,
-        seen_ids: frozenset[str],
+        snapshot: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Send one plain-text command, reconciling uncertainty without resending."""
         if not chat_id or "/" in chat_id:
             raise ValueError("invalid chat id")
+        seen_ids = frozenset(str(item["id"]) for item in snapshot if item.get("id"))
+        latest_snapshot_time = max(
+            (
+                created
+                for item in snapshot
+                if (created := graph_time(item.get("createdDateTime"))) is not None
+            ),
+            default=None,
+        )
         started = datetime.now(UTC)
         path = f"/chats/{chat_id}/messages"
         payload = {"body": {"contentType": "text", "content": command}}
@@ -225,6 +252,7 @@ class GraphTeamsDriver:
                         and item.get("id") not in seen_ids
                         and created is not None
                         and created >= started - timedelta(seconds=10)
+                        and (latest_snapshot_time is None or created >= latest_snapshot_time)
                         and plain == command
                     ):
                         return item
