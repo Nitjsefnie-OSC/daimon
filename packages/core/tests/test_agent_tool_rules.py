@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import cast
 
 import pytest
@@ -15,11 +16,15 @@ from daimon.core.confirmation import (
     ToolRuleCardReference,
 )
 from daimon.core.stores import agent_tool_rules as store
+from daimon.core.stores.agent_tool_rules import valid_tool_name
 from daimon.core.tool_safety import (
+    CONFIRMED_DAIMON_TOOLS,
+    PUBLISH_TOOLS,
     ResolvedAgentToolRule,
     ToolCall,
     ToolSafetyPolicy,
     decide_tool_call,
+    proxy_refusal,
     stricter_agent_tool_rule,
 )
 from daimon.core.turn.approvals import (
@@ -701,6 +706,7 @@ async def test_an_ask_rule_on_a_proxied_daimon_tool_shows_a_card_naming_that_too
         requester_platform_user_id="human",
         confirm=confirm,
         trusted_servers=frozenset({_DAIMON}),
+        daimon_rules=True,
         rules_for=_lookup(db_session_factory, tenant_id),
         rule_card_for=lambda _call: reference,
     )
@@ -732,11 +738,13 @@ async def test_a_deny_rule_on_a_proxied_daimon_tool_refuses_without_a_card(
             requester_platform_user_id="human",
             confirm=confirm,
             trusted_servers=frozenset({_DAIMON}),
+            daimon_rules=True,
             rules_for=_lookup(db_session_factory, tenant_id),
         ),
         unattended_decider(
             _ON,
             trusted_servers=frozenset({_DAIMON}),
+            daimon_rules=True,
             rules_for=_lookup(db_session_factory, tenant_id),
         ),
     ):
@@ -761,6 +769,7 @@ async def test_a_deny_set_while_a_daimon_card_waits_refuses_the_approved_call(
         requester_platform_user_id="human",
         confirm=confirm,
         trusted_servers=frozenset({_DAIMON}),
+        daimon_rules=True,
         rules_for=_lookup(db_session_factory, tenant_id),
     )
     result = await decide(_proxy("hubspot_update_objects"))
@@ -776,6 +785,7 @@ async def test_an_unattended_ask_rule_on_a_daimon_tool_is_refused(
     decide = unattended_decider(
         _ON,
         trusted_servers=frozenset({_DAIMON}),
+        daimon_rules=True,
         rules_for=_lookup(db_session_factory, tenant_id),
     )
     result = await decide(_proxy("hubspot_update_objects"))
@@ -792,6 +802,7 @@ async def test_a_channel_rule_on_a_daimon_tool_applies_only_in_its_channel(
         decide = unattended_decider(
             _ON,
             trusted_servers=frozenset({_DAIMON}),
+            daimon_rules=True,
             rules_for=_lookup(db_session_factory, tenant_id, channel_id=channel),
         )
         assert (await decide(_proxy("discord_send_message"))).allow is allowed, channel
@@ -806,6 +817,7 @@ async def test_a_daimon_rule_applies_through_either_endpoint_the_session_could_u
     decide = unattended_decider(
         _ON,
         trusted_servers=frozenset({_DAIMON}),
+        daimon_rules=True,
         rules_for=_lookup(
             db_session_factory,
             tenant_id,
@@ -817,6 +829,7 @@ async def test_a_daimon_rule_applies_through_either_endpoint_the_session_could_u
     unbound = unattended_decider(
         _ON,
         trusted_servers=frozenset({_DAIMON}),
+        daimon_rules=True,
         rules_for=_lookup(db_session_factory, tenant_id, server_url="https://foreign.example/mcp"),
     )
     assert (await unbound(_proxy("hubspot_update_objects"))).allow
@@ -838,6 +851,7 @@ async def test_a_daimon_publish_card_still_asks_when_the_agent_allows_it(
         requester_platform_user_id="human",
         confirm=confirm,
         trusted_servers=frozenset({_DAIMON}),
+        daimon_rules=True,
         rules_for=_lookup(db_session_factory, tenant_id),
     )
     result = await decide(
@@ -882,9 +896,12 @@ async def test_a_wildcard_deny_refuses_every_proxied_daimon_call_in_the_driver(
             _ON,
             requester_platform_user_id="human",
             trusted_servers=frozenset({_DAIMON}),
+            daimon_rules=True,
             rules_for=lookup,
         ),
-        unattended_decider(_ON, trusted_servers=frozenset({_DAIMON}), rules_for=lookup),
+        unattended_decider(
+            _ON, trusted_servers=frozenset({_DAIMON}), daimon_rules=True, rules_for=lookup
+        ),
     ):
         for inner in ("get_session", "hubspot_update_objects"):
             result = await decide(_proxy(inner))
@@ -901,6 +918,7 @@ async def test_a_wildcard_row_does_nothing_for_other_servers_or_without_the_daim
     bare = unattended_decider(
         _ON,
         trusted_servers=frozenset({_DAIMON}),
+        daimon_rules=True,
         rules_for=_lookup(db_session_factory, tenant_id),
     )
     assert (await bare(_proxy("get_session"))).allow
@@ -931,3 +949,239 @@ async def test_a_wildcard_row_does_nothing_for_other_servers_or_without_the_daim
     assert (
         await scoped(_proxy("get_session").model_copy(update={"tool_name": "get_session"})) is None
     )
+
+
+# --- review follow-ups -----------------------------------------------------------
+
+
+async def _never(_call: ToolCall) -> ResolvedAgentToolRule | None:
+    raise AssertionError("this agent has no rule on daimon's tools: nothing should be read")
+
+
+@pytest.mark.parametrize(
+    "inner",
+    sorted({*CONFIRMED_DAIMON_TOOLS, *PUBLISH_TOOLS}),
+)
+async def test_an_approval_tool_sent_through_call_tool_is_refused_at_once(inner: str) -> None:
+    prompts: list[ConfirmationPrompt] = []
+
+    async def confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    expected = (
+        f"Call {inner} directly, not through call_tool: it is listed under its own "
+        "name so the person can approve it. Nothing was done."
+    )
+    assert proxy_refusal(inner) == expected
+    for decide in (
+        interactive_decider(
+            _ON,
+            requester_platform_user_id="human",
+            confirm=confirm,
+            trusted_servers=frozenset({_DAIMON}),
+            rules_for=_never,
+            daimon_rules=True,
+        ),
+        unattended_decider(
+            _ON, trusted_servers=frozenset({_DAIMON}), rules_for=_never, daimon_rules=True
+        ),
+    ):
+        result = await decide(_proxy(inner, content_hash="abc"))
+        assert not result.allow and result.deny_message == expected
+    assert prompts == [], "a card here would approve nothing"
+    assert proxy_refusal("get_session") is None
+
+
+async def test_a_direct_call_of_an_approval_tool_still_gets_its_card() -> None:
+    prompts: list[ConfirmationPrompt] = []
+
+    async def confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "denied"
+
+    decide = interactive_decider(
+        _ON,
+        requester_platform_user_id="human",
+        confirm=confirm,
+        trusted_servers=frozenset({_DAIMON}),
+    )
+    await decide(ToolCall(tool_use_id="p", server_name=_DAIMON, tool_name="publish_report"))
+    assert len(prompts) == 1
+
+
+async def test_an_agent_without_daimon_rules_costs_no_lookup_and_keeps_every_card() -> None:
+    prompts: list[ConfirmationPrompt] = []
+
+    async def confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    decide = interactive_decider(
+        _ON,
+        requester_platform_user_id="human",
+        confirm=confirm,
+        trusted_servers=frozenset({_DAIMON}),
+        confirmed_tools=frozenset({"add_skill"}),
+        rules_for=_never,
+    )
+    assert (await decide(_proxy("get_session"))).allow
+    assert (
+        await decide(
+            ToolCall(
+                tool_use_id="a",
+                server_name=_DAIMON,
+                tool_name="add_skill",
+                input={"content_hash": "abc"},
+            )
+        )
+    ).allow
+    assert (
+        await decide(ToolCall(tool_use_id="p", server_name=_DAIMON, tool_name="publish_report"))
+    ).allow
+    assert len(prompts) == 2, "add_skill and publish still card; the proxied read does not"
+    unattended = unattended_decider(_ON, trusted_servers=frozenset({_DAIMON}), rules_for=_never)
+    assert (await unattended(_proxy("get_session"))).allow
+    # A third-party server is still looked up.
+    looked_up: list[str] = []
+
+    async def lookup(call: ToolCall) -> ResolvedAgentToolRule | None:
+        looked_up.append(call.key)
+        return None
+
+    await interactive_decider(
+        _ON,
+        requester_platform_user_id="human",
+        trusted_servers=frozenset({_DAIMON}),
+        rules_for=lookup,
+    )(ToolCall(tool_use_id="x", server_name="linear", tool_name="get_issue"))
+    assert looked_up == ["linear/get_issue"]
+
+
+async def test_a_failed_rule_read_on_a_daimon_call_asks_in_chat_and_refuses_unattended() -> None:
+    async def failed(_call: ToolCall) -> ResolvedAgentToolRule | None:
+        raise RuntimeError("database down")
+
+    prompts: list[ConfirmationPrompt] = []
+
+    async def confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "denied"
+
+    chat = interactive_decider(
+        _ON,
+        requester_platform_user_id="human",
+        confirm=confirm,
+        trusted_servers=frozenset({_DAIMON}),
+        rules_for=failed,
+        daimon_rules=True,
+    )
+    routine = unattended_decider(
+        _ON, trusted_servers=frozenset({_DAIMON}), rules_for=failed, daimon_rules=True
+    )
+    assert not (await chat(_proxy("get_session"))).allow
+    assert len(prompts) == 1 and prompts[0].tool_rule is None
+    assert not (await routine(_proxy("get_session"))).allow
+
+
+def test_rule_tool_names_must_be_plain_names_or_the_wildcard() -> None:
+    assert all(valid_tool_name(n) for n in ("get_session", "a.b-c_1", "*", "x" * 128))
+    assert not any(valid_tool_name(n) for n in ("", "x" * 129, "a b", "a/b", "a:b", "é", "a\n"))
+
+
+async def test_a_rule_on_an_invalid_tool_name_is_refused_by_the_store(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _tenant(db_session)
+    for key in ("daimon-mcp/" + "x" * 129, "daimon-mcp/a b", "daimon-mcp/a:b"):
+        with pytest.raises(ValueError, match="tool_key must be exactly"):
+            await _set(db_session, tenant_id, "", "deny", key=key)
+    # A third party's names keep today's shape-only check.
+    for key in ("linear/a:b", "linear/a b", "linear/" + "x" * 200):
+        await _set(db_session, tenant_id, "", "allow", key=key, url="https://linear.example/mcp")
+    await _set(db_session, tenant_id, "x" * 128, "deny")
+    await _set(db_session, tenant_id, "*", "deny", agent_id="ma-9")
+
+
+async def test_a_stored_row_with_a_bad_name_is_skipped_and_logged_not_sent_to_ma(
+    db_session: AsyncSession,
+) -> None:
+    from structlog.testing import capture_logs
+
+    tenant_id = await _tenant(db_session)
+    await _set(db_session, tenant_id, "get_session", "deny")
+    for bad in ("x" * 129, "a b", "é"):
+        db_session.add(
+            AgentToolRuleRecord(
+                tenant_id=tenant_id,
+                agent_id="ma-1",
+                agent_name="one",
+                tool_key=f"{_DAIMON}/{bad}",
+                channel_id=None,
+                server_url=_DAIMON_URL,
+                rule="deny",
+                scope="chat",
+                revision=1,
+                set_by="legacy",
+                set_at=datetime.now(UTC),
+            )
+        )
+    await db_session.flush()
+    with capture_logs() as logs:
+        ruled = await store.daimon_rule_set(db_session, tenant_id=tenant_id, agent_id="ma-1")
+    assert ruled.tools == {"get_session"} and not ruled.needs_driver
+    assert len([row for row in logs if row["event"] == "tool_safety.rule_name_skipped"]) == 3
+
+
+async def test_which_daimon_rules_only_the_driver_can_apply(db_session: AsyncSession) -> None:
+    tenant_id = await _tenant(db_session)
+
+    async def needs(agent_id: str) -> bool:
+        ruled = await store.daimon_rule_set(db_session, tenant_id=tenant_id, agent_id=agent_id)
+        assert ruled.tools
+        return ruled.needs_driver
+
+    await _set(db_session, tenant_id, "get_session", "deny", agent_id="wide")
+    await _set(db_session, tenant_id, "*", "deny", agent_id="wide")
+    assert not await needs("wide"), "the server enforces an agent-wide deny, specific or *"
+    await _set(db_session, tenant_id, "get_session", "ask", agent_id="asks")
+    assert await needs("asks")
+    await _set(db_session, tenant_id, "get_session", "deny", agent_id="chan", channel_id="home")
+    assert await needs("chan"), "the server does not know the channel"
+
+
+async def test_a_channel_rule_on_a_publish_tool_cards_everywhere_and_denies_in_its_channel(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Documented behaviour: a rule on a publish tool turns the tool's own card on session-wide."""
+    tenant_id = await _tenant(db_session)
+    await _set(db_session, tenant_id, "publish_report", "deny", channel_id="home")
+    publish = ToolCall(tool_use_id="p", server_name=_DAIMON, tool_name="publish_report")
+    prompts: list[ConfirmationPrompt] = []
+
+    async def confirm(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    def decider(channel: str):
+        return interactive_decider(
+            _ON,
+            requester_platform_user_id="human",
+            confirm=confirm,
+            trusted_servers=frozenset({_DAIMON}),
+            rules_for=_lookup(db_session_factory, tenant_id, channel_id=channel),
+            daimon_rules=True,
+        )
+
+    refused = await decider("home")(publish)
+    assert not refused.allow and "denies daimon-mcp/publish_report" in (refused.deny_message or "")
+    assert prompts == []
+    elsewhere = await decider("elsewhere")(publish)
+    assert elsewhere.allow and len(prompts) == 1, "no rule here, but the publish card still shows"
+    routine = unattended_decider(
+        _ON,
+        trusted_servers=frozenset({_DAIMON}),
+        rules_for=_lookup(db_session_factory, tenant_id, channel_id="elsewhere"),
+        daimon_rules=True,
+    )
+    assert not (await routine(publish)).allow, "and a routine is refused, as for any publish"

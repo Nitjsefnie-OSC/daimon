@@ -355,7 +355,11 @@ async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
         admission = replace(admission, backend_revision=revision)
     elif failure == "daimon_rules":
         # A rule that makes daimon's own tools ask is a gate this backend cannot hold.
-        admission = replace(admission, daimon_rule_tools=frozenset({"get_session"}))
+        admission = replace(
+            admission,
+            daimon_rule_tools=frozenset({"get_session"}),
+            daimon_rules_need_driver=True,
+        )
     else:
         admission = replace(admission, asks_before_publishing=True)
     with pytest.raises(AdmissionDenied) as refusal:

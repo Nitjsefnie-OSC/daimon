@@ -485,6 +485,7 @@ async def test_a_root_retained_before_daimon_rule_tools_existed_still_reads(root
         record = deepcopy(row.record)
         facts = record["result"]["preparation"]["admission"]
         assert facts.pop("daimon_rule_tools") == []
+        assert facts.pop("daimon_rules_need_driver") is False
         await db.execute(
             update(MuxOperation)
             .where(

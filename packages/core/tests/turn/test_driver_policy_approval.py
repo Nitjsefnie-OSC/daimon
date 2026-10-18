@@ -975,6 +975,7 @@ async def test_a_denied_daimon_tool_behind_call_tool_is_refused_and_an_unruled_o
             requester_platform_user_id="U1",
             confirm=card,
             trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            daimon_rules=True,
             rules_for=rules_for,
         ),
     )
@@ -1026,6 +1027,7 @@ async def test_an_ask_rule_on_a_daimon_tool_behind_call_tool_waits_for_the_card(
                 requester_platform_user_id="U1",
                 confirm=card,
                 trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+                daimon_rules=True,
                 rules_for=rules_for,
             ),
         )
@@ -1067,6 +1069,7 @@ async def test_an_unattended_run_refuses_an_ask_ruled_daimon_tool_behind_call_to
         tool_confirmation=headless_tool_confirmation(
             ToolSafetyPolicy(enabled=True, agent_rules=True),
             trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            daimon_rules=True,
             rules_for=rules_for,
         ),
     )
@@ -1074,3 +1077,77 @@ async def test_an_unattended_run_refuses_an_ask_ruled_daimon_tool_behind_call_to
     [sent] = _confirmations(fa)
     assert sent["result"] == "deny" and sent["tool_use_id"] == "tu_ask"
     assert "daimon-mcp/hubspot_update_objects" in str(sent["deny_message"])
+
+
+async def test_an_agent_without_daimon_rules_runs_a_proxied_call_with_no_lookup_or_card() -> None:
+    fa = FakeAnthropic()
+    _script(
+        fa,
+        ("tu_free", DAIMON_SERVER_NAME, "call_tool"),
+        inputs={"tu_free": _proxied("get_session")},
+    )
+    looked_up: list[str] = []
+    prompts: list[ConfirmationPrompt] = []
+
+    async def rules_for(call: ToolCall) -> ResolvedAgentToolRule | None:
+        looked_up.append(call.key)
+        return None
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="look",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=chat_tool_confirmation(
+            ToolSafetyPolicy(enabled=True, agent_rules=True),
+            requester_platform_user_id="U1",
+            confirm=card,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            rules_for=rules_for,
+        ),
+    )
+
+    assert [(e["tool_use_id"], e["result"]) for e in _confirmations(fa)] == [("tu_free", "allow")]
+    assert looked_up == [] and prompts == []
+
+
+async def test_an_approval_tool_sent_through_call_tool_is_refused_without_a_card() -> None:
+    fa = FakeAnthropic()
+    _script(
+        fa,
+        ("tu_pub", DAIMON_SERVER_NAME, "call_tool"),
+        inputs={"tu_pub": _proxied("publish_report", title="Q3")},
+    )
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    await run_turn(
+        anthropic=_cast(fa),
+        session_id="sess_1",
+        user_message="publish",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        render_interval_s=0.001,
+        billing=_EXEMPT,
+        tool_confirmation=chat_tool_confirmation(
+            ToolSafetyPolicy(enabled=True, agent_rules=True),
+            requester_platform_user_id="U1",
+            confirm=card,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            daimon_rules=True,
+        ),
+    )
+
+    [sent] = _confirmations(fa)
+    assert sent["result"] == "deny" and "Call publish_report directly" in str(sent["deny_message"])
+    assert prompts == []

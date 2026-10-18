@@ -1118,8 +1118,9 @@ session started before tool safety was turned on is gated from its next turn,
 and a tools change never writes the agent's own `always_allow` back. An agent
 `ask` or `deny` rule on `daimon-mcp/<tool>` (see [Permissions](permissions.md))
 adds `call_tool` and each tool such a rule names to the asking set: admission
-reads the agent's rule tool names once per turn
-(`agent_tool_rules.daimon_rule_tools`) and they enter the tools hash like
+reads the agent's rule tool names once per turn and again in `reauthorize`
+(`agent_tool_rules.daimon_rule_set`; no query unless both settings are on, and
+tool names outside `[A-Za-z0-9_.-]{1,128}` are skipped), and they enter the tools hash like
 `asks_before_publishing`, so a rule change updates the session on the next
 bind. The decider unwraps `call_tool` to the inner tool (`unwrap_daimon_call`)
 and looks the rule up under `daimon-mcp/<inner>`, against the agent's attached
@@ -1127,8 +1128,10 @@ URL and the deployment's own; a call with no rule is allowed without a card.
 Precedence on a daimon tool: the operator deny of a confirmed write, an agent
 `deny`, the fixed gates (`add_skill` with a preview hash, the publish tools),
 then an agent `ask`; a rule never loosens a fixed gate. Gemini and OpenAI
-sessions, which cannot hold these asks, refuse a turn for an agent that has
-such a rule. An agent-wide `deny` on `daimon-mcp/*` adds `call_tool` to the
+sessions, which cannot hold these asks, refuse a turn for an agent with an
+`ask` rule or a channel `deny` on a daimon tool (`daimon_rules_need_driver`);
+an agent-wide `deny` is the server's and does not block them. A daimon call that
+needs no rule lookup (the agent has none) is not looked up at all. An agent-wide `deny` on `daimon-mcp/*` adds `call_tool` to the
 asking set and the lookup returns that deny for every daimon call, so the
 driver refuses each proxied call too (the server refuses all of them anyway).
 The exemption holds only for the deployment's verified

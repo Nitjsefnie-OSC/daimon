@@ -26,8 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loosens a confirmation or the operator's deny list. Applies when
   `DAIMON_TOOL_SAFETY__ENABLED` and `DAIMON_TOOL_SAFETY__AGENT_RULES` are on.
   An agent-wide `deny` on `daimon-mcp/*` also makes the driver refuse every
-  proxied call. Gemini and OpenAI turns for an agent with such a rule are
-  refused rather than run unasked.
+  proxied call. Gemini and OpenAI turns for an agent with an `ask` rule or a
+  channel `deny` on a Daimon tool are refused rather than run unasked; an
+  agent-wide `deny` is enforced by the server and does not block them. A
+  tool that waits for Approve (`add_skill`, publish tools) sent through
+  `call_tool` is refused at once with a note to call it directly. `daimon-mcp/`
+  rule names outside `[A-Za-z0-9_.-]{1,128}` are no longer accepted.
 
 - Switching providers preserves supported MCP tools when a sibling needs confirmation; unavailable tools require explicit consent and remain blocked.
 

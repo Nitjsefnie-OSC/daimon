@@ -58,6 +58,7 @@ from typing import Any, Final, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "APPROVAL_TOOLS",
     "CONFIRMED_DAIMON_TOOLS",
     "DAIMON_SERVER_NAME",
     "OPEN_TOOL_SAFETY",
@@ -75,6 +76,7 @@ __all__ = [
     "decide_tool_call",
     "has_confirmation_gate",
     "heal_reserved_server",
+    "proxy_refusal",
     "unwrap_daimon_call",
     "session_tools_for_policy",
     "toolset_permission_policy",
@@ -176,6 +178,9 @@ def _always_confirmed_tools() -> frozenset[str]:
 PUBLISH_TOOLS: Final[frozenset[str]] = frozenset(
     {"publish_report", "create_notebook_upload_url", "create_attachment_upload_url"}
 )
+
+#: Daimon's tools a session can hold on `always_ask` by their own name.
+APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({*CONFIRMED_DAIMON_TOOLS, *PUBLISH_TOOLS})
 
 # Leading verbs that name a read. Deliberately short: a verb that is sometimes
 # a write ("run_", "sync_", "export_", and "query_", which on a SQL server can
@@ -494,6 +499,22 @@ def _confirmed_daimon_write(
 def is_publish_call(call: ToolCall, trusted_servers: frozenset[str]) -> bool:
     """`call` publishes through daimon's own server (`PUBLISH_TOOLS`)."""
     return call.server_name in trusted_servers and call.tool_name in PUBLISH_TOOLS
+
+
+def proxy_refusal(name: str) -> str | None:
+    """Why `call_tool` may not carry `name`, or `None` when it may.
+
+    The tools that wait for a person's Approve are listed under their own name
+    so Managed Agents pauses on the name it sees; through the proxy the pause
+    would be on `call_tool`, and a card there would approve nothing. The MCP
+    server refuses them with this text, and so does the driver.
+    """
+    if name not in APPROVAL_TOOLS:
+        return None
+    return (
+        f"Call {name} directly, not through call_tool: it is listed under its own "
+        "name so the person can approve it. Nothing was done."
+    )
 
 
 def unwrap_daimon_call(call: ToolCall, trusted_servers: frozenset[str]) -> ToolCall:

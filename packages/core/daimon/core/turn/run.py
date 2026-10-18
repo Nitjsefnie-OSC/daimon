@@ -965,6 +965,7 @@ async def run_prepared_turn_impl(
         trusted_servers=trusted_servers_for(deps.public_url),
         asks_before_publishing=prepared.admission.asks_before_publishing,
         confirmed_tools=confirmed_tools,
+        daimon_rules=bool(prepared.admission.daimon_rule_tools),
         rules_for=(
             agent_rule_lookup(
                 deps.sessionmaker,

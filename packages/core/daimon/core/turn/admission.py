@@ -98,7 +98,7 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.tenant_balance import is_over_balance
-from daimon.core.turn.approvals import daimon_rule_tools_for
+from daimon.core.turn.approvals import daimon_rule_set_for
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -198,6 +198,10 @@ class Admission:
     # admitted (empty while rules are off): their session tools wait for the
     # driver's decision, so the set is part of the tools the session is bound to.
     daimon_rule_tools: frozenset[str] = frozenset()
+    # Some of those rules only the turn driver applies (any `ask`, a channel
+    # `deny`); an agent-wide `deny` is also enforced by the MCP server, which
+    # backends without an approval pause rely on.
+    daimon_rules_need_driver: bool = False
     # The channel or thread itself is sealed (DM memory policy aside). Callers
     # that copy content out of the channel, such as /dm-me, must refuse.
     source_sealed: bool = False
@@ -740,6 +744,13 @@ async def admit_impl(
     source_sealed = bool(seal_ids)
     memory_read_only = _memory_read_only(policy, grant, source_sealed)
 
+    # The agent's rules on daimon's own tools, read once per turn (no query
+    # unless tool safety and agent rules are both on).
+    daimon_rules = await daimon_rule_set_for(
+        deps.sessionmaker, deps.tool_safety, tenant_id=tenant_id, agent_id=agent.id
+    )
+    mark("daimon_rule_tools")
+
     backend_counterpart: AgentRevision | None = None
     backend_agent_revision: AgentBackendRevision | None = None
     source_agent: BackendAgent | None = None
@@ -772,7 +783,8 @@ async def admit_impl(
             grant=grant,
             memory_read_only=memory_read_only,
             asks_before_publishing=_asks_before_publishing(policy, grant),
-            daimon_rule_tools=daimon_rule_tools,
+            daimon_rule_tools=daimon_rules.tools,
+            daimon_rules_need_driver=daimon_rules.needs_driver,
             source_sealed=source_sealed,
             origin_channel_id=channel_id,
             origin_thread_id=thread_id,
@@ -950,11 +962,6 @@ async def admit_impl(
 
     mark("channel_skills")
 
-    daimon_rule_tools = await daimon_rule_tools_for(
-        deps.sessionmaker, deps.tool_safety, tenant_id=tenant_id, agent_id=agent.id
-    )
-    mark("daimon_rule_tools")
-
     if deps.agent_backends:
         await resolve_preference()
 
@@ -968,7 +975,8 @@ async def admit_impl(
         backend=backend,
         memory_read_only=memory_read_only,
         asks_before_publishing=_asks_before_publishing(policy, grant),
-        daimon_rule_tools=daimon_rule_tools,
+        daimon_rule_tools=daimon_rules.tools,
+        daimon_rules_need_driver=daimon_rules.needs_driver,
         source_sealed=source_sealed,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
@@ -1120,10 +1128,19 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         policy, grant, bool(seal_ids)
     )
     asks_before_publishing = _asks_before_publishing(policy, grant)
+    # The agent's rules on daimon's own tools, as they are now (one query, and
+    # none unless tool safety and agent rules are both on). A rule added or
+    # cleared since admission reaches the decider of this turn and a fleet
+    # worker prepared from an old root; the session's tools follow at its bind.
+    rules = await daimon_rule_set_for(
+        deps.sessionmaker, deps.tool_safety, tenant_id=grant.tenant_id, agent_id=admission.agent.id
+    )
     if (
         seal_ids == admission.origin_seal_ids
         and memory_read_only == admission.memory_read_only
         and asks_before_publishing == admission.asks_before_publishing
+        and rules.tools == admission.daimon_rule_tools
+        and rules.needs_driver == admission.daimon_rules_need_driver
     ):
         return admission
     return replace(
@@ -1132,6 +1149,8 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         source_sealed=admission.source_sealed or bool(seal_ids),
         memory_read_only=memory_read_only,
         asks_before_publishing=asks_before_publishing,
+        daimon_rule_tools=rules.tools,
+        daimon_rules_need_driver=rules.needs_driver,
     )
 
 
@@ -1321,6 +1340,12 @@ async def capture_backend_source(
                 if context.channel_id is not None
                 else ()
             )
+            rule_set = await daimon_rule_set_for(
+                deps.sessionmaker,
+                deps.tool_safety,
+                tenant_id=context.tenant_id,
+                agent_id=actual.id,
+            )
             admission = Admission(
                 context.account_id,
                 actual,
@@ -1329,12 +1354,8 @@ async def capture_backend_source(
                 grant=grant,
                 memory_read_only=_memory_read_only(policy, grant, bool(seals)),
                 asks_before_publishing=_asks_before_publishing(policy, grant),
-                daimon_rule_tools=await daimon_rule_tools_for(
-                    deps.sessionmaker,
-                    deps.tool_safety,
-                    tenant_id=context.tenant_id,
-                    agent_id=actual.id,
-                ),
+                daimon_rule_tools=rule_set.tools,
+                daimon_rules_need_driver=rule_set.needs_driver,
                 source_sealed=bool(seals),
                 origin_channel_id=context.channel_id,
                 origin_thread_id=context.thread_id,

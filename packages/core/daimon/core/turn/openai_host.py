@@ -362,7 +362,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         or current.slack_turn_context_id is not None
     ):
         raise AdmissionDenied(reason="backend_unsupported")
-    if current.daimon_rule_tools:
+    if current.daimon_rules_need_driver:
         # Daimon tool rules need an approval pause this backend does not have.
         # Refused before any plan, key or transport is touched.
         raise AdmissionDenied(reason="backend_unsupported") from UnsupportedCapability(
