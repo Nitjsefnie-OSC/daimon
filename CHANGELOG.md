@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaced, not reused, the next time such a person is answered in it,
   without carrying its work.
 
+- A Teams channel command whose "answered in your 1:1 chat" notice Teams refuses is still answered in the 1:1 chat. Failed sends now log Teams' error code.
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
 - Revoked GitHub token records are now deleted 7 days after they expire and unused ones 1 hour after, while live tokens and the security audit log are kept.
 - `/dm` is now `/dm-me` on Slack and Discord, including `/dm-me enable` and `/dm-me disable`. Slack reserves `/dm` for its own command, so a Slack app could not offer it. Its replies read as one line for what happened and one for what to do; a DM closed because its channel was sealed now says to keep working in that channel.
