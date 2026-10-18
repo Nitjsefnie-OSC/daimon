@@ -132,6 +132,35 @@ async def get_for_call(
     return resolved
 
 
+async def deny_rules_for_trusted_tool(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    tool_key: str,
+) -> list[AgentToolRule]:
+    """Every agent-wide `deny` row for one tool in a tenant, whichever agent holds it.
+
+    The MCP server cannot turn a chat credential's derived agent uuid back into
+    the Managed Agents id the rows are keyed by, so it reads the tenant's few
+    deny rows for this one tool and compares each by `derive_agent_uuid`. One
+    query on `uq_agent_tool_rules_global` (leading `tenant_id`). Channel rules
+    are left out: the server does not know the channel. Tombstones (`rule IS
+    NULL`), `allow` and `ask` rows are left out too. A deny holds in every
+    scope, so scope is not read.
+    """
+    rows = (
+        await session.scalars(
+            select(AgentToolRuleRecord).where(
+                AgentToolRuleRecord.tenant_id == tenant_id,
+                AgentToolRuleRecord.tool_key == tool_key,
+                AgentToolRuleRecord.channel_id.is_(None),
+                AgentToolRuleRecord.rule == "deny",
+            )
+        )
+    ).all()
+    return [_view(row) for row in rows]
+
+
 async def set_rule(
     session: AsyncSession,
     *,
