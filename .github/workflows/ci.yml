@@ -103,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # test_f2_native_bounds.py and test_anthropic_live.py read origin/integration and neutral-core.
+          fetch-depth: 0  # Credential equivalence tests import the fixed base commit.
       - uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
