@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- OpenAI agent switching names unsupported URL fetching as an explicit consented loss while preserving other source tools and skills.
+
 - Switching providers preserves supported MCP tools when a sibling needs confirmation; unavailable tools require explicit consent and remain blocked.
 
 - Fleet workers can wake the root again after an Anthropic turn reaches its budget.

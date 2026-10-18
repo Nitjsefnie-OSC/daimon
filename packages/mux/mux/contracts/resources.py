@@ -39,7 +39,8 @@ CapabilityDrop = Literal[
 MCPToolDrop = Annotated[
     str, StringConstraints(pattern=r"^mcp_tool:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
 ]
-DeclaredDrop = CapabilityDrop | MCPToolDrop
+BuiltinToolDrop = Literal["builtin_tool:web_fetch"]
+DeclaredDrop = CapabilityDrop | MCPToolDrop | BuiltinToolDrop
 _DeclaredDrops = Annotated[tuple[DeclaredDrop, ...], AfterValidator(_unique_declared_drops)]
 
 
