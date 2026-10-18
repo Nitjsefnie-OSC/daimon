@@ -3124,16 +3124,22 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
     assert result.allow and len(prompts) == 1, "the adapter's card hook answered the write"
 
 
+@pytest.mark.parametrize(
+    "trusted", [("bridge",), (), ("other",)], ids=["trusted", "empty", "other-server-trusted"]
+)
 @pytest.mark.parametrize("is_external", [False, True])
-async def test_a_chat_turn_reads_server_annotations_with_the_agent_token_unless_external(
+async def test_a_chat_turn_reads_trusted_server_annotations_with_the_agent_token_unless_external(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     is_external: bool,
+    trusted: tuple[str, ...],
 ) -> None:
     """The production wiring: `run_prepared_turn` hands the decider a lookup that
-    reads the attached server's catalogue, so a `readOnlyHint` read runs without
-    a card. A caller from another organisation's read carries no agent token."""
+    reads a trusted server's catalogue, so a `readOnlyHint` read runs without
+    a card. A caller from another organisation's read carries no agent token.
+    With an empty `trusted_annotations`, or one naming another server, the
+    server is never listed and its name decides."""
     from cryptography.fernet import Fernet, MultiFernet
     from daimon.core import mcp_tool_annotations
     from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
@@ -3156,7 +3162,7 @@ async def test_a_chat_turn_reads_server_annotations_with_the_agent_token_unless_
     router = _router(session_bodies=[], dead_session_ids=set())
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router),
-        tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=("bridge",)),
+        tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=trusted),
         fernet=MultiFernet([Fernet(Fernet.generate_key())]),
     )
     admission = dataclasses.replace(
@@ -3228,6 +3234,10 @@ async def test_a_chat_turn_reads_server_annotations_with_the_agent_token_unless_
     result = await posture.decide(
         ToolCall(tool_use_id="tu", server_name="bridge", tool_name="memory_flag_list")
     )
+    if "bridge" not in trusted:
+        assert not result.allow and len(prompts) == 1, "the name decides: a noun-first write"
+        assert tokens == [] and credential_reads == [], "no tools/list for an untrusted server"
+        return
     assert result.allow and prompts == [], "readOnlyHint ran the read without a card"
     if is_external:
         assert tokens == [None] and credential_reads == [], "no agent token for an outsider"
