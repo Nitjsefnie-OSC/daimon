@@ -450,9 +450,9 @@ async def turn_platform_skills(
     picked: list[MaSkill] = []
     missing: list[str] = []
     for ref in refs:
-        if ref.type == "anthropic":
+        if ref.type != "custom":
             skill: MaSkill = BetaManagedAgentsAnthropicSkill(
-                type="anthropic", skill_id=ref.skill_id, version="latest"
+                type=ref.type, skill_id=ref.skill_id, version="latest"
             )
         else:
             title = tenant_scoped_display_title(tenant_id=tenant_id, name=ref.skill_id)
