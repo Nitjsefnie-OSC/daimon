@@ -9,12 +9,20 @@ on:
 permissions:
   contents: read
 
-# Reusable Postgres service block + shared bootstrap (checkout, uv sync,
-# alembic upgrade) are duplicated across pytest-* jobs by necessity —
-# GitHub Actions doesn't support YAML anchors. The suites are split across
-# parallel jobs rather than run as one: together they take longer than a
-# reviewer should wait, and a split run names the failing area in the job
-# list instead of somewhere inside a single long log.
+# A new push to a pull request cancels that PR's superseded run. Pushes to main
+# and manual runs get a group of their own (the run id), so they are never
+# cancelled and never queue behind each other: main's run is the one that
+# publishes the staging candidate and deploys it.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Shared by the jobs that need Postgres. `services:` cannot be declared in a
+# composite action, so each of those jobs spells the block out; everything
+# else they have in common (uv, the locked sync, daimon_test, alembic) is
+# .github/actions/setup-daimon. The suites are split across parallel jobs
+# rather than run as one: together they take longer than a reviewer should
+# wait, and a split run names the failing area in the job list.
 
 jobs:
   lint:
@@ -24,11 +32,8 @@ jobs:
       # Silences pyright-python's "newer version available" nag in the log.
       PYRIGHT_PYTHON_IGNORE_WARNINGS: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --all-packages
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-daimon
 
       - name: ruff
         run: uv run ruff check . && uv run ruff format --check .
@@ -68,7 +73,7 @@ jobs:
       - name: mcp tool catalogue check
         run: uv run python scripts/generate_mcp_tool_catalogue.py --check
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/daimon-web
           key: tailwindcss-v4.3.3-linux-x64-dc61b3ac6b8c9ca8
@@ -76,14 +81,29 @@ jobs:
       - name: web CSS check
         run: uv run python scripts/generate_web_css.py --check
 
-  pytest-core:
-    name: pytest-core (${{ matrix.shard }}/${{ strategy.job-total }})
+  # Every Postgres-backed suite but Discord, which has its own hang
+  # diagnostics. `shards` > 1 splits the suite across legs by test file through
+  # daimon.testing.ci_shard, balanced by the per-file seconds in ci_durations.json
+  # (scripts/generate_ci_durations.py refreshes it); add legs and raise
+  # `shards` together to rebalance.
+  # The shard-check job proves the legs of a suite cover it exactly once.
+  pytest-db:
+    name: pytest-${{ matrix.suite }}${{ matrix.shards > 1 && format(' ({0}/{1})', matrix.shard, matrix.shards) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        include:
+          - { suite: core, shard: 0, shards: 4, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: core, shard: 1, shards: 4, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: core, shard: 2, shards: 4, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: core, shard: 3, shards: 4, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: mcp, shard: 0, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
+          - { suite: mcp, shard: 1, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
+          - { suite: slack, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/slack }
+          - { suite: teams, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/teams }
+          - { suite: parity, shard: 0, shards: 1, fetch-depth: 1, paths: tests/parity }
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -101,85 +121,25 @@ jobs:
       DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
       DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0  # Credential equivalence tests import the fixed base commit.
-      - uses: astral-sh/setup-uv@v4
+          fetch-depth: ${{ matrix.fetch-depth }}  # Core's credential equivalence tests import the fixed base commit and origin/integration/neutral-core, so core fetches full history.
+      - uses: ./.github/actions/setup-daimon
         with:
-          enable-cache: true
-      - run: uv sync --all-extras --all-packages
-      - name: Create daimon_test database
-        env:
-          PGPASSWORD: daimon
-        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
-      - name: alembic upgrade (test DB)
-        env:
-          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
-        run: uv run alembic upgrade head
-      - name: pytest (core + cli + scheduler + testing + integration)
+          database: "true"
+      - name: pytest (${{ matrix.suite }})
         run: >-
-          uv run pytest qa/live/tests packages/core packages/adapters/cli
-          packages/adapters/scheduler packages/testing tests/integration
-          tests/test_*.py tests/performance -n auto
-          -p daimon.testing.ci_shard --ci-shard-index=${{ matrix.shard }}
-          --ci-shard-count=4 --durations=20
-          --junitxml=core-shard-${{ matrix.shard }}.xml
-      - uses: actions/upload-artifact@v4
+          uv run pytest ${{ matrix.paths }} -n 4 --dist worksteal
+          -p daimon.testing.ci_shard --ci-shard-by=file
+          --ci-shard-suite=${{ matrix.suite }}
+          --ci-shard-index=${{ matrix.shard }}
+          --ci-shard-count=${{ matrix.shards }} --durations=20
+          --junitxml=${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: core-shard-${{ matrix.shard }}-junit
-          path: core-shard-${{ matrix.shard }}.xml
-          if-no-files-found: ignore
-
-  pytest-mcp:
-    name: pytest-mcp (${{ matrix.shard }}/${{ strategy.job-total }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1]
-    services:
-      postgres:
-        image: mirror.gcr.io/library/postgres:18-alpine
-        env:
-          POSTGRES_USER: daimon
-          POSTGRES_PASSWORD: daimon
-          POSTGRES_DB: daimon
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd="pg_isready -U daimon"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=10
-    env:
-      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
-      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --all-packages
-      - name: Create daimon_test database
-        env:
-          PGPASSWORD: daimon
-        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
-      - name: alembic upgrade (test DB)
-        env:
-          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
-        run: uv run alembic upgrade head
-      - name: pytest (mcp)
-        run: >-
-          uv run pytest packages/adapters/mcp -n auto
-          -p daimon.testing.ci_shard --ci-shard-index=${{ matrix.shard }}
-          --ci-shard-count=2 --durations=20
-          --junitxml=mcp-shard-${{ matrix.shard }}.xml
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: mcp-shard-${{ matrix.shard }}-junit
-          path: mcp-shard-${{ matrix.shard }}.xml
+          name: ${{ matrix.suite }}-shard-${{ matrix.shard }}-junit
+          path: ${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: ignore
 
   pytest-discord:
@@ -202,19 +162,10 @@ jobs:
       DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
       DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-daimon
         with:
-          enable-cache: true
-      - run: uv sync --all-extras --all-packages
-      - name: Create daimon_test database
-        env:
-          PGPASSWORD: daimon
-        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
-      - name: alembic upgrade (test DB)
-        env:
-          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
-        run: uv run alembic upgrade head
+          database: "true"
       - name: pytest (discord)
         id: discord-pytest
         timeout-minutes: 13
@@ -225,7 +176,13 @@ jobs:
           (sleep 360; bash .github/scripts/discord-postgres-diagnostics.sh > "$RUNNER_TEMP/discord-postgres-hang.txt" 2>&1) &
           diagnostic_pid=$!
           trap 'kill "$diagnostic_pid" 2>/dev/null || true' EXIT
-          uv run pytest packages/adapters/discord -n 2 -rfE --tb=short -o faulthandler_timeout=300
+          uv run pytest packages/adapters/discord -n 2 -rfE --tb=short -o faulthandler_timeout=300 --durations=20 --junitxml=discord.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: discord-junit
+          path: discord.xml
+          if-no-files-found: ignore
       - name: Discord hang diagnostics
         if: always() && steps.discord-pytest.outcome != 'success'
         env:
@@ -250,125 +207,41 @@ jobs:
           echo "Postgres snapshot after pytest stopped:"
           bash .github/scripts/discord-postgres-diagnostics.sh
 
-  pytest-slack:
+  # Suites that need no database.
+  pytest-light:
+    name: pytest-${{ matrix.suite }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    services:
-      postgres:
-        image: mirror.gcr.io/library/postgres:18-alpine
-        env:
-          POSTGRES_USER: daimon
-          POSTGRES_PASSWORD: daimon
-          POSTGRES_DB: daimon
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd="pg_isready -U daimon"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=10
-    env:
-      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
-      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { suite: report-host, paths: apps/report-host }
+          - { suite: mux, paths: packages/mux }
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-daimon
+      - name: pytest (${{ matrix.suite }})
+        run: >-
+          uv run pytest ${{ matrix.paths }} -n 4 --dist worksteal
+          --durations=20 --junitxml=${{ matrix.suite }}.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
         with:
-          enable-cache: true
-      - run: uv sync --all-extras --all-packages
-      - name: Create daimon_test database
-        env:
-          PGPASSWORD: daimon
-        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
-      - name: alembic upgrade (test DB)
-        env:
-          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
-        run: uv run alembic upgrade head
-      - name: pytest (slack)
-        run: uv run pytest packages/adapters/slack -n auto
-
-  pytest-teams:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    services:
-      postgres:
-        image: mirror.gcr.io/library/postgres:18-alpine
-        env:
-          POSTGRES_USER: daimon
-          POSTGRES_PASSWORD: daimon
-          POSTGRES_DB: daimon
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd="pg_isready -U daimon"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=10
-    env:
-      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
-      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --all-packages
-      - name: Create daimon_test database
-        env:
-          PGPASSWORD: daimon
-        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
-      - name: alembic upgrade (test DB)
-        env:
-          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
-        run: uv run alembic upgrade head
-      - name: pytest (teams)
-        run: uv run pytest packages/adapters/teams -n auto
-
-  pytest-parity:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    services:
-      postgres:
-        image: mirror.gcr.io/library/postgres:18-alpine
-        env:
-          POSTGRES_USER: daimon
-          POSTGRES_PASSWORD: daimon
-          POSTGRES_DB: daimon
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd="pg_isready -U daimon"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=10
-    env:
-      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
-      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --all-packages
-      - name: Create daimon_test database
-        env:
-          PGPASSWORD: daimon
-        run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
-      - name: alembic upgrade (test DB)
-        env:
-          DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
-        run: uv run alembic upgrade head
-      - name: pytest (parity)
-        run: uv run pytest tests/parity -n auto
+          name: ${{ matrix.suite }}-junit
+          path: ${{ matrix.suite }}.xml
+          if-no-files-found: ignore
 
   pytest-notebook-host:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --all-packages
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-daimon
       - name: pytest (notebook-host)
-        run: uv run pytest apps/notebook-host -n auto
+        run: >-
+          uv run pytest apps/notebook-host -n 4 --dist worksteal
+          --durations=20 --junitxml=notebook-host.xml
       # The real-browser isolation test: two real marimo notebooks on their own
       # *.localhost origins in headless Chromium. Playwright stays out of the
       # locked dependencies; it is only needed here.
@@ -378,30 +251,25 @@ jobs:
         run: >-
           uv run --with playwright==1.63.0 pytest
           apps/notebook-host/tests/test_notebook_origin_browser.py -m slow
+          --durations=20 --junitxml=notebook-host-browser.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: notebook-host-junit
+          path: notebook-host*.xml
+          if-no-files-found: ignore
 
-  pytest-report-host:
+  # Collect-only, so it needs no database: every sharded suite's legs together
+  # must collect exactly what the suite collects unsharded, each test file in
+  # exactly one leg. Reads the matrix above, so a new leg is checked as added.
+  shard-check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --all-packages
-      - name: pytest (report-host)
-        run: uv run pytest apps/report-host -n auto
-
-  pytest-mux:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-        with:
-          enable-cache: true
-      - run: uv sync --all-extras --all-packages
-      - name: pytest (mux)
-        run: uv run pytest packages/mux -n auto
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-daimon
+      - name: shards cover each suite exactly once
+        run: uv run python scripts/check_ci_shards.py
 
   # Pull requests and self-hosted main runs without GCP config exercise all
   # three Dockerfiles without publishing images or staging credentials. Hosted
@@ -411,24 +279,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: daimon
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile
           cache-from: type=gha,scope=daimon
       - name: notebook-host
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: apps/notebook-host/Dockerfile
           cache-from: type=gha,scope=notebook-host
       - name: report-host
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: apps/report-host/Dockerfile
@@ -453,12 +321,12 @@ jobs:
       AR_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
       REPO: ${{ vars.GCP_AR_REPO }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
         with:
           skip_install: true
       - name: Configure Docker for Artifact Registry
@@ -471,12 +339,12 @@ jobs:
           echo "daimon=$BASE/daimon:$TAG" >> "$GITHUB_OUTPUT"
           echo "notebook=$BASE/notebook-host:$TAG" >> "$GITHUB_OUTPUT"
           echo "report=$BASE/report-host:$TAG" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Build + push candidate daimon
         id: daimon
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile
@@ -488,7 +356,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=daimon,ignore-error=true
       - name: Build + push candidate notebook-host
         id: notebook
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: apps/notebook-host/Dockerfile
@@ -500,7 +368,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=notebook-host,ignore-error=true
       - name: Build + push candidate report-host
         id: report
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: apps/report-host/Dockerfile
@@ -513,7 +381,7 @@ jobs:
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, pytest-core, pytest-mcp, pytest-discord, pytest-slack, pytest-teams, pytest-parity, pytest-notebook-host, pytest-report-host, pytest-mux, docker-publish-candidate]
+    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-light, pytest-notebook-host, docker-publish-candidate]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators
