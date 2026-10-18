@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The agent GitHub repo picker groups accounts and orgs, keeps selections across owners, and saves additions and removals together. A GitHub owner whose repos cannot be listed leaves other owners available; stale grants remain removable.
+
 - One agent can now use repos from several GitHub accounts or orgs (up to 12); each gets its own token covering exactly the granted repos.
 
 - **People from another organisation get none of the agent's credentials.**

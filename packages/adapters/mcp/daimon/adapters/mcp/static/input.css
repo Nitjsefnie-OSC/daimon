@@ -358,6 +358,58 @@
   .gh-agent-row,.gh-picker-choice,.gh-status-icon .web-icon{transition:none;animation:none}
 }
 .gh-choice.is-added:has(input:checked){background:#f5f7fa;border-color:var(--border)}
+
+/* Multi-owner agent editor. The tenant connection picker above keeps its palette. */
+.gh-flow--picker:has(.gh-editor){color:#1c1b18}
+.gh-flow--picker:has(.gh-editor) .web-icon:not(.web-icon--github):not(.web-icon--discord){stroke-width:1.5}
+.gh-flow--picker:has(.gh-editor) .gh-connected-list,
+.gh-flow--picker:has(.gh-editor) .gh-repo-dialog{background:#fcfbf8;border-color:#e6e3dc;color:#1c1b18}
+.gh-flow--picker:has(.gh-editor) .gh-primary{background:#1c1b18;border-color:#1c1b18;color:#fcfbf8}
+.gh-flow--picker:has(.gh-editor) .gh-primary:hover:not(:disabled){background:#34312c}
+.gh-flow--picker:has(.gh-editor) .gh-agent-row{display:flex;align-items:center;flex-wrap:wrap;gap:0 8px;min-height:56px;padding:6px 16px;background:#fcfbf8;border-color:#e6e3dc}
+.gh-flow--picker:has(.gh-editor) .gh-agent-row.gh-removed-row{background:#fbeeea}
+.gh-flow--picker:has(.gh-editor) .gh-agent-row.gh-added-row{background:#f1f5ee}
+.gh-flow--picker:has(.gh-editor) .gh-row-top{flex:1;min-width:0;min-height:43px;flex-direction:row;align-items:center}
+.gh-flow--picker:has(.gh-editor) .gh-row-meta{margin:0}
+.gh-row-icon{display:inline-flex;align-items:center;justify-content:center;flex:none;width:20px;height:24px;margin-right:12px;color:#5f5c54}
+.gh-row-icon .web-icon{width:16px;height:16px;stroke-width:1.5}
+.gh-flow--picker:has(.gh-editor) .gh-row-name{flex:1}
+.gh-flow--picker:has(.gh-editor) .gh-row-name{font-size:16px;line-height:24px;font-weight:400;color:#1c1b18}
+.gh-flow--picker:has(.gh-editor) .gh-removed-row .gh-row-name{text-decoration-color:#5f5c54}
+.gh-flow--picker:has(.gh-editor) .gh-row-action{min-height:44px;color:#5f5c54}
+.gh-working-card{display:flex;align-items:center;gap:12px;min-height:56px;margin:16px 0;padding:5px 16px 5px 14px;border:1px solid #e6e3dc;border-left:3px solid #1c1b18;border-radius:4px;background:#fcfbf8}
+.gh-working-card>.web-icon{width:20px;height:20px;color:#5f5c54}
+.gh-working-card>span{flex:none;color:#5f5c54;font-size:14px}
+.gh-working-card>strong{min-width:0;flex:1;overflow-wrap:anywhere;font-size:16px;font-weight:400}
+.gh-working-card>.gh-add-button{min-height:44px;flex:none}
+.gh-owner-group[hidden],.gh-owner-choice[hidden],#repo-owner-sheet[hidden]{display:none!important}
+.gh-owner-heading{display:flex;align-items:center;gap:12px;min-height:40px;margin:0;padding:8px 16px;background:#f1efe9;color:#5f5c54;font-size:14px;font-weight:500}
+.gh-owner-heading span{font-size:12px;font-weight:400}
+.gh-owner-avatar,.gh-owner-avatar-fallback{display:inline-flex;align-items:center;justify-content:center;flex:none;width:20px;height:20px;object-fit:cover;border-radius:4px}
+.gh-owner-avatar--person{border-radius:50%}
+.gh-owner-avatar-fallback{color:#5f5c54}
+.gh-owner-avatar-fallback .web-icon{width:16px;height:16px}
+.gh-owner-choice{padding:0 24px 16px;max-height:65vh;overflow:auto}
+.gh-owner-choice>p:first-child{margin:0 0 14px}
+.gh-owner-button{display:flex;align-items:center;flex-wrap:wrap;gap:8px;width:100%;min-height:56px;padding:12px 16px;border:0;border-top:1px solid #e6e3dc;background:#fcfbf8;color:#1c1b18;text-align:left;font-size:16px}
+.gh-owner-button small{color:#5f5c54;font-size:13px}
+.gh-owner-button:disabled{opacity:.6;cursor:not-allowed}
+.gh-owner-selected{color:#11624f!important}
+.gh-owner-truncated{padding:12px 16px;background:#fdf0d5;color:#8a5300}
+.gh-owner-choice .gh-dialog-footer{margin:16px -24px -16px}
+.gh-flow--picker:has(.gh-editor) .gh-picker-choice{min-height:56px;padding:12px 16px;border-color:#e6e3dc}
+.gh-flow--picker:has(.gh-editor) .gh-picker-label{font-size:16px;font-weight:400}
+.gh-flow--picker:has(.gh-editor) .gh-editor-footer{background:#fff;border-color:#e6e3dc}
+.gh-saved-groups{margin-top:24px;border:1px solid #e6e3dc;background:#fcfbf8}
+.gh-saved-groups h2{margin:0;padding:10px 16px;background:#f1efe9;font-size:14px;font-weight:500}
+.gh-saved-row{min-height:56px;padding:16px;border-top:1px solid #e6e3dc;font-size:16px}
+.gh-saved-row span{margin-left:8px;color:#11624f;font-size:13px}
+@media(max-width:600px){
+  .gh-flow--picker:has(.gh-editor) .gh-row-top{flex-direction:row}
+  .gh-flow--picker:has(.gh-editor) .gh-agent-row{padding:6px 16px}
+  .gh-owner-choice{padding-right:20px;padding-left:20px}
+  .gh-owner-choice .gh-dialog-footer{margin-right:-20px;margin-left:-20px}
+}
 @media(max-width:600px){
   .gh-editor .gh-editor-cancel:not([hidden]){display:inline-flex;grid-area:1/2;justify-self:end;align-self:center}
 }
