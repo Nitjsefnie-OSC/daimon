@@ -1352,7 +1352,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         async def save(hidden: dict[str, str], **choices: object) -> httpx.Response:
             return await browser.post(
                 "/oauth/github/confirm",
-                data={**hidden, "access": "read", "working": "keep", **choices},
+                data={**hidden, "access": "write", "working": "keep", **choices},
             )
 
         state, hidden, rendered = await page()
@@ -1360,7 +1360,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         assert '<dialog id="repo-picker"' in rendered
         assert '<noscript><section class="gh-fallback">' in rendered
         assert (await save(hidden)).status_code == 200  # No-op keeps the invitation.
-        added = await save(hidden, repo=["101", "102"], access_101="read", access_102="write")
+        added = await save(hidden, repo=["101", "102"])
         assert added.status_code == 200
         assert "Editor can use 2 repos." in added.text
         async with sessionmaker() as session:
@@ -1371,13 +1371,13 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
             101: "write",
             102: "write",
         }
-        replay = await save(hidden, repo=["101", "102"], access_101="read", access_102="write")
+        replay = await save(hidden, repo=["101", "102"])
         assert replay.status_code == 200 and "Editor can use 2 repos." in replay.text
 
         state, hidden, rendered = await page()
         assert "Repos for this agent" in rendered
         assert "Read only" not in rendered and "Read and write" not in rendered
-        assert (await save(hidden, repo="101", access_101="write")).status_code == 403
+        assert (await save(hidden, repo="101")).status_code == 403
         assert (await save(hidden, repo="103", access_103="admin")).status_code == 400
         assert (await save(hidden, repo="103", access_103=["read", "write"])).status_code == 400
         working = await save(hidden, working="101")
@@ -2027,6 +2027,64 @@ async def test_confirm_refuses_too_many_fields(editor_env: _EditorEnv) -> None:
     await _no_github_calls_after(editor_env, calls_before)
 
 
+def test_noscript_large_owner_list_uses_one_access_field() -> None:
+    installations = [
+        oauth_github._Installation(
+            id=owner,
+            owner_id=owner,
+            owner_login=f"org-{owner}",
+            repository_selection="selected",
+            repos=tuple(
+                oauth_github._Repo(
+                    owner * 10_000 + index,
+                    owner,
+                    owner,
+                    f"org-{owner}/repo-{index}",
+                    "admin",
+                )
+                for index in range(2000)
+            ),
+        )
+        for owner in range(1, 4)
+    ]
+    page = oauth_github._agent_editor_page(
+        root="https://mcp.test",
+        state="state",
+        invitation_hash="invitation",
+        secret="secret",
+        agent_name="Editor",
+        workspace="Test",
+        platform="discord",
+        grants=[],
+        installations=installations,
+        snapshot="snapshot",
+        cancel_url="https://mcp.test/cancel",
+        install_url="https://github.test/setup",
+        github_user_id=1,
+    ).body.decode()
+    fallback = page.split("<noscript><section", 1)[1].split("</noscript>", 1)[0]
+    assert fallback.count('name="repo"') == 6000
+    assert re.search(r'name="access_\d+"', fallback) is None
+    assert page.count('name="access" value="write"') == 1
+    # Every checkbox can be checked without parse_qs reaching max_num_fields.
+    assert 6000 + len(_hidden_pairs(page)) + fallback.count('name="remove"') + 1 < (
+        oauth_github._MAX_CONFIRM_FIELDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_editor_rejects_unknown_and_forged_scoped_fields(editor_env: _EditorEnv) -> None:
+    _, hidden = await editor_env.open_editor()
+    for extra in ({"forged": "write"}, {"access_103": "write"}):
+        response = await editor_env.browser.post(
+            "/oauth/github/confirm",
+            data={**hidden, "working": "keep", "repo": "103", **extra},
+        )
+        assert response.status_code == 400
+        assert "Selection could not be verified." in response.text
+    assert await editor_env.saved_repo_ids() == []
+
+
 @pytest.mark.asyncio
 async def test_confirm_stops_reading_a_chunked_body_past_the_cap(editor_env: _EditorEnv) -> None:
     state, hidden = await editor_env.open_editor()
@@ -2084,12 +2142,9 @@ async def test_failed_save_retry_form_keeps_state_and_the_ticked_repos(
         "/oauth/github/confirm",
         data={
             **hidden,
-            "access": "read",
+            "access": "write",
             "working": "101",
             "repo": ["101", "102"],
-            "access_101": "read",
-            "access_102": "write",
-            "ignored": '"><script>alert(1)</script>',
         },
     )
 
@@ -2101,11 +2156,10 @@ async def test_failed_save_retry_form_keeps_state_and_the_ticked_repos(
     # have been a state-less GET that lands on the expired page.
     assert form.group(1) == "https://mcp.test/oauth/github/confirm"
     assert "state=" not in form.group(1)
-    assert "<script>" not in failed.text and 'name="ignored"' not in failed.text
     carried = _hidden_pairs(failed.text)
     assert ("state", state) in carried
     assert [value for name, value in carried if name == "repo"] == ["101", "102"]
-    assert dict(carried)["access_102"] == "write"
+    assert dict(carried)["access"] == "write"
     assert dict(carried)["working"] == "101"
     assert dict(carried)["receipt"] == hidden["receipt"]
 

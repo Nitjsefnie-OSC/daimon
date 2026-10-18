@@ -6,20 +6,28 @@ Uses synthetic fixture data and the built web.css; no GitHub login or test DB.
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from daimon.adapters.mcp.oauth_github import _agent_editor_page, _Installation, _Repo
+from daimon.adapters.mcp.oauth_github import (
+    _agent_editor_page,
+    _Installation,
+    _Repo,
+    _saved_agent_page,
+)
 from daimon.core.stores.github_access import AgentRepo
 from playwright.sync_api import Route, expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 CSS = ROOT / "packages/adapters/mcp/daimon/adapters/mcp/static/web.css"
+MARK = ROOT / "packages/adapters/mcp/daimon/adapters/mcp/static/daimon-face.png"
 CHROME = os.environ.get(
     "CHROME", str(Path.home() / ".cache/ms-playwright/chromium-1248/chrome-linux64/chrome")
 )
+SHOTS = Path("/home/derick/scratch/daimon-os-ux/multi-org/picker-shots")
 
 
 def grant(repo_id: int, name: str, *, working: bool = False) -> AgentRepo:
@@ -41,7 +49,24 @@ def grant(repo_id: int, name: str, *, working: bool = False) -> AgentRepo:
     )
 
 
-def fixture_page(*, one_owner: bool = False, error_owner: bool = False, stale: bool = False) -> str:
+def inline_assets(page_html: str) -> str:
+    mark = base64.b64encode(MARK.read_bytes()).decode()
+    page_html = page_html.replace("/web/daimon-face.png", f"data:image/png;base64,{mark}")
+    return re.sub(
+        r'<link rel="stylesheet" href="[^"]+">',
+        lambda _: f"<style>{CSS.read_text()}</style>",
+        page_html,
+        count=1,
+    )
+
+
+def fixture_page(
+    *,
+    one_owner: bool = False,
+    error_owner: bool = False,
+    stale: bool = False,
+    three_granted: bool = False,
+) -> str:
     owners = (
         (77, 55, "sam-rivera", "User"),
         (78, 56, "northwind-labs", "Organization"),
@@ -79,6 +104,8 @@ def fixture_page(*, one_owner: bool = False, error_owner: bool = False, stale: b
     )
     if stale:
         grants.append(grant(9901, "lost-org/old"))
+    if three_granted:
+        grants.append(grant(7901, "tidewater-eap/saved"))
     response = _agent_editor_page(
         root="https://mcp.test",
         state="fixture",
@@ -94,12 +121,165 @@ def fixture_page(*, one_owner: bool = False, error_owner: bool = False, stale: b
         install_url="https://github.com/apps/daimon/installations/new",
         github_user_id=55,
     )
-    return re.sub(
-        r'<link rel="stylesheet" href="[^"]+">',
-        lambda _: f"<style>{CSS.read_text()}</style>",
-        response.body.decode(),
-        count=1,
-    )
+    return inline_assets(response.body.decode())
+
+
+def saved_page() -> str:
+    grants = [
+        grant(7801, "northwind-labs/saved", working=True),
+        grant(7802, "northwind-labs/new"),
+        grant(7901, "tidewater-eap/saved"),
+        grant(7902, "tidewater-eap/new"),
+    ]
+    response = _saved_agent_page("Atlas", grants, {repo.repo_id for repo in grants})
+    return inline_assets(response.body.decode())
+
+
+def capture(width: int) -> None:
+    SHOTS.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=CHROME)
+        page = browser.new_page(viewport={"width": width, "height": 900}, reduced_motion="reduce")
+        page.set_content(fixture_page(three_granted=True))
+
+        def shot(name: str) -> None:
+            page.screenshot(path=str(SHOTS / f"{name}-{width}.png"), full_page=True)
+
+        assert page.locator("#connected-repos .gh-owner-group:visible").count() == 3
+        shot("editor")
+
+        page.get_by_role("button", name="Add repos", exact=True).click()
+        shot("owner-choice")
+        page.locator('.gh-owner-button[data-owner="northwind-labs"]').click()
+        shot("owner-sheet")
+        page.locator('.gh-picker-choice[data-repo-id="7802"] input').check()
+        page.locator("#stage-repos").click()
+        assert page.locator(".gh-agent-row.gh-added-row").count() == 1
+        page.get_by_role("button", name="Add repos", exact=True).click()
+        page.locator('.gh-owner-button[data-owner="northwind-labs"]').click()
+        assert page.locator('.gh-picker-choice[data-repo-id="7802"] input').is_checked()
+        page.get_by_role("button", name="Back").click()
+        assert page.locator("#owner-picker-count").inner_text() == "1 selected"
+        page.locator('.gh-owner-button[data-owner="tidewater-eap"]').click()
+        page.locator('.gh-picker-choice[data-repo-id="7902"] input').check()
+        page.locator("#show-selected-repos").click()
+        assert page.locator(".gh-selected-owner").count() == 2
+        shot("selected")
+        page.locator("#stage-repos").click()
+        assert page.locator(".gh-agent-row.gh-added-row").count() == 2
+        page.locator('.gh-agent-row[data-repo-id="7701"] .gh-remove-action').click()
+        shot("unsaved")
+
+        page.get_by_role("button", name="Add repos", exact=True).click()
+        page.locator('.gh-owner-button[data-owner="northwind-labs"]').click()
+        assert page.locator('.gh-picker-choice[data-repo-id="7802"] input').is_checked()
+        page.locator("#close-repo-picker").click()
+        assert page.locator(".gh-agent-row.gh-added-row").count() == 2
+        assert sorted(
+            page.locator("#github-connect-form").evaluate(
+                "form => new FormData(form).getAll('repo')"
+            )
+        ) == ["7802", "7902"]
+        assert page.locator("#github-connect-form").evaluate(
+            "form => [...new FormData(form).keys()].every(key => !key.startsWith('access_'))"
+        )
+        assert page.locator("#github-connect-form").evaluate(
+            "form => new FormData(form).getAll('remove')"
+        ) == ["7701"]
+
+        def save(route: Route) -> None:
+            route.fulfill(status=200, content_type="text/html", body=saved_page())
+
+        page.route("https://mcp.test/oauth/github/confirm", save)
+        page.locator("#save-repos").click()
+        expect(page.get_by_text("Atlas can use 4 repos.")).to_be_visible()
+        assert page.locator(".gh-saved-groups .gh-owner-group").count() == 2
+        shot("saved")
+        browser.close()
+
+
+def check_staged_edits(width: int) -> int:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=CHROME)
+        page = browser.new_page(viewport={"width": width, "height": 900}, reduced_motion="reduce")
+
+        def fresh() -> None:
+            page.set_content(fixture_page())
+
+        def add_northwind() -> None:
+            page.get_by_role("button", name="Add repos", exact=True).click()
+            page.locator('.gh-owner-button[data-owner="northwind-labs"]').click()
+            page.locator('.gh-picker-choice[data-repo-id="7802"] input').check()
+            page.locator("#stage-repos").click()
+            assert page.locator('.gh-agent-row[data-repo-id="7802"].gh-added-row').count() == 1
+
+        def posted_repos() -> list[str]:
+            return page.locator("#github-connect-form").evaluate(
+                "form => new FormData(form).getAll('repo')"
+            )
+
+        fresh()
+        add_northwind()
+        page.get_by_role("button", name="Add repos", exact=True).click()
+        page.locator('.gh-owner-button[data-owner="northwind-labs"]').click()
+        page.locator('.gh-picker-choice[data-repo-id="7802"] input').uncheck()
+        assert posted_repos() == []
+        assert page.locator('.gh-agent-row[data-repo-id="7802"]').count() == 0
+        page.get_by_role("button", name="Back").click()
+        page.locator('.gh-owner-button[data-owner="tidewater-eap"]').click()
+        page.locator('.gh-picker-choice[data-repo-id="7902"] input').check()
+        page.get_by_role("button", name="Back").click()
+        page.locator('.gh-owner-button[data-owner="northwind-labs"]').click()
+        assert not page.locator('.gh-picker-choice[data-repo-id="7802"] input').is_checked()
+        page.locator("#stage-repos").click()
+        assert posted_repos() == ["7902"]
+
+        fresh()
+        add_northwind()
+        page.get_by_role("button", name="Add repos", exact=True).click()
+        page.locator('.gh-owner-button[data-owner="tidewater-eap"]').click()
+        page.locator("#show-selected-repos").click()
+        page.locator('.gh-picker-choice[data-repo-id="7802"] input').uncheck()
+        assert posted_repos() == []
+        assert page.locator("#show-selected-repos").get_attribute("aria-pressed") == "false"
+        page.locator("#close-repo-picker").click()
+
+        fresh()
+        add_northwind()
+        page.get_by_role("button", name="Add repos", exact=True).click()
+        page.locator("#owner-clear-selection").click()
+        assert posted_repos() == []
+        assert page.locator("#selection-status").inner_text() == "No changes to save"
+        page.locator('.gh-owner-button[data-owner="northwind-labs"]').click()
+        assert not page.locator('.gh-picker-choice[data-repo-id="7802"] input').is_checked()
+        page.locator("#close-repo-picker").click()
+
+        fresh()
+        add_northwind()
+        page.get_by_role("button", name="Add repos", exact=True).click()
+        page.locator('.gh-owner-button[data-owner="northwind-labs"]').click()
+        page.locator("#clear-selection").click()
+        assert posted_repos() == []
+        page.locator("#close-repo-picker").click()
+
+        fresh()
+        add_northwind()
+        page.locator("#discard-repos").click()
+        assert posted_repos() == []
+        page.get_by_role("button", name="Add repos", exact=True).click()
+        page.locator('.gh-owner-button[data-owner="northwind-labs"]').click()
+        assert not page.locator('.gh-picker-choice[data-repo-id="7802"] input').is_checked()
+        page.locator("#close-repo-picker").click()
+
+        fresh()
+        add_northwind()
+        page.locator('.gh-agent-row[data-repo-id="7802"] .gh-remove-action').click()
+        assert posted_repos() == []
+        page.get_by_role("button", name="Add repos", exact=True).click()
+        page.locator('.gh-owner-button[data-owner="northwind-labs"]').click()
+        assert not page.locator('.gh-picker-choice[data-repo-id="7802"] input').is_checked()
+        browser.close()
+    return 6
 
 
 def check(width: int) -> int:
@@ -162,6 +342,9 @@ def check(width: int) -> int:
             "form => [...new FormData(form).getAll('repo')].sort()"
         )
         assert posted == ["7802", "7902"]
+        assert page.locator("#github-connect-form").evaluate(
+            "form => [...new FormData(form).keys()].every(key => !key.startsWith('access_'))"
+        )
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         assert page.locator('input[name="installation"]').count() == 0
         assert page.get_by_text("Remove all and switch").count() == 0
@@ -213,4 +396,7 @@ def check(width: int) -> int:
 
 
 if __name__ == "__main__":
-    print(f"{check(390) + check(1280)} browser checks passed")
+    count = check(390) + check(1280) + check_staged_edits(390) + check_staged_edits(1280)
+    capture(390)
+    capture(1280)
+    print(f"{count} browser checks passed; 12 screenshots saved to {SHOTS}")

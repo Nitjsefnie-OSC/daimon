@@ -70,7 +70,7 @@ ClientFactory = Callable[[], httpx.AsyncClient]
 _COOKIE = "daimon_gh_connect"
 _log = logging.getLogger(__name__)
 _ADMIN_RETRY = "Couldn't confirm you're still a server or workspace admin. Try again in a minute."
-# A save posts about 40 bytes per ticked repo (`repo=<id>` plus `access_<id>=write`),
+# A save posts one `repo=<id>` per addition plus one shared `access=write`,
 # so 256 KiB covers several thousand repos while bounding what one request can
 # make the server read and parse. The cap is checked before any other work.
 _MAX_CONFIRM_BODY_BYTES = 256 * 1024
@@ -671,7 +671,9 @@ _EDITOR_SCRIPT = """
   const saveHelp = document.getElementById("save-help");
   const stage = document.getElementById("stage-repos");
   const selectShown = document.getElementById("select-shown");
+  const showSelected = document.getElementById("show-selected-repos");
   const clearSelection = document.getElementById("clear-selection");
+  let selectedOnly = false;
   const workingInput = document.getElementById("working-input");
   const workingDialog = document.getElementById("working-picker");
   const workingSelect = document.getElementById("working-choice");
@@ -696,7 +698,7 @@ _EDITOR_SCRIPT = """
       trigger.setAttribute("aria-expanded", "false");
     }
   }
-  function makeAddedRow(id, name, access) {
+  function makeAddedRow(id, name) {
     const row = document.getElementById("added-row-template")
       .content.firstElementChild.cloneNode(true);
     row.dataset.repoId = id;
@@ -706,9 +708,6 @@ _EDITOR_SCRIPT = """
     row.querySelector(".gh-remove-action").setAttribute("aria-label", "Remove " + name);
     const repoInput = row.querySelector('input[name="repo"]');
     repoInput.value = id;
-    const accessInput = row.querySelector(".gh-scoped-access");
-    accessInput.name = "access_" + id;
-    accessInput.value = access;
     const owner = name.split("/")[0];
     const group = [...list.querySelectorAll(".gh-owner-group")]
       .find(group => group.dataset.owner.toLowerCase() === owner.toLowerCase());
@@ -791,18 +790,44 @@ _EDITOR_SCRIPT = """
   function resetPicker() {
     for (const option of options) {
       const id = option.dataset.repoId;
-      checkbox(option).checked = pickerDraft.has(id);
+      checkbox(option).checked = pickerDraft.has(id) || staged.has(id);
     }
     search.value = "";
+    selectedOnly = false;
     for (const option of options) option.hidden = activeOwner !== option.dataset.owner;
     for (const option of connected) option.hidden = activeOwner !== option.dataset.owner;
     for (const note of dialog.querySelectorAll(".gh-owner-truncated")) {
       note.hidden = activeOwner !== note.dataset.owner;
     }
     document.getElementById("no-search-results").hidden = true;
+    showSelected.setAttribute("aria-pressed", "false");
     updatePicker();
   }
   function updatePicker() {
+    if (selectedOnly && !options.some(option => checkbox(option).checked)) {
+      selectedOnly = false;
+      showSelected.setAttribute("aria-pressed", "false");
+    }
+    const query = search.value.trim().toLowerCase();
+    for (const option of options) {
+      option.hidden = selectedOnly ? !checkbox(option).checked :
+        option.dataset.owner !== activeOwner || !option.dataset.name.toLowerCase().includes(query);
+    }
+    for (const option of connected) option.hidden = selectedOnly ||
+      option.dataset.owner !== activeOwner || !option.dataset.name.toLowerCase().includes(query);
+    for (const heading of dialog.querySelectorAll(".gh-selected-owner")) heading.remove();
+    if (selectedOnly) {
+      let previousOwner = null;
+      for (const option of options.filter(option => !option.hidden)) {
+        if (option.dataset.owner !== previousOwner) {
+          const heading = document.createElement("h3");
+          heading.className = "gh-selected-owner";
+          heading.textContent = option.dataset.owner;
+          option.before(heading);
+          previousOwner = option.dataset.owner;
+        }
+      }
+    }
     const count = options.filter(o => checkbox(o).checked).length;
     const shown = options.filter(o => !o.hidden).length;
     stage.disabled = count === 0 && staged.size === 0;
@@ -817,8 +842,14 @@ _EDITOR_SCRIPT = """
       button.querySelector(".gh-owner-selected").textContent = n ? n + " selected" : "";
     }
     selectShown.textContent = "Select all " + shown + " shown";
+    selectShown.hidden = selectedOnly;
     selectShown.disabled = shown === 0;
     clearSelection.disabled = count === 0;
+    for (const button of dialog.querySelectorAll(".gh-owner-all")) {
+      button.hidden = selectedOnly;
+    }
+    showSelected.disabled = count === 0;
+    showSelected.textContent = selectedOnly ? "Show all" : "Selected (" + count + ")";
   }
   document.getElementById("open-repo-picker").addEventListener("click", event => {
     opener = event.currentTarget;
@@ -905,6 +936,18 @@ _EDITOR_SCRIPT = """
     for (const option of options) {
       if (checkbox(option).checked) pickerDraft.add(option.dataset.repoId);
     }
+    let changed = false;
+    for (const id of staged.keys()) {
+      if (pickerDraft.has(id)) continue;
+      staged.delete(id);
+      const row = rowFor(id);
+      if (row?.dataset.added === "true") {
+        row.remove();
+        if (working === id) { working = null; workingExplicit = true; }
+      }
+      changed = true;
+    }
+    if (changed) render();
     updatePicker();
   }
   dialog.addEventListener("change", rememberPicker);
@@ -934,25 +977,20 @@ _EDITOR_SCRIPT = """
     });
   }
   search.addEventListener("input", () => {
-    const query = search.value.trim().toLowerCase();
-    for (const option of options) {
-      option.hidden = option.dataset.owner !== activeOwner ||
-        !option.dataset.name.toLowerCase().includes(query);
-    }
-    for (const option of connected) {
-      option.hidden = option.dataset.owner !== activeOwner ||
-        !option.dataset.name.toLowerCase().includes(query);
-    }
+    updatePicker();
     document.getElementById("no-search-results").hidden = options.some(o => !o.hidden);
+  });
+  showSelected.addEventListener("click", () => {
+    selectedOnly = !selectedOnly;
+    showSelected.setAttribute("aria-pressed", String(selectedOnly));
     updatePicker();
   });
   stage.addEventListener("click", () => {
     const selected = options.filter(o => checkbox(o).checked);
-    staged.clear();
     for (const option of selected) {
       const id = option.dataset.repoId;
       staged.set(id, "write");
-      if (!rowFor(id)) makeAddedRow(id, option.dataset.name, staged.get(id));
+      if (!rowFor(id)) makeAddedRow(id, option.dataset.name);
       removed.delete(id);
     }
     for (const row of rows()) {
@@ -1002,6 +1040,7 @@ _EDITOR_SCRIPT = """
     } else if (button.dataset.action === "remove") {
       staged.delete(id);
       if (row.dataset.added === "true") {
+        pickerDraft.delete(id);
         row.remove();
       } else {
         removed.add(id);
@@ -1033,6 +1072,7 @@ _EDITOR_SCRIPT = """
   });
   document.getElementById("discard-repos").addEventListener("click", () => {
     staged.clear(); removed.clear(); working = initialWorking; workingExplicit = false;
+    pickerDraft.clear();
     for (const row of rows()) if (row.dataset.added === "true") row.remove();
     render();
   });
@@ -1412,6 +1452,8 @@ def _agent_editor_page(
         '<div class="gh-dialog-link gh-dialog-bulk">'
         '<button id="select-shown" class="gh-link-button" type="button">'
         f"Select all {len(options)} shown</button>"
+        '<button id="show-selected-repos" class="gh-link-button" type="button" '
+        'aria-pressed="false" disabled>Selected (0)</button>'
         '<button id="clear-selection" class="gh-link-button" type="button">Clear selection</button>'
         + "".join(
             f'<button class="gh-link-button gh-owner-all" type="button" '
@@ -1497,7 +1539,7 @@ def _agent_editor_page(
         f'<span class="gh-working-badge" hidden>{icon("pin")}Working repo</span>'
         '<span class="gh-pending-label" aria-live="polite"></span></div>'
         '<input type="hidden" name="repo" disabled>'
-        '<input class="gh-scoped-access" type="hidden" disabled>' + "</article></template>"
+        "</article></template>"
     )
     # Browsers without scripting still get a complete native form.
     parts.append('<noscript><section class="gh-fallback"><h2>Edit repos</h2>')
@@ -1528,7 +1570,6 @@ def _agent_editor_page(
             + (" checked" if repo.id == requested_id else "")
             + ">"
             f"Add {esc(repo.full_name)}</label>"
-            f'<input type="hidden" name="access_{repo.id}" value="write">'
         )
     parts.append(
         '<label>Working repo <select name="working"><option value="keep">Keep current</option>'
@@ -2403,6 +2444,9 @@ def build_oauth_github_routes(
             }
             old = {repo.repo_id: repo for repo in grants}
             repairable = {repo.repo_id for repo in grants if repo.repo_id in needed}
+            allowed_fields = _RETRY_FIELD_NAMES | {f"access_{repo_id}" for repo_id in repairable}
+            if fields.keys() - allowed_fields:
+                return _error("Selection could not be verified.", 400, retry_confirm_url)
             working_before = next((repo.repo_id for repo in grants if repo.is_working_repo), None)
             working_choice = working_values[0]
             if working_choice not in ("keep", "clear"):

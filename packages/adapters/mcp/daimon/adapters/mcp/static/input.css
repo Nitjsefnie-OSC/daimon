@@ -273,6 +273,7 @@
 .gh-dialog-search .web-icon { position: absolute; top: 13px; left: 12px; width: 18px; height: 18px; color: #728297; pointer-events: none; }
 .gh-dialog-search input { width: 100%; min-height: 44px; padding: 9px 12px 9px 40px; border: 1px solid #cdd7e2; border-radius: 8px; background: #fff; font-size: 14px; }
 .gh-dialog-choices { max-height: min(48vh, 430px); overflow-y: auto; padding: 0 24px; }
+.gh-selected-owner { margin: 16px 0 4px; font-size: 13px; font-weight: 600; }
 .gh-picker-choice { padding: 15px 0; border-top: 1px solid #e5e9ef; }
 .gh-picker-label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
 .gh-picker-label input { width: 17px; height: 17px; accent-color: #173d62; }
@@ -405,7 +406,11 @@
 .gh-saved-row{min-height:56px;padding:16px;border-top:1px solid #e6e3dc;font-size:16px}
 .gh-saved-row span{margin-left:8px;color:#11624f;font-size:13px}
 @media(max-width:600px){
-  .gh-flow--picker:has(.gh-editor) .gh-row-top{flex-direction:row}
+  .gh-flow--picker:has(.gh-editor) .gh-row-top{display:grid;grid-template-columns:20px minmax(0,1fr);gap:0 12px;flex-basis:100%}
+  .gh-flow--picker:has(.gh-editor) .gh-row-top .gh-row-icon{grid-column:1;grid-row:1;margin:0}
+  .gh-flow--picker:has(.gh-editor) .gh-row-name{grid-column:2;grid-row:1}
+  .gh-flow--picker:has(.gh-editor) .gh-row-actions{grid-column:2;grid-row:2;flex-wrap:wrap}
+  .gh-flow--picker:has(.gh-editor) .gh-row-meta{flex-basis:100%;margin-left:32px}
   .gh-flow--picker:has(.gh-editor) .gh-agent-row{padding:6px 16px}
   .gh-owner-choice{padding-right:20px;padding-left:20px}
   .gh-owner-choice .gh-dialog-footer{margin-right:-20px;margin-left:-20px}
