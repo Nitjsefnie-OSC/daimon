@@ -73,8 +73,7 @@ from pydantic import (
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 type TokenScope = (
-    tuple[int, tuple[int, ...]]
-    | tuple[int, int, tuple[int, ...], int | None, str | None]
+    tuple[int, tuple[int, ...]] | tuple[int, int, tuple[int, ...], int | None, str | None]
 )
 type MaSkill = BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill
 type MaTool = (

@@ -951,7 +951,9 @@ async def test_contraction_keeps_both_retained_chunk_ages(
         AppToken(uuid.uuid4(), "b1", 2, (202,), "write", "GH_TOKEN_I2_1", old, 1),
     )
     access = AppSessionAccess(
-        (), b_tokens, None,
+        (),
+        b_tokens,
+        None,
         token_repo_urls=(b0, b1),
         token_scopes=token_scopes_for_tokens(b_tokens, include=True),
     )

@@ -561,6 +561,12 @@ async def test_start_turn_mints_baseline_app_token_with_or_without_personal_link
     monkeypatch.setattr("daimon.core.sessions.add_app_credentials", AsyncMock())
 
     router = _agent_and_env_router()
+    # Minting counts the session vault's existing credentials against the budget.
+    router.add(
+        "GET",
+        r"/v1/vaults/vlt_start_turn/credentials",
+        lambda _r, _m: httpx.Response(200, json={"data": [], "next_page": None}),
+    )
     router.add(
         "POST",
         r"/v1/sessions",

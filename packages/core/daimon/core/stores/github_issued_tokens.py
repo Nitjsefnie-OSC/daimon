@@ -435,12 +435,10 @@ async def session_installations_needing_rotation(
             chunks[installation_id] = chunk + 1
             desired.add((installation_id, chunk, tuple(sorted(repo_ids))))
         live: set[tuple[int, int | None, tuple[int, ...]]] = {
-            (row.installation_id, row.chunk, tuple(sorted(row.repo_ids)))
-            for row in current
+            (row.installation_id, row.chunk, tuple(sorted(row.repo_ids))) for row in current
         }
         differing_installations = {
-            installation_id
-            for installation_id, _, _ in live.symmetric_difference(desired)
+            installation_id for installation_id, _, _ in live.symmetric_difference(desired)
         }
         if len(live) != len(current):
             differing_installations.update(row.installation_id for row in current)
@@ -452,8 +450,7 @@ async def session_installations_needing_rotation(
                 if chunk is not None
             }
             differing_installations.update(
-                installation_id
-                for installation_id, _, _ in recorded - desired
+                installation_id for installation_id, _, _ in recorded - desired
             )
     else:
         # A saved multi-installation scope and one desired installation are a
