@@ -305,11 +305,11 @@ Routines tools: create / list / get / update / delete.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_routine` | all callers | Create a routine in the caller's tenant partition. |
+| `create_routine` | all callers | Create a recurring routine with optional channel, thread or owner-DM delivery. |
 | `delete_routine` | all callers | Delete a routine (hard delete, tenant-scoped). |
 | `get_routine` | all callers | Get a routine by id. |
 | `list_routines` | all callers | List the routines you created (an admin sees every routine in the workspace). |
-| `update_routine` | all callers | PATCH-update a routine. |
+| `update_routine` | all callers | PATCH-update a routine, including owner-only Discord DM delivery. |
 
 ## `self_edit`
 

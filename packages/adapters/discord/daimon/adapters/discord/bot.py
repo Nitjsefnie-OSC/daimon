@@ -100,6 +100,7 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import DirectMessagePolicy, Settings
@@ -156,6 +157,7 @@ from daimon.core.stores.discord_message_admissions import (
 from daimon.core.stores.domain import (
     CredentialRequestRow,
     Role,
+    RoutineRow,
     TaskContinuationRow,
     TenantRow,
     ThreadSessionRow,
@@ -862,6 +864,14 @@ class DaimonBot(commands.Bot):
         if self._output_sweeps.get(session_id) is task:
             del self._output_sweeps[session_id]
 
+    async def _routine_agent_names(self, row: RoutineRow) -> tuple[str | None, ...]:
+        agent = await find_agent_by_daimon_tag(
+            self.runtime.anthropic, tenant_id=row.tenant_id, name=row.agent_name
+        )
+        if agent is None or agent.id != row.agent_id:
+            return ()
+        return (row.agent_name, *agent_pin_names(agent.name, agent.metadata))
+
     async def _sweep_session_outputs(
         self,
         previous: asyncio.Task[None] | None,
@@ -1201,6 +1211,7 @@ class DaimonBot(commands.Bot):
                         ),
                         client=self,
                         membership_resolver=self.membership_resolver,
+                        resolve_agent_names=self._routine_agent_names,
                         resolve_identity=lambda row, guild_id: resolve_routine_identity(
                             self.runtime.sessionmaker,
                             self.runtime.anthropic,

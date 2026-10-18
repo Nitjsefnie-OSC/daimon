@@ -43,15 +43,16 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
-from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_subject
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
-from daimon.core.permissions import any_writers_none
+from daimon.core.permissions import any_writers_none, limiting_ids_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
+from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import (
@@ -62,6 +63,7 @@ from daimon.core.stores.routines import (
     routine_platform,
     settle_routine_delivery,
 )
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
@@ -123,6 +125,9 @@ SkipReason = Literal[
     "post_failed",
     "no_result",
     "own_agents_only",
+    "routine_dms_disabled",
+    "restricted_source",
+    "agent_not_allowed",
 ]
 
 
@@ -143,7 +148,7 @@ class DeliveryTarget:
 def delivery_target(row: RoutineRow, *, platform: str) -> DeliveryTarget | None:
     """The row's destination for `platform`, or `None` when it has none or it
     is malformed (a Slack thread without `channel:ts`)."""
-    if row.destination_kind is None or row.destination_id is None:
+    if row.destination_kind in (None, "dm") or row.destination_id is None:
         return None
     if platform == "teams" and row.destination_kind == "thread":
         thread = _TEAMS_THREAD.fullmatch(row.destination_id)
@@ -193,7 +198,11 @@ def render_routine_controls(
             "destination": {
                 "platform": platform,
                 "kind": row.destination_kind,
-                "channel_id": target.channel_id if target else row.destination_id,
+                **(
+                    {"user_id": row.destination_id}
+                    if row.destination_kind == "dm"
+                    else {"channel_id": target.channel_id if target else row.destination_id}
+                ),
                 **({"thread_ts": target.thread_ts} if target and target.thread_ts else {}),
                 # A Teams thread is posted to by its own id.
                 **(
@@ -204,7 +213,12 @@ def render_routine_controls(
             },
         }
     }
-    if direct_post == "allowed":
+    if row.destination_kind == "dm":
+        delivery = (
+            "Daimon delivers your final reply privately to the routine owner. "
+            "Do not call messaging tools to deliver this result yourself."
+        )
+    elif direct_post == "allowed":
         delivery = (
             "If you do not post it to the destination yourself with send_message, daimon "
             "posts your full final reply there for you."
@@ -249,7 +263,7 @@ def agent_posted_to(state: TurnState, row: RoutineRow) -> bool:
     post to the bare channel of a Slack thread destination is not the thread,
     and does not count.
     """
-    if row.destination_id is None:
+    if row.destination_kind == "dm" or row.destination_id is None:
         return False
     return any(
         _posted_channel(block) == row.destination_id
@@ -265,6 +279,8 @@ def destination_shape_error(platform: str, kind: str, destination_id: str) -> st
     `C…`/`G…` ids and a Slack thread is `<channel id>:<thread ts>`. A Teams
     channel is `19:…@thread.tacv2` and a thread `<channel>;messageid=<root id>`.
     """
+    if kind == "dm" and platform != "discord":
+        return "DM routines are supported only on Discord"
     if platform == "discord":
         return None if destination_id.isdigit() else "a Discord channel or thread id is a number"
     if platform == "slack":
@@ -522,10 +538,34 @@ async def clear_creator(
     after this, and only choose where a cleared result goes.
     """
     async with sessionmaker() as session:
+        if row.destination_kind == "dm":
+            tenant = await get_tenant(session, row.tenant_id)
+            if tenant is None or tenant.archived_at is not None or platform != "discord":
+                return "destination_unavailable"
+            if not await dm_enabled(session, tenant_id=row.tenant_id):
+                return "routine_dms_disabled"
         try:
             policy = await load_access_policy(session, tenant_id=row.tenant_id)
         except AccessPolicyUnreadable:
             return "access_policy_unreadable"
+        if row.destination_kind == "dm":
+            if not row.source_provenance_known:
+                return "restricted_source"
+            if row.source_channel_id is not None and limiting_ids_at(
+                policy,
+                channel_id=row.source_channel_id,
+                thread_id=row.source_thread_id,
+            ):
+                return "restricted_source"
+            if not authorize(
+                policy,
+                subject=Subject(),
+                action=Action.RUN_AGENT,
+                surface=Surface.ROUTINE,
+                agent=AgentRef.of(row.agent_name),
+                place=Place(),
+            ):
+                return "agent_not_allowed"
         is_admin = False
         if platform != "discord" and row.created_by_user_id is not None:
             principal = await find_platform_principal(

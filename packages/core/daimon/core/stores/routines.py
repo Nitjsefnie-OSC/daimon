@@ -22,6 +22,8 @@ import structlog
 from daimon.core._models import Account, PlatformPrincipal, Routine, Tenant
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.errors import StoreError
+from daimon.core.permissions import limiting_ids_at
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import (
     CatchUpPolicy,
     Role,
@@ -61,11 +63,29 @@ async def create_routine(
     destination_kind: RoutineDestinationKind | None = None,
     destination_id: str | None = None,
     channel_id: str | None = None,
+    source_thread_id: str | None = None,
+    source_channel_id: str | None = None,
+    source_provenance_known: bool | None = None,
 ) -> RoutineRow:
     """`channel_id` is the channel the routine's spend counts against (see `Routine`)."""
     if catch_up_policy not in ("skip", "run-once"):
         raise StoreError("catch_up_policy must be skip or run-once")
-    _check_destination(destination_kind, destination_id)
+    destination_id = await _resolve_destination(
+        session, tenant_id, destination_kind, destination_id, created_by_user_id
+    )
+    # Adapter-supplied provenance is an explicit creation snapshot, including
+    # a verified source-free origin. Older host callers use their creation place.
+    if source_provenance_known is None:
+        source_channel_id = source_channel_id or channel_id
+        if destination_kind == "thread":
+            source_thread_id = source_thread_id or destination_id
+        elif destination_kind == "channel":
+            source_channel_id = source_channel_id or destination_id
+        source_provenance_known = destination_kind != "thread" or source_channel_id is not None
+    if destination_kind == "dm":
+        if not source_provenance_known:
+            raise StoreError("Recreate the routine from the channel or thread to get DM delivery.")
+        await validate_dm_source(session, tenant_id, source_channel_id, source_thread_id)
     orm = Routine(
         tenant_id=tenant_id,
         created_by_user_id=created_by_user_id,
@@ -80,6 +100,9 @@ async def create_routine(
         destination_kind=destination_kind,
         destination_id=destination_id,
         channel_id=channel_id,
+        source_thread_id=source_thread_id,
+        source_channel_id=source_channel_id,
+        source_provenance_known=source_provenance_known,
     )
     session.add(orm)
     await session.flush()
@@ -215,12 +238,15 @@ async def update_routine(
 ) -> RoutineRow | None:
     """PATCH: `None` leaves a field alone. A destination is set as a pair, with
     the `channel_id` it resolves to; `clear_destination=True` removes the pair
-    (and any pending delivery) but keeps `channel_id`, so the routine's spend
-    still counts toward the same budget."""
+    (and any pending delivery) but keeps the source channel/thread provenance
+    and `channel_id`, so the routine's spend still counts toward the same budget."""
     values: dict[str, str | bool | datetime | None] = {}
     if clear_destination:
         if destination_kind is not None or destination_id is not None:
             raise StoreError("clear_destination cannot be combined with a new destination")
+        current = await get_routine(session, routine_id, tenant_id=tenant_id)
+        if current is not None and current.destination_kind == "dm":
+            values.update(last_result_tail=None, last_error=None)
         values.update(
             destination_kind=None,
             destination_id=None,
@@ -229,19 +255,32 @@ async def update_routine(
             delivery_note=None,
         )
     elif destination_kind is not None or destination_id is not None:
-        _check_destination(destination_kind, destination_id)
+        current = await get_routine(session, routine_id, tenant_id=tenant_id)
+        if current is None:
+            return None
+        destination_id = await _resolve_destination(
+            session, tenant_id, destination_kind, destination_id, current.created_by_user_id
+        )
+        if destination_kind == "dm":
+            if not current.source_provenance_known:
+                raise StoreError(
+                    "Recreate the routine from the channel or thread to get DM delivery."
+                )
+            await validate_dm_source(
+                session, tenant_id, current.source_channel_id, current.source_thread_id
+            )
         values.update(
             destination_kind=destination_kind,
             destination_id=destination_id,
-            channel_id=channel_id,
+            channel_id=current.channel_id if destination_kind == "dm" else channel_id,
         )
-        current = await get_routine(session, routine_id, tenant_id=tenant_id)
-        if (
-            current is not None
-            and current.delivery_status == "pending"
-            and (current.destination_kind, current.destination_id)
-            != (destination_kind, destination_id)
-        ):
+        if current.destination_kind == "dm" and destination_kind != "dm":
+            # A private preview must not survive a move to a shared destination.
+            values.update(last_result_tail=None, last_error=None, delivery_payload=None)
+        if current.delivery_status in ("pending", "claimed") and (
+            current.destination_kind,
+            current.destination_id,
+        ) != (destination_kind, destination_id):
             # A result queued for the old destination is not posted to the
             # new one.
             values.update(
@@ -249,6 +288,20 @@ async def update_routine(
                 delivery_note="destination_changed",
                 delivery_payload=None,
             )
+    # Metadata-only edits must also respect a seal added after conversion.
+    current = await get_routine(session, routine_id, tenant_id=tenant_id)
+    if (
+        current is not None
+        and current.destination_kind == "dm"
+        and not clear_destination
+        and destination_kind is None
+    ):
+        await validate_dm_source(
+            session,
+            tenant_id,
+            current.source_channel_id,
+            current.source_thread_id,
+        )
     if catch_up_policy is not None:
         if catch_up_policy not in ("skip", "run-once"):
             raise StoreError("catch_up_policy must be skip or run-once")
@@ -438,6 +491,7 @@ async def record_result(
     error: str | None,
     delivery: Literal["pending", "skipped"] | None = None,
     delivery_note: str | None = None,
+    expected_destination: tuple[str | None, str | None] | None = None,
 ) -> None:
     """Set `last_result_tail` and `last_error` in a single UPDATE.
 
@@ -475,7 +529,14 @@ async def record_result(
             delivery_lease_expires_at=None,
             delivered_at=None,
         )
-    await session.execute(update(Routine).where(Routine.id == routine_id).values(**values))
+    statement = update(Routine).where(Routine.id == routine_id)
+    if expected_destination is not None:
+        kind, recipient = expected_destination
+        statement = statement.where(
+            Routine.destination_kind.is_not_distinct_from(kind),
+            Routine.destination_id.is_not_distinct_from(recipient),
+        )
+    await session.execute(statement.values(**values))
     await session.flush()
 
 
@@ -527,11 +588,47 @@ async def routine_platform(session: AsyncSession, routine_id: _uuid.UUID) -> str
     )
 
 
+async def validate_dm_source(
+    session: AsyncSession,
+    tenant_id: _uuid.UUID,
+    channel_id: str | None,
+    thread_id: str | None = None,
+) -> None:
+    """Shared save/dry-run source sealing check, including the original thread."""
+    if thread_id is not None and channel_id is None:
+        raise StoreError("a source thread requires its parent channel")
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    if channel_id is not None and limiting_ids_at(
+        policy, channel_id=channel_id, thread_id=thread_id
+    ):
+        raise StoreError("a routine from a restricted source cannot deliver by DM")
+
+
+async def _resolve_destination(
+    session: AsyncSession,
+    tenant_id: _uuid.UUID,
+    kind: str | None,
+    destination_id: str | None,
+    owner: str | None,
+) -> str | None:
+    if kind == "dm":
+        if owner is None or not owner.isdecimal():
+            raise StoreError("a DM routine requires a Discord owner")
+        if destination_id is not None and destination_id != owner:
+            raise StoreError("a DM routine can deliver only to its owner")
+        tenant = await session.get(Tenant, tenant_id)
+        if tenant is None or tenant.platform != "discord":
+            raise StoreError("DM routines are supported only on Discord")
+        destination_id = owner
+    _check_destination(kind, destination_id)
+    return destination_id
+
+
 def _check_destination(kind: str | None, destination_id: str | None) -> None:
     if (kind is None) != (destination_id is None):
         raise StoreError("destination_kind and destination_id are set together")
-    if kind is not None and kind not in ("channel", "thread"):
-        raise StoreError("destination_kind must be channel or thread")
+    if kind is not None and kind not in ("channel", "thread", "dm"):
+        raise StoreError("destination_kind must be channel, thread or dm")
     if destination_id is not None and not destination_id.strip():
         raise StoreError("destination_id must not be empty")
 

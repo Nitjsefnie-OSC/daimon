@@ -132,3 +132,15 @@ def test_can_manage_routine_is_admin_or_creator_and_fails_closed_on_nulls() -> N
     assert not can_manage_routine(owned, user_id="user-b", is_admin=False), "others may not"
     assert not can_manage_routine(ownerless, user_id=None, is_admin=False), "None never matches"
     assert can_manage_routine(ownerless, user_id=None, is_admin=True), "admins manage any routine"
+
+
+def test_owner_dm_failed_delivery_is_visible_in_routine_status() -> None:
+    row = _make_row(
+        created_by_user_id="123",
+        destination_kind="dm",
+        destination_id="123",
+        last_fired_at=datetime.now(UTC),
+        delivery_status="skipped",
+        delivery_note="DM blocked",
+    )
+    assert derive_glyph(row) == "❌"

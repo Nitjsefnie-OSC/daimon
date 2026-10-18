@@ -1955,16 +1955,23 @@
     }),
     'create_routine': dict({
       'description': '''
-        Create a routine in the caller's tenant partition.
+        Create a recurring routine with optional channel, thread or owner-DM delivery.
+        <blank line>
+        DM runs mount no personal memory and retain ordinary channel-routine tool
+        authority. Sources must be supported channels/threads in this tenant's guild;
+        the original thread and parent remain subject to reader restrictions.
         <blank line>
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
         <blank line>
-        ``destination_kind`` (``channel`` or ``thread``) and ``destination_id``
+        ``destination_kind`` (``channel``, ``thread`` or ``dm``) and ``destination_id``
         optionally name where each run's result goes. The run is told where,
         and if the agent does not post there itself, daimon posts the end of
         its final reply there. On Slack a thread is ``<channel id>:<thread
         ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
-        are in. A protected channel is refused. Without a destination the
+        are in. Discord ``dm`` delivers only to the authenticated owner; omit
+        ``destination_id`` to derive their user ID. Slack and Teams reject DM
+        destinations. Delivery status and failure reasons are returned by list/get.
+        A protected channel is refused. Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
         spend counts toward the destination channel's budget, or without a
         destination the budget of the channel named by ``origin_context_id``
@@ -2028,6 +2035,7 @@
                 'enum': list([
                   'channel',
                   'thread',
+                  'dm',
                 ]),
                 'type': 'string',
               }),
@@ -6502,11 +6510,16 @@
     }),
     'update_routine': dict({
       'description': '''
-        PATCH-update a routine. Only provided fields are changed.
+        PATCH-update a routine, including owner-only Discord DM delivery.
+        <blank line>
+        Only provided fields are changed.
         <blank line>
         ``destination_kind`` + ``destination_id`` set where results go (see
         ``create_routine``); ``clear_destination=true`` removes it, and the
-        routine's spend still counts toward the same channel's budget.
+        routine's spend still counts toward the same channel's budget. Saved
+        creation-time source channel/thread restrictions survive every edit.
+        Legacy routines with unknown provenance keep ordinary destination edits
+        but must be recreated from the source channel/thread to select DM delivery.
         <blank line>
         ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
         <blank line>
@@ -6574,6 +6587,7 @@
                 'enum': list([
                   'channel',
                   'thread',
+                  'dm',
                 ]),
                 'type': 'string',
               }),

@@ -415,3 +415,15 @@ async def test_long_routine_delivers_every_word_to_thread_or_creator(
     assert all(call.kwargs["channel"] == expected_channel for call in calls)
     if not fallback:
         assert all(call.kwargs["thread_ts"] == "1717.5" for call in calls)
+
+
+async def test_dm_row_is_explicitly_refused_without_channel_or_dm_io(
+    db_session, db_session_factory, monkeypatch
+):
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    row = row.model_copy(update={"destination_kind": "dm", "destination_id": "U1"})
+    post, client = _poster(db_session_factory, monkeypatch)
+    result = await post(row)
+    assert result.status == "skipped" and "only on Discord" in result.note
+    client.chat_postMessage.assert_not_awaited()
+    client.conversations_open.assert_not_awaited()

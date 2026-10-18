@@ -90,6 +90,18 @@ def build_panel_container(
     else:
         timeline_body = next_line
 
+    routine = selected.routine
+    destination = (
+        "Owner DM"
+        if routine.destination_kind == "dm"
+        else (routine.destination_id or "No automatic delivery")
+    )
+    timeline_body += f"\n\nDelivery: {destination}"
+    if routine.delivery_status is not None:
+        timeline_body += f"\nStatus: {routine.delivery_status}"
+    if routine.delivery_note is not None:
+        timeline_body += "\n" + routine.delivery_note.replace("_", " ")
+
     # Accent: only non-blurple states carry the color bar
     accent: int | None = color_int if color_int != theme.COLOR_BLURPLE else None
 

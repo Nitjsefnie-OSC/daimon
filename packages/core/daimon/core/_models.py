@@ -449,8 +449,13 @@ class Routine(Base):
             "catch_up_policy IN ('skip', 'run-once')", name="ck_routines_catch_up_policy"
         ),
         CheckConstraint(
-            "destination_kind IS NULL OR destination_kind IN ('channel', 'thread')",
+            "destination_kind IS NULL OR destination_kind IN ('channel', 'thread', 'dm')",
             name="ck_routines_destination_kind",
+        ),
+        CheckConstraint(
+            "destination_kind IS DISTINCT FROM 'dm' OR "
+            "(created_by_user_id IS NOT NULL AND destination_id = created_by_user_id)",
+            name="ck_routines_dm_owner",
         ),
         CheckConstraint(
             "(destination_kind IS NULL) = (destination_id IS NULL)",
@@ -513,6 +518,12 @@ class Routine(Base):
     # Channel the routine's spend is attributed to and budget-gated by: its
     # destination's parent channel, resolved when the destination is set.
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Immutable creation-time provenance, independent of mutable delivery/budget placement.
+    source_provenance_known: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

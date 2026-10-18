@@ -1473,7 +1473,8 @@ admission before any of this runs.
   same driver under the same ceiling — but it calls neither `admit()` nor
   `bind_session()`. The scheduler runs the balance, cap and channel budget
   gates itself before each fire. A routine with a destination is told where its result
-  goes; if the agent does not post there, the row's outbox goes `pending` and
+  goes; owner-DM results always use the outbox. For a channel/thread destination,
+  the outbox is used when the agent does not post there itself. It goes `pending` and
   the chat adapter for the tenant's platform posts the result tail through
   its delivery poller (`daimon.core.routine_delivery`), after the access
   policy's writers and invoker checks. See [routines.md](routines.md).
@@ -1748,13 +1749,14 @@ limited readers and in DMs under `dm_memory_read_only`. A session without a pers
 store gets shared-store instructions saying that no personal memory is mounted and
 nothing personal is to be recorded. Who else gets one:
 
-- **Routines**: only a routine whose result reaches nobody but its owner
-  (`rule_views.routine_answers_only_owner`: no destination and no channel, so made in a
-  DM or with no origin) mounts its owner's personal store, read-only like all routine
-  memory. Any routine with a destination posts where others read it and gets the shared
-  store alone. The scheduler decides this from the routine row at every fire, so adding
-  a destination stops it at the next run. The agent can still call a posting tool itself;
-  its instructions say not to quote personal memory where others will read it.
+- **Routines**: only a legacy routine with no destination and no channel
+  (`rule_views.routine_mounts_personal_memory`) mounts its owner's personal store,
+  read-only like all routine memory. Every routine with a destination,
+  including an owner-DM destination, gets the shared store alone. DM delivery retains ordinary tool authority and
+  mounts no personal memory. The scheduler decides this from the routine row
+  at every fire, so adding a destination stops it at the next run. The agent can
+  still call a posting tool itself; its instructions say not to quote personal
+  memory where others will read it.
 - **MCP**: the hub's `ask` and `start_turn` mount the caller's personal store. A hub
   caller is a person: the hub token comes from Daimon's OAuth proxy after a Discord or
   Slack sign-in, `HubIdentityMiddleware` checks its signature, issuer, audience and
@@ -2144,3 +2146,32 @@ with the existing bot credential, without importing the Discord adapter.
 The shared cache keys by tenant, guild, and user, shares concurrent fetches,
 and discards results invalidated while in flight. `require_fresh=True` bypasses
 completed cache entries. Unknown evidence cannot satisfy a role gate.
+
+
+### Owner-DM routine delivery
+
+Discord `/routines` includes an owner-only delivery choice and delivery failure
+reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
+the authenticated owner; the operator CLI has `routines create --destination dm`
+and a verifying dry-run. Slack and Teams explicitly reject DM writes.
+
+DM routine runs mount no personal memory; tenant memory remains read-only and
+tool authority is the same as for channel routines. Source channels and threads
+are verified against the tenant's guild through core Discord REST transport.
+Source channel/thread provenance and its known/unknown marker are written once
+at creation and are immutable through every edit. Delivery and budget targets
+may change independently. Legacy routines with unknown provenance retain ordinary
+channel/thread edits, clearing and firing on all platforms, but cannot select DM;
+they must be recreated from the source to get DM delivery. DM conversion, fire
+and every delivery chunk check the immutable creation-time source pair. Unknown
+provenance never becomes known during an edit. Private-scope origins resolve
+only the caller's current tenant-bound conversation and verify its saved guild
+source; source-free cold conversations require no guild-channel lookup.
+
+The scheduler runs a read-only headless turn and queues its final answer in
+the routine outbox. The Discord host checks live membership, tenant DM
+enablement, recipient policy and source restrictions before opening the
+owner's DM and before each chunk. Recipient IDs are never channel targets or
+budget sources. Notifications do not alter the selected cold-DM conversation
+or its model history. Delivery uses the existing at-most-once claim/settle
+leases, with no public fallback or automatic retry after an uncertain send.

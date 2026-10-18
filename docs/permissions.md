@@ -312,3 +312,15 @@ conversations too, whose source sealing remains independently enforced. Archivin
 deleting or transferring the bound agent to another tenant, or an unreadable
 private access policy, suppresses replies without choosing a different tenant.
 Billing and operational notices remain separate from these silent access denials.
+
+DM routine delivery derives the recipient from the owner but grants no extra
+private tool authority: these runs use the same tool permissions as channel
+routines and mount no personal memory. Tenant memory is read-only. A source
+thread and its parent are captured at creation and never changed by an edit;
+Daimon checks both at save, fire and before each delivery chunk. Operator source
+IDs must resolve to supported channels or threads in the selected tenant's guild,
+including during dry-run. Private-conversation origins inherit their verified
+saved source. Legacy routines with unknown creation-time provenance retain
+ordinary channel/thread edits, clearing and normal firing on every platform,
+but must be recreated from their source to get DM delivery. No edit promotes
+unknown provenance to known.

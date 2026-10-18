@@ -356,8 +356,8 @@ async def run_turn_impl(
 
     ``personal_memory`` also mounts ``account_id``'s personal store, with the
     same (read-only, for a routine) access as the shared one. The scheduler
-    sets it only for a routine whose result reaches nobody but its owner,
-    decided again at every fire (`rule_views.routine_answers_only_owner`).
+    sets it only for a legacy routine with no destination or channel; explicit
+    DM destinations never enable it (`rule_views.routine_mounts_personal_memory`).
     """
     turn_scope: Scope | None = None
     if load_turn_settings().path == "mux":
@@ -425,8 +425,8 @@ async def run_turn_impl(
             requester_is_headless=True,
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",
-            # Only a routine whose result reaches nobody but its owner
-            # (`rule_views.routine_answers_only_owner`); read-only like the
+            # Only a legacy owner-only routine, never an explicit DM destination
+            # (`rule_views.routine_mounts_personal_memory`); read-only like the
             # shared mount, since a routine's memory is always read-only.
             personal_memory=personal_memory,
             tool_safety=tool_safety,

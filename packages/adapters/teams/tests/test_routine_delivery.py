@@ -205,3 +205,12 @@ async def test_a_dm_fallback_sends_no_notice(
     teams, feed = _Teams(post_status=404), _Notices()
     await _post(db_session_factory, teams, _row(), feed)
     assert teams.posts and feed.calls == [], "no notice for a 1:1 chat"
+
+
+async def test_dm_row_is_explicitly_refused_without_channel_or_dm_io(db_session_factory):
+    teams = _Teams()
+    result = await _post(
+        db_session_factory, teams, _row(destination_kind="dm", destination_id=CREATOR)
+    )
+    assert result.status == "skipped" and "only on Discord" in result.note
+    assert not teams.posts
