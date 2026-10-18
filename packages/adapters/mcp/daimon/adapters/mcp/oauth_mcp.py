@@ -44,7 +44,13 @@ from daimon.core.authz import (
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
-from daimon.core.mcp_oauth import complete_mcp_oauth_flow, prepare_authorization
+from daimon.core.mcp_oauth import (
+    McpOAuthClientConfigError,
+    McpOAuthTokenRefusedError,
+    complete_mcp_oauth_flow,
+    flow_uses_configured_client,
+    prepare_authorization,
+)
 from daimon.core.mcp_oauth.complete import McpOAuthWriteRefusedError
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
@@ -67,6 +73,7 @@ _ErrorKind = Literal[
     "exchange_failed",
     "declined",
     "agent_gone",
+    "client_misconfigured",
 ]
 _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
     "expired": (
@@ -101,6 +108,13 @@ _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
         "be added from a conversation inside them, or by an admin. Nothing was connected.",
         403,
     ),
+    "client_misconfigured": (
+        "Sign-in to this server is not set up correctly",
+        "The OAuth client this deployment is configured to use for it was refused or does "
+        "not fit the server, so nothing was connected. Ask the operator to check that "
+        "client; signing in again will not help until it is fixed.",
+        502,
+    ),
     "agent_gone": (
         "Signed in, but the agent is gone",
         "Your connection is stored, but the agent it was for no longer exists, so nothing "
@@ -108,6 +122,14 @@ _ERROR_COPY: dict[_ErrorKind, tuple[str, str, int]] = {
         200,
     ),
 }
+
+
+# Errors that blame a configured client rather than the person or the code:
+# a wrong or rotated secret, an app the server does not know, a bad redirect
+# URI or scope. Retrying cannot fix them, so the page sends the person to the
+# operator. Dynamically registered clients keep their old pages.
+_CLIENT_TOKEN_ERRORS = frozenset({"invalid_client", "unauthorized_client"})
+_PERSON_AUTHORIZE_ERRORS = frozenset({"access_denied"})
 
 
 def _error_page(kind: _ErrorKind) -> HTMLResponse:
@@ -183,6 +205,8 @@ def build_oauth_mcp_routes(
                 err_type=type(err).__name__,
                 error=str(err)[:300],
             )
+            if isinstance(err, McpOAuthClientConfigError):
+                return _error_page("client_misconfigured")
             return _error_page("discovery_failed")
         if prepared is None:
             return _error_page("expired")
@@ -206,14 +230,20 @@ def build_oauth_mcp_routes(
         if flow is None:
             return _error_page("expired")
         request_row = await _load_request(flow)
-        if request.query_params.get("error") or not code:
+        configured = flow_uses_configured_client(settings.mcp_oauth.clients, flow)
+        authorize_error = request.query_params.get("error", "")
+        if authorize_error or not code:
             log.info(
                 "mcp_oauth.authorization_declined",
                 mcp_server_url=flow.mcp_server_url,
-                error=request.query_params.get("error", "")[:80],
+                error=authorize_error[:80],
+                error_description=request.query_params.get("error_description", "")[:300],
+                configured_client=configured,
             )
             if request_row is not None:
                 await _settle(request_row, outcome="declined", state="refused")
+            if configured and authorize_error and authorize_error not in _PERSON_AUTHORIZE_ERRORS:
+                return _error_page("client_misconfigured")
             return _error_page("declined")
         # A flow started before a pin (or a rename) must not finish after it:
         # re-check the agent as it is now before any grant, stamp or attach.
@@ -236,6 +266,7 @@ def build_oauth_mcp_routes(
                     session_factory=runtime.session_factory,
                     default=runtime.deployment_default,
                     may_write=lambda: _may_write(flow, request_row),
+                    configured_client=configured,
                 )
         except McpOAuthWriteRefusedError:
             # A pin landed during the code exchange: nothing was stored.
@@ -249,9 +280,16 @@ def build_oauth_mcp_routes(
                 mcp_server_url=flow.mcp_server_url,
                 err_type=type(err).__name__,
                 error=str(err)[:300],
+                configured_client=configured,
             )
             if request_row is not None:
                 await _settle(request_row, outcome="write_failed", state="partial")
+            if (
+                configured
+                and isinstance(err, McpOAuthTokenRefusedError)
+                and err.error_code in _CLIENT_TOKEN_ERRORS
+            ):
+                return _error_page("client_misconfigured")
             return _error_page("exchange_failed")
         log.info(
             "mcp_oauth.connected",
