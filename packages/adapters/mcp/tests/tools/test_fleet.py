@@ -36,6 +36,8 @@ from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.security_audit import list_events
+from daimon.testing.db import db_committing_engine as db_committing_engine
+from daimon.testing.db import db_committing_pool as db_committing_pool
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import build_stub_anthropic
