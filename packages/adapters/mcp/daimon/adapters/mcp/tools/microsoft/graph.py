@@ -96,7 +96,31 @@ def _refused(response: httpx.Response) -> ToolError:
         error = None
     code = str(error.get("code") or "") if isinstance(error, dict) else ""
     code = f" {code}" if _ERROR_CODE.fullmatch(code) else ""
-    return ToolError(f"Microsoft Graph refused ({response.status_code}{code}).")
+    status = response.status_code
+    return ToolError(f"Microsoft Graph refused ({status}{code}). {_refusal_hint(response)}".strip())
+
+
+def _refusal_hint(response: httpx.Response) -> str:
+    """What the agent should do next, so a refusal never turns into a retry loop."""
+    status = response.status_code
+    if status in (429, 503):
+        wait = response.headers.get("retry-after", "")
+        after = f"at least {wait} seconds" if wait.isdigit() else "a minute"
+        return (
+            f"Microsoft is busy or throttling. Wait {after} before trying once more, "
+            "or tell the person to try later."
+        )
+    if status == 401:
+        return (
+            "Microsoft refused the person's sign-in for this; a sign-in policy may require "
+            "them to sign in again. Tell them, and call connect_microsoft only if they agree."
+        )
+    if status == 403:
+        return (
+            "The person's account, or what their organisation allowed this app, does not "
+            "permit this. Do not retry."
+        )
+    return ""
 
 
 def _without_links(value: JsonValue) -> JsonValue:

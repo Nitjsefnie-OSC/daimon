@@ -24,6 +24,7 @@ from daimon.adapters.mcp.web_shell import render_page
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.mcp_oauth.flow import generate_pkce
 from daimon.core.microsoft_identity import (
+    MicrosoftAppRejected,
     MicrosoftIdentityError,
     MicrosoftIdentityMismatch,
     build_authorize_url,
@@ -39,7 +40,9 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 log = structlog.get_logger(__name__)
 
 Handler = Callable[[Request], Awaitable[Response]]
-_Error = Literal["expired", "declined", "exchange_failed", "wrong_account"]
+_Error = Literal[
+    "expired", "declined", "blocked", "exchange_failed", "misconfigured", "wrong_account"
+]
 _COPY: dict[_Error, tuple[str, str, int]] = {
     "expired": (
         "This sign-in link has expired",
@@ -50,6 +53,18 @@ _COPY: dict[_Error, tuple[str, str, int]] = {
         "Sign-in was cancelled",
         "Nothing was connected. Ask Daimon again whenever you want to connect Microsoft.",
         200,
+    ),
+    "blocked": (
+        "Microsoft did not allow the sign-in",
+        "Your organisation may need to approve Daimon or allow this sign-in. Ask your IT "
+        "administrator. Nothing was connected.",
+        403,
+    ),
+    "misconfigured": (
+        "Microsoft sign-in is not set up correctly",
+        "Microsoft refused Daimon's app registration. Tell your Daimon administrator. "
+        "Nothing was connected.",
+        502,
     ),
     "exchange_failed": (
         "Sign-in did not complete",
@@ -122,6 +137,11 @@ def build_oauth_microsoft_routes(
         if row is None:
             return _error_page("expired")
         if not code:
+            # Only the code is logged: Entra's description can echo request details.
+            error = request.query_params.get("error", "")
+            if error and error != "access_denied":
+                log.warning("microsoft_connect.refused_by_entra", code=error[:64])
+                return _error_page("blocked")
             return _error_page("declined")
         try:
             async with graph.http() as http:
@@ -149,8 +169,15 @@ def build_oauth_microsoft_routes(
                     reason=str(exc),
                 )
             return _error_page("wrong_account")
+        except MicrosoftAppRejected as exc:
+            log.error("microsoft_accounts.app_rejected", code=str(exc))
+            return _error_page("misconfigured")
         except (MicrosoftIdentityError, httpx.HTTPError) as exc:
-            log.warning("microsoft_connect.exchange_failed", err_type=type(exc).__name__)
+            log.warning(
+                "microsoft_connect.exchange_failed",
+                err_type=type(exc).__name__,
+                code=str(exc) if isinstance(exc, MicrosoftIdentityError) else None,
+            )
             return _error_page("exchange_failed")
         if tokens.refresh_token is None:
             log.warning("microsoft_connect.no_refresh_token")

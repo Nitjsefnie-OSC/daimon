@@ -36,6 +36,9 @@ MICROSOFT_SCOPES: tuple[str, ...] = (
 # Errors meaning the stored grant can no longer be used without the person
 # signing in again (revoked, expired, or a Conditional Access re-prompt).
 _RECONNECT_ERRORS = frozenset({"invalid_grant", "interaction_required"})
+# Errors about the app registration itself (a wrong or expired client secret, a
+# wrong tenant): no person can fix these by reconnecting.
+_APP_ERRORS = frozenset({"invalid_client", "unauthorized_client"})
 
 
 class MicrosoftIdentityError(DaimonError):
@@ -44,6 +47,10 @@ class MicrosoftIdentityError(DaimonError):
 
 class MicrosoftGrantRevoked(MicrosoftIdentityError):
     """The refresh token no longer works; the person must connect again."""
+
+
+class MicrosoftAppRejected(MicrosoftIdentityError):
+    """Entra refused this deployment's app registration; an administrator must fix it."""
 
 
 class MicrosoftIdentityMismatch(MicrosoftIdentityError):
@@ -96,9 +103,9 @@ async def _token_request(
     if response.is_error:
         # Only the error code: descriptions can echo request details.
         error = str(payload.get("error") or f"http_{response.status_code}")
-        raise (MicrosoftGrantRevoked if error in _RECONNECT_ERRORS else MicrosoftIdentityError)(
-            error
-        )
+        if error in _RECONNECT_ERRORS:
+            raise MicrosoftGrantRevoked(error)
+        raise (MicrosoftAppRejected if error in _APP_ERRORS else MicrosoftIdentityError)(error)
     access_token = payload.get("access_token")
     if not isinstance(access_token, str) or not access_token:
         raise MicrosoftIdentityError("token response carried no access_token")

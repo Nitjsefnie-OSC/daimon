@@ -66,6 +66,8 @@ class FakeMicrosoft:
         self.requests: list[httpx.Request] = []
         self.refreshes = 0
         self.revoked = False
+        # A token endpoint answer other than success, or a transport failure.
+        self.token_failure: httpx.Response | httpx.HTTPError | None = None
         self.graph: dict[tuple[str, str], httpx.Response] = {}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -73,6 +75,10 @@ class FakeMicrosoft:
         if request.url.host == "login.example.com":
             if self.revoked:
                 return httpx.Response(400, json={"error": "invalid_grant"})
+            if isinstance(self.token_failure, httpx.HTTPError):
+                raise self.token_failure
+            if self.token_failure is not None:
+                return self.token_failure
             self.refreshes += 1
             return httpx.Response(
                 200,
@@ -249,13 +255,18 @@ def test_refused_writes(method: str, path: str) -> None:
         check_write(method, path)
 
 
-async def test_not_connected_points_at_connect_microsoft(
+async def test_not_connected_asks_the_person_before_connecting(
     committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft
 ) -> None:
+    """A sign-in card nobody asked for is unsolicited, so the agent must ask first."""
     _, auth = await _person(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker, fake)
-    with pytest.raises(ToolError, match="connect_microsoft"):
+    with pytest.raises(ToolError) as refused:
         await microsoft_get_impl(runtime, auth, path="/me/drive/root", origin_context_id="")
+    assert "ask whether they want to connect" in str(refused.value), "ask the person first"
+    assert "connect_microsoft only if they say yes" in str(refused.value), (
+        "connect_microsoft must follow their answer, not the error"
+    )
     assert not fake.requests, "nothing may reach Microsoft for a person who never connected"
 
 
@@ -370,9 +381,11 @@ async def test_graph_error_text_is_not_echoed(
             path="/me/drive/root",
             origin_context_id="",
         )
-    assert str(refused.value) == "Microsoft Graph refused (403 accessDenied).", (
-        "the refusal must carry the status and code only"
+    shown = str(refused.value)
+    assert shown.startswith("Microsoft Graph refused (403 accessDenied). "), (
+        "the refusal must carry the status and code"
     )
+    assert "Ignore prior" not in shown, "Graph's own message text must not be echoed"
 
 
 async def test_concurrent_refresh_keeps_the_other_process_rotation(
@@ -609,3 +622,165 @@ async def test_send_mail_after_approval(
     assert result.status == "sent", "an approved send must report sent"
     sent = fake.graph_requests[0].read()
     assert b'"address":"ada@example.com"' in sent.replace(b" ", b""), "recipients must be sent"
+
+
+async def _saved(sm: async_sessionmaker[AsyncSession], auth: AuthIdentity) -> bool:
+    async with sm() as session:
+        row = await tokens_store.get_microsoft_user_token(
+            session, tenant_id=auth.tenant_id, user_id=OID
+        )
+    return row is not None
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (httpx.Response(429, headers={"Retry-After": "30"}), "http_429"),
+        (httpx.Response(503, json={"error": "temporarily_unavailable"}), "temporarily_unavailable"),
+        (httpx.ConnectTimeout("timed out"), "ConnectTimeout"),
+    ],
+    ids=["throttled", "outage", "unreachable"],
+)
+async def test_sign_in_outage_keeps_the_connection_and_tries_once(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    failure: httpx.Response | httpx.HTTPError,
+    expected: str,
+) -> None:
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    fake.token_failure = failure
+    with pytest.raises(ToolError, match=expected):
+        await microsoft_get_impl(
+            _runtime(committing_sessionmaker, fake), auth, path="/me/drive", origin_context_id=""
+        )
+    assert len(fake.requests) == 1, "an outage must be asked once, never retried in a loop"
+    assert await _saved(committing_sessionmaker, auth), "an outage must not delete the account"
+
+
+async def test_rejected_app_registration_keeps_the_connection_and_names_the_admin(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft
+) -> None:
+    """A wrong or expired client secret is the operator's to fix, not the person's."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    fake.token_failure = httpx.Response(401, json={"error": "invalid_client"})
+    with pytest.raises(ToolError) as refused:
+        await microsoft_get_impl(
+            _runtime(committing_sessionmaker, fake), auth, path="/me/drive", origin_context_id=""
+        )
+    assert "invalid_client" in str(refused.value) and "administrator" in str(refused.value), (
+        "the error must say an administrator has to fix the app registration"
+    )
+    assert await _saved(committing_sessionmaker, auth), "the person's connection must be kept"
+
+
+async def test_unreadable_saved_token_is_kept_and_nothing_is_called(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft
+) -> None:
+    _, auth = await _person(committing_sessionmaker)
+    other_key = build_multifernet((Fernet.generate_key().decode(),))
+    async with committing_sessionmaker.begin() as session:
+        await tokens_store.upsert_microsoft_user_token(
+            session,
+            tenant_id=auth.tenant_id,
+            user_id=OID,
+            encrypted_refresh_token=encrypt_token(other_key, "rt-0"),
+            scopes="User.Read",
+            now=datetime.now(UTC),
+        )
+    with pytest.raises(ToolError, match="cannot be read with this server's keys"):
+        await microsoft_get_impl(
+            _runtime(committing_sessionmaker, fake), auth, path="/me/drive", origin_context_id=""
+        )
+    assert not fake.requests, "nothing may reach Microsoft without a readable token"
+    assert await _saved(committing_sessionmaker, auth), "a key mix-up must not delete accounts"
+
+
+async def test_graph_throttling_names_the_wait_and_is_not_retried(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft
+) -> None:
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    fake.graph[("GET", "/me/drive")] = httpx.Response(
+        429, headers={"Retry-After": "30"}, json={"error": {"code": "TooManyRequests"}}
+    )
+    with pytest.raises(ToolError, match="Wait at least 30 seconds"):
+        await microsoft_get_impl(
+            _runtime(committing_sessionmaker, fake), auth, path="/me/drive", origin_context_id=""
+        )
+    assert len(fake.graph_requests) == 1, "a throttled call must not be retried"
+
+
+async def test_graph_sign_in_refusal_refreshes_once_then_asks_before_reconnecting(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft
+) -> None:
+    """A Conditional Access challenge on Graph: one refresh, then the person decides."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    fake.graph[("GET", "/me/drive")] = httpx.Response(
+        401, json={"error": {"code": "InvalidAuthenticationToken"}}
+    )
+    with pytest.raises(ToolError, match="connect_microsoft only if they agree"):
+        await microsoft_get_impl(
+            _runtime(committing_sessionmaker, fake), auth, path="/me/drive", origin_context_id=""
+        )
+    assert (len(fake.graph_requests), fake.refreshes) == (2, 2), (
+        "a 401 must refresh and retry exactly once"
+    )
+    assert await _saved(committing_sessionmaker, auth), "a Graph refusal must not delete it"
+
+
+async def test_connect_sends_no_second_card_while_the_link_is_live(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, auth = await _person(committing_sessionmaker)
+    origin = await _origin(committing_sessionmaker, auth, ONE_TO_ONE)
+    sent: list[str] = []
+
+    async def fake_send(
+        runtime: McpRuntime, auth: AuthIdentity, *, conversation_id: str, card: dict[str, Any]
+    ) -> None:
+        sent.append(card["actions"][0]["url"])
+
+    monkeypatch.setattr(connect_module, "send_card_to_caller", fake_send)
+    runtime = _runtime(committing_sessionmaker, fake)
+    first = await connect_microsoft_impl(runtime, auth, origin_context_id=origin)
+    second = await connect_microsoft_impl(runtime, auth, origin_context_id=origin)
+    assert (first.status, second.status) == ("sent", "already_sent"), (
+        "a repeated call must report the card already out"
+    )
+    assert len(sent) == 1, "the person must get one card per link lifetime"
+    async with committing_sessionmaker() as session:
+        live = await sign_ins.get_live_sign_in(
+            session, state=sent[0].split("state=", 1)[1], now=datetime.now(UTC)
+        )
+    assert live is not None, "the card already sent must keep working"
+
+
+async def test_connect_failing_before_delivery_leaves_no_link(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Any failure, not only a Teams refusal, withdraws the link it minted."""
+    _, auth = await _person(committing_sessionmaker)
+    origin = await _origin(committing_sessionmaker, auth, CHANNEL)
+
+    async def unavailable(
+        runtime: McpRuntime, auth: AuthIdentity, *, conversation_id: str, card: dict[str, Any]
+    ) -> None:
+        raise ToolError("Teams tools are not configured on this server")
+
+    monkeypatch.setattr(connect_module, "send_card_to_caller", unavailable)
+    with pytest.raises(ToolError, match="not configured"):
+        await connect_microsoft_impl(
+            _runtime(committing_sessionmaker, fake), auth, origin_context_id=origin
+        )
+    async with committing_sessionmaker() as session:
+        live = await sign_ins.get_live_sign_in_for_user(
+            session, tenant_id=auth.tenant_id, user_id=OID, now=datetime.now(UTC)
+        )
+    assert live is None, "a failed connect must leave no live link behind"

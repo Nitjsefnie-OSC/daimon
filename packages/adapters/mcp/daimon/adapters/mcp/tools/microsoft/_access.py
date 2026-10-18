@@ -18,11 +18,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import httpx
+import structlog
 from cachetools import TTLCache
-from cryptography.fernet import MultiFernet
+from cryptography.fernet import InvalidToken, MultiFernet
 from daimon.core.config import MicrosoftAccountsSettings
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.microsoft_identity import (
+    MicrosoftAppRejected,
     MicrosoftGrantRevoked,
     MicrosoftIdentityError,
     refresh_tokens,
@@ -32,15 +34,32 @@ from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
+# Neither tells the agent to connect on its own: a sign-in card nobody asked
+# for is unsolicited, so the person is asked first.
 NOT_CONNECTED = (
     "This person has not connected their Microsoft account, so nothing was read or "
-    "changed. Call connect_microsoft to send them a private sign-in card, then try again "
-    "after they sign in."
+    "changed. Tell them, and ask whether they want to connect it; call "
+    "connect_microsoft only if they say yes."
 )
 _REVOKED = (
     "This person's Microsoft connection has expired or was revoked, so it was removed. "
-    "Call connect_microsoft to send them a new sign-in card."
+    "Tell them, and call connect_microsoft only if they want to connect again."
 )
+_APP_REJECTED = (
+    "Microsoft refused this server's app registration ({code}), so nothing was read or "
+    "changed and the person's connection was kept. Tell them an administrator needs to "
+    "fix the Microsoft 365 settings; do not retry or reconnect."
+)
+_UNREADABLE = (
+    "This person's saved Microsoft sign-in cannot be read with this server's keys, so "
+    "nothing was read or changed. Tell them, and call connect_microsoft only if they want "
+    "to connect again."
+)
+_UNAVAILABLE = (
+    "Microsoft sign-in did not answer ({code}), so nothing was read or changed. Try once "
+    "more in a minute at most, then tell the person it is unavailable."
+)
+_log = structlog.get_logger(__name__)
 _EARLY = 120.0  # seconds before expiry an access token is refreshed
 
 HttpFactory = Callable[[], httpx.AsyncClient]
@@ -88,7 +107,12 @@ class MicrosoftGraph:
                 and cached.expires_at - _EARLY > self.clock()
             ):
                 return cached.access_token
-            refresh_token = decrypt_token(self.fernet, row.encrypted_refresh_token)
+            try:
+                refresh_token = decrypt_token(self.fernet, row.encrypted_refresh_token)
+            except InvalidToken:
+                # Kept: the keys may be fixed, and reconnecting overwrites it anyway.
+                _log.warning("microsoft_accounts.token_unreadable")
+                raise ToolError(_UNREADABLE) from None
             try:
                 async with self.http() as http:
                     tokens = await refresh_tokens(http, self.config, refresh_token=refresh_token)
@@ -99,8 +123,13 @@ class MicrosoftGraph:
                         session, tenant_id=tenant_id, user_id=user_id, read_at=row.updated_at
                     )
                 raise ToolError(_REVOKED) from None
+            except MicrosoftAppRejected as exc:
+                _log.error("microsoft_accounts.app_rejected", code=str(exc))
+                raise ToolError(_APP_REJECTED.format(code=exc)) from None
             except (MicrosoftIdentityError, httpx.HTTPError) as exc:
-                raise ToolError("Microsoft sign-in did not answer; try again in a minute.") from exc
+                # Outages and throttling never delete the saved connection.
+                code = str(exc) if isinstance(exc, MicrosoftIdentityError) else type(exc).__name__
+                raise ToolError(_UNAVAILABLE.format(code=code)) from None
             connected_at = row.created_at
             if tokens.refresh_token and tokens.refresh_token != refresh_token:
                 async with self.session_factory.begin() as session:

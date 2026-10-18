@@ -175,3 +175,37 @@ async def test_unknown_state_is_refused(
         "/oauth/microsoft/callback", params={"state": "forged", "code": "c"}
     )
     assert (start.status_code, callback.status_code) == (400, 400), "a forged state is refused"
+
+
+async def test_sign_in_blocked_by_the_organisation_says_who_can_fix_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Missing admin consent or a Conditional Access block come back as an Entra error."""
+    endpoint = TokenEndpoint("")
+    client, row = await _app(committing_sessionmaker, endpoint)
+    response = await client.get(
+        "/oauth/microsoft/callback", params={"state": row.state, "error": "consent_required"}
+    )
+    assert response.status_code == 403 and "IT administrator" in response.text, (
+        "a refused sign-in must point at the administrator, not read as a cancel"
+    )
+    assert not endpoint.forms, "nothing may be exchanged after Entra refused"
+
+
+class RejectingTokenEndpoint(TokenEndpoint):
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.forms.append(parse_qs(request.content.decode()))
+        return httpx.Response(401, json={"error": "invalid_client"})
+
+
+async def test_rejected_client_secret_shows_a_setup_error_and_stores_nothing(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    client, row = await _app(committing_sessionmaker, RejectingTokenEndpoint(""))
+    response = await client.get(
+        "/oauth/microsoft/callback", params={"state": row.state, "code": "c1"}
+    )
+    assert response.status_code == 502 and "administrator" in response.text, (
+        "a wrong or expired client secret must read as a setup problem"
+    )
+    assert await _stored(committing_sessionmaker, row) is None, "nothing may be stored"
