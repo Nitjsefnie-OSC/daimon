@@ -198,7 +198,8 @@ Rules are server or workspace admins' calls, :
 - chat: `set_channel_rule` and `set_agent_rule` ([MCP tools](mcp-tools.md));
 - panels: the channel's **Permissions** screen, from Who answers where in the
   Discord and Slack setup panels, and the Channel settings dialog on Teams;
-- CLI: `daimon channels rule set` and `daimon agents rule set`.
+- CLI: `daimon channels rule set` and `daimon agents rule set`;
+  `daimon channels answerable` checks the result (below).
 
 Setting `readers: own` makes the channel's default agent its own (a custom
 agent answering nowhere else), or copies an agent for it (`copy_from`).
@@ -209,6 +210,37 @@ enforce. `archive_channel_copy` retires a copy when its channel closes.
 
 `daimon tenants access-policy rules PLATFORM WORKSPACE_ID [--json]` lists
 every channel, category and agent rule, and each agent's home.
+
+**Where Daimon may answer.** `daimon channels answerable discord GUILD_ID
+[--expect FILE] [--json]` lists the server's channels where Daimon may answer
+at all: every channel where the turn gate would let a turn start, that is one
+not under a `writers: none` rule, its own or its category's. It reads
+Discord's channel list for the server with the bot token, so a channel with
+no stored config counts too, and it writes nothing. Agent rules (`--runs-in`,
+`--anywhere`, `--nowhere`) are not considered: they choose which agent
+answers, not whether Daimon may.
+
+It also lists every thread bound to an agent (setup or handoff, archived and
+locked threads included) and whether it answers. A bound thread passes the
+same gate, so under a `writers: none` channel it is refused like the channel
+and adds nothing to the set.
+
+Use `--expect` when another bot shares the server and hands some channels
+to Daimon. The file lists the channels that bot does not answer, one id per
+line (`#` starts a comment); Daimon's answerable set must equal it exactly.
+The command prints the ids Daimon may answer in that the file lacks, the ids
+the file lists where Daimon may not answer, and every answering bound thread
+whose parent the file does not list; any difference, either way, exits 1.
+It reports threads only through their bindings, and DMs not at all.
+
+It fails closed: what it cannot tell is answerable or an error, never
+silent. A channel the bot cannot view still counts by its rules alone,
+because the view permission can be granted later without touching a rule.
+A channel whose category is missing from the server's channel list counts
+as answerable unless its own rule is `writers: none`, and is reported as an
+error (exit 1). A thread binding whose parent channel is not in the list is
+reported as an error and not counted. A server the bot cannot see, or a failed Discord call, is an
+error and prints no set.
 
 **Stored policy.** The policy row holds `channel_rules`, `category_rules` and
 `agent_rules`. A row an older build wrote (lists of protected, sealed and

@@ -706,6 +706,7 @@ daimon channels rule set discord GUILD_ID CHANNEL_ID --readers own --writers own
 daimon channels rule set discord GUILD_ID CHANNEL_ID --readers inside
 daimon channels rule set discord GUILD_ID CHANNEL_ID --readers any [--release-agents]
 daimon channels rule set discord GUILD_ID CATEGORY_ID --category --writers none
+daimon channels answerable discord GUILD_ID [--expect FILE] [--json]   # read-only check
 daimon agents rule set discord GUILD_ID AGENT --runs-in CHANNEL_ID [--runs-in ...]
 daimon agents rule set discord GUILD_ID AGENT --anywhere | --nowhere
 daimon tenants access-policy rules discord GUILD_ID [--json]
