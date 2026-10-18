@@ -975,10 +975,8 @@ async def watch_fleet_budget(
             try:
                 async with asyncio.timeout(timeout):
                     async with sessionmaker.begin() as session:
-                        # Admissions hold the tenant fleet lock while they work; a
-                        # passive refresh must not queue behind them. Try it first
-                        # (re-entrant for lock_budget below); a held lock is busy,
-                        # not unavailable usage.
+                        # Admissions take the tenant fleet lock repeatedly during dispatch; a held
+                        # lock past the short wait below is busy, not unavailable usage.
                         # Queue fairly behind writers (try-lock starved behind the
                         # admissions' repeated short holds), but only briefly.
                         await session.execute(text(f"SET LOCAL lock_timeout = '{lock_wait_ms}ms'"))
