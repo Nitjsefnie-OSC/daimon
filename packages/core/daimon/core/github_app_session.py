@@ -18,6 +18,7 @@ from anthropic.types.beta.vaults.beta_managed_agents_static_bearer_auth_response
     BetaManagedAgentsStaticBearerAuthResponse,
 )
 from cryptography.fernet import InvalidToken, MultiFernet
+from daimon.core._models import ThreadSession
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
     PERMISSION_PROFILES,
@@ -45,6 +46,7 @@ from daimon.core.mux_compat import (
     store_credential,
     update_credential,
 )
+from daimon.core.session_snapshot import SessionSnapshot, TokenScope, token_scope_parts
 from daimon.core.stores.github_access import (
     AgentGrant,
     AuthorizedRepo,
@@ -76,9 +78,104 @@ from daimon.core.stores.thread_sessions import record_app_token_refresh
 from daimon.core.turn_origin import current_origin_id
 from mux.contracts.ids import Scope
 from mux.contracts.resources import WorkspaceSource
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = logging.getLogger(__name__)
+MAX_INSTALLATIONS_PER_AGENT = 12
+MAX_SESSION_VAULT_CREDENTIALS = 15
+
+
+def installation_credential_name(installation_id: int, chunk: int) -> str:
+    """Stable vault name for one exact-scope token chunk."""
+    if installation_id <= 0 or chunk < 0:
+        raise ValueError("invalid installation token chunk")
+    return f"GH_TOKEN_I{installation_id}_{chunk}"
+
+
+def token_scopes_for_groups(
+    groups: list[tuple[int, PermissionProfile, tuple[int, ...]]],
+    *,
+    multi_installation: bool | None = None,
+) -> tuple[TokenScope, ...]:
+    """Leave every single-installation snapshot and fingerprint unchanged."""
+    if multi_installation is None:
+        multi_installation = len({installation_id for installation_id, _, _ in groups}) > 1
+    if not multi_installation:
+        return ()
+    chunks: dict[int, int] = {}
+    scopes: list[TokenScope] = []
+    for installation_id, _, repo_ids in sorted(groups):
+        chunk = chunks.get(installation_id, 0)
+        chunks[installation_id] = chunk + 1
+        scopes.append((installation_id, chunk, tuple(sorted(repo_ids)), None, None))
+    return tuple(sorted(scopes, key=lambda scope: (scope[0], scope[1])))
+
+
+def token_scopes_for_tokens(
+    tokens: tuple[AppToken, ...], *, include: bool
+) -> tuple[TokenScope, ...]:
+    if not include:
+        return ()
+    if any(token.chunk is None or token.issued_at is None for token in tokens):
+        raise ValueError("multi-installation token identity is incomplete")
+    return tuple(
+        sorted(
+            (
+                token.installation_id,
+                token.chunk,
+                tuple(sorted(token.repo_ids)),
+                token.issued_at,
+                str(token.token_id),
+            )
+            for token in tokens
+            if token.chunk is not None and token.issued_at is not None
+        )
+    )
+
+
+def projected_vault_credential_count(
+    groups: list[tuple[int, PermissionProfile, tuple[int, ...]]],
+    *,
+    other_credentials: int = 1,
+    include_alias: bool = True,
+    multi_installation: bool | None = None,
+) -> int:
+    """Count vault token variables and other credentials after sync."""
+    if other_credentials < 0:
+        raise ValueError("vault credential count cannot be negative")
+    if multi_installation is None:
+        multi_installation = len({installation_id for installation_id, _, _ in groups}) > 1
+    token_variables = len(groups) + int(include_alias) if multi_installation else int(bool(groups))
+    return token_variables + int(bool(groups) and include_alias) + other_credentials
+
+
+def require_vault_budget(
+    groups: list[tuple[int, PermissionProfile, tuple[int, ...]]],
+    *,
+    other_credentials: int = 1,
+    include_alias: bool = True,
+    multi_installation: bool | None = None,
+) -> None:
+    if len({installation_id for installation_id, _, _ in groups}) > MAX_INSTALLATIONS_PER_AGENT:
+        raise ValueError("GitHub App access exceeds 12 installations per agent")
+    if projected_vault_credential_count(
+        groups,
+        other_credentials=other_credentials,
+        include_alias=include_alias,
+        multi_installation=multi_installation,
+    ) > (MAX_SESSION_VAULT_CREDENTIALS):
+        raise ValueError("GitHub App access exceeds the 15-credential session vault limit")
+
+
+def _working_alias(
+    tokens: tuple[AppToken, ...], working_token: str | None, *, multi_installation: bool
+) -> str | None:
+    if working_token is not None and any(token.token == working_token for token in tokens):
+        return working_token
+    if tokens and not multi_installation:
+        return tokens[0].token
+    return None
 
 
 @dataclass(frozen=True)
@@ -89,6 +186,8 @@ class AppToken:
     repo_ids: tuple[int, ...]
     profile: PermissionProfile
     credential_name: str
+    issued_at: int | None = None
+    chunk: int | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +197,10 @@ class AppSessionAccess:
     working_token: str | None
     excluded_repo_urls: tuple[str, ...] = ()
     token_repo_urls: tuple[str, ...] = ()
+    token_scopes: tuple[TokenScope, ...] = ()
+    repo_urls_by_id: tuple[tuple[int, str], ...] = ()
+    multi_installation: bool = False
+    working_repo_id: int | None = None
 
 
 class GitHubTokenMintUnavailable(RuntimeError):
@@ -105,6 +208,8 @@ class GitHubTokenMintUnavailable(RuntimeError):
 
 
 REQUESTER_CACHE = PermissionCache()
+type EffectiveAppRows = tuple[tuple[AgentGrant, AuthorizedRepo, PermissionProfile], ...]
+type EffectiveAppGrantView = tuple[EffectiveAppRows, int | None, int | None]
 
 #: Bot identity per App slug. The numeric bot id never changes for a slug, so a
 #: process asks GitHub once; a failed lookup is not cached and is retried by the
@@ -169,28 +274,37 @@ async def effective_repo_url_sets(
     is_external: bool,
     config: GithubAppSettings,
     fernet: MultiFernet | None,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """(every repo the App tokens cover, the mounted working repo) in one lookup."""
-    every, _ = await effective_repo_state(
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[TokenScope, ...]]:
+    """Effective repo URLs, working mount, and canonical token scopes."""
+    if is_external:
+        return (), (), ()
+    rows, _, _ = await effective_app_grant_view(
         sessionmaker,
         tenant_id=tenant_id,
         agent_id=agent_id,
-        account_id=account_id,
-        is_external=is_external,
-        config=config,
         fernet=fernet,
     )
-    if not every:
-        return (), ()
-    async with sessionmaker() as session:
-        working = {
-            f"https://github.com/{repo.repo_full_name}"
-            for grant, repo in await list_live_grant_repositories(
-                session, tenant_id=tenant_id, agent_id=agent_id
-            )
-            if grant.is_working_repo
-        }
-    return every, tuple(url for url in every if url in working)
+    if not rows:
+        return (), (), ()
+    every = tuple(sorted(f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows))
+    working = {
+        f"https://github.com/{repo.repo_full_name}"
+        for grant, repo, _ in rows
+        if grant.is_working_repo
+    }
+    multi_installation = len({repo.installation_id for _, repo, _ in rows}) > 1
+    groups = group_repository_access(
+        [(repo.installation_id, repo.repo_id, profile) for _, repo, profile in rows],
+        sort_repo_ids=multi_installation,
+    )
+    return (
+        every,
+        tuple(url for url in every if url in working),
+        token_scopes_for_groups(
+            groups,
+            multi_installation=multi_installation,
+        ),
+    )
 
 
 async def effective_repo_state(
@@ -206,22 +320,12 @@ async def effective_repo_state(
 ) -> tuple[tuple[str, ...], dict[int, dict[str, str]]]:
     if is_external:
         return (), {}
-    async with sessionmaker() as session:
-        if not await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id):
-            return (), {}
-    if fernet is None:
-        raise ValueError("GitHub App mode requires encryption")
-    async with httpx.AsyncClient() as client:
-        rows, _, _ = await _effective_rows(
-            sessionmaker,
-            client,
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            account_id=account_id,
-            config=config,
-            fernet=fernet,
-            cache=REQUESTER_CACHE,
-        )
+    rows, _, _ = await effective_app_grant_view(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        fernet=fernet,
+    )
     mounted = _mounted_repo_ids(
         [repo.repo_id for _, repo, _ in rows],
         working_ids={grant.repo_id for grant, _, _ in rows if grant.is_working_repo},
@@ -271,42 +375,33 @@ async def create_session_vault(
     return vault.id
 
 
-async def _effective_rows(
+async def effective_app_grant_view(
     sessionmaker: async_sessionmaker[AsyncSession],
-    client: httpx.AsyncClient,
     *,
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
-    account_id: uuid.UUID | None,
-    config: GithubAppSettings,
-    fernet: MultiFernet,
-    cache: PermissionCache,
-) -> tuple[list[tuple[AgentGrant, AuthorizedRepo, PermissionProfile]], int | None, int | None]:
-    async with sessionmaker() as session:
+    fernet: MultiFernet | None,
+) -> EffectiveAppGrantView:
+    async with sessionmaker.begin() as session:
+        await lock_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
         live = await list_live_grant_repositories(session, tenant_id=tenant_id, agent_id=agent_id)
     if not live:
-        return [], None, None
-    by_installation: dict[int, list[tuple[AgentGrant, AuthorizedRepo]]] = {}
-    for grant, repo in live:
-        by_installation.setdefault(repo.installation_id, []).append((grant, repo))
-    working = next((repo.installation_id for grant, repo in live if grant.is_working_repo), None)
-    selected = working or max(
-        by_installation,
-        key=lambda installation_id: (len(by_installation[installation_id]), -installation_id),
-    )
-    if len(by_installation) > 1:
-        _log.warning(
-            "Agent %s has grants in multiple GitHub installations; using %s for GH_TOKEN",
-            agent_id,
-            selected,
-        )
+        return (), None, None
+    if fernet is None:
+        raise ValueError("GitHub App mode requires encryption")
     rows: list[tuple[AgentGrant, AuthorizedRepo, PermissionProfile]] = []
-    for grant, repo in by_installation[selected]:
+    for grant, repo in live:
         profile: PermissionProfile = (
             "write" if grant.ceiling_access == "write" and repo.max_access == "write" else "read"
         )
         rows.append((grant, repo, profile))
-    return rows, None, None
+    # Existing single-installation read grants remain valid in M1. The #1005
+    # multi-installation path is write-only.
+    if len({repo.installation_id for _, repo, _ in rows}) > 1 and any(
+        profile != "write" for _, _, profile in rows
+    ):
+        raise ValueError("multi-installation App grants require write access")
+    return tuple(rows), None, None
 
 
 async def revoke_token(client: httpx.AsyncClient, token: str) -> None:
@@ -374,48 +469,92 @@ async def prepare_app_access(
     fernet: MultiFernet | None,
     cache: PermissionCache,
     excluded_repo_urls: tuple[str, ...] = (),
+    installation_ids: frozenset[int] | None = None,
+    grant_view: EffectiveAppGrantView | None = None,
+    anthropic: AsyncAnthropic | None = None,
+    vault_id: str | None = None,
 ) -> AppSessionAccess:
     """Mint only this session's effective repository groups, recording every token."""
     if is_external:
         return AppSessionAccess((), (), None)
-    if not await _declared_repositories(sessionmaker, tenant_id=tenant_id, agent_id=agent_id):
-        return AppSessionAccess((), (), None)
-    if fernet is None or config.app_id is None or config.private_key is None:
-        raise ValueError("GitHub App mode requires App credentials and encryption")
-    rows, user_id, link_generation = await _effective_rows(
+    rows, user_id, link_generation = grant_view or await effective_app_grant_view(
         sessionmaker,
-        client,
         tenant_id=tenant_id,
         agent_id=agent_id,
-        account_id=account_id,
-        config=config,
         fernet=fernet,
-        cache=cache,
     )
     if not rows:
         return AppSessionAccess((), (), None)
+    if fernet is None or config.app_id is None or config.private_key is None:
+        raise ValueError("GitHub App mode requires App credentials and encryption")
     repo_urls = {repo.repo_id: f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows}
     skipped_repo_ids = {
         repo.repo_id for _, repo, _ in rows if repo_urls[repo.repo_id] in excluded_repo_urls
     }
+    multi_installation = len({repo.installation_id for _, repo, _ in rows}) > 1
     active_groups = group_repository_access(
         [
             (repo.installation_id, repo.repo_id, access)
             for _, repo, access in rows
             if repo.repo_id not in skipped_repo_ids
-        ]
+        ],
+        sort_repo_ids=multi_installation,
     )
     active_groups.sort(key=lambda group: (group[0], group[1], group[2]))
-    if len(active_groups) + 1 > 15:
-        raise ValueError("GitHub App access exceeds the session vault credential limit")
+    other_credentials = 1
+    if anthropic is not None and vault_id is not None:
+        scope = resource_scope(
+            tenant_id=str(tenant_id),
+            account_id=str(account_id) if account_id is not None else "service",
+        )
+        existing = [cred async for cred in list_credentials(anthropic, vault_id, scope=scope)]
+        other_credentials = sum(
+            not (
+                isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
+                and cred.auth.secret_name.startswith("GH_TOKEN")
+            )
+            and not (
+                isinstance(cred.auth, BetaManagedAgentsStaticBearerAuthResponse)
+                and cred.auth.mcp_server_url == GITHUB_COPILOT_MCP_URL
+            )
+            for cred in existing
+        )
+    active_working = any(
+        grant.is_working_repo and repo.repo_id not in skipped_repo_ids for grant, repo, _ in rows
+    )
+    include_alias = active_working or (bool(active_groups) and not multi_installation)
+    require_vault_budget(
+        active_groups,
+        other_credentials=other_credentials,
+        include_alias=include_alias,
+        multi_installation=multi_installation,
+    )
+    mint_groups = [
+        group for group in active_groups if installation_ids is None or group[0] in installation_ids
+    ]
     jwt = build_app_jwt(
         config.private_key.get_secret_value(), config.app_id, now=int(datetime.now(UTC).timestamp())
     )
     tokens: list[AppToken] = []
     excluded_repo_ids: set[int] = set(skipped_repo_ids)
     pending_token_id: uuid.UUID | None = None
+    chunk_by_installation: dict[int, int] = {}
+    failed_installations: set[int] = set()
+    repo_ids_by_installation = {
+        installation_id: {
+            repo_id
+            for group_id, _, ids in active_groups
+            if group_id == installation_id
+            for repo_id in ids
+        }
+        for installation_id, _, _ in active_groups
+    }
     try:
-        for installation_id, profile, repo_ids in active_groups:
+        for installation_id, profile, repo_ids in mint_groups:
+            if installation_id in failed_installations:
+                continue
+            chunk = chunk_by_installation.get(installation_id, 0)
+            chunk_by_installation[installation_id] = chunk + 1
             versions = {
                 key: version
                 for grant, repo, _ in rows
@@ -440,6 +579,7 @@ async def prepare_app_access(
                     requester_account_id=account_id if user_id is not None else None,
                     github_user_id=user_id,
                     link_generation=link_generation,
+                    chunk=chunk if multi_installation else None,
                 )
             pending_token_id = pending.token_id
             try:
@@ -461,7 +601,23 @@ async def prepare_app_access(
                         session, installation_id=installation_id, now=datetime.now(UTC)
                     )
                 pending_token_id = None
-                excluded_repo_ids.update(repo_ids)
+                if multi_installation:
+                    failed_installations.add(installation_id)
+                    excluded_repo_ids.update(repo_ids_by_installation[installation_id])
+                    previous_chunks = tuple(
+                        item for item in tokens if item.installation_id == installation_id
+                    )
+                    if previous_chunks:
+                        await revoke_app_access(
+                            sessionmaker,
+                            client,
+                            AppSessionAccess((), previous_chunks, None),
+                        )
+                        tokens = [
+                            item for item in tokens if item.installation_id != installation_id
+                        ]
+                else:
+                    excluded_repo_ids.update(repo_ids)
                 _log.warning(
                     "GitHub App token mint could not cover installation %s (HTTP %s)",
                     installation_id,
@@ -501,7 +657,7 @@ async def prepare_app_access(
             except Exception:
                 await revoke_token(client, token)
                 raise
-            credential_name = "GH_TOKEN"
+            credential_name = installation_credential_name(installation_id, chunk)
             tokens.append(
                 AppToken(
                     pending.token_id,
@@ -510,6 +666,8 @@ async def prepare_app_access(
                     repo_ids,
                     profile,
                     credential_name,
+                    int(pending.created_at.timestamp()),
+                    chunk if multi_installation else None,
                 )
             )
             async with sessionmaker() as session:
@@ -552,6 +710,7 @@ async def prepare_app_access(
                 "mount_path": grant.mount_path or f"/workspace/{owner}/{name}",
             }
         )
+    working_repo_id = next((grant.repo_id for grant, _, _ in rows if grant.is_working_repo), None)
     working = next(
         (by_repo[grant.repo_id] for grant, _, _ in available_rows if grant.is_working_repo), None
     )
@@ -568,9 +727,13 @@ async def prepare_app_access(
     return AppSessionAccess(
         tuple(resources),
         tuple(tokens),
-        working or (tokens[0].token if tokens else None),
+        _working_alias(tuple(tokens), working, multi_installation=multi_installation),
         excluded,
         token_repo_urls,
+        token_scopes_for_tokens(tuple(tokens), include=multi_installation),
+        tuple(sorted((repo_id, repo_urls[repo_id]) for repo_id in by_repo)),
+        multi_installation,
+        working_repo_id,
     )
 
 
@@ -623,20 +786,64 @@ async def add_app_credentials(
     access: AppSessionAccess,
     on_mutation: Callable[[], None] | None = None,
     on_delivered: Callable[[str], None] | None = None,
+    unchanged_credential_names: frozenset[str] = frozenset(),
     scope: Scope | None = None,
 ) -> None:
     scope = scope or Scope.legacy_host_authorized(
         call_site="daimon.core.github_app_session:add_app_credentials"
     )
-    token = access.working_token or (access.tokens[0].token if access.tokens else None)
-    desired = {"GH_TOKEN": token} if token is not None else {}
+    multi_installation = (
+        access.multi_installation or len({token.installation_id for token in access.tokens}) > 1
+    )
+    working_token = _working_alias(
+        access.tokens, access.working_token, multi_installation=multi_installation
+    )
+    desired = (
+        {issued.credential_name: issued.token for issued in access.tokens}
+        if multi_installation
+        else {}
+    )
+    if working_token is not None:
+        desired["GH_TOKEN"] = working_token
+    all_credentials = [cred async for cred in list_credentials(anthropic, vault_id, scope=scope)]
     existing = {
         cred.auth.secret_name: cred.id
-        async for cred in list_credentials(anthropic, vault_id, scope=scope)
+        for cred in all_credentials
         if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse)
         and cred.auth.secret_name.startswith("GH_TOKEN")
     }
+    copilot_ids = [
+        cred.id
+        for cred in all_credentials
+        if isinstance(cred.auth, BetaManagedAgentsStaticBearerAuthResponse)
+        and cred.auth.mcp_server_url == GITHUB_COPILOT_MCP_URL
+    ]
+    other_count = sum(
+        cred.id not in set(existing.values())
+        and not (
+            isinstance(cred.auth, BetaManagedAgentsStaticBearerAuthResponse)
+            and cred.auth.mcp_server_url == GITHUB_COPILOT_MCP_URL
+        )
+        for cred in all_credentials
+    )
+    require_vault_budget(
+        [(item.installation_id, item.profile, item.repo_ids) for item in access.tokens],
+        other_credentials=other_count,
+        include_alias=working_token is not None,
+        multi_installation=multi_installation,
+    )
+    for name, credential_id in existing.items():
+        if name not in desired:
+            await delete_credential(anthropic, vault_id, credential_id, scope=scope)
+            if on_mutation is not None:
+                on_mutation()
+    for credential_id in copilot_ids[1:] if working_token is not None else copilot_ids:
+        await delete_credential(anthropic, vault_id, credential_id, scope=scope)
+        if on_mutation is not None:
+            on_mutation()
     for name, token in desired.items():
+        if name in existing and name in unchanged_credential_names:
+            continue
         if name in existing:
             await update_credential(
                 anthropic,
@@ -667,28 +874,17 @@ async def add_app_credentials(
             on_mutation()
         if on_delivered is not None:
             on_delivered(token)
-    for name, credential_id in existing.items():
-        if name not in desired:
-            await delete_credential(anthropic, vault_id, credential_id, scope=scope)
-            if on_mutation is not None:
-                on_mutation()
-    if access.working_token is not None:
+    copilot_exists = bool(copilot_ids)
+    if working_token is not None and not (
+        "GH_TOKEN" in unchanged_credential_names and copilot_exists
+    ):
         await add_github_copilot_credential(
-            anthropic, vault_id=vault_id, token=access.working_token, in_place=True, scope=scope
+            anthropic, vault_id=vault_id, token=working_token, in_place=True, scope=scope
         )
         if on_mutation is not None:
             on_mutation()
         if on_delivered is not None:
-            on_delivered(access.working_token)
-    else:
-        async for cred in list_credentials(anthropic, vault_id, scope=scope):
-            if (
-                isinstance(cred.auth, BetaManagedAgentsStaticBearerAuthResponse)
-                and cred.auth.mcp_server_url == GITHUB_COPILOT_MCP_URL
-            ):
-                await delete_credential(anthropic, vault_id, cred.id, scope=scope)
-                if on_mutation is not None:
-                    on_mutation()
+            on_delivered(working_token)
 
 
 async def finish_app_delivery(
@@ -834,6 +1030,7 @@ async def _current_app_access(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     fernet: MultiFernet,
+    grant_rows: EffectiveAppRows | None = None,
 ) -> AppSessionAccess:
     """Rebuild the current mounted values from encrypted issued tokens for rollback."""
     async with sessionmaker() as session:
@@ -845,15 +1042,47 @@ async def _current_app_access(
         # A revoked grant or removed installation repository is still needed to
         # restore a running turn if this refresh fails after touching MA.
         repo_rows = await list_authorized_repos(session, tenant_id=tenant_id, agent_id=agent_id)
-        grant_rows = await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
+        current_grants = (
+            [grant for grant, _, _ in grant_rows]
+            if grant_rows is not None
+            else await list_agent_grants(session, tenant_id=tenant_id, agent_id=agent_id)
+        )
         repos = {repo.repo_id: repo for repo in repo_rows}
-        grants = {grant.repo_id: grant for grant in grant_rows}
-        working_ids = {grant.repo_id for grant in grant_rows if grant.is_working_repo}
+        grants = {grant.repo_id: grant for grant in current_grants}
+        working_ids = {grant.repo_id for grant in current_grants if grant.is_working_repo}
+        mapped = await session.scalar(
+            select(ThreadSession)
+            .where(ThreadSession.ma_session_id == session_id, ThreadSession.status == "live")
+            .limit(1)
+        )
+        recorded_scopes = (
+            SessionSnapshot.model_validate(mapped.effective_config).token_scopes
+            if mapped is not None and mapped.effective_config is not None
+            else ()
+        )
+    # Reconstruct the delivered mode. New grants may already describe the
+    # target mode while these rows still belong to the previous one.
+    multi_installation = (
+        bool(recorded_scopes)
+        or any(row.chunk is not None for row in issued)
+        or len({row.installation_id for row in issued}) > 1
+    )
+    working_repo_id = next(iter(sorted(working_ids)), None)
+    if multi_installation and any(row.chunk is None for row in issued):
+        raise ValueError("multi-installation token inventory has no persisted chunk label")
+    recorded_by_token_id = {
+        uuid.UUID(token_id): (installation_id, chunk, tuple(sorted(repo_ids)), issued_at)
+        for scope in recorded_scopes
+        for installation_id, chunk, repo_ids, issued_at, token_id in (token_scope_parts(scope),)
+        if token_id is not None
+    }
     ordered = sorted(
         issued,
         key=lambda row: (
             row.installation_id,
-            "write" if row.permissions.get("contents") == "write" else "read",
+            (row.chunk if row.chunk is not None else 0)
+            if multi_installation
+            else ("write" if row.permissions.get("contents") == "write" else "read"),
             row.repo_ids,
         ),
     )
@@ -864,6 +1093,13 @@ async def _current_app_access(
         [repo_id for row in ordered for repo_id in row.repo_ids], working_ids=working_ids
     )
     for row in ordered:
+        if recorded_by_token_id and recorded_by_token_id.get(row.token_id) != (
+            row.installation_id,
+            row.chunk,
+            tuple(sorted(row.repo_ids)),
+            int(row.created_at.timestamp()),
+        ):
+            raise ValueError("current App token disagrees with its saved snapshot record")
         token = decrypt_issued_token(row, fernet=fernet)
         if (
             token is None
@@ -874,7 +1110,8 @@ async def _current_app_access(
         profile: PermissionProfile = (
             "write" if row.permissions.get("contents") == "write" else "read"
         )
-        credential_name = "GH_TOKEN"
+        chunk = row.chunk if row.chunk is not None else 0
+        credential_name = installation_credential_name(row.installation_id, chunk)
         tokens.append(
             AppToken(
                 row.token_id,
@@ -883,6 +1120,8 @@ async def _current_app_access(
                 tuple(row.repo_ids),
                 profile,
                 credential_name,
+                int(row.created_at.timestamp()),
+                chunk,
             )
         )
         for repo_id in row.repo_ids:
@@ -902,7 +1141,99 @@ async def _current_app_access(
         if working_token is None and any(repo_id in working_ids for repo_id in row.repo_ids):
             working_token = token
     return AppSessionAccess(
-        tuple(resources), tuple(tokens), working_token or (tokens[0].token if tokens else None)
+        tuple(resources),
+        tuple(tokens),
+        _working_alias(tuple(tokens), working_token, multi_installation=multi_installation),
+        token_repo_urls=tuple(
+            sorted(
+                f"https://github.com/{repos[repo_id].repo_full_name}"
+                for item in tokens
+                for repo_id in item.repo_ids
+            )
+        ),
+        token_scopes=token_scopes_for_tokens(
+            tuple(tokens), include=multi_installation or bool(recorded_scopes)
+        ),
+        repo_urls_by_id=tuple(
+            sorted(
+                (repo_id, f"https://github.com/{repos[repo_id].repo_full_name}")
+                for item in tokens
+                for repo_id in item.repo_ids
+            )
+        ),
+        multi_installation=multi_installation,
+        working_repo_id=working_repo_id,
+    )
+
+
+def _combine_app_access(
+    replacement: AppSessionAccess,
+    previous: AppSessionAccess,
+    installation_ids: frozenset[int],
+) -> AppSessionAccess:
+    """Keep untouched installation tokens and their exact repo scope."""
+    previous_mode = previous.multi_installation or bool(previous.token_scopes)
+    if replacement.multi_installation != previous_mode:
+        raise ValueError("App token mode changed during partial rotation")
+    retained = tuple(
+        token for token in previous.tokens if token.installation_id not in installation_ids
+    )
+    tokens = tuple(
+        sorted(
+            (*retained, *replacement.tokens),
+            key=lambda token: (token.installation_id, token.credential_name),
+        )
+    )
+    if any((token.chunk is not None) != replacement.multi_installation for token in tokens):
+        raise ValueError("App token labels disagree with the delivered vault mode")
+    if not replacement.multi_installation and (previous.token_scopes or replacement.token_scopes):
+        raise ValueError("single-installation vault cannot retain multi-installation scopes")
+    retained_values = {token.token for token in retained}
+    resources = (
+        tuple(
+            resource
+            for resource in previous.resources
+            if resource["type"] == "github_repository"
+            and resource["authorization_token"] in retained_values
+        )
+        + replacement.resources
+    )
+    retained_repo_ids = {repo_id for token in retained for repo_id in token.repo_ids}
+    retained_repo_urls = {
+        url for repo_id, url in previous.repo_urls_by_id if repo_id in retained_repo_ids
+    }
+    token_repo_urls = tuple(sorted(retained_repo_urls | set(replacement.token_repo_urls)))
+    working = next(
+        (
+            token.token
+            for token in tokens
+            if replacement.working_repo_id is not None
+            and replacement.working_repo_id in token.repo_ids
+        ),
+        None,
+    )
+    return AppSessionAccess(
+        resources,
+        tokens,
+        _working_alias(tokens, working, multi_installation=replacement.multi_installation),
+        replacement.excluded_repo_urls,
+        token_repo_urls,
+        token_scopes_for_tokens(
+            tokens,
+            include=replacement.multi_installation,
+        ),
+        tuple(
+            sorted(
+                (
+                    (repo_id, url)
+                    for repo_id, url in previous.repo_urls_by_id
+                    if repo_id in retained_repo_ids
+                ),
+            )
+        )
+        + replacement.repo_urls_by_id,
+        replacement.multi_installation,
+        replacement.working_repo_id,
     )
 
 
@@ -921,6 +1252,7 @@ async def _rotate_live_app_tokens_unlocked(
     fernet: MultiFernet,
     active_turn: bool = False,
     unavailable_repos: tuple[tuple[str, datetime], ...] = (),
+    installation_ids: tuple[int, ...] = (),
 ) -> AppSessionAccess:
     """Refresh resources and vault in place; leave equal-access old tokens to expire."""
     scope = resource_scope(
@@ -937,25 +1269,41 @@ async def _rotate_live_app_tokens_unlocked(
         nonlocal swapped
         swapped = True
 
-    old_access: AppSessionAccess | None = None
-    if active_turn:
-        try:
-            old_access = await _current_app_access(
+    async with httpx.AsyncClient() as client:
+        grant_view = (
+            ((), None, None)
+            if is_external
+            else await effective_app_grant_view(
                 sessionmaker,
-                session_id=session_id,
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 fernet=fernet,
             )
-        except (ValueError, InvalidToken):
-            # No rollback snapshot: refresh anyway. A failure still leaves the
-            # running turn alone; the next turn boundary replaces the session.
-            _log.warning("No App rollback snapshot for active session %s", session_id)
-    async with httpx.AsyncClient() as client:
+        )
+        old_access: AppSessionAccess | None = None
+        if active_turn or installation_ids:
+            try:
+                old_access = await _current_app_access(
+                    sessionmaker,
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    fernet=fernet,
+                    grant_rows=grant_view[0],
+                )
+            except (ValueError, InvalidToken):
+                # No rollback snapshot: refresh anyway. A failure still leaves the
+                # running turn alone; the next turn boundary replaces the session.
+                _log.warning("No App rollback snapshot for active session %s", session_id)
+        refresh_installation_ids = installation_ids
+        if old_access is not None and installation_ids:
+            target_multi = len({repo.installation_id for _, repo, _ in grant_view[0]}) > 1
+            if bool(old_access.token_scopes) != target_multi:
+                refresh_installation_ids = ()
         # Rotation never retries a refused repo, even after its 60 minutes: only
         # the turn-boundary replacement does, so retries stay one per turn.
         refused = tuple(url for url, _ in unavailable_repos)
-        access = await prepare_app_access(
+        minted_access = await prepare_app_access(
             sessionmaker,
             client,
             tenant_id=tenant_id,
@@ -967,9 +1315,27 @@ async def _rotate_live_app_tokens_unlocked(
             fernet=fernet,
             cache=REQUESTER_CACHE,
             excluded_repo_urls=refused,
+            installation_ids=(
+                frozenset(refresh_installation_ids) if refresh_installation_ids else None
+            ),
+            grant_view=grant_view,
+            anthropic=anthropic,
+            vault_id=vault_id,
         )
+        if installation_ids and old_access is None:
+            await revoke_app_access(sessionmaker, client, minted_access)
+            raise ValueError("current App tokens are required for installation rotation")
         try:
-            for resource in access.resources:
+            access = (
+                _combine_app_access(minted_access, old_access, frozenset(refresh_installation_ids))
+                if refresh_installation_ids and old_access is not None
+                else minted_access
+            )
+        except Exception:
+            await revoke_app_access(sessionmaker, client, minted_access)
+            raise
+        try:
+            for resource in minted_access.resources:
                 if resource["type"] != "github_repository":
                     continue
                 resource_id = resource_ids.get(resource["url"])
@@ -1004,12 +1370,29 @@ async def _rotate_live_app_tokens_unlocked(
                 access=access,
                 on_mutation=mark_swapped,
                 on_delivered=delivered.add,
+                unchanged_credential_names=(
+                    frozenset(
+                        {
+                            token.credential_name
+                            for token in old_access.tokens
+                            if token.installation_id not in refresh_installation_ids
+                        }
+                        | (
+                            {"GH_TOKEN"}
+                            if old_access.working_token is not None
+                            and access.working_token == old_access.working_token
+                            else set()
+                        )
+                    )
+                    if refresh_installation_ids and old_access is not None
+                    else frozenset()
+                ),
                 scope=scope,
             )
             await finish_app_delivery(
                 sessionmaker,
                 client,
-                access=access,
+                access=minted_access,
                 provisional_session_id=provisional,
                 session_id=session_id,
                 grant_guard=(tenant_id, agent_id),
@@ -1107,7 +1490,7 @@ async def _rotate_live_app_tokens_unlocked(
                                 session_id=session_id,
                                 token_ids=frozenset(
                                     token.token_id
-                                    for token in access.tokens
+                                    for token in minted_access.tokens
                                     if token.token in delivered
                                 ),
                                 now=datetime.now(UTC),
@@ -1121,9 +1504,9 @@ async def _rotate_live_app_tokens_unlocked(
                     sessionmaker,
                     client,
                     replace(
-                        access,
+                        minted_access,
                         tokens=tuple(
-                            token for token in access.tokens if token.token_id not in kept
+                            token for token in minted_access.tokens if token.token_id not in kept
                         ),
                     ),
                 )
@@ -1145,6 +1528,7 @@ async def rotate_live_app_tokens(
     fernet: MultiFernet,
     active_turn: bool = False,
     unavailable_repos: tuple[tuple[str, datetime], ...] = (),
+    installation_ids: tuple[int, ...] = (),
 ) -> AppSessionAccess:
     """Rotate without holding a database connection during network calls."""
     return await _rotate_live_app_tokens_unlocked(
@@ -1161,4 +1545,5 @@ async def rotate_live_app_tokens(
         fernet=fernet,
         active_turn=active_turn,
         unavailable_repos=unavailable_repos,
+        installation_ids=installation_ids,
     )

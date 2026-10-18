@@ -14,7 +14,14 @@ from datetime import UTC, datetime
 
 import pytest_asyncio
 from daimon.core._models import ThreadSession
-from daimon.core.github_app_session import AppSessionAccess
+from daimon.core.github_app_session import AppSessionAccess, AppToken, token_scopes_for_tokens
+from daimon.core.session_compat import (
+    DEFAULT_MA_CAPABILITIES,
+    RemirrorVaultCredentials,
+    RotateAppTokens,
+    UpdateInPlace,
+    decide_session_compatibility,
+)
 from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.thread_session_lineage import (
@@ -879,6 +886,95 @@ async def test_app_token_refresh_updates_live_session_snapshots(
     assert dead_row is not None and dead_row.effective_config is not None
     assert live_row.effective_config.repo_token_issued_at == 200
     assert dead_row.effective_config.repo_token_issued_at == 100
+
+
+async def test_single_installation_refresh_uses_legacy_refresh_timestamp(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    snapshot = _snapshot().model_copy(update={"github_mode": "app", "repo_token_issued_at": 100})
+    live = await create_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        thread_id="single_refresh",
+        account_id=uuid.uuid4(),
+        ma_session_id="sess_single_refresh",
+        effective_config=snapshot,
+    )
+    token = AppToken(uuid.uuid4(), "token", 71, (101,), "write", "GH_TOKEN_I71_0", 150)
+    await record_app_token_refresh(
+        db_session,
+        ma_session_id="sess_single_refresh",
+        issued_at=200,
+        access=AppSessionAccess((), (token,), token.token),
+        now=datetime.now(UTC),
+    )
+    row = await get_thread_session_by_id(db_session, id=live.id)
+    assert row is not None and row.effective_config is not None
+    assert row.effective_config.repo_token_issued_at == 200
+
+
+async def test_contraction_keeps_both_retained_chunk_ages(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    now = datetime(2026, 10, 16, 12, tzinfo=UTC)
+    old = int(now.timestamp()) - 39 * 60
+    a = "https://github.com/example/a"
+    b0 = "https://github.com/example/b0"
+    b1 = "https://github.com/example/b1"
+    snapshot = _snapshot().model_copy(
+        update={
+            "github_mode": "app",
+            "repo_urls": (),
+            "token_repo_urls": (a, b0, b1),
+            "token_scopes": (
+                (1, 0, (101,), old, str(uuid.uuid4())),
+                (2, 0, (201,), old, str(uuid.uuid4())),
+                (2, 1, (202,), old, str(uuid.uuid4())),
+            ),
+            "repo_token_issued_at": old,
+        }
+    )
+    live = await create_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        thread_id="contract_chunks",
+        account_id=uuid.uuid4(),
+        ma_session_id="sess_contract_chunks",
+        effective_config=snapshot,
+    )
+    b_tokens = (
+        AppToken(uuid.uuid4(), "b0", 2, (201,), "write", "GH_TOKEN_I2_0", old, 0),
+        AppToken(uuid.uuid4(), "b1", 2, (202,), "write", "GH_TOKEN_I2_1", old, 1),
+    )
+    access = AppSessionAccess(
+        (), b_tokens, None,
+        token_repo_urls=(b0, b1),
+        token_scopes=token_scopes_for_tokens(b_tokens, include=True),
+    )
+    await record_app_token_refresh(
+        db_session,
+        ma_session_id="sess_contract_chunks",
+        issued_at=int(now.timestamp()),
+        access=access,
+        now=now,
+    )
+    row = await get_thread_session_by_id(db_session, id=live.id)
+    assert row is not None and row.effective_config is not None
+    refreshed = row.effective_config
+    assert [scope[3] for scope in refreshed.token_scopes if len(scope) == 5] == [old, old]
+    assert decide_session_compatibility(
+        recorded=refreshed,
+        desired=refreshed,
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=now.replace(minute=now.minute + 1),
+    ) == UpdateInPlace(
+        ops=(RotateAppTokens(resource_ids={}, installation_ids=(2,)), RemirrorVaultCredentials()),
+        reasons=("repo_token_age",),
+    )
 
 
 async def test_partial_app_rotation_records_exclusion_in_live_snapshot(

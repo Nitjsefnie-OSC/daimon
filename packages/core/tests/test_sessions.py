@@ -318,8 +318,12 @@ async def test_app_cleanup_respects_native_ownership_and_retains_allocation_ack(
 
     revoke = AsyncMock(wraps=session_module.revoke_app_access)
     monkeypatch.setattr(session_module, "revoke_app_access", revoke)
+    grant_view = AsyncMock(return_value=(("declared",), None, None))
+    monkeypatch.setattr(  # pyright: ignore[reportUnknownMemberType]
+        session_module, "effective_app_grant_view", grant_view
+    )
     monkeypatch.setattr(
-        session_module, "declared_app_repositories", AsyncMock(return_value=("declared",))
+        session_module, "prepare_app_access", AsyncMock(return_value=AppSessionAccess((), (), None))
     )
     async with build_fake_anthropic_http(
         combine_handlers(make_fake_memory_store_handler(), handle)
@@ -350,6 +354,7 @@ async def test_app_cleanup_respects_native_ownership_and_retains_allocation_ack(
         with pytest.raises(error):
             await task
     assert len(retained) == 1 and retained[0]["id"] == "sess_root_app"
+    grant_view.assert_awaited_once()
     assert retained[0]["metadata"] == native["metadata"]
     assert retained[0].get("budget") == (
         None if fault == "ack_budget" or not budgeted else expected_budget
@@ -1525,10 +1530,8 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
     identity = BotIdentity(name="daimon[bot]", email="7+daimon[bot]@users.noreply.github.com")
     token = AppToken(uuid.uuid4(), "ghs_x", 1, (1,), "write", "GH_TOKEN_ACME_WRITE")
     monkeypatch.setattr("daimon.core.sessions.create_session_vault", AsyncMock(return_value="v"))
-    monkeypatch.setattr(
-        "daimon.core.sessions.declared_app_repositories",
-        AsyncMock(return_value=("declared",)),
-    )
+    grant_view = AsyncMock(return_value=(("declared",), None, None))
+    monkeypatch.setattr("daimon.core.sessions.effective_app_grant_view", grant_view)
     monkeypatch.setattr(
         "daimon.core.sessions.prepare_app_access",
         AsyncMock(
@@ -1573,6 +1576,7 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
     )
 
     resolve.assert_awaited_once()
+    grant_view.assert_awaited_once()
     assert observed_access[0].excluded_repo_urls == ("https://github.com/example/unavailable",)
     assert "github_unavailable_repo_urls" not in bodies[0]["metadata"]
     assert resolve.await_args is not None and resolve.await_args.kwargs["slug"] == "daimon"
@@ -1597,9 +1601,11 @@ async def test_app_session_attaches_caller_and_session_vaults(
     monkeypatch.setattr(
         "daimon.core.sessions.create_session_vault", AsyncMock(return_value="vlt_session")
     )
+    grant_view = AsyncMock(return_value=(("declared",), None, None))
+    monkeypatch.setattr("daimon.core.sessions.effective_app_grant_view", grant_view)
     monkeypatch.setattr(
-        "daimon.core.sessions.declared_app_repositories",
-        AsyncMock(return_value=("declared",)),
+        "daimon.core.sessions.prepare_app_access",
+        AsyncMock(return_value=AppSessionAccess((), (), None)),
     )
     monkeypatch.setattr(
         "daimon.core.sessions.ensure_agent_mcp_vault", AsyncMock(return_value="vlt_caller")
@@ -1637,6 +1643,7 @@ async def test_app_session_attaches_caller_and_session_vaults(
         fernet=build_multifernet((Fernet.generate_key().decode(),)),
     )
     assert bodies[0]["vault_ids"] == ["vlt_caller", "vlt_session"]
+    grant_view.assert_awaited_once()
     assert mirror.await_args.kwargs["vault_id"] == "vlt_caller"
     assert add_app.await_args.kwargs["vault_id"] == "vlt_session"
 

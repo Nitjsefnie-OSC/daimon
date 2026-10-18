@@ -94,7 +94,10 @@ from daimon.core.session_update_ops import (
 from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores.access_policy import load_access_policy, lock_access_policy
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind
-from daimon.core.stores.github_issued_tokens import session_token_needs_rotation
+from daimon.core.stores.github_issued_tokens import (
+    session_installations_needing_rotation,
+    session_token_needs_rotation,
+)
 from daimon.core.stores.session_preparations import (
     advance_stage,
     fail_preparation,
@@ -934,10 +937,20 @@ async def _prepare_session_for_turn_locked(
             )
         else:
             assert recorded is not None, "a readable row always has a recorded snapshot here"
-            rotate_app_token = (
-                recorded.github_mode == "app"
-                and bool(recorded.repo_urls or recorded.token_repo_urls)
-                and await session_token_needs_rotation(db, session_id=row.ma_session_id)
+            has_app_tokens = recorded.github_mode == "app" and bool(
+                recorded.repo_urls or recorded.token_repo_urls
+            )
+            forced_installations = (
+                await session_installations_needing_rotation(db, session_id=row.ma_session_id)
+                if has_app_tokens and recorded.token_scopes
+                else ()
+            )
+            rotate_app_token = bool(
+                has_app_tokens
+                and (
+                    forced_installations
+                    or await session_token_needs_rotation(db, session_id=row.ma_session_id)
+                )
             )
             decision = decide_session_compatibility(
                 recorded=recorded,
@@ -945,6 +958,7 @@ async def _prepare_session_for_turn_locked(
                 capabilities=capabilities,
                 now=moment,
                 force_app_token_rotation=rotate_app_token,
+                forced_app_installation_ids=forced_installations,
             )
 
         async def on_current(

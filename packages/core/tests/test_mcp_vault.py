@@ -13,7 +13,7 @@ import json
 import os
 import uuid
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import jwt as pyjwt
@@ -1512,7 +1512,7 @@ async def test_legacy_copilot_credential_is_deleted_then_created() -> None:
 async def test_add_github_copilot_credential_updates_static_token_in_place() -> None:
     from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, add_github_copilot_credential
 
-    writes: list[tuple[str, str, dict[str, object]]] = []
+    writes: list[tuple[str, str, dict[str, Any]]] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "GET" and req.url.path == "/v1/vaults/vlt_1/credentials":
@@ -1615,6 +1615,18 @@ async def test_app_refresh_updates_env_and_copilot_credentials_in_place() -> Non
 
     credentials = [
         {
+            "id": "vcrd_a",
+            "type": "credential",
+            "vault_id": "vlt_1",
+            "auth": {"type": "environment_variable", "secret_name": "GH_TOKEN_I1_0"},
+        },
+        {
+            "id": "vcrd_b",
+            "type": "credential",
+            "vault_id": "vlt_1",
+            "auth": {"type": "environment_variable", "secret_name": "GH_TOKEN_I2_0"},
+        },
+        {
             "id": "vcrd_repo",
             "type": "credential",
             "vault_id": "vlt_1",
@@ -1633,7 +1645,7 @@ async def test_app_refresh_updates_env_and_copilot_credentials_in_place() -> Non
             "auth": {"type": "static_bearer", "mcp_server_url": GITHUB_COPILOT_MCP_URL},
         },
     ]
-    writes: list[tuple[str, str, dict[str, object]]] = []
+    writes: list[tuple[str, str, dict[str, Any]]] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "GET" and req.url.path == "/v1/vaults/vlt_1/credentials":
@@ -1642,28 +1654,337 @@ async def test_app_refresh_updates_env_and_copilot_credentials_in_place() -> Non
         if req.method == "DELETE":
             return httpx.Response(204)
         return httpx.Response(
-            200, json=next(item for item in credentials if req.url.path.endswith(item["id"]))
+            200, json=next(item for item in credentials if req.url.path.endswith(str(item["id"])))
         )
 
     access = AppSessionAccess(
         resources=(),
-        tokens=(AppToken(uuid.uuid4(), "fresh-token", 1, (11,), "write", "GH_TOKEN"),),
-        working_token="fresh-token",
+        tokens=(
+            AppToken(uuid.uuid4(), "fresh-a", 1, (11,), "write", "GH_TOKEN_I1_0"),
+            AppToken(uuid.uuid4(), "fresh-b", 2, (22,), "write", "GH_TOKEN_I2_0"),
+        ),
+        working_token="fresh-a",
     )
     await add_app_credentials(
         _make_client(httpx.MockTransport(handler)), vault_id="vlt_1", access=access
     )
     assert {(method, path) for method, path, _ in writes} == {
         ("DELETE", "/v1/vaults/vlt_1/credentials/vcrd_repo"),
+        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_a"),
+        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_b"),
         ("POST", "/v1/vaults/vlt_1/credentials/vcrd_working"),
         ("POST", "/v1/vaults/vlt_1/credentials/vcrd_copilot"),
     }
-    assert all(
-        body["auth"]["secret_value"] == "fresh-token"
+    assert {
+        path.rsplit("/", 1)[-1]: body["auth"]["secret_value"]
         for _, path, body in writes
-        if path.endswith("vcrd_working")
-    )
+        if path.endswith(("vcrd_a", "vcrd_b", "vcrd_working"))
+    } == {"vcrd_a": "fresh-a", "vcrd_b": "fresh-b", "vcrd_working": "fresh-a"}
     assert next(body for _, path, body in writes if path.endswith("vcrd_copilot"))["auth"] == {
         "type": "static_bearer",
-        "token": "fresh-token",
+        "token": "fresh-a",
     }
+
+
+async def test_app_refresh_leaves_retained_installation_credentials_untouched() -> None:
+    from daimon.core.github_app_session import AppSessionAccess, AppToken, add_app_credentials
+    from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL
+
+    credentials = [
+        {
+            "id": f"vcrd_{name}",
+            "type": "credential",
+            "vault_id": "vlt_1",
+            "auth": {"type": "environment_variable", "secret_name": secret_name},
+        }
+        for name, secret_name in (
+            ("a", "GH_TOKEN_I1_0"),
+            ("b", "GH_TOKEN_I2_0"),
+            ("alias", "GH_TOKEN"),
+        )
+    ]
+    credentials.append(
+        {
+            "id": "vcrd_copilot",
+            "type": "credential",
+            "vault_id": "vlt_1",
+            "auth": {"type": "static_bearer", "mcp_server_url": GITHUB_COPILOT_MCP_URL},
+        }
+    )
+    writes: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            return httpx.Response(200, json={"data": credentials, "has_more": False})
+        writes.append(f"{req.method} {req.url.path}")
+        return httpx.Response(
+            200, json=next(item for item in credentials if req.url.path.endswith(str(item["id"])))
+        )
+
+    access = AppSessionAccess(
+        resources=(),
+        tokens=(
+            AppToken(uuid.uuid4(), "old-a", 1, (11,), "write", "GH_TOKEN_I1_0"),
+            AppToken(uuid.uuid4(), "new-b", 2, (22, 23), "write", "GH_TOKEN_I2_0"),
+        ),
+        working_token="old-a",
+    )
+    await add_app_credentials(
+        _make_client(httpx.MockTransport(handler)),
+        vault_id="vlt_1",
+        access=access,
+        unchanged_credential_names=frozenset({"GH_TOKEN_I1_0", "GH_TOKEN"}),
+    )
+    assert writes == ["POST /v1/vaults/vlt_1/credentials/vcrd_b"]
+
+
+async def test_app_vault_variables_follow_single_multi_single_transition() -> None:
+    from daimon.core.github_app_session import AppSessionAccess, AppToken, add_app_credentials
+    from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL
+
+    credentials: dict[str, dict[str, Any]] = {
+        "vcrd_alias": {
+            "id": "vcrd_alias",
+            "type": "credential",
+            "vault_id": "vlt_1",
+            "auth": {"type": "environment_variable", "secret_name": "GH_TOKEN"},
+        },
+        "vcrd_copilot": {
+            "id": "vcrd_copilot",
+            "type": "credential",
+            "vault_id": "vlt_1",
+            "auth": {"type": "static_bearer", "mcp_server_url": GITHUB_COPILOT_MCP_URL},
+        },
+    }
+    writes: list[tuple[str, str]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        collection = "/v1/vaults/vlt_1/credentials"
+        if req.method == "GET" and path == collection:
+            return httpx.Response(200, json={"data": list(credentials.values()), "has_more": False})
+        writes.append((req.method, path))
+        if req.method == "POST" and path == collection:
+            body = json.loads(req.content)
+            name = body["auth"]["secret_name"]
+            credential_id = f"vcrd_{name}"
+            credentials[credential_id] = {
+                "id": credential_id,
+                "type": "credential",
+                "vault_id": "vlt_1",
+                "auth": {"type": "environment_variable", "secret_name": name},
+            }
+            return httpx.Response(200, json=credentials[credential_id])
+        credential_id = path.removeprefix(f"{collection}/")
+        assert credential_id in credentials
+        if req.method == "POST":
+            return httpx.Response(200, json=credentials[credential_id])
+        if req.method == "DELETE":
+            del credentials[credential_id]
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected call: {req.method} {path}")
+
+    def token_names() -> set[str]:
+        names: set[str] = set()
+        for credential in credentials.values():
+            auth = credential["auth"]
+            if not isinstance(auth, dict):
+                continue
+            typed_auth = cast(dict[str, Any], auth)
+            if typed_auth.get("type") == "environment_variable":
+                names.add(str(typed_auth["secret_name"]))
+        return names
+
+    client = _make_client(httpx.MockTransport(handler))
+    a = AppToken(uuid.uuid4(), "a-token", 1, (11,), "write", "GH_TOKEN_I1_0")
+    b = AppToken(uuid.uuid4(), "b-token", 2, (22,), "write", "GH_TOKEN_I2_0")
+    await add_app_credentials(client, vault_id="vlt_1", access=AppSessionAccess((), (a,), a.token))
+    assert token_names() == {"GH_TOKEN"}
+    assert writes == [
+        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_alias"),
+        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_copilot"),
+    ]
+
+    writes.clear()
+    same_installation = AppToken(uuid.uuid4(), "a-write", 1, (12,), "write", "GH_TOKEN_I1_1")
+    await add_app_credentials(
+        client,
+        vault_id="vlt_1",
+        access=AppSessionAccess((), (a, same_installation), same_installation.token),
+    )
+    assert token_names() == {"GH_TOKEN"}
+    assert writes == [
+        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_alias"),
+        ("POST", "/v1/vaults/vlt_1/credentials/vcrd_copilot"),
+    ]
+
+    writes.clear()
+    delivered: list[str] = []
+    await add_app_credentials(
+        client,
+        vault_id="vlt_1",
+        access=AppSessionAccess((), (a, same_installation), None),
+        on_delivered=delivered.append,
+    )
+    assert token_names() == {"GH_TOKEN"}
+    assert delivered == [a.token, a.token]
+
+    writes.clear()
+    await add_app_credentials(
+        client, vault_id="vlt_1", access=AppSessionAccess((), (a, b), a.token)
+    )
+    assert token_names() == {"GH_TOKEN", "GH_TOKEN_I1_0", "GH_TOKEN_I2_0"}
+    assert [
+        path for method, path in writes if method == "POST" and path.endswith("/credentials")
+    ] == ["/v1/vaults/vlt_1/credentials"] * 2
+    assert not any(method == "DELETE" for method, _ in writes)
+
+    writes.clear()
+    await add_app_credentials(client, vault_id="vlt_1", access=AppSessionAccess((), (b,), b.token))
+    assert token_names() == {"GH_TOKEN"}
+    assert {path for method, path in writes if method == "DELETE"} == {
+        "/v1/vaults/vlt_1/credentials/vcrd_GH_TOKEN_I1_0",
+        "/v1/vaults/vlt_1/credentials/vcrd_GH_TOKEN_I2_0",
+    }
+
+    writes.clear()
+    b_second_chunk = AppToken(uuid.uuid4(), "b-token-two", 2, (23,), "write", "GH_TOKEN_I2_1")
+    await add_app_credentials(
+        client,
+        vault_id="vlt_1",
+        access=AppSessionAccess((), (b, b_second_chunk), b.token),
+    )
+    assert token_names() == {"GH_TOKEN"}
+    assert not any(method == "DELETE" for method, _ in writes)
+
+    writes.clear()
+    await add_app_credentials(client, vault_id="vlt_1", access=AppSessionAccess((), (a, b), None))
+    assert token_names() == {"GH_TOKEN_I1_0", "GH_TOKEN_I2_0"}
+    assert "vcrd_copilot" not in credentials
+    assert ("DELETE", "/v1/vaults/vlt_1/credentials/vcrd_alias") in writes
+    assert ("DELETE", "/v1/vaults/vlt_1/credentials/vcrd_copilot") in writes
+
+
+async def test_app_vault_contraction_stays_within_fifteen_credentials() -> None:
+    from daimon.core.github_app_session import AppSessionAccess, AppToken, add_app_credentials
+
+    credentials: dict[str, dict[str, Any]] = {
+        f"vcrd_{name}": {
+            "id": f"vcrd_{name}",
+            "type": "credential",
+            "vault_id": "vlt_1",
+            "auth": {"type": "environment_variable", "secret_name": name},
+        }
+        for name in [*(f"GH_TOKEN_I{i}_0" for i in range(1, 13)), "OTHER_1", "OTHER_2", "OTHER_3"]
+    }
+    writes: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        collection = "/v1/vaults/vlt_1/credentials"
+        if req.method == "GET" and req.url.path == collection:
+            return httpx.Response(200, json={"data": list(credentials.values()), "has_more": False})
+        if req.method == "POST" and req.url.path == collection:
+            assert len(credentials) < 15
+            auth = json.loads(req.content)["auth"]
+            name = auth.get("secret_name", "copilot")
+            credential_id = f"vcrd_{name}"
+            credentials[credential_id] = {
+                "id": credential_id,
+                "type": "credential",
+                "vault_id": "vlt_1",
+                "auth": auth,
+            }
+            writes.append(f"create:{name}")
+            return httpx.Response(200, json=credentials[credential_id])
+        credential_id = req.url.path.removeprefix(f"{collection}/")
+        if req.method == "DELETE":
+            del credentials[credential_id]
+            writes.append(f"delete:{credential_id}")
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected call: {req.method} {req.url.path}")
+
+    client = _make_client(httpx.MockTransport(handler))
+    token = AppToken(uuid.uuid4(), "token", 1, (101,), "write", "GH_TOKEN_I1_0")
+    await add_app_credentials(
+        client,
+        vault_id="vlt_1",
+        access=AppSessionAccess((), (token,), token.token),
+    )
+    assert all(write.startswith("delete:") for write in writes[:12])
+    assert len(credentials) == 5
+    assert {credential["auth"].get("secret_name") for credential in credentials.values()} == {
+        "OTHER_1",
+        "OTHER_2",
+        "OTHER_3",
+        "GH_TOKEN",
+        None,
+    }
+
+
+async def test_app_vault_removes_alias_and_copilot_before_chunk_growth() -> None:
+    from daimon.core.github_app_session import AppSessionAccess, AppToken, add_app_credentials
+    from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL
+
+    credentials: dict[str, dict[str, object]] = {
+        f"vcrd_{name}": {
+            "id": f"vcrd_{name}",
+            "type": "credential",
+            "vault_id": "vlt_1",
+            "auth": {"type": "environment_variable", "secret_name": name},
+        }
+        for name in [*(f"GH_TOKEN_I{i}_0" for i in range(1, 13)), "GH_TOKEN", "OTHER"]
+    }
+    credentials["vcrd_copilot"] = {
+        "id": "vcrd_copilot",
+        "type": "credential",
+        "vault_id": "vlt_1",
+        "auth": {"type": "static_bearer", "mcp_server_url": GITHUB_COPILOT_MCP_URL},
+    }
+    writes: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        collection = "/v1/vaults/vlt_1/credentials"
+        if req.method == "GET" and req.url.path == collection:
+            return httpx.Response(200, json={"data": list(credentials.values()), "has_more": False})
+        if req.method == "POST" and req.url.path == collection:
+            assert len(credentials) < 15
+            name = json.loads(req.content)["auth"]["secret_name"]
+            credential_id = f"vcrd_{name}"
+            credentials[credential_id] = {
+                "id": credential_id,
+                "type": "credential",
+                "vault_id": "vlt_1",
+                "auth": {"type": "environment_variable", "secret_name": name},
+            }
+            writes.append(f"create:{name}")
+            return httpx.Response(200, json=credentials[credential_id])
+        credential_id = req.url.path.removeprefix(f"{collection}/")
+        if req.method == "DELETE":
+            del credentials[credential_id]
+            writes.append(f"delete:{credential_id}")
+            return httpx.Response(204)
+        if req.method == "POST":
+            return httpx.Response(200, json=credentials[credential_id])
+        raise AssertionError(f"unexpected call: {req.method} {req.url.path}")
+
+    tokens = tuple(
+        AppToken(
+            uuid.uuid4(),
+            f"token-{i}-{chunk}",
+            i,
+            (i + chunk * 100,),
+            "write",
+            f"GH_TOKEN_I{i}_{chunk}",
+        )
+        for i in range(1, 13)
+        for chunk in (range(2) if i <= 2 else range(1))
+    )
+    client = _make_client(httpx.MockTransport(handler))
+    await add_app_credentials(
+        client,
+        vault_id="vlt_1",
+        access=AppSessionAccess((), tokens, None, multi_installation=True),
+    )
+    assert writes[:2] == ["delete:vcrd_GH_TOKEN", "delete:vcrd_copilot"]
+    assert len(credentials) == 15
+    assert "vcrd_GH_TOKEN" not in credentials and "vcrd_copilot" not in credentials
