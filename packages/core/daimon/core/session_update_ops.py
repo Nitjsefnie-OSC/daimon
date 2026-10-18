@@ -246,6 +246,7 @@ async def apply_update_ops(
     now: dt.datetime,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    daimon_rule_tools: frozenset[str] = frozenset(),
     mcp_vault_ids: McpVaultIds | None = None,
     shared_owner: uuid.UUID | None = None,
 ) -> AppliedOps | SessionBusy:
@@ -320,6 +321,7 @@ async def apply_update_ops(
                     public_url=public_url,
                     asks_before_publishing=asks_before_publishing,
                     confirmed_tools=confirmed_tools,
+                    daimon_rule_tools=daimon_rule_tools,
                 )
                 servers = session_mcp_servers(
                     agent,
@@ -367,7 +369,10 @@ async def apply_update_ops(
                     unavailable_repos=snapshot.unavailable_repos,
                     config=agent_github_app or GithubAppSettings(),
                     fernet=fernet,
+                    installation_ids=op.installation_ids,
                 )
+                issued_at = int(now.timestamp())
+                legacy_issued_at = issued_at
                 snapshot = snapshot.model_copy(
                     update={
                         "repo_urls": tuple(
@@ -376,10 +381,19 @@ async def apply_update_ops(
                             if url not in access.excluded_repo_urls
                         ),
                         "token_repo_urls": access.token_repo_urls,
+                        "token_scopes": access.token_scopes,
+                        "token_issued_at_by_installation": {
+                            installation_id: min(
+                                token.issued_at or issued_at
+                                for token in access.tokens
+                                if token.installation_id == installation_id
+                            )
+                            for installation_id in {scope[0] for scope in access.token_scopes}
+                        },
                         **refreshed_unavailable_state(
                             snapshot, access.excluded_repo_urls, now=dt.datetime.now(dt.UTC)
                         ),
-                        "repo_token_issued_at": int(now.timestamp()),
+                        "repo_token_issued_at": legacy_issued_at,
                     }
                 )
                 applied.append("repo_token_age")
@@ -394,7 +408,7 @@ async def apply_update_ops(
                     await sync_agent_mcp_credentials(
                         anthropic,
                         sessionmaker=sessionmaker,
-                        fernet=fernet,
+                        fernet=cast(MultiFernet, fernet),
                         tenant_id=tenant_id,
                         agent_id=agent_uuid,
                         account_id=account_id,

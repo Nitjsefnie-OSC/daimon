@@ -31,7 +31,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-from daimon.core.session_snapshot import SessionSnapshot
+from daimon.core.session_snapshot import (
+    SessionSnapshot,
+    TokenScope,
+    token_scope_identity,
+    token_scope_parts,
+)
 
 type ChangeReason = Literal[
     "agent_identity",
@@ -42,6 +47,7 @@ type ChangeReason = Literal[
     "environment",
     "github_mode",
     "repo_set",
+    "github_helper",
     "repo_url",
     "repo_branch",
     "memory_store",
@@ -98,6 +104,7 @@ class RotateAppTokens:
     """Refresh App tokens and swap every mounted repository resource in place."""
 
     resource_ids: dict[str, str]
+    installation_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,8 +180,14 @@ def identity_change_reasons(
             # Repos GitHub refused at mint stay excluded instead of replacing the
             # session every turn; reconciliation then removes them from desired.
             recorded.repo_urls != _without(desired.repo_urls, excluded)
-            or recorded.token_repo_urls != _without(desired.token_repo_urls, excluded),
+            or recorded.token_repo_urls != _without(desired.token_repo_urls, excluded)
+            or _token_scopes_changed(recorded.token_scopes, desired.token_scopes, excluded),
             "repo_set",
+        ),
+        (
+            recorded.github_repo_script_sha256 != desired.github_repo_script_sha256
+            or recorded.github_repo_map_sha256 != desired.github_repo_map_sha256,
+            "github_helper",
         ),
         (recorded.repo_url != desired.repo_url, "repo_url"),
         (recorded.repo_branch != desired.repo_branch, "repo_branch"),
@@ -197,6 +210,87 @@ def identity_change_reasons(
     return tuple(reason for differs, reason in checks if differs)
 
 
+def _token_scopes_changed(
+    recorded: tuple[TokenScope, ...],
+    desired: tuple[TokenScope, ...],
+    excluded_urls: tuple[str, ...],
+) -> bool:
+    if not recorded and not desired:
+        return False
+    if not excluded_urls:
+        return token_scope_identity(recorded) != token_scope_identity(desired)
+    # GitHub refused repos are excluded from the live token until replacement.
+    # Still detect an installation reassignment of every repo shared by both.
+    old_owner = {
+        repo_id: installation
+        for installation, ids in token_scope_identity(recorded)
+        for repo_id in ids
+    }
+    new_owner = {
+        repo_id: installation
+        for installation, ids in token_scope_identity(desired)
+        for repo_id in ids
+    }
+    return any(
+        repo_id not in new_owner or new_owner[repo_id] != installation
+        for repo_id, installation in old_owner.items()
+    )
+
+
+def _unmounted_scope_expansion(
+    recorded: SessionSnapshot, desired: SessionSnapshot
+) -> tuple[int, ...]:
+    """An added repo can use a new vault token without changing MA mounts."""
+    if (
+        recorded.github_mode != "app"
+        or desired.github_mode != "app"
+        or not recorded.token_scopes
+        or not desired.token_scopes
+        or recorded.repo_urls != desired.repo_urls
+        or not set(recorded.token_repo_urls) < set(desired.token_repo_urls)
+    ):
+        return ()
+    old_owner = {
+        repo_id: installation
+        for installation, ids in token_scope_identity(recorded.token_scopes)
+        for repo_id in ids
+    }
+    new_owner = {
+        repo_id: installation
+        for installation, ids in token_scope_identity(desired.token_scopes)
+        for repo_id in ids
+    }
+    if any(new_owner.get(repo_id) != installation for repo_id, installation in old_owner.items()):
+        return ()
+    return tuple(
+        sorted(
+            {
+                installation
+                for repo_id, installation in new_owner.items()
+                if repo_id not in old_owner
+            }
+        )
+    )
+
+
+def _unmounted_scope_contraction(
+    recorded: SessionSnapshot,
+    desired: SessionSnapshot,
+    forced_installation_ids: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Stale token rows identify which installation lost unmounted access."""
+    if (
+        recorded.github_mode != "app"
+        or desired.github_mode != "app"
+        or not recorded.token_scopes
+        or recorded.repo_urls != desired.repo_urls
+        or not set(desired.token_repo_urls) < set(recorded.token_repo_urls)
+        or not forced_installation_ids
+    ):
+        return ()
+    return tuple(sorted(set(forced_installation_ids)))
+
+
 def decide_session_compatibility(
     *,
     recorded: SessionSnapshot,
@@ -205,6 +299,7 @@ def decide_session_compatibility(
     now: datetime,
     repo_token_max_age_s: int = 2400,
     force_app_token_rotation: bool = False,
+    forced_app_installation_ids: tuple[int, ...] = (),
 ) -> CompatibilityDecision:
     """Reuse, update in place, or replace the session `recorded` describes.
 
@@ -215,12 +310,38 @@ def decide_session_compatibility(
         raise ValueError("now must be timezone-aware")
 
     identity_reasons = identity_change_reasons(recorded, desired, now=now)
+    full_mode_refresh = (
+        recorded.github_mode == desired.github_mode == "app"
+        and bool(recorded.token_scopes) != bool(desired.token_scopes)
+        and recorded.repo_urls == desired.repo_urls
+        and identity_reasons == ("repo_set",)
+        and capabilities.repo_token_rotatable
+    )
+    expanded_installations = (
+        _unmounted_scope_expansion(recorded, desired)
+        if identity_reasons == ("repo_set",) and capabilities.repo_token_rotatable
+        else ()
+    )
+    contracted_installations = (
+        _unmounted_scope_contraction(recorded, desired, forced_app_installation_ids)
+        if identity_reasons == ("repo_set",) and capabilities.repo_token_rotatable
+        else ()
+    )
+    scope_changed_installations = tuple(
+        sorted(set(expanded_installations) | set(contracted_installations))
+    )
+    if scope_changed_installations or full_mode_refresh:
+        identity_reasons = ()
     if identity_reasons:
         return ReplaceSession(reasons=identity_reasons)
 
     ops: list[UpdateOp] = []
     reasons: list[ChangeReason] = []
     must_replace = False
+
+    if scope_changed_installations or full_mode_refresh:
+        reasons.append("repo_set")
+    rotation_installation_ids = () if full_mode_refresh else scope_changed_installations
 
     if recorded.env_sha256 != desired.env_sha256:
         reasons.append("env_file")
@@ -250,18 +371,68 @@ def decide_session_compatibility(
     if recorded.github_mode == "app" and (
         recorded.repo_urls or recorded.token_repo_urls or recorded.repo_token_issued_at is not None
     ):
+        # Installation tokens have a conservative 55-minute life. Refresh each
+        # at 40 minutes, leaving 15 minutes for vault propagation. A legacy
+        # single-token snapshot keeps the original age and operation shape.
+        installation_ids = tuple(sorted({scope[0] for scope in recorded.token_scopes}))
+        token_ages = {
+            installation_id: tuple(
+                token_scope_parts(scope)[3]
+                for scope in recorded.token_scopes
+                if scope[0] == installation_id and len(scope) == 5
+            )
+            for installation_id in installation_ids
+        }
+        due_installations = tuple(
+            installation_id
+            for installation_id in installation_ids
+            if (force_app_token_rotation and not forced_app_installation_ids)
+            or installation_id in forced_app_installation_ids
+            or any(
+                issued_at is None or now.timestamp() - issued_at >= 2400
+                for issued_at in token_ages[installation_id]
+            )
+            or (
+                not token_ages[installation_id]
+                and (
+                    (issued_at := recorded.token_issued_at_by_installation.get(installation_id))
+                    is None
+                    or now.timestamp() - issued_at >= 2400
+                )
+            )
+        )
         issued_at = recorded.repo_token_issued_at
-        # Installation tokens are recorded with a conservative 55-minute life.
-        # Refresh at 40 minutes, leaving 15 minutes for vault propagation.
-        if force_app_token_rotation or issued_at is None or now.timestamp() - issued_at >= 2400:
+        legacy_due = (
+            force_app_token_rotation or issued_at is None or now.timestamp() - issued_at >= 2400
+        )
+        due_installations = tuple(
+            installation_id
+            for installation_id in due_installations
+            if installation_id not in scope_changed_installations
+        )
+        rotation_due = bool(due_installations) if installation_ids else legacy_due
+        if rotation_due and not full_mode_refresh:
             reasons.append("repo_token_age")
             if capabilities.repo_token_rotatable:
-                ops.append(RotateAppTokens(resource_ids=recorded.repo_resource_ids))
+                rotation_installation_ids = tuple(
+                    sorted(set(rotation_installation_ids) | set(due_installations))
+                )
             else:
                 must_replace = True
 
     if must_replace:
         return ReplaceSession(reasons=tuple(reasons))
+    if (
+        full_mode_refresh
+        or rotation_installation_ids
+        or ("repo_token_age" in reasons and not recorded.token_scopes)
+    ):
+        ops.append(
+            RotateAppTokens(
+                resource_ids=recorded.repo_resource_ids,
+                installation_ids=rotation_installation_ids,
+            )
+        )
     if not ops:
         return ReuseAsIs()
     if recorded.vault_id is not None:

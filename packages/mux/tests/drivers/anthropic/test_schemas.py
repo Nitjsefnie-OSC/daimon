@@ -195,3 +195,28 @@ def test_exact_mcp_toolset_representation_requires_resolved_catalogue_authority(
         tools = native.intent(exact=True, mcp_catalogues={"daimon-mcp": catalogue})
         assert len(tools) == 1 and tools[0].kind == "mcp_toolset" and tools[0].permission == "auto"
         assert not native.has_unrepresented_toolset(mcp_catalogues={"daimon-mcp": catalogue})
+
+
+@pytest.mark.parametrize("policy", ["always_allow", "always_ask"])
+def test_per_tool_mcp_permissions_keep_siblings_and_never_relax_ask(policy):
+    from mux.drivers.anthropic.schemas import MCPToolset, mcp_permissions
+
+    tool = MCPToolset.model_validate(
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "daimon-mcp",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [{"name": "add_skill", "permission_policy": {"type": policy}}],
+        }
+    )
+    assert mcp_permissions(tool, frozenset({"add_skill", "call_tool"})) == {
+        "add_skill": "ask" if policy == "always_ask" else "auto",
+        "call_tool": "auto",
+    }
+    # Ordinary projection still refuses to erase an approval requirement.
+    config = AgentToolsConfig(tools=[tool])
+    if policy == "always_ask":
+        with pytest.raises(ValueError):
+            config.intent(
+                exact=True, mcp_catalogues={"daimon-mcp": frozenset({"add_skill", "call_tool"})}
+            )

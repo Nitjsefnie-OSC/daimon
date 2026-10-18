@@ -26,13 +26,25 @@ from daimon.core._models import (
     TenantGitHubRepo,
 )
 from daimon.core.config import GithubAppSettings, load_settings
-from daimon.core.github_app_auth import group_repository_access, mint_installation_token
-from daimon.core.github_app_session import add_app_credentials, prepare_app_access
+from daimon.core.github_app_auth import (
+    PermissionProfile,
+    group_repository_access,
+    mint_installation_token,
+)
+from daimon.core.github_app_session import (
+    add_app_credentials,
+    installation_credential_name,
+    prepare_app_access,
+    projected_vault_credential_count,
+    require_vault_budget,
+    token_scopes_for_groups,
+)
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_removal_delivery import poll_removal_notices_once
 from daimon.core.github_requester_access import PermissionCache
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.security_audit import GITHUB_TOKEN_MINT
+from daimon.core.session_snapshot import token_scope_identity
 from daimon.core.stores import github_access, github_app_installations, github_issued_tokens
 from daimon.core.stores.github_access_requests import get_request, request_access
 from daimon.core.stores.github_new_repo_notices import queue_new_repos
@@ -89,6 +101,47 @@ def test_group_access_uses_write_for_duplicate_repo() -> None:
         [(9, 101, "read"), (9, 101, "write"), (9, 101, "read"), (9, 102, "read")]
     )
     assert groups == [(9, "write", (101,)), (9, "read", (102,))]
+
+
+def test_multi_installation_chunk_names_scopes_and_budget() -> None:
+    grants: list[tuple[int, int, Literal["read", "write"]]] = [
+        (72, repo_id, "write") for repo_id in range(1, 502)
+    ]
+    grants.append((71, 900, "write"))
+    groups = group_repository_access(grants)
+    assert groups == [
+        (72, "write", tuple(range(1, 501))),
+        (72, "write", (501,)),
+        (71, "write", (900,)),
+    ]
+    assert [
+        installation_credential_name(installation, chunk)
+        for installation, chunk in ((72, 0), (72, 1), (71, 0))
+    ] == ["GH_TOKEN_I72_0", "GH_TOKEN_I72_1", "GH_TOKEN_I71_0"]
+    assert token_scope_identity(token_scopes_for_groups(groups)) == (
+        (71, (900,)),
+        (72, tuple(range(1, 501))),
+        (72, (501,)),
+    )
+    require_vault_budget(groups, other_credentials=10)
+    with pytest.raises(ValueError, match="15-credential"):
+        require_vault_budget(groups, other_credentials=11)
+    assert projected_vault_credential_count([(71, "write", (900,))], other_credentials=2) == 4
+    assert projected_vault_credential_count(groups, other_credentials=2) == 7
+    assert projected_vault_credential_count(groups, other_credentials=2, include_alias=False) == 5
+    require_vault_budget([(71, "write", (900,))], other_credentials=13)
+    twelve_installations: list[tuple[int, PermissionProfile, tuple[int, ...]]] = [
+        (number, "write", (number,)) for number in range(1, 13)
+    ]
+    assert (
+        projected_vault_credential_count(
+            twelve_installations, other_credentials=3, include_alias=False
+        )
+        == 15
+    )
+    require_vault_budget(twelve_installations, other_credentials=3, include_alias=False)
+    with pytest.raises(ValueError, match="12 installations"):
+        require_vault_budget([(number, "write", (number,)) for number in range(1, 14)])
 
 
 @pytest.mark.asyncio

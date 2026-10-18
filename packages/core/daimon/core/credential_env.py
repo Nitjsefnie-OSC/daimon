@@ -13,6 +13,9 @@ key_count only.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import importlib.resources
+import re
 import shlex
 import uuid
 
@@ -37,6 +40,76 @@ _MOUNT_PATH = ".env"
 #: Served at /mnt/session/uploads/git-identity.sh. Not a ``.env`` suffix, so the
 #: session snapshot and the `.env` swap never mistake it for the secrets file.
 GIT_IDENTITY_MOUNT_PATH = "git-identity.sh"
+GITHUB_REPOS_MOUNT_PATH = "github-repos.tsv"
+GITHUB_REPO_SCRIPT_MOUNT_PATH = "github-repo.sh"
+_REPOSITORY_NAME = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+_TOKEN_VARIABLE = re.compile(r"GH_TOKEN_I[0-9]+_[0-9]+\Z")
+
+
+def github_repo_script_bytes() -> bytes:
+    """The non-secret per-command helper shipped with daimon.core."""
+    return importlib.resources.files("daimon.core").joinpath("github_repo.sh").read_bytes()
+
+
+def github_repo_script_sha256() -> str:
+    return hashlib.sha256(github_repo_script_bytes()).hexdigest()
+
+
+def render_github_repo_map(entries: tuple[tuple[str, str], ...]) -> bytes:
+    """Repository to vault-variable names; token bytes never enter this file."""
+    seen: set[str] = set()
+    lines: list[str] = []
+    for name, variable in sorted(entries, key=lambda entry: entry[0].lower()):
+        if (
+            not _REPOSITORY_NAME.fullmatch(name)
+            or any(part in (".", "..") for part in name.split("/"))
+            or not _TOKEN_VARIABLE.fullmatch(variable)
+        ):
+            raise ValueError("invalid GitHub repository helper mapping")
+        lowered = name.lower()
+        if lowered in seen:
+            raise ValueError("duplicate GitHub repository helper mapping")
+        seen.add(lowered)
+        lines.append(f"{name}\t{variable}\n")
+    return "".join(lines).encode()
+
+
+def github_repo_map_sha256(entries: tuple[tuple[str, str], ...]) -> str:
+    return hashlib.sha256(render_github_repo_map(entries)).hexdigest()
+
+
+async def upload_github_repo_helpers_and_mount(
+    anthropic: AsyncAnthropic,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    entries: tuple[tuple[str, str], ...],
+    tenant_id: uuid.UUID,
+    ttl_hours: int = 1,
+) -> tuple[BetaManagedAgentsFileResourceParams, BetaManagedAgentsFileResourceParams]:
+    """Mount the non-secret map and script beside git-identity.sh."""
+    scope = resource_scope(tenant_id=str(tenant_id))
+    map_id = await _upload_disposable(
+        anthropic,
+        session_factory,
+        content=render_github_repo_map(entries),
+        mount_path=GITHUB_REPOS_MOUNT_PATH,
+        ttl_hours=ttl_hours,
+        secret_values=[],
+        scope=scope,
+    )
+    script_id = await _upload_disposable(
+        anthropic,
+        session_factory,
+        content=github_repo_script_bytes(),
+        mount_path=GITHUB_REPO_SCRIPT_MOUNT_PATH,
+        ttl_hours=ttl_hours,
+        secret_values=[],
+        scope=scope,
+    )
+    return (
+        {"type": "file", "file_id": map_id, "mount_path": GITHUB_REPOS_MOUNT_PATH},
+        {"type": "file", "file_id": script_id, "mount_path": GITHUB_REPO_SCRIPT_MOUNT_PATH},
+    )
 
 
 def session_env_key(key: str, *, exclude_github: bool) -> bool:

@@ -7,8 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- An agent-wide `deny` tool rule on one of Daimon's own tools (`daimon-mcp/<tool>`) now stops the call. The MCP server refuses it, directly or through `call_tool`, when that agent's chat or routine session makes it and tool rules are enabled. The rule used to be saved but never enforced for Daimon's own tools. An agent-wide `deny` on `daimon-mcp/*` denies all of Daimon's own tools for that agent, tools added later included, and `search_tools` and `call_tool` too; wildcards are recognised only for `daimon-mcp`, agent-wide and `deny`. The turn driver applies `ask` and channel rules on them (see Fixed).
+
+### Fixed
+
+- OpenAI agents with native web search and host-bound MCP now accept the provider's echoed default search fields and empty credential carriers during readback. Nondefault search controls and nonempty native credentials remain refused.
+
+- Fleet workers get distinct names, so later mentions keep reaching the original agent. Defaults updates leave live workers alone.
+- OpenAI agent switching names unsupported URL fetching as an explicit consented loss while preserving other source tools and skills.
+- Discord turns cap answer output at five messages, combine excess prose into an attachment, and suppress repeated blocks and pure tool-call markup.
+
+- GitHub's `pull_request_read` and `issue_read` tools now count as reads for tool safety, so reading a pull request no longer waits for an approval card. GitHub's write tools (`pull_request_review_write`, `merge_pull_request`, `mark_all_notifications_read` and the rest) still ask.
+
+- **Tool rules on Daimon's own tools are enforced.** An `ask` or `deny` rule
+  on `daimon-mcp/<tool>` was saved but never applied, because Daimon's own
+  server was exempt from rule lookups. A chat or routine session whose agent
+  has such a rule now pauses on `call_tool` and on the tools a rule names;
+  the driver reads the tool inside the call, refuses a `deny`, asks on a card
+  for an `ask` (refused in a routine), and lets every other call run without a
+  card. A rule added or cleared takes effect on the agent's next turn. An
+  agent `deny` also wins over `add_skill` and publish confirmations; no rule
+  loosens a confirmation or the operator's deny list. Applies when
+  `DAIMON_TOOL_SAFETY__ENABLED` and `DAIMON_TOOL_SAFETY__AGENT_RULES` are on.
+  An agent-wide `deny` on `daimon-mcp/*` also makes the driver refuse every
+  proxied call. Gemini and OpenAI turns for an agent with an `ask` rule or a
+  channel `deny` on a Daimon tool are refused rather than run unasked; an
+  agent-wide `deny` is enforced by the server and does not block them. A
+  tool that waits for Approve (`add_skill`, publish tools) sent through
+  `call_tool` is refused at once with a note to call it directly. `daimon-mcp/`
+  rule names outside `[A-Za-z0-9_.-]{1,128}` are no longer accepted.
+
+- Switching providers preserves supported MCP tools when a sibling needs confirmation; unavailable tools require explicit consent and remain blocked.
+
+- Fleet workers can wake the root again after an Anthropic turn reaches its budget.
+- Blocked fleet runs post a final Discord notice with worker statuses, without sharing unreviewed results.
+
 ### Changed
 
+- The GitHub repo editor now refuses saves over 256 KiB, gives up listing your GitHub repos after 60 seconds, and keeps your ticked repos when Try again follows a GitHub error.
 - **People from another organisation get none of the agent's credentials.**
   A Teams external participant or guest answered in a `readers: own`
   channel used to get the agent's keys as a mounted `.env` and its shared
@@ -19,7 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaced, not reused, the next time such a person is answered in it,
   without carrying its work.
 
+- A Teams channel command whose "answered in your 1:1 chat" notice Teams refuses is still answered in the 1:1 chat. Failed sends now log Teams' error code.
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
+- Revoked GitHub token records are now deleted 7 days after they expire and unused ones 1 hour after, while live tokens and the security audit log are kept.
 - `/dm` is now `/dm-me` on Slack and Discord, including `/dm-me enable` and `/dm-me disable`. Slack reserves `/dm` for its own command, so a Slack app could not offer it. Its replies read as one line for what happened and one for what to do; a DM closed because its channel was sealed now says to keep working in that channel.
 - GitHub connection confirmation now checks the requester's live Discord, Slack, or Teams admin status before saving repository access.
 - Channel admins are removed. Grants no longer give any rights; server and workspace admins are unchanged. Stored grant rows are kept until a later release drops them.
@@ -88,6 +128,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read and only in the channel the turn runs in, and says whether a failed
   write may have saved. Shared and replayed channel files carry the link and
   version it takes. No new permission is needed.
+
+- **MCP sign-in works with authorization servers that offer no dynamic
+  client registration**, such as Microsoft Entra ID. List clients registered
+  by hand in `DAIMON_MCP_OAUTH__CLIENTS`; each names its authorization server
+  host and the MCP servers it may be used for, and a sign-in uses it only
+  when both match. An entry can override the authorization and token
+  endpoints, set the scope to request and leave the RFC 8707 `resource`
+  parameter out, and it asks for `offline_access` when the authorization
+  server offers it so the connection keeps refreshing. Every other server
+  still registers a client dynamically, as before. See docs/self-hosting.md.
 
 - **Self-host on OpenAI, with no Anthropic account at all.** `DAIMON_ANTHROPIC__API_KEY`
   is now optional; `docker compose up` and `daimon defaults apply` succeed

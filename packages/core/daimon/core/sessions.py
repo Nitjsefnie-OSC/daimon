@@ -43,9 +43,12 @@ from daimon.core.agent_mcp_credentials import (
 )
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import (
+    github_repo_map_sha256,
+    github_repo_script_sha256,
     session_env_key,
     upload_env_and_mount,
     upload_git_identity_and_mount,
+    upload_github_repo_helpers_and_mount,
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -58,12 +61,15 @@ from daimon.core.errors import StoreError
 from daimon.core.github_app_session import (
     REQUESTER_CACHE,
     AppSessionAccess,
+    EffectiveAppGrantView,
     add_app_credentials,
     archive_app_vault,
     create_session_vault,
     declared_app_repositories,
+    effective_app_grant_view,
     finish_app_delivery,
     prepare_app_access,
+    repo_credential_entries,
     resolve_bot_identity,
     revoke_app_access,
 )
@@ -513,6 +519,7 @@ async def create_session(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    daimon_rule_tools: frozenset[str] = frozenset(),
     slack_turn_context_id: uuid.UUID | None = None,
     private_dm_id: str | None = None,
     budget_channel_id: str | None = None,
@@ -654,6 +661,7 @@ async def create_session(
         tenant_id=tenant_id, account_id=account_id, call_site="sessions:create_session"
     )
     resource_agent = agent
+    source_channel_skills = channel_skills
     if resource_source is not None or worker is not None:
         from daimon.core.turn.runtime_manifest import worker_source_ceiling
 
@@ -678,8 +686,10 @@ async def create_session(
             raise ScopeViolation(
                 "worker-resources", "captured source and owned preparation required"
             )
-        if worker.declared_drops:
-            raise UnsupportedCapability(("native_worker_resource_drop",), worker.backend.profile)
+        # Channel additions are source authority, not permission to undo a
+        # worker's declared loss when constructing agent_with_overrides.
+        if "skills" in worker.spec.declared_drops:
+            channel_skills = ()
         resource_agent = sdk_agent(resource_source.source)
         scope = resource_source.resource_scope
         _check_resource_source(
@@ -721,6 +731,15 @@ async def create_session(
         app_mode = await _session_app_mode(
             session_factory, tenant_id=tenant_id, agent_id=agent_uuid
         )
+    app_grant_view: EffectiveAppGrantView | None = None
+    if app_mode and not is_external:
+        assert tenant_id is not None and agent_uuid is not None and session_factory is not None
+        app_grant_view = await effective_app_grant_view(
+            session_factory,
+            tenant_id=tenant_id,
+            agent_id=agent_uuid,
+            fernet=fernet,
+        )
     caller_vault = worker is None and _caller_mcp_vault_required(
         app_mode=app_mode,
         mcp_settings=mcp_settings,
@@ -733,9 +752,7 @@ async def create_session(
     try:
         if app_mode:
             assert tenant_id is not None and agent_uuid is not None and session_factory is not None
-            if not is_external and await declared_app_repositories(
-                session_factory, tenant_id=tenant_id, agent_id=agent_uuid
-            ):
+            if app_grant_view is not None and app_grant_view[0]:
                 vault_id = await create_session_vault(
                     anthropic,
                     tenant_id=tenant_id,
@@ -962,6 +979,7 @@ async def create_session(
             public_url=public_url,
             asks_before_publishing=asks_before_publishing,
             confirmed_tools=confirmed_tools,
+            daimon_rule_tools=daimon_rule_tools,
         )
         servers = session_mcp_servers(
             agent,
@@ -1045,10 +1063,27 @@ async def create_session(
                         config=agent_github_app or GithubAppSettings(),
                         fernet=fernet,
                         cache=REQUESTER_CACHE,
+                        grant_view=app_grant_view,
+                        anthropic=anthropic,
+                        vault_id=vault_id,
                     )
                 if on_app_access is not None:
                     on_app_access(app_access)
                 resources.extend(app_access.resources)
+                if app_access.multi_installation and any(
+                    token.credential_name.startswith("GH_TOKEN_I") for token in app_access.tokens
+                ):
+                    entries = repo_credential_entries(app_access)
+                    resources.extend(
+                        await upload_github_repo_helpers_and_mount(
+                            anthropic,
+                            session_factory,
+                            entries=entries,
+                            tenant_id=tenant_id,
+                        )
+                    )
+                    metadata["daimon_github_repo_map_sha256"] = github_repo_map_sha256(entries)
+                    metadata["daimon_github_repo_script_sha256"] = github_repo_script_sha256()
                 if app_access.tokens:
                     # Degrade-not-block: without it, commits just carry no preset author.
                     try:
@@ -1228,7 +1263,8 @@ async def create_session(
                     resource_scope=scope,
                     memory_read_only=resource_source.memory_read_only,
                     fernet=fernet,
-                    channel_skills=channel_skills,
+                    # Recheck source authority, including additions excluded from execution.
+                    channel_skills=source_channel_skills,
                     tool_safety=tool_safety,
                     asks_before_publishing=asks_before_publishing,
                     mcp_settings=mcp_settings,

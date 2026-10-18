@@ -340,8 +340,49 @@ github_session_token	SessionToken	UnsafeCrash	violates:LiveSessionHasToken	21	-	
 github_session_token	SessionToken	UnsafeSweep	violates:LiveSessionHasToken	44	-	stale sweep revokes after rollback restores old token
 github_session_token	SessionToken	UnsafeRemoved	violates:RemovedAccessInvalid	6	-	rollback re-enables removed access
 github_session_token	SessionToken	UnsafeLongLock	violates:NoNetworkUnderLock	5	-	grant lock held across GitHub mint
-github_session_token	GrantInstall	GrantSafe	clean	9	-	transaction lock serializes first grants across installations
-github_session_token	GrantInstall	GrantUnsafe	violates:OneInstallation	31	-	read-then-write first grants race across installations
+github_session_token	GrantInstall	GrantSafe	clean	8	-	locked grants from both installations persist
+github_session_token	GrantInstall	GrantUnsafe	violates:CompletedGrantsPersist	31	-	stale read-then-write loses a completed cross-installation grant
+github_session_token	MultiInstallation	MultiSafe	clean	5593	-	per-installation scope and expiry, rotation, B grant remint, helper read/return race
+github_session_token	MultiInstallation	MultiSingleToken	violates:GrantedReachable	3	-	guard removed but only one token leaves B unreachable
+github_session_token	MultiInstallation	MultiFallback	violates:ResultScoped	28	-	helper fallback returns A token for uncovered B repo
+github_session_token	MultiInstallation	MultiRevokeAll	violates:UnrelatedSurvives	5	-	A revocation kills unrelated B token
+github_session_token	MultiInstallation	MultiOldFingerprint	violates:FingerprintExact	5	-	repo installation mapping changes without fingerprint change
+github_session_token	MultiInstallation	MultiExpiredLookup	violates:FreshRead	55	-	helper selects A token after A expired
+github_session_token	MultiInstallation	MultiExpireAll	violates:ExpiryIsolation	8	-	A token expiry also invalidates B
+github_session_token	MultiInstallation	MultiRotationStaleB	violates:RotationRefreshes	11	-	B rotation fails to replace its expired token
+github_session_token	MultiInstallation	MultiGrantStaleScope	violates:ExactLiveScope	7	-	new B grant uses token without new exact repo scope
+github_session_token	MultiInstallation	MultiGrantOldFingerprint	violates:FingerprintExact	7	-	new B grant does not change mapping fingerprint
+github_session_token	MultiInstallation	MultiGrantTouchesA	violates:GrantIsolation	7	-	new B grant kills unrelated A token
+github_session_token	MultiInstallation	MultiNoUpstreamRevoke	violates:NoStaleUsable	95	-	helper returns cached A token after revoke without GitHub-side invalidation
+github_session_token	MultiInstallation	MultiAliasSafe	clean	14612	-	no working repo keeps alias absent through B-only rotation
+github_session_token	MultiInstallation	MultiAliasFallback	violates:AliasSelected	108	-	B-only rotation aliases B despite no working repo
+github_session_token	MultiInstallation	MultiAtomicSafe	clean	42801	-	complete chunks retain stable names; failed installation discards every chunk
+github_session_token	MultiInstallation	MultiPartialMint	violates:AtomicChunks	12	-	failed chunk zero leaves later chunks from A delivered
+github_session_token	MultiInstallation	MultiRenumberNames	violates:StableNames	109	-	B rotation renumbers partial A inventory and keeps a stale vault name
+github_session_token	MultiInstallation	MultiChunkSafe	clean	3	-	per-chunk revocation is detected by exact set difference
+github_session_token	MultiInstallation	MultiAnyRowDetection	violates:MissingChunkDetected	3	-	A's surviving chunk masks its revoked sibling
+github_session_token	MultiInstallation	MultiSnapshotContraction	clean	3	-	snapshot detects A contraction after sweeper removes A inventory
+github_session_token	MultiInstallation	MultiSweptContractionMissed	violates:SweptContractionDetected	3	-	live-only detection misses A after sweeping
+github_session_token	MultiInstallation	MultiModeTransitionSafe	clean	2	-	multi-to-single refresh writes unlabelled legacy token rows
+github_session_token	MultiInstallation	MultiTransitionKeepsLabels	violates:ModeTransitionShape	2	-	contraction keeps multi-mode labels in single mode
+github_session_token	MultiInstallation	MultiAgeSafe	clean	4	-	contraction keeps each retained token's age and refresh is due at 40 minutes
+github_session_token	MultiInstallation	MultiResetAgeOnContraction	violates:RetainedTokenAge	2	-	contraction resets a retained token's age
+github_session_token	MultiInstallation	MultiVaultSafe	clean	6	-	delete, update, create stay at or below 15 credentials
+github_session_token	MultiInstallation	MultiCreateBeforeDelete	violates:VaultBudget	3	-	creating before obsolete alias and Copilot deletion exceeds the cap
+# ---- GitHub issued-token prune ----
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneSafe	clean	40	-	the code: grace hour, status filter, bounded store stall, late revoke may fail: no live token lost, no stored or delivered row deleted, a store never misses its row
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneStallUnbounded	clean	48	-	a store stalled past the grace: still no live token lost and no live row deleted (the late revoke covers it)
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneStallUnboundedMisses	violates:StoreNeverMissesRow	41	-	witness: a store stalled past the grace can miss its pruned row; the failure is safe, the session preparation fails
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneNoGraceMisses	violates:StoreNeverMissesRow	27	-	unsafe: pending rows pruned at expires_at; a mint in flight finds its row gone
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneNoGraceStillSafe	clean	50	-	no grace but a late revoke that succeeds: the token is still revoked
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneNoGraceRevokeFails	violates:NoLiveTokenLost	38	-	unsafe: no grace and the late revoke fails: a live token with no row
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneNoStatusFilter	violates:NeverDeleteLiveRow	38	-	unsafe: prune ignores status and deletes a stored row
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneNoStatusFilterNoGrace	violates:NoLiveTokenLost	27	-	unsafe: no status filter and no grace delete a stored row whose token is live
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneSplitSafe	clean	46	-	two-statement prune behind the grace: safe only while stores finish within the hour
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneSplitNoGrace	violates:NoLiveTokenLost	42	-	unsafe: select then delete by id without a recheck deletes a row stored in between
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneSplitStallUnbounded	violates:NeverDeleteLiveRow	54	-	unsafe: select then delete by id loses to a store stalled past the grace
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneWitnessPending	violates:NoPendingPruned	25	-	witness: a pending row is pruned
+github_issued_tokens_prune	IssuedTokensPrune	IssuedTokensPruneWitnessRevoked	violates:NoRevokedPruned	30	-	witness: a revoked row is pruned
 # ---- agent tool rules (proposed) ----
 tool_rules	ToolRules	ToolRulesSafe	clean	8906	-	per-call rule read, admin-only Always allow saved after settlement, compare-and-set save
 tool_rules	ToolRules	ToolRulesRuleWitness	violates:NoRuleRun	7	-	witness: a call runs on a rule without a card

@@ -45,6 +45,17 @@ if TYPE_CHECKING:
     from daimon.core.github_app_session import AppSessionAccess
 
 
+async def live_effective_config_for_ma_session(
+    session: AsyncSession, *, ma_session_id: str
+) -> dict[str, Any] | None:
+    """The stored snapshot of the live row mapped to `ma_session_id`, or None."""
+    return await session.scalar(
+        select(ThreadSession.effective_config)
+        .where(ThreadSession.ma_session_id == ma_session_id, ThreadSession.status == "live")
+        .limit(1)
+    )
+
+
 async def get_live_thread_session(
     session: AsyncSession,
     *,
@@ -641,16 +652,26 @@ async def record_app_token_refresh(
     for row in rows:
         config = row.effective_config
         if config is not None and config.get("github_mode") == "app":
-            updated = {**config, "repo_token_issued_at": issued_at}
+            snapshot = SessionSnapshot.model_validate(config)
+            legacy_issued_at = issued_at
+            updated = {**config, "repo_token_issued_at": legacy_issued_at}
             if access is not None:
                 assert now is not None
                 excluded = access.excluded_repo_urls
-                snapshot = SessionSnapshot.model_validate(config)
                 updated.update(
                     repo_urls=tuple(
                         url for url in config.get("repo_urls", ()) if url not in excluded
                     ),
                     token_repo_urls=access.token_repo_urls,
+                    token_scopes=access.token_scopes,
+                    token_issued_at_by_installation={
+                        installation_id: min(
+                            token.issued_at or issued_at
+                            for token in access.tokens
+                            if token.installation_id == installation_id
+                        )
+                        for installation_id in {scope[0] for scope in access.token_scopes}
+                    },
                     **refreshed_unavailable_state(snapshot, excluded, now=now),
                 )
                 refreshed = SessionSnapshot.model_validate(updated)

@@ -582,6 +582,66 @@ async def test_waiting_collect_blocks_real_lifecycle_summary_path():
     assert not lifecycle.was_answered
 
 
+@pytest.mark.parametrize(
+    "run_status,worker_status",
+    [
+        ("running", "failed"),
+        ("failed", "starting"),
+        ("cancelled", "cancelled"),
+        ("collecting", "succeeded"),
+    ],
+)
+@pytest.mark.parametrize("render_first", [False, True])
+async def test_blocked_fleet_posts_only_status_notice_and_finishes_turn(
+    run_status, worker_status, render_first
+):
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (
+        replace(run(), status=run_status),
+        (worker(status=worker_status, result_contract={"review_required": True}),),
+    )
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    state = TurnState(
+        content=[
+            TextBlock(kind="text", text="DO_NOT_POST_SEALED " * 80),
+            ToolUseBlock(kind="tool_use", id="tool", type="agent.tool_use", name="read", input={}),
+            TextBlock(kind="text", text="DO_NOT_POST_FINAL"),
+        ]
+    )
+    if render_first:
+        await lifecycle.on_render(state)
+    await lifecycle.on_terminal_success(state)
+    messages = [
+        str(c.kwargs.get("content", "")) for c in send.await_args_list + edit.await_args_list
+    ]
+    assert sum("No reviewed result to share." in text for text in messages) == 1
+    assert not any(
+        "DO_NOT_POST" in text or "@everyone" in text or "<#50>" in text for text in messages
+    )
+    assert any(worker_status in text for text in messages)
+    assert lifecycle.was_answered and lifecycle._terminal
+    views = [
+        c.kwargs["view"]
+        for c in send.await_args_list + edit.await_args_list
+        if c.kwargs.get("view")
+    ]
+    blocked = [
+        v
+        for v in views
+        if any(
+            "Fleet — blocked" in item.content
+            for item in v.walk_children()
+            if isinstance(item, discord.ui.TextDisplay)
+        )
+    ]
+    assert blocked
+    if run_status in ("failed", "cancelled"):
+        assert not any(isinstance(item, FleetControl) for item in blocked[-1].walk_children())
+    owner.read_result.assert_not_awaited()
+
+
 @pytest.mark.parametrize("worker_status", [None, "pending", "failed"])
 async def test_terminal_failure_sealed_answers_obey_fleet_disclosure_policy(worker_status):
     card, owner, _, send, edit = setup()
@@ -676,7 +736,10 @@ async def test_actual_review_barrier_controls_the_existing_summary_delivery(verd
     final = [text for text in messages if "The orchestrator's one final summary." in text]
     assert len(final) == (1 if verdict == "approved" else 0)
     assert not any("DO_NOT_POST" in text or "reviewed_digest" in text for text in messages)
-    assert lifecycle.was_answered is (verdict == "approved")
+    assert lifecycle.was_answered
+    assert any("No reviewed result to share." in text for text in messages) is (
+        verdict == "refused"
+    )
 
 
 def test_real_bot_flag_off_does_not_construct_a_sender_or_fleet_service():
@@ -1792,3 +1855,34 @@ async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
             == 1
         )
         assert not transport.violations
+
+
+async def test_real_runtime_ordinary_turn_without_fleet_root_has_no_card(discord_frozen_root):
+    """With fleet enabled, a normal turn of this thread renders no fleet card and
+    never refuses: its own turn intent exists but no fleet root was frozen."""
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores.turn_card_intents import create_turn_card_intent
+
+    deps, _, _, intent, _, _, _, _ = discord_frozen_root
+    async with deps.sessionmaker.begin() as db:
+        ordinary = await create_turn_card_intent(
+            db,
+            tenant_id=intent.tenant_id,
+            platform="discord",
+            thread_id=intent.thread_id,
+            channel_id=intent.channel_id,
+            turn_token=UUID(int=991),
+        )
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = int(intent.thread_id), 50
+    thread.guild.id = 60
+    send = AsyncMock()
+    shared = FleetOrchestrator(HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal("1")))
+    card = DiscordFleetCardFactory.from_runtime(shared, deps)(
+        thread, 123, send, AsyncMock(), turn_card_intent_id=ordinary.id
+    )
+    assert card is not None
+    assert await card.refresh() is False
+    assert await card.allow_sealed_responses() is True
+    assert await card.allow_summary() is True
+    send.assert_not_awaited()

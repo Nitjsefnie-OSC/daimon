@@ -521,6 +521,140 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     )
 
 
+async def test_admit_reads_the_daimon_tools_the_agent_has_ask_or_deny_rules_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    from daimon.core.authz import Subject
+    from daimon.core.stores import agent_tool_rules
+    from daimon.core.tool_safety import ToolSafetyPolicy
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    for key, rule in (
+        ("daimon-mcp/hubspot_update_objects", "ask"),
+        ("daimon-mcp/get_session", "allow"),
+        ("linear/create_issue", "deny"),
+    ):
+        await agent_tool_rules.set_rule(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id="ag_1",
+            agent_name="daimon",
+            tool_key=key,
+            server_url="https://mcp.example/mcp",
+            rule=rule,  # type: ignore[arg-type]
+            set_by="admin",
+            actor=Subject(is_admin=True),
+        )
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    admitted: dict[str, frozenset[str]] = {}
+    for label, policy in (
+        ("rules on", ToolSafetyPolicy(enabled=True, agent_rules=True)),
+        ("rules off", ToolSafetyPolicy(enabled=True)),
+        ("safety off", ToolSafetyPolicy()),
+    ):
+        admission = await admit(
+            replace(deps, tool_safety=policy),
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+        admitted[label] = admission.daimon_rule_tools
+    assert admitted == {
+        "rules on": frozenset({"hubspot_update_objects"}),
+        "rules off": frozenset(),
+        "safety off": frozenset(),
+    }
+
+
+async def test_admission_reads_agent_rules_only_when_tool_safety_and_rules_are_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Flags off cost no rule query, at admit or at reauthorize; on costs one each."""
+    from daimon.core.authz import Subject
+    from daimon.core.stores import agent_tool_rules
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.core.turn.admission import reauthorize
+    from sqlalchemy import event
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    statements: list[str] = []
+
+    def count(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        if "agent_tool_rules" in statement:
+            statements.append(statement)
+
+    engine = db_session.bind.engine.sync_engine  # type: ignore[union-attr]
+    event.listen(engine, "before_cursor_execute", count)
+    try:
+
+        async def admit_with(policy: ToolSafetyPolicy) -> tuple[TurnDeps, Admission]:
+            scoped = replace(deps, tool_safety=policy)
+            return scoped, await admit(
+                scoped,
+                tenant_id=tenant.id,
+                platform="discord",
+                external_user_id="user-1",
+                channel_id="chan-1",
+                now=_NOW,
+            )
+
+        for policy in (ToolSafetyPolicy(), ToolSafetyPolicy(enabled=True)):
+            scoped, admission = await admit_with(policy)
+            await reauthorize(scoped, admission)
+            assert statements == [], f"{policy}: no rule may be read"
+        on = ToolSafetyPolicy(enabled=True, agent_rules=True)
+        scoped, admission = await admit_with(on)
+        assert len(statements) == 1 and admission.daimon_rule_tools == frozenset()
+        same = await reauthorize(scoped, admission)
+        assert len(statements) == 2 and same is admission, "unchanged rules return the admission"
+
+        # A rule set after admission reaches the next reauthorize (fleet workers, retries).
+        async with db_session_factory() as other, other.begin():
+            await agent_tool_rules.set_rule(
+                other,
+                tenant_id=tenant.id,
+                agent_id="ag_1",
+                agent_name="daimon",
+                tool_key="daimon-mcp/hubspot_update_objects",
+                channel_id="chan-1",
+                server_url="https://mcp.example/mcp",
+                rule="deny",
+                set_by="admin",
+                actor=Subject(is_admin=True),
+            )
+        fresh = await reauthorize(scoped, admission)
+        assert fresh.daimon_rule_tools == frozenset({"hubspot_update_objects"})
+        assert fresh.daimon_rules_need_driver, "a channel deny is the driver's to apply"
+        assert admission.daimon_rule_tools == frozenset(), "the old admission is not mutated"
+    finally:
+        event.remove(engine, "before_cursor_execute", count)
+
+
 async def test_admit_gate_order_config_bail_wins_over_over_balance(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

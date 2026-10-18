@@ -555,6 +555,101 @@ def test_history_preserves_separate_root_turns_and_approval_resumption():
     assert ended.payload["root_turn_id"] == "run1"
 
 
+def _fold(events):
+    from mux.state.journal import empty_projection, project_all
+
+    return project_all(empty_projection(SESSION, NOW), events, cursor="c", now=NOW)
+
+
+def test_running_recorded_before_its_input_still_ends_the_turn():
+    # Managed Agents records status_running before the user.message that opened
+    # the turn (staging r11, 2026-10-18). The turn must end under the id it began.
+    normalizer = EventNormalizer(SESSION)
+    events = [
+        normalizer.normalize(native("session.status_running", "run1"), observed_at=NOW),
+        normalizer.normalize(
+            native("user.message", "input1", content=[{"type": "text", "text": "hi"}]),
+            observed_at=NOW,
+        ),
+        normalizer.normalize(
+            native("session.status_idle", "end1", stop_reason={"type": "end_turn"}),
+            observed_at=NOW,
+        ),
+    ]
+    assert events[0].payload["root_turn_id"] == "run1"
+    assert events[2].payload["root_turn_id"] == "run1"
+    assert {event.turn_id for event in events} == {"run1"}
+    projection = _fold(events)
+    assert projection.state == "idle" and projection.active_root_turn is None
+
+
+def test_input_recorded_first_anchors_the_turn_and_the_next_turn_starts_fresh():
+    normalizer = EventNormalizer(SESSION)
+    first = [
+        normalizer.normalize(
+            native("user.message", "input1", content=[{"type": "text", "text": "a"}]),
+            observed_at=NOW,
+        ),
+        normalizer.normalize(native("session.status_running", "run1"), observed_at=NOW),
+        normalizer.normalize(
+            native("session.status_idle", "end1", stop_reason={"type": "end_turn"}),
+            observed_at=NOW,
+        ),
+    ]
+    second = [
+        normalizer.normalize(native("session.status_running", "run2"), observed_at=NOW),
+        normalizer.normalize(
+            native("user.message", "input2", content=[{"type": "text", "text": "b"}]),
+            observed_at=NOW,
+        ),
+        normalizer.normalize(
+            native("session.status_idle", "end2", stop_reason={"type": "end_turn"}),
+            observed_at=NOW,
+        ),
+    ]
+    assert {event.turn_id for event in first} == {"input1"}
+    assert {event.turn_id for event in second} == {"run2"}
+    assert _fold(first + second).state == "idle"
+
+
+def test_host_root_identity_still_wins_over_native_records():
+    normalizer = EventNormalizer(SESSION, root_turn_id="host-op")
+    events = [
+        normalizer.normalize(native("session.status_running", "run1"), observed_at=NOW),
+        normalizer.normalize(
+            native("user.message", "input1", content=[{"type": "text", "text": "hi"}]),
+            observed_at=NOW,
+        ),
+        normalizer.normalize(
+            native("session.status_idle", "end1", stop_reason={"type": "end_turn"}),
+            observed_at=NOW,
+        ),
+    ]
+    assert {event.turn_id for event in events} == {"host-op"}
+    assert _fold(events).state == "idle"
+
+
+def test_budget_reached_ends_root_and_allows_the_next_fleet_wake():
+    normalizer = EventNormalizer(SESSION)
+    running = normalizer.normalize(native("session.status_running", "root"), observed_at=NOW)
+    stopped = normalizer.normalize(
+        native("session.status_idle", "budget-stop", stop_reason={"type": "budget_reached"}),
+        observed_at=NOW,
+    )
+    assert stopped.type == "session.turn_ended"
+    assert stopped.turn_id == "root"
+    assert stopped.payload == {
+        "root_turn_id": "root",
+        "outcome": "completed",
+        "native_reason": "budget_reached",
+    }
+    projection = _fold([running, stopped])
+    assert projection.state == "idle" and projection.active_root_turn is None
+    wake = normalizer.normalize(native("session.status_running", "wake"), observed_at=NOW)
+    assert wake.turn_id == "wake"
+    assert _fold([running, stopped, wake]).active_root_turn == "wake"
+
+
 def test_retries_exhausted_records_an_errored_turn_with_native_reason():
     # FOLLOWUPS: M0's host preserves COMPLETED for an answer with no settled
     # error, even though this neutral stop record correctly says errored.

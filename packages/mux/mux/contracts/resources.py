@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, Field, JsonValue
+from pydantic import AfterValidator, Field, JsonValue, StringConstraints
 
 from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.actions import RequiredAction
@@ -32,9 +32,15 @@ def _unique_declared_drops(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted(values))
 
 
-DeclaredDrop = Literal[
+CapabilityDrop = Literal[
     "memory", "sandbox", "skills", "mcp", "tools", "files", "repository", "model_controls"
 ]
+# A concrete MCP tool can be unavailable while the rest of its server survives.
+MCPToolDrop = Annotated[
+    str, StringConstraints(pattern=r"^mcp_tool:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
+]
+BuiltinToolDrop = Literal["builtin_tool:web_fetch"]
+DeclaredDrop = CapabilityDrop | MCPToolDrop | BuiltinToolDrop
 _DeclaredDrops = Annotated[tuple[DeclaredDrop, ...], AfterValidator(_unique_declared_drops)]
 
 

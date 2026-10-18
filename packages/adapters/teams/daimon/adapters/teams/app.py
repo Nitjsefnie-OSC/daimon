@@ -73,6 +73,7 @@ from daimon.adapters.teams.lifecycle import (
     TeamsTurnLifecycle,
     TimedSender,
     retry_hint,
+    send_error_details,
 )
 from daimon.adapters.teams.names import remember_inbound
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
@@ -1099,7 +1100,14 @@ class TeamsApp:
         try:
             await self._route(inbound)
         except _TURN_ERRORS as exc:
-            log.error("teams.message.failed", conversation_id=inbound.conversation_id, exc_info=exc)
+            status, error_code = send_error_details(exc)
+            log.error(
+                "teams.message.failed",
+                conversation_id=inbound.conversation_id,
+                status=status,
+                error_code=error_code,
+                exc_info=exc,
+            )
             capture_exception_with_scope(exc)
             if await self._finish([inbound]):  # unfinished, it replays: say nothing
                 command = self._private.command(inbound) is not None  # its sender's alone

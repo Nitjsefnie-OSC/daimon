@@ -221,18 +221,14 @@ type BackendRefusalStage = Literal[
 ]
 
 
-def log_backend_unsupported(
-    stage: BackendRefusalStage,
-    error: BaseException | None = None,
-    *,
-    reason: Literal["backend_not_enabled", "profile_not_runnable"] | None = None,
-    revision: ConfigRevision | None = None,
-) -> None:
-    """Log closed diagnostic labels, never provider messages or source payloads."""
+def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object]]:
+    """One closed-label sanitizer for turn and background worker refusals."""
     # Delay this import: the turn package itself imports channel_backend.
-    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.fleet import FleetConflict, FleetConflictReason
+    from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 
     safe_types: dict[type[BaseException], str] = {
+        FleetConflict: "FleetConflict",
         AgentBackendRefused: "AgentBackendRefused",
         AdmissionDenied: "AdmissionDenied",
         BackendUnsupported: "BackendUnsupported",
@@ -263,7 +259,9 @@ def log_backend_unsupported(
         "worker_identity_required",
         "backend_unsupported",
     }
+    safe_reasons.update(get_args(AdmissionDenialReason))
     safe_missing = set(get_args(Capability)) | {
+        "native_worker_resource_drop",
         "source_definition",
         "source_context",
         "source_drift",
@@ -289,12 +287,30 @@ def log_backend_unsupported(
         cause: dict[str, object] = {"type": safe_types.get(type(error), "redacted")}
         if isinstance(error, (AgentBackendRefused, AdmissionDenied)):
             cause["reason"] = error.reason if error.reason in safe_reasons else "redacted"
+        if isinstance(error, FleetConflict):
+            cause["reason"] = (
+                error.reason
+                if error.reason in get_args(FleetConflictReason.__value__)
+                else "redacted"
+            )
         if isinstance(error, UnsupportedCapability):
             cause["missing"] = sorted(
                 {item if item in safe_missing else "redacted" for item in error.missing}
             )
         causes.append(cause)
         error = error.__cause__ or error.__context__
+    return causes
+
+
+def log_backend_unsupported(
+    stage: BackendRefusalStage,
+    error: BaseException | None = None,
+    *,
+    reason: Literal["backend_not_enabled", "profile_not_runnable"] | None = None,
+    revision: ConfigRevision | None = None,
+) -> None:
+    """Log closed diagnostic labels, never provider messages or source payloads."""
+    causes = backend_refusal_causes(error)
     fields: dict[str, object] = {}
     if reason is not None:
         fields["reason"] = (

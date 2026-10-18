@@ -72,6 +72,9 @@ from pydantic import (
 )
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
+type TokenScope = (
+    tuple[int, tuple[int, ...]] | tuple[int, int, tuple[int, ...], int | None, str | None]
+)
 type MaSkill = BetaManagedAgentsAnthropicSkill | BetaManagedAgentsCustomSkill
 type MaTool = (
     BetaManagedAgentsAgentToolset20260401
@@ -119,6 +122,14 @@ class SessionSnapshot(BaseModel):
             "unavailable_notice_pending",
             "unavailable_notice_sent",
             "is_external",
+            "token_scopes",
+            "token_issued_at_by_installation",
+            "github_repo_map_sha256",
+            "github_repo_script_sha256",
+            "github_repo_map_file_id",
+            "github_repo_map_resource_id",
+            "github_repo_script_file_id",
+            "github_repo_script_resource_id",
         ):
             if not data.get(name):
                 data.pop(name, None)
@@ -140,9 +151,15 @@ class SessionSnapshot(BaseModel):
     environment_id: str
     github_mode: Literal["legacy", "app"] = "legacy"
     repo_urls: tuple[str, ...] = ()
-    # Every repo the session's App tokens cover, mounted or not. A new grant
-    # changes this set, and the session must be replaced to receive the token.
+    # Every repo the session's App tokens cover, mounted or not. Compatibility
+    # may refresh an unmounted repo's token in place when this set changes.
     token_repo_urls: tuple[str, ...] = ()
+    # New multi-installation entries persist installation, chunk, exact scope,
+    # issue time, and inventory token ID. Legacy single-installation snapshots
+    # omit this field; two-element entries remain readable for old snapshots.
+    token_scopes: tuple[TokenScope, ...] = ()
+    github_repo_map_sha256: str | None = None
+    github_repo_script_sha256: str | None = None
     unavailable_repos: tuple[tuple[str, datetime], ...] = ()
     unavailable_notice_pending: tuple[str, ...] = ()
     unavailable_notice_sent: tuple[str, ...] = ()
@@ -171,8 +188,15 @@ class SessionSnapshot(BaseModel):
     env_resource_id: str | None = None
     repo_resource_id: str | None = None
     repo_resource_ids: dict[str, str] = Field(default_factory=dict)
+    github_repo_map_file_id: str | None = None
+    github_repo_map_resource_id: str | None = None
+    github_repo_script_file_id: str | None = None
+    github_repo_script_resource_id: str | None = None
     repo_mount_path: str | None = None
     repo_token_issued_at: int | None = None
+    token_issued_at_by_installation: dict[int, int] = Field(
+        default_factory=lambda: dict[int, int]()
+    )
 
     # Diagnostics only. Never fingerprinted — an agent version bump on its own
     # is not a configuration change to the session that already froze it.
@@ -251,6 +275,10 @@ def fingerprint_identity(snapshot: SessionSnapshot) -> str:
     fields = _IDENTITY_FIELDS
     if snapshot.github_mode == "app":
         fields = (*fields, "github_mode", "repo_urls")
+        if snapshot.token_scopes:
+            fields = (*fields, "token_scopes")
+        if snapshot.github_repo_map_sha256 is not None:
+            fields = (*fields, "github_repo_map_sha256", "github_repo_script_sha256")
     if snapshot.personal_memory_store_id is not None:
         # Only when set, so every snapshot without one keeps the fingerprint
         # it was recorded with.
@@ -266,7 +294,30 @@ def fingerprint_mutable(snapshot: SessionSnapshot) -> str:
 
 def _fingerprint(snapshot: SessionSnapshot, fields: Sequence[str]) -> str:
     dumped: dict[str, JsonValue] = snapshot.model_dump(mode="json")
+    if "token_scopes" in fields:
+        dumped["token_scopes"] = [
+            [installation_id, list(repo_ids)]
+            for installation_id, repo_ids in token_scope_identity(snapshot.token_scopes)
+        ]
     return _sha256_of(canonical_json({name: dumped[name] for name in fields}))
+
+
+def token_scope_identity(scopes: Sequence[TokenScope]) -> tuple[tuple[int, tuple[int, ...]], ...]:
+    """Scope and installation affect identity; issue time and token ID do not."""
+    return tuple(
+        sorted(
+            (installation_id, tuple(sorted(repo_ids)))
+            for installation_id, _, repo_ids, _, _ in map(token_scope_parts, scopes)
+        )
+    )
+
+
+def token_scope_parts(
+    scope: TokenScope,
+) -> tuple[int, int | None, tuple[int, ...], int | None, str | None]:
+    if len(scope) == 5:
+        return scope
+    return scope[0], None, scope[1], None, None
 
 
 def snapshot_from_created_session(
@@ -350,6 +401,10 @@ def _snapshot_from_session(
     resolved_env_file_id = env_file_id
     repo_resource_id: str | None = None
     repo_resource_ids: dict[str, str] = {}
+    github_repo_map_file_id: str | None = None
+    github_repo_map_resource_id: str | None = None
+    github_repo_script_file_id: str | None = None
+    github_repo_script_resource_id: str | None = None
     repo_urls: list[str] = []
     repo_url: str | None = None
     repo_branch: str | None = None
@@ -363,6 +418,18 @@ def _snapshot_from_session(
             if resource.mount_path.endswith(_ENV_MOUNT_SUFFIX):
                 env_resource_id = resource.id
                 resolved_env_file_id = resolved_env_file_id or resource.file_id
+            elif (
+                resource.mount_path.endswith("/github-repos.tsv")
+                or resource.mount_path == "github-repos.tsv"
+            ):
+                github_repo_map_resource_id = resource.id
+                github_repo_map_file_id = resource.file_id
+            elif (
+                resource.mount_path.endswith("/github-repo.sh")
+                or resource.mount_path == "github-repo.sh"
+            ):
+                github_repo_script_resource_id = resource.id
+                github_repo_script_file_id = resource.file_id
         elif isinstance(resource, BetaManagedAgentsGitHubRepositoryResource):
             repo_urls.append(resource.url)
             resource_id = cast(str | None, resource.id)
@@ -386,6 +453,7 @@ def _snapshot_from_session(
         access == "read_only" for access in memory_accesses
     )
     agent = session.agent
+    metadata = session.metadata or {}
     return SessionSnapshot(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
@@ -409,6 +477,12 @@ def _snapshot_from_session(
         env_resource_id=env_resource_id,
         repo_resource_id=repo_resource_id,
         repo_resource_ids=repo_resource_ids,
+        github_repo_map_sha256=metadata.get("daimon_github_repo_map_sha256"),
+        github_repo_script_sha256=metadata.get("daimon_github_repo_script_sha256"),
+        github_repo_map_file_id=github_repo_map_file_id,
+        github_repo_map_resource_id=github_repo_map_resource_id,
+        github_repo_script_file_id=github_repo_script_file_id,
+        github_repo_script_resource_id=github_repo_script_resource_id,
         repo_mount_path=repo_mount_path,
         repo_token_issued_at=repo_token_issued_at,
         agent_version=agent.version,
@@ -437,9 +511,13 @@ def session_tools(
     public_url: str | None,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    daimon_rule_tools: frozenset[str] = frozenset(),
 ) -> Sequence[MaTool]:
     """The tools a session for this caller runs: the visible ones, tool safety applied,
     and the publish tools asking first when the turn's agent may not publish freely.
+    `daimon_rule_tools` are the daimon tools an agent rule asks or denies on
+    (`agent_tool_rules.daimon_rule_tools`); they, and the `call_tool` proxy,
+    ask too, and an agent with none hashes as it always did.
 
     The one definition `create_session`, the bind-time drift check and the
     in-place update all use. Hashing or pushing the agent's raw tools instead
@@ -453,6 +531,7 @@ def session_tools(
         trusted_servers=trusted_servers_for(public_url),
         asks_before_publishing=asks_before_publishing,
         confirmed_tools=confirmed_tools,
+        daimon_rule_tools=daimon_rule_tools,
     )
     return visible if gated is None else _TOOLS.validate_python(gated)
 
@@ -486,6 +565,9 @@ def desired_snapshot(
     github_mode: Literal["legacy", "app"] = "app",
     repo_urls: tuple[str, ...] = (),
     token_repo_urls: tuple[str, ...] = (),
+    token_scopes: tuple[TokenScope, ...] = (),
+    github_repo_map_sha256: str | None = None,
+    github_repo_script_sha256: str | None = None,
     repo_branch: str | None,
     memory_store_id: str | None,
     vault_id: str | None,
@@ -494,8 +576,10 @@ def desired_snapshot(
     personal_memory_store_id: str | None = None,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
+    daimon_rule_tools: frozenset[str] = frozenset(),
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
+    token_issued_at_by_installation: dict[int, int] | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     public_url: str | None = None,
     channel_skills: Sequence[MaSkill] = (),
@@ -526,6 +610,9 @@ def desired_snapshot(
         github_mode=github_mode,
         repo_urls=repo_urls if github_mode == "app" else (),
         token_repo_urls=token_repo_urls if github_mode == "app" else (),
+        token_scopes=token_scopes if github_mode == "app" else (),
+        github_repo_map_sha256=github_repo_map_sha256 if github_mode == "app" else None,
+        github_repo_script_sha256=github_repo_script_sha256 if github_mode == "app" else None,
         repo_url=repo_url,
         repo_branch=repo_branch,
         memory_store_id=memory_store_id,
@@ -546,6 +633,7 @@ def desired_snapshot(
                 public_url=public_url,
                 asks_before_publishing=asks_before_publishing,
                 confirmed_tools=confirmed_tools,
+                daimon_rule_tools=daimon_rule_tools,
             )
         ),
         mcp_servers_sha256=hash_mcp_servers(
@@ -563,6 +651,7 @@ def desired_snapshot(
         repo_resource_id=None,
         repo_mount_path=repo_mount_path,
         repo_token_issued_at=repo_token_issued_at,
+        token_issued_at_by_installation=token_issued_at_by_installation or {},
         agent_version=agent.version,
         agent_name=agent.name,
     )
