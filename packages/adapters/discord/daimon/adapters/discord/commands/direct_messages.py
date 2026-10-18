@@ -41,7 +41,8 @@ from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.membership_subject import resolve_subject
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.setup_conversations import BoundAgentUnavailable
+from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.direct_messages import (
     DirectMessageRow,
     dm_enabled,
@@ -53,7 +54,7 @@ from daimon.core.stores.direct_messages import (
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from daimon.core.turn.admission import Admission, admit
-from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -68,6 +69,16 @@ _DM_LANE_CAP = 1_000_000
 DISCOVERY_BURST = 3
 DISCOVERY_REFILL_SECONDS = 20
 SELECTION_SECONDS = 300
+_ACCESS_DENIALS: frozenset[AdmissionDenialReason] = frozenset(
+    {
+        "invoker_not_allowed",
+        "writers_none",
+        "runs_elsewhere",
+        "own_agents_only",
+        "external_participant",
+    }
+)
+_DISCOVERY_FAILURE_NOTICE = "Couldn't open a private conversation. Please retry or ask an admin."
 
 
 @dataclass(frozen=True)
@@ -158,29 +169,33 @@ class DirectMessageCog(commands.Cog):
         self,
         tenant: TenantRow,
         message: discord.Message | _DmRequest,
-    ) -> tuple[Admission | None, bool]:
+    ) -> tuple[Admission | None, bool, bool]:
         runtime = self.bot.runtime
         if tenant.archived_at is not None or tenant.provision_status != "ready":
             self._suppress(message, "tenant_unavailable")
-            return None, False
+            return None, False, False
         async with runtime.sessionmaker() as session:
             enabled = await dm_enabled(session, tenant_id=tenant.id)
             agent = await get_dm_agent_name(session, tenant_id=tenant.id)
-            policy = await load_access_policy(session, tenant_id=tenant.id)
+            try:
+                policy = await load_access_policy(session, tenant_id=tenant.id)
+            except AccessPolicyUnreadable:
+                self._suppress(message, "policy_unreadable")
+                return None, False, False
         recipient_policy = runtime.settings.direct_message_policies.get(
             tenant.id, DirectMessagePolicy()
         )
         if not enabled or agent is None or not recipient_policy.allows(str(message.author.id)):
             self._suppress(message, "dm_policy")
-            return None, False
+            return None, False, False
         subject = await self._subject(tenant.id, message.author.id)
         if subject.verified_membership is None:
-            return None, True
+            return None, True, False
         if subject.verified_membership is not True or not authorize(
             policy, subject=subject, action=Action.START_TURN
         ):
             self._suppress(message, "invoker_not_allowed")
-            return None, False
+            return None, False, False
         try:
             admission = await admit_cold_dm(
                 runtime.turn_deps,
@@ -192,11 +207,27 @@ class DirectMessageCog(commands.Cog):
                 verified_membership=subject.verified_membership,
             )
         except (DaimonError, MAResolverMissError) as exc:
-            self._suppress(
-                message, exc.reason if isinstance(exc, AdmissionDenied) else type(exc).__name__
+            if (isinstance(exc, AdmissionDenied) and exc.reason in _ACCESS_DENIALS) or isinstance(
+                exc,
+                (
+                    DirectMessageAccessRevoked,
+                    BoundAgentUnavailable,
+                    MAResolverMissError,
+                    AccessPolicyUnreadable,
+                ),
+            ):
+                self._suppress(
+                    message, exc.reason if isinstance(exc, AdmissionDenied) else type(exc).__name__
+                )
+                return None, False, False
+            # Membership and invoker eligibility were established above. Do not
+            # disclose which candidate failed, or include exception/resource text.
+            log.warning("discord.dm.discovery_failed", error_type=type(exc).__name__)
+            await message.channel.send(
+                _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
             )
-            return None, False
-        return admission, False
+            return None, False, True
+        return admission, False, False
 
     async def _discover(
         self,
@@ -210,7 +241,9 @@ class DirectMessageCog(commands.Cog):
         candidates: list[tuple[TenantRow, Admission]] = []
         unknown = False
         for tenant in tenants:
-            admission, uncertain = await self._eligible(tenant, message)
+            admission, uncertain, failed = await self._eligible(tenant, message)
+            if failed:
+                return None
             unknown |= uncertain
             if admission is not None:
                 candidates.append((tenant, admission))
@@ -269,7 +302,9 @@ class DirectMessageCog(commands.Cog):
                 if tenant is None:
                     self._suppress(message, "tenant_unavailable")
                     return
-                admission, uncertain = await self._eligible(tenant, message)
+                admission, uncertain, failed = await self._eligible(tenant, message)
+                if failed:
+                    return
                 if uncertain:
                     await message.channel.send(
                         "Server membership is temporarily unavailable. Please retry."
@@ -679,11 +714,7 @@ class DirectMessageCog(commands.Cog):
             if isinstance(exc, DirectMessageAccessRevoked):
                 self._suppress(message, exc.reason)
                 return
-            if isinstance(exc, AdmissionDenied) and exc.reason not in {
-                "balance_depleted",
-                "cap_exceeded",
-                "channel_budget_exceeded",
-            }:
+            if isinstance(exc, AdmissionDenied) and exc.reason in _ACCESS_DENIALS:
                 self._suppress(message, exc.reason)
                 return
             error = _error_text(
