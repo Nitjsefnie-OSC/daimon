@@ -19,10 +19,11 @@ import httpx
 from daimon.core.config import MicrosoftAccountsSettings
 from daimon.core.errors import DaimonError
 
-# Delegated Graph permissions; `openid` makes the token response carry the
-# id_token the identity check reads.
+# Delegated Graph permissions; `openid` and `profile` make the token response
+# carry an id_token with the `oid` the identity check reads.
 MICROSOFT_SCOPES: tuple[str, ...] = (
     "openid",
+    "profile",
     "User.Read",
     "offline_access",
     "Files.ReadWrite.All",
