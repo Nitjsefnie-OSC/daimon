@@ -139,10 +139,16 @@ def build_oauth_microsoft_routes(
         if not code:
             # Only the code is logged: Entra's description can echo request details.
             error = request.query_params.get("error", "")
-            if error and error != "access_denied":
-                log.warning("microsoft_connect.refused_by_entra", code=error[:64])
-                return _error_page("blocked")
-            return _error_page("declined")
+            if not error or error == "access_denied":
+                return _error_page("declined")
+            log.warning("microsoft_connect.refused_by_entra", code=error[:64])
+            # Consent and Conditional Access refusals stay "blocked": an admin
+            # must allow the app. An outage is worth a retry; a bad app is ours.
+            if error in ("server_error", "temporarily_unavailable"):
+                return _error_page("exchange_failed")
+            if error in ("invalid_client", "unauthorized_client"):
+                return _error_page("misconfigured")
+            return _error_page("blocked")
         try:
             async with graph.http() as http:
                 tokens = await exchange_code(

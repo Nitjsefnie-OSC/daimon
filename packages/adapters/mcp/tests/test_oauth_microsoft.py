@@ -192,6 +192,29 @@ async def test_sign_in_blocked_by_the_organisation_says_who_can_fix_it(
     assert not endpoint.forms, "nothing may be exchanged after Entra refused"
 
 
+@pytest.mark.parametrize(
+    ("error", "title"),
+    [
+        ("interaction_required", "Microsoft did not allow the sign-in"),
+        ("server_error", "Sign-in did not complete"),
+        ("temporarily_unavailable", "Sign-in did not complete"),
+        ("invalid_client", "Microsoft sign-in is not set up correctly"),
+        ("unauthorized_client", "Microsoft sign-in is not set up correctly"),
+    ],
+)
+async def test_entra_errors_name_who_can_fix_them(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], error: str, title: str
+) -> None:
+    """An outage asks for a retry and a bad app registration goes to the Daimon admin."""
+    endpoint = TokenEndpoint("")
+    client, row = await _app(committing_sessionmaker, endpoint)
+    response = await client.get(
+        "/oauth/microsoft/callback", params={"state": row.state, "error": error}
+    )
+    assert title in response.text, f"{error} must show the {title!r} page"
+    assert not endpoint.forms, "nothing may be exchanged after Entra refused"
+
+
 class RejectingTokenEndpoint(TokenEndpoint):
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.forms.append(parse_qs(request.content.decode()))
