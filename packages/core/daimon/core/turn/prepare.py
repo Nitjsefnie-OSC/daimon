@@ -649,6 +649,7 @@ async def create_ma_session(
         tool_safety=deps.tool_safety,
         asks_before_publishing=admission.asks_before_publishing,
         confirmed_tools=backend_switch_tools_for_turn(deps),
+        daimon_rule_tools=admission.daimon_rule_tools,
         slack_turn_context_id=admission.slack_turn_context_id,
         private_dm_id=admission.private_dm_id,
         budget_channel_id=admission.budget_channel_id,

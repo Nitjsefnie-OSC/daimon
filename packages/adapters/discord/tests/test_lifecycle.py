@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import MagicMock
 
@@ -3025,3 +3026,241 @@ async def test_ended_after_a_terminal_render() -> None:
     await lc.on_render(TurnState())
     await lc.on_terminal_failure(TurnState(), Exception("boom"))
     assert lc.ended
+
+
+@pytest.mark.parametrize("notify", [False, True])
+async def test_r20_captured_final_markup_flood_is_one_notice(notify):
+    capture = json.loads(
+        (Path(__file__).parent / "fixtures/r20-tool-markup-flood.json").read_text()
+    )
+    text = capture["repeated_message"] * capture["repeat_count"] + capture["tail"]
+    thread = _VisibleThread()
+    lc = DiscordTurnLifecycle(
+        send=thread.send,
+        edit=thread.edit,
+        delete=thread.delete,
+        agent_name="test",
+        model_id="claude-haiku-5-5",
+        notify_on_completion=notify,
+        requester_id=123,
+    )
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=text)]))
+    visible = [m.content for m in thread.messages.values() if m.content]
+    assert len(visible) == 1
+    assert "tool-call markup without an answer" in visible[0]
+    assert "<invoke_fleet_check>" not in visible[0]
+
+
+async def test_repeated_and_markup_sealed_blocks_do_not_post():
+    lc, sends, _ = _make_lifecycle()
+    answer = "Useful prose. " * 50
+    state = TurnState()
+    for index, text in enumerate(
+        [answer, answer, "<invoke_fleet_check>\n</invoke_fleet_check>" * 30]
+    ):
+        state.content.extend(
+            [
+                TextBlock(kind="text", text=text),
+                ToolUseBlock(
+                    kind="tool_use", id=str(index), type="agent.tool_use", name="bash", input={}
+                ),
+            ]
+        )
+        await lc.on_render(state)
+    await lc.on_terminal_success(state)
+    assert [s["content"] for s in sends if "content" in s] == [answer]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+async def test_sealed_flood_caps_actual_messages_and_attaches_all_excess(failure):
+    lc, sends, edits = _make_lifecycle()
+    state = TurnState()
+    answers = [f"Answer {i}: " + "x" * 600 for i in range(10)]
+    with structlog.testing.capture_logs() as logs:
+        for index, text in enumerate(answers):
+            state.content.extend(
+                [
+                    TextBlock(kind="text", text=text),
+                    ToolUseBlock(
+                        kind="tool_use", id=str(index), type="agent.tool_use", name="bash", input={}
+                    ),
+                ]
+            )
+            await lc.on_render(state)
+        state.content.append(TextBlock(kind="text", text="Final answer."))
+        if failure:
+            await lc.on_terminal_failure(state, RuntimeError("failed"))
+        else:
+            await lc.on_terminal_success(state)
+    content_sends = [s["content"] for s in sends if "content" in s]
+    assert content_sends == answers[:4]
+    final = edits[-1][1]
+    assert "answer.txt" in final["content"]
+    attached = final["attachments"][0].fp.read().decode()
+    assert all(answer in attached for answer in answers[4:])
+    if not failure:
+        assert "Final answer." in attached
+    assert sum(x["event"] == "turn.answer_message_limit" for x in logs) == 1
+
+
+@pytest.mark.parametrize("notify", [False, True])
+async def test_long_final_answer_is_attached_instead_of_flooding(notify):
+    thread = _VisibleThread()
+    files = []
+
+    async def send(**kwargs):
+        files.extend(kwargs.get("files", []))
+        return await thread.send(**kwargs)
+
+    async def edit(ref, **kwargs):
+        files.extend(kwargs.get("attachments", []))
+        await thread.edit(ref, **kwargs)
+
+    lc = DiscordTurnLifecycle(
+        send=send,
+        edit=edit,
+        delete=thread.delete,
+        agent_name="test",
+        model_id="claude-haiku-5-5",
+        notify_on_completion=notify,
+        requester_id=123,
+    )
+    text = "A long useful answer. " * 1000
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=text)]))
+    assert len(thread.messages) == 1
+    assert files[0].filename == "answer.txt"
+    assert text in files[0].fp.read().decode()
+
+
+async def test_huge_sealed_block_is_deferred_without_using_message_budget():
+    lc, sends, edits = _make_lifecycle()
+    text = "Useful prose. " * 1000
+    state = _sealed_state(text, trailing="Final answer.")
+    await lc.on_render(state)
+    assert not [s for s in sends if "content" in s]
+    await lc.on_terminal_success(state)
+    assert text in edits[-1][1]["attachments"][0].fp.read().decode()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Here is an example: <invoke_fleet_check></invoke_fleet_check>",
+        "<p>Normal HTML prose</p>",
+        "a < b and c > d",
+    ],
+)
+async def test_markup_filter_preserves_prose_and_examples(text):
+    lc, _, edits = _make_lifecycle()
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=text)]))
+    assert edits[-1][1]["content"] == text
+
+
+async def test_consecutive_final_blocks_collapse_but_distinct_answers_survive():
+    lc, _, edits = _make_lifecycle()
+    await lc.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="First.\n"),
+                TextBlock(kind="text", text="First.\n"),
+                TextBlock(kind="text", text="Second."),
+            ]
+        )
+    )
+    assert edits[-1][1]["content"] == "First.\nSecond."
+
+
+async def test_final_response_preserves_whitespace_between_distinct_blocks():
+    lc, _, edits = _make_lifecycle()
+    await lc.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="Hello"),
+                TextBlock(kind="text", text=" "),
+                TextBlock(kind="text", text="world."),
+            ]
+        )
+    )
+    assert edits[-1][1]["content"] == "Hello world."
+
+
+@pytest.mark.parametrize("notice", ["cancel", "degraded", "continuity"])
+async def test_overflow_keeps_operational_notices_visible(notice):
+    lc, _, edits = _make_lifecycle()
+    state = TurnState(content=[TextBlock(kind="text", text="Useful answer. " * 1000)])
+    if notice == "cancel":
+        state = dataclasses.replace(state, termination=TerminationReason.INTERRUPTED)
+        expected = "Stopped."
+    elif notice == "degraded":
+        state = dataclasses.replace(
+            state,
+            mcp_failures=(
+                McpServerFailure(
+                    server_name="notion",
+                    error_type="mcp_authentication_failed_error",
+                    message="access forbidden",
+                    retry_status="exhausted",
+                ),
+            ),
+        )
+        expected = "`notion`"
+    else:
+        lc.answer_prefix = "Recovered files."
+        expected = lc.answer_prefix
+    await lc.on_terminal_success(state)
+    assert expected in edits[-1][1]["content"]
+    assert expected in edits[-1][1]["attachments"][0].fp.read().decode()
+
+
+async def test_unprompted_markup_only_output_stays_silent():
+    lc, sends, edits, _ = _make_unprompted_lifecycle()
+    await lc.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="<invoke_fleet_check></invoke_fleet_check>" * 100),
+            ]
+        )
+    )
+    assert not sends and not edits
+    assert not lc.was_answered
+
+
+async def test_overflow_keeps_fallback_identity_and_bounds_long_notice():
+    lc, sends, edits = _make_lifecycle()
+    lc._fallback_active = lambda: True
+    lc.answer_prefix = "Recovery details. " * 1000
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Answer.")]))
+    visible = edits[-1][1]["content"]
+    assert visible.startswith("-# test-agent\n")
+    assert "answer.txt" in visible
+    assert len(visible) <= 2000
+    assert lc.answer_prefix in edits[-1][1]["attachments"][0].fp.read().decode()
+    assert not [sent for sent in sends if "content" in sent]
+
+
+async def test_rendered_table_expansion_respects_last_answer_slot(monkeypatch, tmp_path):
+    lc, sends, edits = _make_lifecycle()
+    state = TurnState()
+    for index in range(4):
+        state.content.extend(
+            [
+                TextBlock(kind="text", text=f"Answer {index}. " + "x" * 600),
+                ToolUseBlock(
+                    kind="tool_use", id=str(index), type="agent.tool_use", name="bash", input={}
+                ),
+            ]
+        )
+    state.content.append(TextBlock(kind="text", text="A compact table."))
+    image_path = tmp_path / "table.png"
+    image_path.write_bytes(b"image")
+    file = discord.File(image_path)
+
+    async def expanded_render(text, *, enabled):
+        return "table reference " * 300, [file]
+
+    monkeypatch.setattr(lifecycle_module, "render_discord_tables", expanded_render)
+    await lc.on_terminal_success(state)
+    assert len([sent for sent in sends if "content" in sent]) == 4
+    assert "answer.txt" in edits[-1][1]["content"]
+    assert "A compact table." in edits[-1][1]["attachments"][0].fp.read().decode()
+    assert file.fp.closed

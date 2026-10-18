@@ -18,7 +18,8 @@ SPEC.loader.exec_module(inventory)
 
 
 def test_ma_call_ratchet() -> None:
-    current = inventory.scan(ROOT)
+    # The ratchet reads production calls only, and a call spells `.beta.`: parse just those files.
+    current = inventory.scan(ROOT, categories={"production"}, prefilter=True)
     assert not current["parse_errors"], f"MA inventory has parse errors: {current['parse_errors']}"
     baseline = json.loads(inventory.BASELINE.read_text())
     assert inventory.BASELINE.stat().st_size <= 500 * 1024, (
@@ -69,6 +70,34 @@ def test_inventory_reports_unparseable_source(tmp_path: Path) -> None:
     (tmp_path / "broken.py").write_text("async def broken(:\n")
     result = inventory.scan(tmp_path)
     assert result["parse_errors"][0][0] == "broken.py"
+
+
+def test_production_only_scan_matches_the_full_scan_and_still_reports_parse_errors(
+    tmp_path: Path,
+) -> None:
+    files = {
+        "packages/core/daimon/core/turn.py": "client.beta.sessions.events.list(session_id)\n",
+        "packages/core/daimon/core/plain.py": "x = 1\n",
+        "packages/core/daimon/core/imports.py": "from anthropic import AsyncAnthropic\n",
+        "packages/mux/mux/drivers/anthropic/turn.py": "client.beta.sessions.create()\n",
+        "packages/core/tests/test_turn.py": "client.beta.sessions.create()\n",
+        "scripts/probe.py": "client.beta.environments.create()\n",
+        # Syntax errors: the one that mentions `beta` must still surface, in production only.
+        "packages/core/daimon/core/broken_beta.py": "client.beta.agents.create(:\n",
+        "packages/core/tests/test_broken.py": "client.beta.agents.create(:\n",
+    }
+    for name, source in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    full = inventory.scan(tmp_path)
+    fast = inventory.scan(tmp_path, categories={"production"}, prefilter=True)
+    production = [call for call in full["calls"] if call["category"] == "production"]
+    assert fast["calls"] == production and len(production) == 2
+    assert inventory.outside_driver_calls(fast) == inventory.outside_driver_calls(full)
+    assert [name for name, _ in fast["parse_errors"]] == [
+        "packages/core/daimon/core/broken_beta.py"
+    ]
 
 
 @pytest.mark.parametrize("resource", sorted(inventory.RESOURCES))
