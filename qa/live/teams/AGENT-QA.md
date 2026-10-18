@@ -86,7 +86,10 @@ model-specific phrasing.
 Stop posting on `post_outcome_unknown`: run `read` to investigate, then report
 uncertainty; never resend blindly. Stop on `chat_not_quiet`, `reauth_required`, a
 reply from an unexpected bot or model, anything that looks like production, a
-staging deploy starting (ask the operator), or anything touching real users.
+staging deploy starting (ask the operator), or an action that would affect or
+contact a real person. Admin cards such as `billing` list staging users' names
+and spend; that is expected and not a reason to stop, but keep those names out
+of your report.
 For a timeout or other error, preserve the JSON and investigate before any next
 post. Do not treat absent or unreadable replies as permission evidence.
 
