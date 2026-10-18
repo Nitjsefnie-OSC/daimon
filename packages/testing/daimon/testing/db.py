@@ -32,9 +32,13 @@ Model:
 - Per test, ``db_clean`` wipes every ORM table in the worker schema at SETUP
   (one DO block of child-first DELETEs, a few ms). ``public`` is never touched:
   other worktrees share it, and a few own-engine tests write there on purpose.
-- ``@pytest.mark.fresh_schema`` opts a test out of the shared schema: it gets a
-  private ``test_f<pid>_<8hex>`` schema on its own NullPool engine
-  (CREATE / create_all / DROP around the test). Use it for tests that run DDL.
+- ``@pytest.mark.fresh_schema`` opts a test out of the shared schema, for tests
+  that run DDL. It gets one reusable per-worker DDL schema, ``test_f<pid>_<8hex>``,
+  built on first use. The test runs in a transaction ``db_session`` rolls back, and
+  Postgres rolls DDL back with it. The next such test first compares a catalog
+  fingerprint with the baseline: unchanged, it deletes every row; changed (a test
+  committed DDL), it drops and rebuilds the schema. ``DAIMON_TEST_FRESH_SCHEMA=1``
+  restores a private schema per test (CREATE / create_all / DROP around it).
 - ``db_committing_engine`` is a pooled engine (production's 5 + 10) on the worker
   schema for tests whose sessions really COMMIT; ``db_nullpool_engine`` (a new
   connection per checkout, ~20 ms each) remains for code that runs its own event
@@ -107,9 +111,19 @@ class DatabasePreflight:
 
 
 @dataclass
+class _DdlSchema:
+    """A worker's reusable ``@pytest.mark.fresh_schema`` schema (see ``db_session``)."""
+
+    name: str
+    engine: AsyncEngine = field(repr=False)
+    baseline: str = field(repr=False)
+
+
+@dataclass
 class _WorkerEngine:
     engine: AsyncEngine = field(repr=False)
     users: int = 0
+    ddl: _DdlSchema | None = None
 
 
 _WORKER_ENGINES = pytest.StashKey[dict[tuple[URL, str], _WorkerEngine]]()
@@ -519,6 +533,11 @@ async def db_engine(
             del engines[key]
             try:
                 await _drain_background_tasks()
+                if worker.ddl is not None:
+                    try:
+                        await _drop_schema(worker.ddl.engine, worker.ddl.name)
+                    finally:
+                        await worker.ddl.engine.dispose()
                 await _drop_schema(worker.engine, db_schema)
             finally:
                 await worker.engine.dispose()
@@ -848,6 +867,118 @@ async def _drain_background_tasks() -> None:
     platform_names.forget_all()
 
 
+# Everything DDL can change in one schema: columns (type, nullability, default,
+# identity, generation, collation), indexes, constraints, triggers, functions,
+# views, sequences, enum and domain types. A rolled-back transaction leaves it
+# untouched; a committed ALTER/CREATE/DROP does not. Row data is not part of it:
+# every fresh test starts by deleting every row.
+_FINGERPRINT_SQL = text(
+    """
+SELECT md5(concat_ws('|',
+  (SELECT coalesce(string_agg(c.relname || '.' || a.attname || ':'
+          || format_type(a.atttypid, a.atttypmod) || ':' || a.attnotnull::text || ':'
+          || a.attidentity::text || a.attgenerated::text || ':'
+          || coalesce((SELECT collname FROM pg_collation WHERE oid = a.attcollation), '') || ':'
+          || coalesce(pg_get_expr(d.adbin, d.adrelid), ''),
+          ',' ORDER BY c.relname, a.attnum), '')
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+     LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
+    WHERE n.nspname = :schema AND c.relkind IN ('r', 'p', 'v', 'm', 'S')),
+  (SELECT coalesce(string_agg(pg_get_indexdef(i.indexrelid), ','
+          ORDER BY i.indexrelid::regclass::text), '')
+     FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = :schema),
+  (SELECT coalesce(string_agg(k.conname || ':' || pg_get_constraintdef(k.oid),
+          ',' ORDER BY k.conname, k.oid), '')
+     FROM pg_constraint k JOIN pg_namespace n ON n.oid = k.connamespace
+    WHERE n.nspname = :schema),
+  (SELECT coalesce(string_agg(pg_get_triggerdef(g.oid), ',' ORDER BY g.tgname, g.oid), '')
+     FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = :schema AND NOT g.tgisinternal),
+  (SELECT coalesce(string_agg(pg_get_functiondef(p.oid), ',' ORDER BY p.proname, p.oid), '')
+     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = :schema AND p.prokind IN ('f', 'p')),
+  (SELECT coalesce(string_agg(c.relname || ':' || pg_get_viewdef(c.oid), ',' ORDER BY c.relname),
+          '')
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = :schema AND c.relkind IN ('v', 'm')),
+  (SELECT coalesce(string_agg(t.typname || ':' || t.typtype::text, ',' ORDER BY t.typname), '')
+     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname = :schema AND t.typtype IN ('e', 'd')),
+  (SELECT coalesce(string_agg(e.enumtypid::text || e.enumlabel, ',' ORDER BY e.oid), '')
+     FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+     JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = :schema)
+)) AS fingerprint
+"""
+)
+
+
+async def _schema_fingerprint(engine: AsyncEngine, schema: str) -> str:
+    async with engine.connect() as conn:
+        return (await conn.execute(_FINGERPRINT_SQL, {"schema": schema})).scalar_one()
+
+
+async def _ready_ddl_schema(worker: _WorkerEngine, url: str) -> _DdlSchema:
+    """The worker's DDL schema, empty and shaped exactly like the ORM models.
+
+    Built on first use and reused: a ``fresh_schema`` test runs inside a
+    transaction that ``db_session`` rolls back, and Postgres rolls DDL back with
+    it. A test that commits anyway (``session.commit()``, ``engine.begin()``)
+    leaves rows and maybe a changed shape; the next test rewipes the rows,
+    restarts the sequences a test advanced, and rebuilds the schema when the
+    shape differs from the baseline.
+    """
+    ddl = worker.ddl
+    if ddl is not None and await _schema_fingerprint(ddl.engine, ddl.name) == ddl.baseline:
+        async with ddl.engine.begin() as conn:
+            await truncate_all(conn, ddl.name, lock_timeout="5s")
+            # A rolled-back nextval() still advances its sequence; a private
+            # schema would have started every test at 1.
+            advanced = (
+                await conn.execute(
+                    text(
+                        "SELECT sequencename FROM pg_sequences "
+                        "WHERE schemaname = :schema AND last_value IS NOT NULL"
+                    ),
+                    {"schema": ddl.name},
+                )
+            ).scalars()
+            for sequence in list(advanced):
+                quoted = sequence.replace('"', '""')
+                await conn.execute(text(f'ALTER SEQUENCE "{ddl.name}"."{quoted}" RESTART'))
+        return ddl
+    if ddl is not None:
+        await _drop_schema(ddl.engine, ddl.name)
+        await _create_schema_with_tables(ddl.engine, ddl.name)
+        return ddl
+    name = _new_schema_name("f")
+    engine = build_test_engine(url, name, poolclass=NullPool)
+    try:
+        require_owned_sessionmaker(engine)
+        await _create_schema_with_tables(engine, name)
+        worker.ddl = _DdlSchema(name, engine, await _schema_fingerprint(engine, name))
+    except BaseException:
+        await engine.dispose()
+        raise
+    return worker.ddl
+
+
+@asynccontextmanager
+async def _ddl_schema_session(worker: _WorkerEngine, url: str) -> AsyncIterator[AsyncSession]:
+    """A session on the worker's reusable DDL schema; its transaction is rolled back."""
+    ddl = await _ready_ddl_schema(worker, url)
+    async with ddl.engine.connect() as conn:
+        session = AsyncSession(bind=conn, expire_on_commit=False)
+        try:
+            yield session
+        finally:
+            await _drain_background_tasks()
+            await session.close()
+            await conn.rollback()
+
+
 @asynccontextmanager
 async def _fresh_schema_session(url: str) -> AsyncIterator[AsyncSession]:
     """A session on a private ``test_f<pid>_<8hex>`` schema, dropped afterwards."""
@@ -875,6 +1006,7 @@ async def _fresh_schema_session(url: str) -> AsyncIterator[AsyncSession]:
 async def db_session(
     db_preflight: DatabasePreflight,
     db_engine: AsyncEngine,
+    db_schema: str,
     db_clean: None,
     request: pytest.FixtureRequest,
 ) -> AsyncIterator[AsyncSession]:
@@ -885,8 +1017,13 @@ async def db_session(
     schema instead (see module docstring).
     """
     if _request_item(request).get_closest_marker("fresh_schema") is not None:
-        async with _fresh_schema_session(db_preflight.url) as session:
-            yield session
+        worker = request.config.stash[_WORKER_ENGINES].get((make_url(db_preflight.url), db_schema))
+        if worker is None or os.environ.get("DAIMON_TEST_FRESH_SCHEMA") == "1":
+            async with _fresh_schema_session(db_preflight.url) as session:
+                yield session
+        else:
+            async with _ddl_schema_session(worker, db_preflight.url) as session:
+                yield session
         return
     async with db_engine.connect() as conn:
         session = AsyncSession(bind=conn, expire_on_commit=False)

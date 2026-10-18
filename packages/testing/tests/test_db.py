@@ -15,19 +15,23 @@ import pytest
 from daimon.core import agent_identity
 from daimon.core._models import Base
 from daimon.testing.db import (
+    _WORKER_ENGINES,  # pyright: ignore[reportPrivateUsage]
     _assert_committing_pool_clean,  # pyright: ignore[reportPrivateUsage]
     _create_schema_with_tables,  # pyright: ignore[reportPrivateUsage]
     _drain_background_tasks,  # pyright: ignore[reportPrivateUsage]
     _drop_schema,  # pyright: ignore[reportPrivateUsage]
     _forget_touched_connections,  # pyright: ignore[reportPrivateUsage]
     _fresh_schema_session,  # pyright: ignore[reportPrivateUsage]
+    _ready_ddl_schema,  # pyright: ignore[reportPrivateUsage]
     _require_test_dsn,  # pyright: ignore[reportPrivateUsage]
+    _schema_fingerprint,  # pyright: ignore[reportPrivateUsage]
     build_test_engine,
     sweep_orphan_schemas,
     truncate_all,
 )
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -168,6 +172,142 @@ async def test_committing_pool_guard_rejects_a_session_fence_permit_never_releas
         with pytest.raises(AssertionError, match="fence permit"):
             await _assert_committing_pool_clean(db_committing_pool, pool, 0, db_schema)
     await _assert_committing_pool_clean(db_committing_pool, pool, 0, db_schema)
+
+
+@pytest.mark.fresh_schema
+async def test_ddl_schema_is_rebuilt_after_a_test_commits_ddl_or_rows(
+    db_session: AsyncSession,
+    db_preflight: object,
+    db_schema: str,
+    request: pytest.FixtureRequest,
+) -> None:
+    """A fresh_schema test that commits leaves the next one a clean, ORM-shaped schema."""
+    if os.environ.get("DAIMON_TEST_FRESH_SCHEMA") == "1":
+        pytest.skip("DAIMON_TEST_FRESH_SCHEMA=1 gives every fresh_schema test a private schema")
+    url = os.environ["DAIMON_DATABASE__TEST_URL"]
+    worker = request.config.stash[_WORKER_ENGINES][(make_url(url), db_schema)]
+    assert worker.ddl is not None
+    ddl = worker.ddl
+    async with ddl.engine.begin() as conn:  # committed behind the session's back
+        await conn.execute(text("ALTER TABLE tenants ADD COLUMN leaked integer"))
+        await conn.execute(
+            text(
+                "CREATE FUNCTION leaked_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TRIGGER leaked_trg BEFORE INSERT ON tenants FOR EACH ROW EXECUTE FUNCTION leaked_fn()"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO tenants (id, platform, external_id) VALUES (gen_random_uuid(), 'd', 'x')"
+            )
+        )
+    await db_session.rollback()
+    again = await _ready_ddl_schema(worker, url)
+    assert again.name == ddl.name
+    async with ddl.engine.connect() as conn:
+        columns = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = :s AND table_name = 'tenants' AND column_name = 'leaked'"
+                ),
+                {"s": ddl.name},
+            )
+        ).scalar_one()
+        rows = (await conn.execute(text("SELECT count(*) FROM tenants"))).scalar_one()
+        functions = (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+                    "WHERE n.nspname = :s AND p.proname = 'leaked_fn'"
+                ),
+                {"s": ddl.name},
+            )
+        ).scalar_one()
+    assert (columns, rows, functions) == (0, 0, 0)
+
+
+@pytest.mark.fresh_schema
+async def test_ddl_schema_restarts_sequences_an_earlier_test_advanced(
+    db_session: AsyncSession,
+    db_preflight: object,
+    db_schema: str,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Rolled-back inserts still consume ids; a fresh_schema test must start at 1 again."""
+    if os.environ.get("DAIMON_TEST_FRESH_SCHEMA") == "1":
+        pytest.skip("DAIMON_TEST_FRESH_SCHEMA=1 gives every fresh_schema test a private schema")
+    url = os.environ["DAIMON_DATABASE__TEST_URL"]
+    worker = request.config.stash[_WORKER_ENGINES][(make_url(url), db_schema)]
+    assert worker.ddl is not None
+    ddl = worker.ddl
+    async with ddl.engine.connect() as conn:
+        sequence = (
+            await conn.execute(
+                text("SELECT sequencename FROM pg_sequences WHERE schemaname = :s LIMIT 1"),
+                {"s": ddl.name},
+            )
+        ).scalar_one()
+        await conn.execute(text(f'SELECT nextval(\'"{ddl.name}"."{sequence}"\')'))
+        await conn.rollback()  # nextval is not transactional: the sequence stays advanced
+    await db_session.rollback()
+    await _ready_ddl_schema(worker, url)
+    async with ddl.engine.connect() as conn:
+        last = (
+            await conn.execute(
+                text(
+                    "SELECT last_value FROM pg_sequences WHERE schemaname = :s AND sequencename = :n"
+                ),
+                {"s": ddl.name, "n": sequence},
+            )
+        ).scalar_one()
+    assert last is None, "the sequence must be back to its starting point"
+
+
+_COMMITTED_DDL = [
+    pytest.param("ALTER TABLE tenants ADD COLUMN leaked integer", id="column"),
+    pytest.param(
+        "ALTER TABLE tenants ADD COLUMN leaked integer GENERATED ALWAYS AS IDENTITY", id="identity"
+    ),
+    pytest.param("CREATE INDEX leaked_idx ON tenants (id)", id="index"),
+    pytest.param("ALTER TABLE tenants ADD CONSTRAINT leaked_ck CHECK (true)", id="constraint"),
+    pytest.param("CREATE VIEW leaked_view AS SELECT 1 AS x", id="view"),
+    pytest.param("CREATE DOMAIN leaked_domain AS integer", id="domain"),
+    pytest.param("CREATE TYPE leaked_enum AS ENUM ('a')", id="enum"),
+    pytest.param(
+        "CREATE FUNCTION leaked_fn() RETURNS integer LANGUAGE sql AS 'SELECT 1'", id="function"
+    ),
+    pytest.param("CREATE SEQUENCE leaked_seq", id="sequence"),
+]
+
+
+@pytest.mark.fresh_schema
+@pytest.mark.parametrize("statement", _COMMITTED_DDL)
+async def test_ddl_schema_fingerprint_notices_committed_ddl_of_every_kind(
+    db_session: AsyncSession,
+    db_preflight: object,
+    db_schema: str,
+    request: pytest.FixtureRequest,
+    statement: str,
+) -> None:
+    """Every kind of committed DDL changes the fingerprint, so the next test gets a rebuild."""
+    if os.environ.get("DAIMON_TEST_FRESH_SCHEMA") == "1":
+        pytest.skip("DAIMON_TEST_FRESH_SCHEMA=1 gives every fresh_schema test a private schema")
+    url = os.environ["DAIMON_DATABASE__TEST_URL"]
+    worker = request.config.stash[_WORKER_ENGINES][(make_url(url), db_schema)]
+    assert worker.ddl is not None
+    ddl = worker.ddl
+    assert await _schema_fingerprint(ddl.engine, ddl.name) == ddl.baseline
+    async with ddl.engine.begin() as conn:
+        await conn.execute(text(statement))
+    assert await _schema_fingerprint(ddl.engine, ddl.name) != ddl.baseline
+    await db_session.rollback()
+    await _ready_ddl_schema(worker, url)
+    assert await _schema_fingerprint(ddl.engine, ddl.name) == ddl.baseline
 
 
 @pytest.mark.fresh_schema
