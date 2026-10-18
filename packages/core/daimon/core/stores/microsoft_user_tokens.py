@@ -1,8 +1,9 @@
 """Async store for microsoft_user_tokens: one encrypted refresh token per person.
 
 Ciphertext in and out; the Fernet key never reaches the store. Re-connecting
-and every refresh replace the row's token; `updated_at` tells a reader whether
-the token it cached an access token for is still the stored one.
+and every refresh replace the row's token. `created_at` is the connection's
+start, reset only by a reconnect, so a refresh's rotation leaves readers'
+cached access tokens valid; `updated_at` guards the rotation write itself.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ async def upsert_microsoft_user_token(
             set_={
                 "encrypted_refresh_token": encrypted_refresh_token,
                 "scopes": scopes,
+                "created_at": now,
                 "updated_at": now,
             },
         )

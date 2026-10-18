@@ -38,7 +38,9 @@ async def test_token_upsert_replaces_on_reconnect_and_is_per_tenant(
     first = await _token(db_session, tenant.id, ct=b"old", now=_NOW)
     second = await _token(db_session, tenant.id, ct=b"new", now=_NOW + timedelta(minutes=1))
     assert second.encrypted_refresh_token == b"new", "reconnect must replace the ciphertext"
-    assert second.created_at == first.created_at, "reconnect keeps the original created_at"
+    assert second.created_at > first.created_at, (
+        "reconnect starts a new connection, so cached access tokens are dropped"
+    )
     assert second.updated_at > first.updated_at, "reconnect must bump updated_at"
     missing = await tokens.get_microsoft_user_token(db_session, tenant_id=other.id, user_id=_OID)
     assert missing is None, "the same oid in another tenant must not match"
@@ -141,4 +143,40 @@ async def test_new_sign_in_replaces_the_persons_older_link(db_session: AsyncSess
     )
     assert await sign_ins.get_live_sign_in(db_session, state=new.state, now=_NOW) == new, (
         "the newest link must stay live"
+    )
+
+
+async def test_new_sign_in_sweeps_expired_links(db_session: AsyncSession) -> None:
+    """Creating a link deletes everyone's expired links; live ones stay."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    stale = await sign_ins.create_sign_in(
+        db_session,
+        state="st_stale",
+        tenant_id=tenant.id,
+        account_id=account.id,
+        user_id="00000000-0000-0000-0000-0000000000b2",
+        code_verifier="verifier",
+        expires_at=_NOW - timedelta(minutes=1),
+        now=_NOW - timedelta(minutes=11),
+    )
+    live = await sign_ins.create_sign_in(
+        db_session,
+        state="st_live",
+        tenant_id=tenant.id,
+        account_id=account.id,
+        user_id="00000000-0000-0000-0000-0000000000c3",
+        code_verifier="verifier",
+        expires_at=_NOW + timedelta(minutes=10),
+        now=_NOW,
+    )
+    await _sign_in(db_session, tenant.id, account.id, expires_at=_NOW + timedelta(minutes=10))
+    assert (
+        await sign_ins.consume_sign_in(
+            db_session, state=stale.state, now=_NOW - timedelta(minutes=5)
+        )
+        is None
+    ), "another person's expired link must be swept"
+    assert await sign_ins.get_live_sign_in(db_session, state=live.state, now=_NOW) == live, (
+        "another person's live link must survive"
     )

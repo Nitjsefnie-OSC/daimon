@@ -1,8 +1,8 @@
 """Async store for microsoft_sign_ins: the single-use Connect Microsoft links.
 
 `create_sign_in` replaces the person's earlier links, so only the newest card
-works. `consume_sign_in` deletes the row it returns: one statement, so a
-replayed or raced callback finds nothing.
+works, and drops every expired link. `consume_sign_in` deletes the row it
+returns: one statement, so a replayed or raced callback finds nothing.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from datetime import datetime
 
 from daimon.core._models import MicrosoftSignIn
 from daimon.core.stores.domain import MicrosoftSignInRow
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -27,9 +27,13 @@ async def create_sign_in(
     expires_at: datetime,
     now: datetime,
 ) -> MicrosoftSignInRow:
+    # Also sweeps everyone's expired links, so no cleanup job is needed.
     await session.execute(
         delete(MicrosoftSignIn).where(
-            MicrosoftSignIn.tenant_id == tenant_id, MicrosoftSignIn.user_id == user_id
+            or_(
+                and_(MicrosoftSignIn.tenant_id == tenant_id, MicrosoftSignIn.user_id == user_id),
+                MicrosoftSignIn.expires_at <= now,
+            )
         )
     )
     orm = MicrosoftSignIn(
