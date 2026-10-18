@@ -32,9 +32,14 @@ from anthropic.types.beta.session_create_params import Resource
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.config import GithubAppSettings
-from daimon.core.credential_env import assemble_env_bytes
-from daimon.core.github_app_session import effective_repo_url_sets
+from daimon.core.credential_env import (
+    assemble_env_bytes,
+    github_repo_map_sha256,
+    github_repo_script_sha256,
+)
+from daimon.core.github_app_session import effective_repo_plan
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.session_compat import valid_unavailable_repo_urls
 from daimon.core.session_fence_retry import try_fence
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
 from daimon.core.session_snapshot import (
@@ -329,7 +334,12 @@ async def desired_snapshot_for(
             session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=account_id
         )
 
-    app_urls = await effective_repo_url_sets(
+    excluded = (
+        valid_unavailable_repo_urls(recorded, now=dt.datetime.now(dt.UTC))
+        if recorded is not None
+        else ()
+    )
+    app_urls = await effective_repo_plan(
         sessionmaker,
         tenant_id=tenant_id,
         agent_id=agent_uuid,
@@ -337,7 +347,11 @@ async def desired_snapshot_for(
         is_external=is_external,
         config=github_app or GithubAppSettings(),
         fernet=fernet,
+        excluded_repo_urls=excluded,
     )
+    # Token scopes are labelled only in multi mode. A surviving installation
+    # still needs the helper when another installation refused its mint.
+    has_multi_installation_tokens = bool(app_urls[2])
     return desired_snapshot(
         agent,
         hidden_mcp_server_names=await resolve_hidden_mcp_server_names(
@@ -353,6 +367,12 @@ async def desired_snapshot_for(
         repo_urls=app_urls[1],
         token_repo_urls=app_urls[0],
         token_scopes=app_urls[2],
+        github_repo_map_sha256=(
+            github_repo_map_sha256(app_urls[3]) if has_multi_installation_tokens else None
+        ),
+        github_repo_script_sha256=(
+            github_repo_script_sha256() if has_multi_installation_tokens else None
+        ),
         env_sha256=hash_env_bytes(assemble_env_bytes(rows)) if rows else None,
         repo_url=None,
         repo_branch=None,

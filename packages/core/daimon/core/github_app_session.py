@@ -202,6 +202,7 @@ class AppSessionAccess:
     repo_urls_by_id: tuple[tuple[int, str], ...] = ()
     multi_installation: bool = False
     working_repo_id: int | None = None
+    repo_credential_map: tuple[tuple[str, str], ...] = ()
 
 
 class GitHubTokenMintUnavailable(RuntimeError):
@@ -276,9 +277,38 @@ async def effective_repo_url_sets(
     config: GithubAppSettings,
     fernet: MultiFernet | None,
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[TokenScope, ...]]:
-    """Effective repo URLs, working mount, and canonical token scopes."""
+    """The legacy three-field view of the effective repository plan."""
+    every, working, scopes, _ = await effective_repo_plan(
+        sessionmaker,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=account_id,
+        is_external=is_external,
+        config=config,
+        fernet=fernet,
+    )
+    return every, working, scopes
+
+
+async def effective_repo_plan(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    is_external: bool,
+    config: GithubAppSettings,
+    fernet: MultiFernet | None,
+    excluded_repo_urls: tuple[str, ...] = (),
+) -> tuple[
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[TokenScope, ...],
+    tuple[tuple[str, str], ...],
+]:
+    """One grant view determines scope, mount and non-secret helper map."""
     if is_external:
-        return (), (), ()
+        return (), (), (), ()
     rows, _, _ = await effective_app_grant_view(
         sessionmaker,
         tenant_id=tenant_id,
@@ -286,7 +316,7 @@ async def effective_repo_url_sets(
         fernet=fernet,
     )
     if not rows:
-        return (), (), ()
+        return (), (), (), ()
     every = tuple(sorted(f"https://github.com/{repo.repo_full_name}" for _, repo, _ in rows))
     working = {
         f"https://github.com/{repo.repo_full_name}"
@@ -294,18 +324,39 @@ async def effective_repo_url_sets(
         if grant.is_working_repo
     }
     multi_installation = len({repo.installation_id for _, repo, _ in rows}) > 1
+    excluded = set(excluded_repo_urls)
     groups = group_repository_access(
-        [(repo.installation_id, repo.repo_id, profile) for _, repo, profile in rows],
+        [
+            (repo.installation_id, repo.repo_id, profile)
+            for _, repo, profile in rows
+            if f"https://github.com/{repo.repo_full_name}" not in excluded
+        ],
         sort_repo_ids=multi_installation,
+    )
+    scopes = token_scopes_for_groups(groups, multi_installation=multi_installation)
+    names = {repo.repo_id: repo.repo_full_name for _, repo, _ in rows}
+    helper_entries = tuple(
+        sorted(
+            (
+                names[repo_id],
+                installation_credential_name(installation_id, chunk),
+            )
+            for installation_id, chunk, repo_ids, _, _ in map(token_scope_parts, scopes)
+            if chunk is not None
+            for repo_id in repo_ids
+        )
     )
     return (
         every,
         tuple(url for url in every if url in working),
-        token_scopes_for_groups(
-            groups,
-            multi_installation=multi_installation,
-        ),
+        scopes,
+        helper_entries,
     )
+
+
+def repo_credential_entries(access: AppSessionAccess) -> tuple[tuple[str, str], ...]:
+    """Map granted repos to variables; an unminted variable fails closed in sh."""
+    return access.repo_credential_map if access.multi_installation else ()
 
 
 async def effective_repo_state(
@@ -735,6 +786,18 @@ async def prepare_app_access(
         tuple(sorted((repo_id, repo_urls[repo_id]) for repo_id in by_repo)),
         multi_installation,
         working_repo_id,
+        tuple(
+            sorted(
+                (
+                    repo_urls[repo_id].removeprefix("https://github.com/"),
+                    token.credential_name,
+                )
+                for token in tokens
+                for repo_id in token.repo_ids
+            )
+        )
+        if multi_installation
+        else (),
     )
 
 
@@ -1162,6 +1225,18 @@ async def _current_app_access(
         ),
         multi_installation=multi_installation,
         working_repo_id=working_repo_id,
+        repo_credential_map=tuple(
+            sorted(
+                (
+                    repos[repo_id].repo_full_name,
+                    token.credential_name,
+                )
+                for token in tokens
+                for repo_id in token.repo_ids
+            )
+        )
+        if multi_installation
+        else (),
     )
 
 
@@ -1211,6 +1286,14 @@ def _combine_app_access(
         ),
         None,
     )
+    retained_map = (
+        (repo, variable)
+        for repo, variable in previous.repo_credential_map
+        if f"https://github.com/{repo}" in retained_repo_urls
+    )
+    combined_map = tuple(
+        sorted({**dict(retained_map), **dict(replacement.repo_credential_map)}.items())
+    )
     return AppSessionAccess(
         resources,
         tokens,
@@ -1233,6 +1316,7 @@ def _combine_app_access(
         + replacement.repo_urls_by_id,
         replacement.multi_installation,
         replacement.working_repo_id,
+        combined_map,
     )
 
 

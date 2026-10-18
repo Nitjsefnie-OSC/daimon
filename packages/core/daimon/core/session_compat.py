@@ -47,6 +47,7 @@ type ChangeReason = Literal[
     "environment",
     "github_mode",
     "repo_set",
+    "github_helper",
     "repo_url",
     "repo_branch",
     "memory_store",
@@ -182,6 +183,11 @@ def identity_change_reasons(
             or recorded.token_repo_urls != _without(desired.token_repo_urls, excluded)
             or _token_scopes_changed(recorded.token_scopes, desired.token_scopes, excluded),
             "repo_set",
+        ),
+        (
+            recorded.github_repo_script_sha256 != desired.github_repo_script_sha256
+            or recorded.github_repo_map_sha256 != desired.github_repo_map_sha256,
+            "github_helper",
         ),
         (recorded.repo_url != desired.repo_url, "repo_url"),
         (recorded.repo_branch != desired.repo_branch, "repo_branch"),

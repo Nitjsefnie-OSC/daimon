@@ -22,10 +22,16 @@ from daimon.core._models import (
     TenantGitHubRepo,
 )
 from daimon.core.config import GithubAppSettings
+from daimon.core.credential_env import (
+    github_repo_map_sha256,
+    github_repo_script_sha256,
+    render_github_repo_map,
+)
 from daimon.core.github_app_session import (
     AppSessionAccess,
     AppToken,
     GitHubTokenMintUnavailable,
+    effective_repo_plan,
     effective_repo_url_sets,
     finish_app_delivery,
     prepare_app_access,
@@ -36,12 +42,14 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.github_requester_access import PermissionCache
 from daimon.core.session_compat import (
     MaCapabilities,
+    ReplaceSession,
     ReuseAsIs,
     RotateAppTokens,
     UpdateInPlace,
     decide_session_compatibility,
 )
-from daimon.core.session_snapshot import SessionSnapshot, token_scope_identity
+from daimon.core.session_preparation_stages import desired_snapshot_for
+from daimon.core.session_snapshot import SessionSnapshot, desired_snapshot, token_scope_identity
 from daimon.core.stores import github_access, github_app_installations, github_issued_tokens
 from daimon.core.stores.github_issued_tokens import (
     select_stale_tokens,
@@ -49,11 +57,13 @@ from daimon.core.stores.github_issued_tokens import (
     session_token_needs_rotation,
 )
 from daimon.core.stores.thread_sessions import create_thread_session, get_thread_session_by_id
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.prepare import (
     _delivered_app_snapshot_state,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.turn.termination import TerminationReason
+from daimon.testing.ma_models import ma_agent
 from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -537,6 +547,8 @@ async def test_failed_working_installation_never_aliases_surviving_token(
             return httpx.Response(422)
         return httpx.Response(201, json={"token": "b-token"})
 
+    config = GithubAppSettings(app_id="123", private_key=SecretStr("unused"))
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         access = await prepare_app_access(
             db_session_factory,
@@ -546,8 +558,8 @@ async def test_failed_working_installation_never_aliases_surviving_token(
             account_id=None,
             is_external=False,
             provisional_session_id="working-failed",
-            config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
-            fernet=build_multifernet((Fernet.generate_key().decode(),)),
+            config=config,
+            fernet=fernet,
             cache=PermissionCache(),
         )
     assert access.multi_installation
@@ -577,6 +589,48 @@ async def test_failed_working_installation_never_aliases_surviving_token(
         cast(AsyncAnthropic, object()), vault_id="vault", access=access
     )
     assert stored_names == ["GH_TOKEN_I772_0"]
+    assert access.repo_credential_map == (("owner772/repo201", "GH_TOKEN_I772_0"),)
+
+    agent = ma_agent(id="agent_working_refused")
+    now = datetime.now(UTC)
+    recorded = desired_snapshot(
+        agent,
+        hidden_mcp_server_names=frozenset(),
+        environment_id="environment",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id="vault",
+        token_repo_urls=access.token_repo_urls,
+        token_scopes=access.token_scopes,
+        github_repo_map_sha256=github_repo_map_sha256(access.repo_credential_map),
+        github_repo_script_sha256=github_repo_script_sha256(),
+    ).model_copy(
+        update={"unavailable_repos": tuple((url, now) for url in access.excluded_repo_urls)}
+    )
+    desired = await desired_snapshot_for(
+        db_session_factory,
+        agent=agent,
+        environment_id="environment",
+        tenant_id=tenant_id,
+        agent_uuid=agent_id,
+        account_id=uuid.uuid4(),
+        github_app=config,
+        fernet=fernet,
+        recorded=recorded,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+    )
+    assert desired.github_repo_map_sha256 == recorded.github_repo_map_sha256
+    assert desired.github_repo_script_sha256 == recorded.github_repo_script_sha256
+    assert token_scope_identity(desired.token_scopes) == token_scope_identity(access.token_scopes)
+    assert (
+        decide_session_compatibility(
+            recorded=recorded, desired=desired, capabilities=MaCapabilities(), now=now
+        )
+        == ReuseAsIs()
+    )
 
 
 @pytest.mark.parametrize("failed_repo_id", [101, 102])
@@ -649,6 +703,7 @@ async def test_failed_installation_chunk_is_atomic_and_inventory_names_survive_b
             "https://github.com/owner771/repo102",
         )
         assert initial.working_token is None
+        assert initial.repo_credential_map == (("owner772/repo201", "GH_TOKEN_I772_0"),)
         await finish_app_delivery(
             db_session_factory,
             client,
@@ -677,6 +732,7 @@ async def test_failed_installation_chunk_is_atomic_and_inventory_names_survive_b
         installation_ids=(772,),
     )
     assert rotated.working_token is None
+    assert rotated.repo_credential_map == (("owner772/repo201", "GH_TOKEN_I772_0"),)
     assert {token.credential_name: token.token for token in rotated.tokens} == {
         "GH_TOKEN_I772_0": rotated.tokens[0].token
     }
@@ -791,6 +847,10 @@ async def test_new_repo_in_b_remints_only_b_and_preserves_a(
             "GH_TOKEN_I771_0",
             "GH_TOKEN_I772_0",
         ]
+        assert initial.repo_credential_map == (
+            ("a/one", "GH_TOKEN_I771_0"),
+            ("b/two", "GH_TOKEN_I772_0"),
+        )
         assert token_scope_identity(initial.token_scopes) == ((771, (101,)), (772, (102,)))
         assert (initial.working_token is not None) == has_working_repo
         await finish_app_delivery(
@@ -866,6 +926,11 @@ async def test_new_repo_in_b_remints_only_b_and_preserves_a(
     assert rotated.tokens[0].token_id == initial.tokens[0].token_id
     assert rotated.tokens[0].token == initial.tokens[0].token
     assert token_scope_identity(rotated.token_scopes) == ((771, (101,)), (772, (102, 103)))
+    assert rotated.repo_credential_map == (
+        ("a/one", "GH_TOKEN_I771_0"),
+        ("b/three", "GH_TOKEN_I772_0"),
+        ("b/two", "GH_TOKEN_I772_0"),
+    )
     assert (rotated.working_token is not None) == has_working_repo
     async with db_session_factory() as session:
         rows = list(
@@ -1067,6 +1132,12 @@ async def test_contraction_of_501_repo_installation_enters_legacy_mode_once(
             cache=PermissionCache(),
         )
         assert minted == [[900], list(range(1, 501)), [501]]
+        mapped_repos = dict(initial.repo_credential_map)
+        assert len(mapped_repos) == 502
+        assert mapped_repos["owner771/repo900"] == "GH_TOKEN_I771_0"
+        assert mapped_repos["owner772/repo1"] == "GH_TOKEN_I772_0"
+        assert mapped_repos["owner772/repo500"] == "GH_TOKEN_I772_0"
+        assert mapped_repos["owner772/repo501"] == "GH_TOKEN_I772_1"
         await finish_app_delivery(
             db_session_factory,
             client,
@@ -1217,6 +1288,7 @@ async def test_contraction_of_501_repo_installation_enters_legacy_mode_once(
     assert expanded.multi_installation
     assert [token.chunk for token in expanded.tokens] == [0, 0, 1]
     assert len(expanded.token_scopes) == 3
+    assert dict(expanded.repo_credential_map)["owner772/repo501"] == "GH_TOKEN_I772_1"
 
 
 @pytest.mark.asyncio
@@ -1691,6 +1763,260 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
         unavailable_repos=((read_url, expired),),
     )
     assert minted_ids == [[103], [102]]
+
+
+@pytest.mark.asyncio
+async def test_two_refused_installations_leave_no_helper_or_replacement_loop(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant_id, agent_id = await _seed_multi_installation_grants(
+        db_session_factory, repos=((771, 101, False), (772, 201, False))
+    )
+    monkeypatch.setattr(github_app_session, "build_app_jwt", _fake_jwt)
+    minted: list[list[int]] = []
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        minted.append(json.loads(request.content)["repository_ids"])
+        return httpx.Response(422)
+
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+    config = GithubAppSettings(app_id="123", private_key=SecretStr("unused"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+        first = await prepare_app_access(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            is_external=False,
+            provisional_session_id="both-refused-first",
+            config=config,
+            fernet=fernet,
+            cache=PermissionCache(),
+        )
+        assert minted == [[101], [201]]
+        assert first.multi_installation
+        assert first.tokens == first.repo_credential_map == ()
+        minted.clear()
+        second = await prepare_app_access(
+            db_session_factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            is_external=False,
+            provisional_session_id="both-refused-second",
+            config=config,
+            fernet=fernet,
+            cache=PermissionCache(),
+            excluded_repo_urls=first.excluded_repo_urls,
+        )
+    assert minted == []
+    assert second.tokens == second.repo_credential_map == ()
+
+    agent = ma_agent(id="agent_both_refused")
+    now = datetime.now(UTC)
+    recorded = desired_snapshot(
+        agent,
+        hidden_mcp_server_names=frozenset(),
+        environment_id="environment",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id="vault",
+    ).model_copy(
+        update={"unavailable_repos": tuple((url, now) for url in first.excluded_repo_urls)}
+    )
+    desired = await desired_snapshot_for(
+        db_session_factory,
+        agent=agent,
+        environment_id="environment",
+        tenant_id=tenant_id,
+        agent_uuid=agent_id,
+        account_id=uuid.uuid4(),
+        github_app=config,
+        fernet=fernet,
+        recorded=recorded,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+    )
+    assert desired.token_scopes == ()
+    assert recorded.github_repo_map_sha256 is desired.github_repo_map_sha256 is None
+    assert recorded.github_repo_script_sha256 is desired.github_repo_script_sha256 is None
+    assert (
+        decide_session_compatibility(
+            recorded=recorded, desired=desired, capabilities=MaCapabilities(), now=now
+        )
+        == ReuseAsIs()
+    )
+    one_excluded = recorded.model_copy(
+        update={"unavailable_repos": ((first.excluded_repo_urls[0], now),)}
+    )
+    one_desired = await desired_snapshot_for(
+        db_session_factory,
+        agent=agent,
+        environment_id="environment",
+        tenant_id=tenant_id,
+        agent_uuid=agent_id,
+        account_id=uuid.uuid4(),
+        github_app=config,
+        fernet=fernet,
+        recorded=one_excluded,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+    )
+    assert len({scope[0] for scope in one_desired.token_scopes}) == 1
+    assert one_desired.github_repo_map_sha256 == github_repo_map_sha256(
+        (("owner772/repo201", "GH_TOKEN_I772_0"),)
+    )
+    assert one_desired.github_repo_script_sha256 == github_repo_script_sha256()
+
+
+@pytest.mark.asyncio
+async def test_refusal_does_not_hide_a_healthy_installation_map_expansion(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, agent_id = await _seed_multi_installation_grants(
+        db_session_factory,
+        repos=((771, 101, False), (772, 201, False), (773, 301, False)),
+    )
+    refused = "https://github.com/owner771/repo101"
+    config = GithubAppSettings()
+    fernet = build_multifernet((Fernet.generate_key().decode(),))
+
+    async def plan():
+        return await effective_repo_plan(
+            db_session_factory,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=None,
+            is_external=False,
+            config=config,
+            fernet=fernet,
+            excluded_repo_urls=(refused,),
+        )
+
+    before = await plan()
+    assert before[3] == (
+        ("owner772/repo201", "GH_TOKEN_I772_0"),
+        ("owner773/repo301", "GH_TOKEN_I773_0"),
+    )
+    now = datetime.now(UTC)
+    recorded = SessionSnapshot.model_validate(
+        {
+            "ma_agent_id": "agent_map",
+            "model_id": "test-model",
+            "system_sha256": None,
+            "skills_sha256": "skills",
+            "environment_id": "environment",
+            "github_mode": "app",
+            "repo_urls": (),
+            "token_repo_urls": (
+                "https://github.com/owner772/repo201",
+                "https://github.com/owner773/repo301",
+            ),
+            "token_scopes": (
+                (772, 0, (201,), int(now.timestamp()), str(uuid.uuid4())),
+                (773, 0, (301,), int(now.timestamp()), str(uuid.uuid4())),
+            ),
+            "repo_token_issued_at": int(now.timestamp()),
+            "token_issued_at_by_installation": {
+                772: int(now.timestamp()),
+                773: int(now.timestamp()),
+            },
+            "github_repo_map_sha256": github_repo_map_sha256(before[3]),
+            "github_repo_script_sha256": "script",
+            "unavailable_repos": ((refused, now),),
+            "repo_url": None,
+            "repo_branch": None,
+            "memory_store_id": None,
+            "vault_id": "vault",
+            "tools_sha256": "tools",
+            "mcp_servers_sha256": "servers",
+            "env_sha256": None,
+            "agent_version": 1,
+            "agent_name": "Agent",
+        }
+    )
+    unchanged = recorded.model_copy(update={"token_repo_urls": before[0]})
+    assert (
+        decide_session_compatibility(
+            recorded=recorded, desired=unchanged, capabilities=MaCapabilities(), now=now
+        )
+        == ReuseAsIs()
+    )
+
+    async with db_session_factory.begin() as session:
+        session.add(
+            TenantGitHubRepo(
+                tenant_id=tenant_id,
+                repo_id=202,
+                owner_id=772,
+                installation_id=772,
+                repo_full_name="owner772/repo202",
+                max_access="write",
+                authorized_by_github_user_id=2,
+                status="active",
+                version=1,
+            )
+        )
+        await session.flush()
+        await github_app_installations.upsert_github_app(
+            session,
+            installation_id=772,
+            account_id=772,
+            account_login="owner772",
+            account_type="Organization",
+            repository_selection="selected",
+            suspended_at=None,
+        )
+        session.add(
+            AgentGitHubGrant(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                repo_id=202,
+                baseline_access="write",
+                ceiling_access="write",
+                mount_path=None,
+                is_working_repo=False,
+                app_visible=True,
+                granted_by_account_id=None,
+            )
+        )
+    after = await plan()
+    assert after[3] == (
+        ("owner772/repo201", "GH_TOKEN_I772_0"),
+        ("owner772/repo202", "GH_TOKEN_I772_0"),
+        ("owner773/repo301", "GH_TOKEN_I773_0"),
+    )
+    assert b"owner772/repo202\tGH_TOKEN_I772_0\n" in render_github_repo_map(after[3])
+    actual_desired = await desired_snapshot_for(
+        db_session_factory,
+        agent=ma_agent(id="agent_map"),
+        environment_id="environment",
+        tenant_id=tenant_id,
+        agent_uuid=agent_id,
+        account_id=uuid.uuid4(),
+        github_app=config,
+        fernet=fernet,
+        recorded=recorded,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+    )
+    assert actual_desired.github_repo_map_sha256 == github_repo_map_sha256(after[3])
+    desired = recorded.model_copy(
+        update={
+            "token_repo_urls": after[0],
+            "token_scopes": after[2],
+            "github_repo_map_sha256": github_repo_map_sha256(after[3]),
+        }
+    )
+    decision = decide_session_compatibility(
+        recorded=recorded, desired=desired, capabilities=MaCapabilities(), now=now
+    )
+    assert isinstance(decision, ReplaceSession)
+    assert "github_helper" in decision.reasons
 
 
 def test_repos_refused_at_mint_do_not_replace_the_session_every_turn() -> None:

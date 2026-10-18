@@ -12,9 +12,12 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import FileMetadata
 from daimon.core.credential_env import (
     assemble_env_bytes,
+    github_repo_script_bytes,
     render_git_identity_script,
+    render_github_repo_map,
     upload_env_and_mount,
     upload_git_identity_and_mount,
+    upload_github_repo_helpers_and_mount,
 )
 from daimon.core.github_app_auth import BotIdentity
 from daimon.core.stores.agent_files import put_agent_file
@@ -143,6 +146,54 @@ def _client_for(capture: _UploadCapture) -> AsyncAnthropic:
     transport = httpx.MockTransport(capture.handler)
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
     return AsyncAnthropic(api_key="test", http_client=http_client)
+
+
+@pytest.mark.asyncio
+async def test_multi_repo_helper_uploads_exact_non_secret_map_and_two_mounts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    uploads: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/files" and request.method == "POST"
+        uploads.append(request.content)
+        metadata = FileMetadata(
+            id=f"file_helper_{len(uploads)}",
+            created_at=_NOW,
+            filename="github-helper",
+            mime_type="text/plain",
+            size_bytes=len(request.content),
+            type="file",
+        )
+        return httpx.Response(200, json=metadata.model_dump(mode="json"))
+
+    client = AsyncAnthropic(
+        api_key="test",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+        ),
+    )
+    entries = (("OwnerB/RepoB", "GH_TOKEN_I202_0"), ("OwnerA/RepoA", "GH_TOKEN_I101_0"))
+    mounts = await upload_github_repo_helpers_and_mount(
+        client, db_session_factory, entries=entries, tenant_id=tenant.id
+    )
+    assert mounts == (
+        {"type": "file", "file_id": "file_helper_1", "mount_path": "github-repos.tsv"},
+        {"type": "file", "file_id": "file_helper_2", "mount_path": "github-repo.sh"},
+    )
+    assert render_github_repo_map(entries) == (
+        b"OwnerA/RepoA\tGH_TOKEN_I101_0\nOwnerB/RepoB\tGH_TOKEN_I202_0\n"
+    )
+    assert render_github_repo_map(entries) in uploads[0]
+    assert github_repo_script_bytes() in uploads[1]
+    assert b"opaque-placeholder" not in uploads[0] + uploads[1]
+    due = await list_due_pending_file_deletes(
+        db_session, now=dt.datetime.now(dt.UTC) + dt.timedelta(hours=2)
+    )
+    assert {row.file_id for row in due} >= {"file_helper_1", "file_helper_2"}
 
 
 @pytest.mark.asyncio
