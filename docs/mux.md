@@ -3362,3 +3362,24 @@ search transform (normally `search_tools` and `call_tool`). A recorded source
 restricted to direct `describe_agent`/`list_my_sessions` is refused; preserving
 those operations through the proxy requires explicit consent to the actual
 source catalogue, rather than narrowing or expanding authority during a switch.
+
+#### Confirmation-gated MCP tools in source representations
+
+Capture resolves each enabled tool's effective native permission against the
+verified ordinary chat catalogue. A confirmation requirement is never converted
+to automatic permission. OpenAI's hosted Agents API currently exposes no MCP
+`require_approval` policy or MCP approval response event; the Responses API's
+MCP approval protocol cannot be used on Agents sessions. The existing OpenAI
+browser-origin approval path remains unchanged.
+
+For this unsupported case, capture retains the server and its other tools, but
+excludes the gated tool from its executable `allowed_tools`. Preview declares
+`mcp_tool:<server>:<tool>` (for example `mcp_tool:daimon-mcp:add_skill`) and the
+normal backend selection consent must explicitly accept that loss. The target
+instructions disclose it. Omitted loss consent refuses preparation; it never
+authorizes execution. Disabled source tools remain disabled without being
+reported as lost enabled capabilities. A server with no automatically executable
+tools is refused rather than publishing an ambiguous empty allowlist. Existing unconfigured channels and native
+Anthropic permission policies retain their behavior.
+
+Provider contract: [Agents MCP connections](https://developers.openai.com/api/docs/guides/agents-api/tools/mcp).

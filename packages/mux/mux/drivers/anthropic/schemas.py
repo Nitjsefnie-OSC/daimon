@@ -78,6 +78,42 @@ class CustomTool(NativeConfig):
 type AgentTool = Annotated[AgentToolset | MCPToolset | CustomTool, Field(discriminator="type")]
 
 
+def mcp_permissions(
+    tool: MCPToolset, catalogue: frozenset[str]
+) -> dict[str, Literal["auto", "ask", "disabled"]]:
+    """Resolve every verified MCP tool without discarding sibling capabilities.
+
+    An unresolved or ambiguous policy is never permission to execute a tool.
+    Existing neutral toolset projection remains exact and fail-closed.
+    """
+    configs = tool.configs or []
+    if not catalogue or len({item.name for item in configs}) != len(configs):
+        raise ValueError("ambiguous MCP tool configuration")
+    if any(item.name not in catalogue for item in configs):
+        raise ValueError("MCP configuration outside verified catalogue")
+    result: dict[str, Literal["auto", "ask", "disabled"]] = {}
+    for name in sorted(catalogue):
+        config = next((item for item in configs if item.name == name), None)
+        defaults = tool.default_config
+        enabled = (
+            config.enabled
+            if config and config.enabled is not None
+            else (defaults.enabled if defaults else None)
+        )
+        policy = (
+            config.permission_policy
+            if config and config.permission_policy is not None
+            else (defaults.permission_policy if defaults else None)
+        )
+        if enabled is False:
+            result[name] = "disabled"
+        elif enabled is not True or policy is None:
+            raise ValueError("unresolved MCP tool permission")
+        else:
+            result[name] = "ask" if isinstance(policy, AskPolicy) else "auto"
+    return result
+
+
 def _toolset_intent(
     tool: AgentTool, mcp_catalogues: Mapping[str, frozenset[str]] | None = None
 ) -> tuple[ToolSpec, ...] | None:
