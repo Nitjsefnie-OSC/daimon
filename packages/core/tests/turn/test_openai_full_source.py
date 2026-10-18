@@ -649,12 +649,26 @@ NATIVE_DEFAULT_PARAMS = {
     "tools": [
         {
             **ASK_PARAMS["tools"][0],
+            "configs": [
+                config
+                for config in ASK_PARAMS["tools"][0]["configs"]
+                if config["name"] not in ("web_fetch", "web_search")
+            ],
             "default_config": {
                 "enabled": True,
                 "permission_policy": {"type": "always_allow"},
             },
         },
-        ASK_PARAMS["tools"][1],
+        {
+            **ASK_PARAMS["tools"][1],
+            "configs": [
+                {"name": "add_skill", "enabled": True, "permission_policy": {"type": "always_ask"}}
+            ],
+            "default_config": {
+                "enabled": True,
+                "permission_policy": {"type": "always_allow"},
+            },
+        },
     ],
 }
 
