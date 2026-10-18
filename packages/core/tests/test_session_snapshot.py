@@ -903,3 +903,90 @@ def test_native_fast_model_is_in_session_identity_and_pricing():
     assert fast.pricing_id == "claude-opus-5-5-fast"
     assert identity_change_reasons(standard, fast) == ("model",)
     assert fingerprint_identity(fast) != fingerprint_identity(standard)
+
+
+def test_a_daimon_rule_changes_the_tools_hash_and_clearing_it_restores_the_hash() -> None:
+    """The bind-time drift check sees a rule added or cleared since the session was made."""
+    from daimon.core.session_compat import (
+        DEFAULT_MA_CAPABILITIES,
+        ReuseAsIs,
+        UpdateInPlace,
+        decide_session_compatibility,
+    )
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.testing.ma_models import ma_agent
+
+    agent = ma_agent(
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "daimon-mcp",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            },
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            },
+        ],
+        mcp_servers=[
+            {"name": "daimon-mcp", "type": "url", "url": "https://mcp.example/mcp"},
+            {"name": "linear", "type": "url", "url": "https://linear.example/mcp"},
+        ],
+    )
+    policy = ToolSafetyPolicy(enabled=True, agent_rules=True)
+
+    def desired(rule_tools: frozenset[str] = frozenset()) -> SessionSnapshot:
+        return desired_snapshot(
+            agent,
+            hidden_mcp_server_names=frozenset(),
+            environment_id="env",
+            env_sha256=None,
+            repo_url=None,
+            repo_branch=None,
+            memory_store_id=None,
+            vault_id=None,
+            tool_safety=policy,
+            public_url="https://mcp.example/mcp",
+            daimon_rule_tools=rule_tools,
+        )
+
+    base = desired()
+    assert desired(frozenset()).tools_sha256 == base.tools_sha256
+    asking = desired(frozenset({"hubspot_update_objects"}))
+    assert asking.tools_sha256 != base.tools_sha256
+    assert desired(frozenset({"hubspot_update_objects"})).tools_sha256 == asking.tools_sha256
+    assert desired(frozenset({"get_session"})).tools_sha256 != asking.tools_sha256
+    assert asking.mcp_servers_sha256 == base.mcp_servers_sha256
+
+    added = decide_session_compatibility(
+        recorded=base, desired=asking, capabilities=DEFAULT_MA_CAPABILITIES, now=_NOW
+    )
+    assert isinstance(added, UpdateInPlace) and added.reasons == ("tools",)
+    cleared = decide_session_compatibility(
+        recorded=asking, desired=desired(), capabilities=DEFAULT_MA_CAPABILITIES, now=_NOW
+    )
+    assert isinstance(cleared, UpdateInPlace) and cleared.reasons == ("tools",)
+    assert isinstance(
+        decide_session_compatibility(
+            recorded=desired(), desired=desired(), capabilities=DEFAULT_MA_CAPABILITIES, now=_NOW
+        ),
+        ReuseAsIs,
+    )
+    # Rules switched off: the same rows leave the hash alone.
+    off = desired_snapshot(
+        agent,
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+        tool_safety=ToolSafetyPolicy(enabled=True),
+        public_url="https://mcp.example/mcp",
+        daimon_rule_tools=frozenset({"hubspot_update_objects"}),
+    )
+    assert off.tools_sha256 == base.tools_sha256
