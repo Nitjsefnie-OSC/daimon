@@ -930,7 +930,7 @@ async def _reserve_fleet_worker(
 #: Consecutive slow budget reads tolerated before a run's workers are cancelled.
 BUDGET_READ_TIMEOUT_LIMIT = 3
 #: Seconds the tenant fleet lock may stay held by admissions before the watch fails closed.
-BUDGET_LOCK_BUSY_LIMIT_S = 30.0
+BUDGET_LOCK_BUSY_LIMIT_S = 10.0
 
 
 class _BudgetLockBusy(Exception):
@@ -978,7 +978,7 @@ async def watch_fleet_budget(
                         # not unavailable usage.
                         acquired = await session.scalar(
                             text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
-                            {"key": f"fleet:{parent.fleet.scope.tenant_id}"},
+                            {"key": f"fleet:{uuid.UUID(parent.fleet.scope.tenant_id)}"},
                         )
                         if not acquired:
                             raise _BudgetLockBusy
