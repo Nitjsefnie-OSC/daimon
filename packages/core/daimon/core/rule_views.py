@@ -247,10 +247,10 @@ def keeps_routine_inside(
         return True
     if (
         row.destination_kind == "dm"
-        and (row.source_channel_id or row.channel_id) is not None
+        and row.source_channel_id is not None
         and limiting_ids_at(
             policy,
-            channel_id=row.source_channel_id or row.channel_id or "",
+            channel_id=row.source_channel_id,
             thread_id=row.source_thread_id,
         )
     ):

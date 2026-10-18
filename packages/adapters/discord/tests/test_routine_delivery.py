@@ -63,7 +63,13 @@ def _text_channel(
     return channel
 
 
-async def _routine(db_session: AsyncSession, *, destination_id: str = "555") -> RoutineRow:
+async def _routine(
+    db_session: AsyncSession,
+    *,
+    destination_id: str = "555",
+    destination_kind="channel",
+    channel_id: str | None = None,
+) -> RoutineRow:
     tenant = await make_tenant(db_session, platform="discord", workspace_id=str(_GUILD))
     from daimon.core.stores.direct_messages import set_dm_enabled
 
@@ -77,8 +83,9 @@ async def _routine(db_session: AsyncSession, *, destination_id: str = "555") -> 
         cron_expr="0 9 * * 1",
         timezone_="UTC",
         trigger_message="go",
-        destination_kind="channel",
+        destination_kind=destination_kind,
         destination_id=destination_id,
+        channel_id=channel_id,
     )
     await record_result(
         db_session, row.id, tail="All green @everyone.", error=None, delivery="pending"
@@ -792,18 +799,13 @@ async def test_dm_partial_delivery_is_never_retried(db_session_factory, stop):
     from daimon.core.stores.routines import get_routine, update_routine
 
     async with db_session_factory() as session:
-        row = await _routine(session)
+        row = await _routine(
+            session,
+            destination_kind="thread" if stop == "thread_sealed" else "channel",
+            destination_id="789" if stop == "thread_sealed" else "555",
+            channel_id="456" if stop == "thread_sealed" else None,
+        )
     async with db_session_factory.begin() as session:
-        if stop == "thread_sealed":
-            row = await update_routine(
-                session,
-                row.id,
-                tenant_id=row.tenant_id,
-                destination_kind="thread",
-                destination_id="789",
-                channel_id="456",
-            )
-            assert row is not None
         row = await update_routine(session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
         assert row is not None
         await record_result(session, row.id, tail="private " * 900, error=None, delivery="pending")

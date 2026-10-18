@@ -35,11 +35,11 @@ Daimon checks current owner membership and invoker permissions at fire and
 again before each delivery chunk. Restricted sources cannot be converted to
 DM delivery; source restrictions and agent rules are checked again at fire
 and delivery, including the original source thread and its parent. Source
-provenance is retained even when automatic delivery is cleared or a routine
-is created without a destination. Legacy thread parents must be resolved before
-clearing delivery; DM conversion refuses unknown source provenance. Recreate a
-legacy routine if its historical source cannot be established. DM routine
-runs mount no personal memory. Tenant memory remains read-only, and tool
+provenance is written once at creation and never changed by retargeting,
+clearing delivery, changing the budget, or selecting DM. Legacy routines with
+unknown provenance keep ordinary channel/thread edits, clearing and normal firing
+on every platform, but cannot select DM. Recreate the routine from its channel
+or thread to get DM delivery. DM routine runs mount no personal memory. Tenant memory remains read-only, and tool
 authority stays the same as for channel routines; selecting DM delivery does
 not restrict tools to private output.
 

@@ -3272,3 +3272,56 @@ async def test_dm_fire_refuses_disabled_or_unverified_private_access(
         after = await get_routine(session, row.id, tenant_id=tenant.id)
     assert after is not None and after.last_error and after.delivery_status is None
     await client.close()
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize("kind", ["channel", "thread"])
+async def test_legacy_public_routines_still_fire_with_unknown_creation_source(
+    db_session, db_session_factory, monkeypatch, platform, kind
+):
+    tenant = await make_tenant(db_session, platform=platform)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    target = "789"
+    if kind == "thread" and platform == "slack":
+        target = "456:1710000000.000001"
+    elif kind == "thread" and platform == "teams":
+        target = "19:channel@thread.tacv2;messageid=789"
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        destination_kind=kind,
+        destination_id=target,
+        channel_id="456",
+        source_provenance_known=False,
+    )
+    await db_session.commit()
+    client = AsyncAnthropic(api_key="offline", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+
+    async def resolve(*args, **kwargs):
+        return "agent_z"
+
+    with (
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", return_value="tail") as turn,
+    ):
+        await fire(row)
+        turn.assert_called_once()
+    async with db_session_factory() as session:
+        saved = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert saved is not None and saved.delivery_status == "pending"
+    assert not saved.source_provenance_known
+    await client.close()

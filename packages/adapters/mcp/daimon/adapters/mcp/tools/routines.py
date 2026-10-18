@@ -550,7 +550,7 @@ async def _create_routine_impl(
     origin = await get_verified_origin(runtime, auth, origin_context_id)
     if origin_context_id is not None and origin is None:
         raise ToolError("The routine's source origin could not be verified.")
-    source_thread_id = None
+    source_thread_id = destination_id if destination_kind == "thread" else None
     source_channel_id = budget_channel_id
     source_id = None
     private_origin = (
@@ -581,6 +581,7 @@ async def _create_routine_impl(
             ):
                 raise ToolError("The private conversation's source could not be established.")
             source_channel_id = None
+            source_thread_id = None
         else:
             source_id = conversation.source_thread_id or conversation.source_channel_id
             source_channel_id = conversation.source_channel_id
@@ -663,6 +664,7 @@ async def _create_routine_impl(
             channel_id=budget_channel_id,
             source_thread_id=source_thread_id,
             source_channel_id=source_channel_id,
+            source_provenance_known=True,
         )
 
 
@@ -732,42 +734,10 @@ async def _update_routine_impl(
             and row.created_by_user_id != auth.platform_user_id
         ):
             raise ToolError("only the authenticated owner can change private delivery")
-        if (
-            clear_destination
-            and row.destination_kind == "thread"
-            and row.channel_id is None
-            and row.source_channel_id is None
-        ):
-            # Slack and Teams thread IDs already carry their parent; Discord
-            # parents require a guild-bound lookup before discarding the ID.
-            new_destination_channel_id = _saved_destination_channel(auth, row)
-            if new_destination_channel_id is None:
-                try:
-                    new_destination_channel_id, _ = await verify_discord_source(
-                        _require_bot_token(runtime),
-                        guild_id=_require_guild_id(auth),
-                        channel_id=row.destination_id or "",
-                    )
-                except StoreError as exc:
-                    raise ToolError(str(exc)) from exc
         if destination_kind == "dm":
             if row.created_by_user_id != auth.platform_user_id or row.created_by_user_id is None:
                 raise ToolError("only the authenticated owner can select DM delivery")
             destination_id = row.created_by_user_id
-            source_id = (
-                row.destination_id
-                if row.destination_kind in ("channel", "thread")
-                else row.source_thread_id or row.source_channel_id or row.channel_id
-            )
-            if source_id is not None:
-                try:
-                    new_destination_channel_id, _ = await verify_discord_source(
-                        _require_bot_token(runtime),
-                        guild_id=_require_guild_id(auth),
-                        channel_id=source_id,
-                    )
-                except StoreError as exc:
-                    raise ToolError(str(exc)) from exc
         if clear_destination:
             destination_channel_id = None
         elif destination_id is not None:
@@ -992,9 +962,9 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``destination_kind`` + ``destination_id`` set where results go (see
         ``create_routine``); ``clear_destination=true`` removes it, and the
         routine's spend still counts toward the same channel's budget. Saved
-        source channel/thread restrictions survive clearing and later conversion.
-        Legacy thread parents must resolve before clearing; unknown provenance
-        cannot select DM delivery.
+        creation-time source channel/thread restrictions survive every edit.
+        Legacy routines with unknown provenance keep ordinary destination edits
+        but must be recreated from the source channel/thread to select DM delivery.
 
         ``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.
 

@@ -146,14 +146,17 @@ async def test_result_computed_for_dm_cannot_be_queued_after_public_redirect(db_
     assert after is not None and after.delivery_payload is None and after.last_result_tail is None
 
 
-async def test_legacy_thread_needs_a_resolved_source_before_dm_conversion(db_session):
+async def test_unknown_thread_never_promotes_from_a_new_budget_channel(db_session):
     row = await _create(db_session, destination_kind="thread", destination_id="789")
-    with pytest.raises(StoreError, match="source thread's parent"):
-        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
-    converted = await update_routine(
-        db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm", channel_id="456"
-    )
-    assert converted is not None and converted.channel_id == "456"
+    for budget in (None, "456", "999"):
+        with pytest.raises(StoreError, match="Recreate the routine"):
+            await update_routine(
+                db_session,
+                row.id,
+                tenant_id=row.tenant_id,
+                destination_kind="dm",
+                channel_id=budget,
+            )
 
 
 async def test_thread_conversion_preserves_source_and_checks_later_seals(db_session):
@@ -187,20 +190,20 @@ async def test_unknown_legacy_source_cannot_be_converted_to_dm(db_session):
     await db_session.execute(
         text("UPDATE routines SET source_provenance_known = false WHERE id = :id"), {"id": row.id}
     )
-    with pytest.raises(StoreError, match="provenance could not be established"):
+    with pytest.raises(StoreError, match="Recreate the routine"):
         await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
 
 
-async def test_legacy_thread_cannot_be_cleared_without_its_parent(db_session):
+async def test_unknown_thread_clears_without_changing_creation_provenance(db_session):
     row = await _create(db_session, destination_kind="thread", destination_id="789")
-    with pytest.raises(StoreError, match="parent before clearing"):
-        await update_routine(db_session, row.id, tenant_id=row.tenant_id, clear_destination=True)
     cleared = await update_routine(
         db_session, row.id, tenant_id=row.tenant_id, clear_destination=True, channel_id="456"
     )
     assert cleared is not None
-    assert (cleared.source_channel_id, cleared.source_thread_id) == ("456", "789")
-    assert cleared.source_provenance_known
+    assert (cleared.source_channel_id, cleared.source_thread_id) == (None, "789")
+    assert not cleared.source_provenance_known
+    with pytest.raises(StoreError, match="Recreate the routine"):
+        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
 
 
 async def test_source_pair_survives_changing_budget_and_clearing_delivery(db_session):
@@ -228,4 +231,47 @@ async def test_source_pair_survives_changing_budget_and_clearing_delivery(db_ses
         policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
     )
     with pytest.raises(StoreError, match="restricted source"):
+        await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize("initial_kind", [None, "channel", "thread"])
+async def test_legacy_public_edits_never_promote_creation_provenance(
+    db_session, platform, initial_kind
+):
+    from daimon.core.rule_views import keeps_routine_inside
+
+    row = await _create(
+        db_session,
+        platform=platform,
+        destination_kind=initial_kind,
+        destination_id="789" if initial_kind else None,
+        channel_id="456",
+        source_provenance_known=False,
+    )
+    original = (row.source_channel_id, row.source_thread_id, row.source_provenance_known)
+    for kind, target, parent in [
+        ("channel", "999", "999"),
+        ("thread", "888", "999"),
+        (None, None, None),
+    ]:
+        edited = await update_routine(
+            db_session,
+            row.id,
+            tenant_id=row.tenant_id,
+            destination_kind=kind,
+            destination_id=target,
+            channel_id=parent,
+            clear_destination=kind is None,
+        )
+        assert edited is not None
+        assert (
+            edited.source_channel_id,
+            edited.source_thread_id,
+            edited.source_provenance_known,
+        ) == original
+        assert not keeps_routine_inside(TenantAccessPolicy(), edited), (
+            "legacy public runs remain available"
+        )
+    with pytest.raises(StoreError):
         await update_routine(db_session, row.id, tenant_id=row.tenant_id, destination_kind="dm")

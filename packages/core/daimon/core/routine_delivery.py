@@ -551,9 +551,9 @@ async def clear_creator(
         if row.destination_kind == "dm":
             if not row.source_provenance_known:
                 return "restricted_source"
-            if (row.source_channel_id or row.channel_id) is not None and limiting_ids_at(
+            if row.source_channel_id is not None and limiting_ids_at(
                 policy,
-                channel_id=row.source_channel_id or row.channel_id or "",
+                channel_id=row.source_channel_id,
                 thread_id=row.source_thread_id,
             ):
                 return "restricted_source"

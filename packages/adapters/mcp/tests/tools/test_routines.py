@@ -2044,7 +2044,7 @@ async def test_mcp_thread_to_dm_checks_and_retains_original_thread(
             saved = await get_routine(session, row.id, tenant_id=tenant.id)
         assert saved is not None
         assert saved.destination_kind == ("thread" if restricted else "dm")
-        assert requests == ["/api/v10/channels/789", "/api/v10/channels/456"]
+        assert requests == [], "conversion checks immutable creation provenance without REST"
     finally:
         await client.close()
 
@@ -2235,7 +2235,8 @@ async def test_authenticated_mcp_dm_conversion_enforces_thread_seal(
             async with committing_sessionmaker.begin() as session:
                 saved = await get_routine(session, row.id, tenant_id=tenant.id)
                 assert saved is not None and saved.destination_kind is None
-                assert (saved.source_channel_id, saved.source_thread_id) == ("456", "789")
+                assert (saved.source_channel_id, saved.source_thread_id) == (None, None)
+                assert not saved.source_provenance_known
                 await set_access_policy(session, tenant_id=tenant.id, policy=seal)
         response = await call_mcp_tool(
             app,
@@ -2490,7 +2491,7 @@ async def test_authenticated_routine_creation_preserves_private_or_guild_origin(
         ("teams", "19:channel@thread.tacv2;messageid=123", "19:channel@thread.tacv2"),
     ],
 )
-async def test_clearing_legacy_platform_thread_retains_encoded_parent(
+async def test_clearing_legacy_platform_thread_keeps_unknown_creation_snapshot(
     committing_sessionmaker, db_session, platform, thread, parent, monkeypatch
 ):
     tenant = await make_tenant(db_session, platform=platform)
@@ -2519,4 +2520,144 @@ async def test_clearing_legacy_platform_thread_retains_encoded_parent(
         clear_destination=True,
     )
     assert cleared.destination_kind is None
-    assert (cleared.source_channel_id, cleared.source_thread_id) == (parent, thread)
+    assert (cleared.source_channel_id, cleared.source_thread_id) == (None, thread)
+    assert not cleared.source_provenance_known
+
+
+@pytest.mark.parametrize("known", [False, True])
+@pytest.mark.parametrize("target_kind", ["channel", "thread"])
+async def test_authenticated_retarget_never_rewrites_creation_source(
+    committing_sessionmaker, db_session, monkeypatch, known, target_kind
+):
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.config import DiscordSettings
+    from daimon.core.routine_delivery import poll_deliveries_once
+    from daimon.core.stores.accounts import set_role
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
+    account = await make_account(db_session, tenant=tenant)
+    await set_role(db_session, account.id, Role.ADMIN)
+    await make_platform_principal(
+        db_session, platform="discord", external_id="123", tenant=tenant, account=account
+    )
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="ag_resolved",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        destination_kind="thread",
+        destination_id="789",
+        channel_id="456" if known else None,
+        source_channel_id="456" if known else None,
+        source_thread_id="789" if known else None,
+        source_provenance_known=known,
+    )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(channel_rules={"456": ChannelRule(readers="inside")}),
+    )
+    await db_session.commit()
+    original = (row.source_channel_id, row.source_thread_id, row.source_provenance_known)
+    resolutions = []
+
+    async def destination(runtime, auth, *, kind, destination_id):
+        resolutions.append(destination_id)
+        assert destination_id in ("999", "888"), "never resolve an old source during an edit"
+        return ("999" if kind == "thread" else None), None
+
+    monkeypatch.setattr(_routines_mod, "_resolve_discord_destination", destination)
+    monkeypatch.setattr(
+        _routines_mod,
+        "verify_discord_source",
+        AsyncMock(side_effect=AssertionError("creation provenance is immutable")),
+    )
+    secret = b"synthetic-routine-test-signing-key"
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    app = create_mcp_app(
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://unused/db")),
+            anthropic=AnthropicSettings(api_key=SecretStr("offline")),
+            discord=DiscordSettings(bot_token=SecretStr("offline")),
+            mcp=McpSettings(
+                jwt_secret=SecretStr(secret.decode()),
+                public_url=HttpUrl("https://mcp.test.invalid/mcp"),
+            ),
+            _env_file=None,
+        ),  # type: ignore[call-arg]
+        sessionmaker=committing_sessionmaker,
+        anthropic=client,
+    )
+    async with committing_sessionmaker.begin() as session:
+        token = await mint_panel_mcp_token(
+            session, account_id=account.id, secret=secret, now=datetime.now(UTC)
+        )
+    try:
+        response = await call_mcp_tool(
+            app,
+            token=token,
+            name="update_routine",
+            arguments={
+                "routine_id": str(row.id),
+                "destination_kind": target_kind,
+                "destination_id": "999" if target_kind == "channel" else "888",
+            },
+        )
+        assert not response["result"].get("isError")
+        async with committing_sessionmaker() as session:
+            saved = await get_routine(session, row.id, tenant_id=tenant.id)
+        assert saved is not None and saved.channel_id == "999"
+        assert (
+            saved.source_channel_id,
+            saved.source_thread_id,
+            saved.source_provenance_known,
+        ) == original
+        if target_kind == "thread":
+            cleared = await call_mcp_tool(
+                app,
+                token=token,
+                name="update_routine",
+                arguments={"routine_id": str(row.id), "clear_destination": True},
+            )
+            assert not cleared["result"].get("isError")
+        converted = await call_mcp_tool(
+            app,
+            token=token,
+            name="update_routine",
+            arguments={"routine_id": str(row.id), "destination_kind": "dm"},
+        )
+        assert converted["result"]["isError"] is True
+        error = str(converted["result"]["content"])
+        assert ("restricted source" if known else "Recreate the routine") in error
+        async with committing_sessionmaker() as session:
+            saved = await get_routine(session, row.id, tenant_id=tenant.id)
+        assert saved is not None and saved.destination_kind == (
+            "channel" if target_kind == "channel" else None
+        )
+        assert (
+            saved.source_channel_id,
+            saved.source_thread_id,
+            saved.source_provenance_known,
+        ) == original
+        assert resolutions == ["999" if target_kind == "channel" else "888"]
+
+        async def unexpected_post(row):
+            raise AssertionError("refused conversion must perform zero DM I/O")
+
+        assert (
+            await poll_deliveries_once(
+                committing_sessionmaker,
+                platform="discord",
+                post=unexpected_post,
+                now=datetime.now(UTC),
+            )
+            == 0
+        )
+    finally:
+        await client.close()

@@ -800,10 +800,8 @@ async def test_private_delivery_choice_belongs_to_owner_only(
 async def test_panel_thread_dm_conversion_retains_and_checks_thread(
     db_session_factory, monkeypatch, restricted, clear_first
 ):
-    import httpx
     from daimon.adapters.discord.routines_panel import panel as panel_mod
     from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
-    from daimon.core.discord_membership import verify_discord_source
     from daimon.core.stores.access_policy import set_access_policy
     from daimon.core.stores.routines import create_routine, get_routine
     from daimon.testing.factories import make_tenant
@@ -830,24 +828,6 @@ async def test_panel_thread_dm_conversion_retains_and_checks_thread(
                 policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
             )
 
-    def channel(request):
-        key = request.url.path.rsplit("/", 1)[1]
-        return httpx.Response(
-            200,
-            json={
-                "id": key,
-                "guild_id": "424242",
-                "type": 11 if key == "789" else 0,
-                "parent_id": "456",
-            },
-        )
-
-    async def verify(token, **kwargs):
-        return await verify_discord_source(
-            "offline", **kwargs, transport=httpx.MockTransport(channel)
-        )
-
-    monkeypatch.setattr(panel_mod, "verify_discord_source", verify)
     glyph, color = derive_state(row)
     entry = RoutineEntry(
         routine=row, agent_name="daimon", glyph=glyph, color=color, label="summary"

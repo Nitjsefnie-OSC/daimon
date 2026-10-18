@@ -518,7 +518,7 @@ class Routine(Base):
     # Channel the routine's spend is attributed to and budget-gated by: its
     # destination's parent channel, resolved when the destination is set.
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Source provenance survives destination changes independently of budget placement.
+    # Immutable creation-time provenance, independent of mutable delivery/budget placement.
     source_provenance_known: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )

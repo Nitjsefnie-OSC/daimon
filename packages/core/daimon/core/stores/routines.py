@@ -65,6 +65,7 @@ async def create_routine(
     channel_id: str | None = None,
     source_thread_id: str | None = None,
     source_channel_id: str | None = None,
+    source_provenance_known: bool | None = None,
 ) -> RoutineRow:
     """`channel_id` is the channel the routine's spend counts against (see `Routine`)."""
     if catch_up_policy not in ("skip", "run-once"):
@@ -72,12 +73,18 @@ async def create_routine(
     destination_id = await _resolve_destination(
         session, tenant_id, destination_kind, destination_id, created_by_user_id
     )
-    source_channel_id = source_channel_id or channel_id
-    if destination_kind == "thread":
-        source_thread_id = source_thread_id or destination_id
-    elif destination_kind == "channel":
-        source_channel_id = source_channel_id or destination_id
+    # Adapter-supplied provenance is an explicit creation snapshot, including
+    # a verified source-free origin. Older host callers use their creation place.
+    if source_provenance_known is None:
+        source_channel_id = source_channel_id or channel_id
+        if destination_kind == "thread":
+            source_thread_id = source_thread_id or destination_id
+        elif destination_kind == "channel":
+            source_channel_id = source_channel_id or destination_id
+        source_provenance_known = destination_kind != "thread" or source_channel_id is not None
     if destination_kind == "dm":
+        if not source_provenance_known:
+            raise StoreError("Recreate the routine from the channel or thread to get DM delivery.")
         await validate_dm_source(session, tenant_id, source_channel_id, source_thread_id)
     orm = Routine(
         tenant_id=tenant_id,
@@ -95,7 +102,7 @@ async def create_routine(
         channel_id=channel_id,
         source_thread_id=source_thread_id,
         source_channel_id=source_channel_id,
-        source_provenance_known=destination_kind != "thread" or source_channel_id is not None,
+        source_provenance_known=source_provenance_known,
     )
     session.add(orm)
     await session.flush()
@@ -238,24 +245,6 @@ async def update_routine(
         if destination_kind is not None or destination_id is not None:
             raise StoreError("clear_destination cannot be combined with a new destination")
         current = await get_routine(session, routine_id, tenant_id=tenant_id)
-        if current is not None:
-            source_channel = current.source_channel_id or current.channel_id
-            source_thread = current.source_thread_id
-            if current.destination_kind == "thread":
-                source_thread = source_thread or current.destination_id
-                source_channel = source_channel or channel_id
-                if source_channel is None:
-                    raise StoreError("resolve the source thread's parent before clearing delivery")
-            elif current.destination_kind == "channel":
-                source_channel = source_channel or current.destination_id
-            values.update(
-                source_channel_id=source_channel,
-                source_thread_id=source_thread,
-                source_provenance_known=current.source_provenance_known
-                or current.destination_kind in ("channel", "thread"),
-            )
-            if current.channel_id is None:
-                values["channel_id"] = source_channel
         if current is not None and current.destination_kind == "dm":
             values.update(last_result_tail=None, last_error=None)
         values.update(
@@ -269,33 +258,21 @@ async def update_routine(
         current = await get_routine(session, routine_id, tenant_id=tenant_id)
         if current is None:
             return None
-        if not current.source_provenance_known and current.destination_kind in (None, "dm"):
-            raise StoreError("the routine's source provenance could not be established")
         destination_id = await _resolve_destination(
             session, tenant_id, destination_kind, destination_id, current.created_by_user_id
         )
-        dm_source = current.source_channel_id or current.channel_id or channel_id
-        dm_thread = current.source_thread_id
-        if current.destination_kind == "thread":
-            dm_thread = dm_thread or current.destination_id
         if destination_kind == "dm":
-            if dm_source is None and current.destination_kind == "channel":
-                dm_source = current.destination_id
-            if dm_source is None and current.destination_kind == "thread":
-                dm_source = channel_id
-                if dm_source is None:
-                    raise StoreError(
-                        "resolve the source thread's parent before selecting DM delivery"
-                    )
-            await validate_dm_source(session, tenant_id, dm_source, dm_thread)
+            if not current.source_provenance_known:
+                raise StoreError(
+                    "Recreate the routine from the channel or thread to get DM delivery."
+                )
+            await validate_dm_source(
+                session, tenant_id, current.source_channel_id, current.source_thread_id
+            )
         values.update(
             destination_kind=destination_kind,
             destination_id=destination_id,
-            channel_id=dm_source if destination_kind == "dm" else channel_id,
-            source_thread_id=dm_thread,
-            source_channel_id=dm_source,
-            source_provenance_known=current.source_provenance_known
-            or current.destination_kind in ("channel", "thread"),
+            channel_id=current.channel_id if destination_kind == "dm" else channel_id,
         )
         if current.destination_kind == "dm" and destination_kind != "dm":
             # A private preview must not survive a move to a shared destination.
@@ -322,7 +299,7 @@ async def update_routine(
         await validate_dm_source(
             session,
             tenant_id,
-            current.source_channel_id or current.channel_id,
+            current.source_channel_id,
             current.source_thread_id,
         )
     if catch_up_policy is not None:

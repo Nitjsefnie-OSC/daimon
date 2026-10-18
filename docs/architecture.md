@@ -2134,11 +2134,13 @@ and a verifying dry-run. Slack and Teams explicitly reject DM writes.
 DM routine runs mount no personal memory; tenant memory remains read-only and
 tool authority is the same as for channel routines. Source channels and threads
 are verified against the tenant's guild through core Discord REST transport.
-Source channel/thread provenance is stored independently of the mutable delivery
-and budget target, including no-destination creation and destination clearing.
-Legacy thread parents are resolved before clearing; unknown provenance refuses
-DM conversion, fire and delivery. Both saved source IDs are checked for reader
-restrictions on save, fire and every delivery chunk. Private-scope origins resolve
+Source channel/thread provenance and its known/unknown marker are written once
+at creation and are immutable through every edit. Delivery and budget targets
+may change independently. Legacy routines with unknown provenance retain ordinary
+channel/thread edits, clearing and firing on all platforms, but cannot select DM;
+they must be recreated from the source to get DM delivery. DM conversion, fire
+and every delivery chunk check the immutable creation-time source pair. Unknown
+provenance never becomes known during an edit. Private-scope origins resolve
 only the caller's current tenant-bound conversation and verify its saved guild
 source; source-free cold conversations require no guild-channel lookup.
 

@@ -254,6 +254,8 @@ async def run_create_dm_routine(
             destination_kind="dm",
             channel_id=source_channel,
             source_thread_id=source_thread_id,
+            source_channel_id=source_channel,
+            source_provenance_known=True,
             next_fire_at=next_fire,
         )
     console.print(f"Created routine {row.id}.")
