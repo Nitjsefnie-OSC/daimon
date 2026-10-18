@@ -1934,7 +1934,7 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
 
 
 @pytest.mark.parametrize("explicit_worker_request", [False, True], indirect=True)
-async def test_worker_cancelled_before_binding_ends_worker_without_native_io(
+async def test_worker_cancelled_before_binding_records_preparation_refusal_without_native_io(
     materialization_worker_request,
     monkeypatch,
 ):
@@ -1960,7 +1960,7 @@ async def test_worker_cancelled_before_binding_ends_worker_without_native_io(
         selected.deps.sessionmaker, tenant_id=worker.tenant_id, run_id=worker.run_id
     )
     ended = next(row for row in rows if row.id == worker.id)
-    assert ended.status == "failed" and ended.error_code == "dispatch_refused"
+    assert ended.status == "failed" and ended.error_code == "preparation_refused"
     assert ended.binding_id is None and ended.turns_used == 0 and ended.attempts == 0
     assert (len(calls), len(owned.wire.requests)) == before
 

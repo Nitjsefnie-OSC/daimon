@@ -555,8 +555,8 @@ async def commit_worker_transition(
                     or replace(latest, version=worker.version, error_code=worker.error_code)
                     != worker
                 ):
-                    # The claim moved on (e.g. funded) but is still this attempt's:
-                    # end it as a dispatch refusal rather than leave it running.
+                    # The claim changed but is still this attempt's: end it under the
+                    # same-attempt check rather than leave it running.
                     failure_code = "dispatch_refused"
                 if dispatch_changed:
                     raise FleetConflict("worker preparation claim changed", reason="claim_changed")
