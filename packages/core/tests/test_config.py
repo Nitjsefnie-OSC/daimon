@@ -354,8 +354,33 @@ def test_mcp_oauth_settings_refuse_one_server_under_two_clients() -> None:
         "client_secret": "sec",
     }
     other = entry | {"client_id": "other", "mcp_servers": ["https://MCP.example.com/mcp/"]}
-    with pytest.raises(ValidationError, match="one client"):
+    with pytest.raises(ValidationError, match="https://mcp.example.com/mcp is listed under more"):
         McpOAuthSettings.model_validate({"clients": [entry, other]})
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "[]"], ids=["empty", "blank", "empty-list"])
+def test_mcp_oauth_clients_treat_a_blank_env_as_none(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_MCP_OAUTH__CLIENTS", raw)
+    assert load_settings(_env_file=None).mcp_oauth.clients == [], (
+        "a compose file passing the variable through empty must not stop the deployment"
+    )
+
+
+def test_mcp_oauth_clients_name_the_variable_on_bad_json_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_MCP_OAUTH__CLIENTS", '[{"client_secret": "s3cr3t-value"')
+    with pytest.raises(ValidationError) as caught:
+        load_settings(_env_file=None)
+    message = str(caught.value)
+    assert "DAIMON_MCP_OAUTH__CLIENTS is not valid JSON" in message, message
+    assert "s3cr3t-value" not in message, "the error must not quote the secret"
 
 
 def test_mcp_app_root_url_strips_mcp_suffix() -> None:

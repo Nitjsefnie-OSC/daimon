@@ -365,7 +365,7 @@ class McpOAuthClientSettings(BaseModel):
 
 
 class McpOAuthSettings(BaseModel):
-    clients: list[McpOAuthClientSettings] = Field(
+    clients: Annotated[list[McpOAuthClientSettings], NoDecode] = Field(
         default_factory=list[McpOAuthClientSettings],
         description=(
             "OAuth clients registered by hand, for authorization servers that offer no "
@@ -384,14 +384,35 @@ class McpOAuthSettings(BaseModel):
         ),
     )
 
+    @field_validator("clients", mode="before")
+    @classmethod
+    def _parse_json(cls, value: object) -> object:
+        # Decoded here, not by the settings source: a blank value (a compose
+        # file passing `${DAIMON_MCP_OAUTH__CLIENTS:-}`) must mean "none", and
+        # bad JSON must name this variable rather than the whole section.
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return []
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as err:
+            # The position only: the decoder's message can quote the value, a secret.
+            raise ValueError(
+                f"DAIMON_MCP_OAUTH__CLIENTS is not valid JSON "
+                f"(line {err.lineno}, column {err.colno})"
+            ) from None
+
     @field_validator("clients")
     @classmethod
     def _one_client_per_server(
         cls, value: list[McpOAuthClientSettings]
     ) -> list[McpOAuthClientSettings]:
-        servers = [url for client in value for url in client.mcp_servers]
-        if len(servers) != len(set(servers)):
-            raise ValueError("each MCP server may be listed under one client")
+        seen: set[str] = set()
+        for url in (url for client in value for url in client.mcp_servers):
+            if url in seen:
+                raise ValueError(f"{url} is listed under more than one client")
+            seen.add(url)
         return value
 
 
