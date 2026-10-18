@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fleet workers can wake the root again after an Anthropic turn reaches its budget.
+- Blocked fleet runs post a final Discord notice with worker statuses, without sharing unreviewed results.
+
 ### Changed
 
 - **People from another organisation get none of the agent's credentials.**

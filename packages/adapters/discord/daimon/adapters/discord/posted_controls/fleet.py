@@ -56,6 +56,7 @@ def build_fleet_view(
     workers: Sequence[FleetWorker],
     *,
     collected: bool = False,
+    blocked: bool = False,
 ) -> discord.ui.LayoutView:
     """Render only canonical scoped rows; no specs, excerpts or native handles."""
     if (
@@ -69,7 +70,7 @@ def build_fleet_view(
         "applied"
         if collected
         else "refused"
-        if run.status in ("cancelled", "failed")
+        if blocked or run.status in ("cancelled", "failed")
         else "received"
     )
     facts = tuple(
@@ -99,7 +100,13 @@ def build_fleet_view(
     card = PostedCard(
         kind="fleet",
         state=state,
-        headline="Fleet — collected" if collected else f"Fleet — {run.status}",
+        headline=(
+            "Fleet — collected"
+            if collected
+            else "Fleet — blocked"
+            if blocked
+            else f"Fleet — {run.status}"
+        ),
         facts=facts,
         buttons=buttons,
         footer=(
@@ -445,12 +452,18 @@ class DiscordFleetCard:
         return parent, policy, run, workers
 
     def _render(
-        self, run: FleetRun, workers: tuple[FleetWorker, ...], *, collected: bool = False
+        self,
+        run: FleetRun,
+        workers: tuple[FleetWorker, ...],
+        *,
+        collected: bool = False,
+        blocked: bool = False,
     ) -> discord.ui.LayoutView:
         return build_fleet_view(
             run,
             workers,
             collected=collected,
+            blocked=blocked,
         )
 
     async def refresh(self) -> bool:
@@ -554,18 +567,48 @@ class DiscordFleetCard:
                 return False
 
     async def allow_summary(self) -> bool:
-        """Gate the existing orchestrator answer on authoritative collect/review."""
+        """Compatibility gate for callers that only need disclosure authority."""
+        allowed, _ = await self.summary_gate(render=self._message is not None)
+        return allowed
+
+    async def summary_gate(self, *, render: bool = True) -> tuple[bool, str | None]:
+        """Allow reviewed text, or supply a status-only explanation of a blocked run."""
         async with self._lock:
             try:
                 snapshot = await self._snapshot(None)
                 if snapshot is None:
-                    return True
+                    return True, None
                 parent, policy, run, workers = snapshot
                 reply = await self._service.collect(parent, policy, run_id=run.id)
             except (FleetRefused, WorkerSpecRefused):
-                return False
+                return False, None
             ready = reply.get("status") == "ready"
-            if ready and self._message is not None:
-                view = self._render(run, workers, collected=True)
+            blocked = reply.get("status") == "blocked"
+            if render and (blocked or (ready and self._message is not None)):
+                # Collect can observe rows newer than the initial snapshot.
+                try:
+                    run, workers = await self._service.read_snapshot(parent, policy, run.id)
+                    view = self._render(run, workers, collected=ready, blocked=blocked)
+                except (FleetRefused, WorkerSpecRefused):
+                    return False, None
                 await self._display(view)
-            return ready
+            notice = None
+            if blocked:
+                facts = [
+                    f"{_literal(row.role, 60)}: {row.status.replace('_', ' ')}"
+                    for row in sorted(workers, key=lambda row: row.ordinal)
+                ]
+                # Keep complete role/status pairs within one Discord message.
+                retained: list[str] = []
+                for fact in facts:
+                    if len("; ".join(retained + [fact])) > 1400:
+                        break
+                    retained.append(fact)
+                if len(retained) < len(facts):
+                    retained.append(f"+{len(facts) - len(retained)} more")
+                details = "; ".join(retained)
+                notice = "Fleet run didn't finish. "
+                if details:
+                    notice += details + ". "
+                notice += "No reviewed result to share."
+            return ready, notice
