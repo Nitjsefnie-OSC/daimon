@@ -1745,7 +1745,7 @@ async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
     is_dm: bool,
     expected: bool,
 ) -> None:
-    """/dm needs to know the source itself is sealed, not only that memory is read-only."""
+    """/dm-me needs to know the source itself is sealed, not only that memory is read-only."""
     tenant = await _seed_admittable_tenant(db_session, policy=policy)
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
@@ -1767,7 +1767,7 @@ async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
 
 
 async def test_start_dm_refuses_a_sealed_source_admission() -> None:
-    """Backstop for any /dm caller: no DM row is written for a sealed source."""
+    """Backstop for any /dm-me caller: no DM row is written for a sealed source."""
     from unittest.mock import MagicMock
 
     from daimon.core.direct_messages import SEALED_SOURCE_MESSAGE

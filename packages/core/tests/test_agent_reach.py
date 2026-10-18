@@ -26,7 +26,7 @@ DEFAULT = DeploymentDefault(agent_name="daimon")
 async def _dm_from(
     db_session: AsyncSession, tenant: TenantRow, *, source_channel_id: str, agent_name: str
 ) -> uuid.UUID:
-    """The rows `start_dm` writes for a /dm started in `source_channel_id`."""
+    """The rows `start_dm` writes for a /dm-me started in `source_channel_id`."""
     account = await make_account(db_session, tenant=tenant)
     await start_conversation(
         db_session,

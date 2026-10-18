@@ -48,7 +48,7 @@ enables DM conversations, daimon also stores the selected workspace, an
 excerpt from the conversation (up to 12 messages / 16,000 characters), and the
 most recent 12 private user/agent messages (up to 16,000 characters). This
 supports private conversation recovery without mixing the history of different
-workspaces. Running `/dm` again replaces that local context. `/privacy` account
+workspaces. Running `/dm-me` again replaces that local context. `/privacy` account
 deletion removes it along with the record linking your private chat to its
 workspace. Full JSON export remains unimplemented.
 

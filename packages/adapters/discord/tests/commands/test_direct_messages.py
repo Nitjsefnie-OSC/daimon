@@ -1,4 +1,4 @@
-"""`/dm` and later DM turns answer to the source channel's budget.
+"""`/dm-me` and later DM turns answer to the source channel's budget.
 
 Admission and the DM store are patched on the command module.
 """
@@ -177,3 +177,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
     (reply,), _ = message.channel.send.await_args
     assert reply == _OVER_BUDGET, "the member is told why the DM stopped"
     assert bot.turn_queue.in_flight() == 0, "the slot is returned"
+
+
+def test_command_is_registered_as_dm_me() -> None:
+    assert DirectMessageCog.dm.name == "dm-me"
