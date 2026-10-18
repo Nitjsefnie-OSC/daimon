@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- An agent-wide `deny` tool rule on one of Daimon's own tools (`daimon-mcp/<tool>`) now stops the call. The MCP server refuses it, directly or through `call_tool`, when that agent's chat or routine session makes it and tool rules are enabled. The rule used to be saved but never enforced for Daimon's own tools. `ask`, `allow` and channel rules on them still do not apply.
+- An agent-wide `deny` tool rule on one of Daimon's own tools (`daimon-mcp/<tool>`) now stops the call. The MCP server refuses it, directly or through `call_tool`, when that agent's chat or routine session makes it and tool rules are enabled. The rule used to be saved but never enforced for Daimon's own tools. An agent-wide `deny` on `daimon-mcp/*` denies all of Daimon's own tools for that agent, tools added later included, and `search_tools` and `call_tool` too; wildcards are recognised only for `daimon-mcp`, agent-wide and `deny`. `ask`, `allow` and channel rules on them still do not apply.
 
 ### Fixed
 

@@ -7,6 +7,11 @@ would never stop a call. Chat sessions also reach most Daimon tools through the
 runs again with the inner tool's name for a proxied call, so one check keyed on
 the name being invoked covers direct and proxied calls.
 
+An agent-wide `deny` on `daimon-mcp/*` (`WILDCARD_TOOL_KEY`) denies the whole
+server: every call from that agent's chat credential is refused, `search_tools`
+and `call_tool` included. A deny on one tool never refuses the two proxies by
+name; the inner call it carries is refused instead.
+
 Only an agent-wide `deny` is enforced here. `allow` has no server-side effect,
 and `ask` and channel rules need the driver (the server has no card and does not
 know the channel). The chat credential is shared by chat turns and routines, and
@@ -31,6 +36,11 @@ log = structlog.get_logger(__name__)
 
 #: Audit reason for a call this backstop refused.
 DENIAL_REASON: Final = "agent_tool_rule_deny"
+
+#: An agent-wide `deny` on this key is a default-deny: the agent reaches no
+#: Daimon tool, `search_tools` and `call_tool` included, tools added later too.
+#: Recognised only for the built-in server and only as an agent-wide `deny`.
+WILDCARD_TOOL_KEY: Final = f"{DAIMON_SERVER_NAME}/*"
 
 
 def _enforced_for(identity: AuthIdentity) -> bool:
@@ -71,17 +81,18 @@ async def tool_rule_refusal(
         or not policy.enabled
         or not policy.agent_rules
         or not public_url
-        or tool_name in SEARCH_PROXY_TOOLS
         or not _enforced_for(identity)
     ):
         return None
     chat_agent_id = identity.chat_agent_id
     assert chat_agent_id is not None  # _enforced_for
     key = f"{DAIMON_SERVER_NAME}/{tool_name}"
+    # The search proxies are never refused by their own name, only by the wildcard.
+    keys = [WILDCARD_TOOL_KEY] if tool_name in SEARCH_PROXY_TOOLS else [key, WILDCARD_TOOL_KEY]
     try:
         async with sessionmaker() as session:
             rows = await agent_tool_rules.deny_rules_for_trusted_tool(
-                session, tenant_id=identity.tenant_id, tool_key=key
+                session, tenant_id=identity.tenant_id, tool_keys=keys
             )
     except Exception as err:
         log.warning(
@@ -93,6 +104,7 @@ async def tool_rule_refusal(
         return (
             f"Refused: could not check this agent's tool rules for {tool_name}. Nothing was done."
         )
+    wildcard = False
     for row in rows:
         # Rows hold the agent's own daimon-mcp entry URL. A server that merely
         # wears the reserved name elsewhere is not this one.
@@ -100,16 +112,28 @@ async def tool_rule_refusal(
             continue
         if (
             derive_agent_uuid(tenant_id=identity.tenant_id, ma_agent_id=row.agent_id)
-            == chat_agent_id
+            != chat_agent_id
         ):
-            log.info(
-                "tool_safety.server_rule_denied",
-                tool=key,
-                tenant=_prefix(identity.tenant_id),
-                agent=str(chat_agent_id),
-            )
-            return f"Refused: this agent's tool rule denies {tool_name}. Nothing was done."
+            continue
+        if row.tool_key != WILDCARD_TOOL_KEY:
+            return _denied(identity, key, chat_agent_id, wildcard=False)
+        wildcard = True
+    if wildcard:
+        return _denied(identity, key, chat_agent_id, wildcard=True)
     return None
+
+
+def _denied(identity: AuthIdentity, key: str, agent: uuid.UUID, *, wildcard: bool) -> str:
+    log.info(
+        "tool_safety.server_rule_denied",
+        tool=key,
+        tenant=_prefix(identity.tenant_id),
+        agent=str(agent),
+        wildcard=wildcard,
+    )
+    if wildcard:
+        return "Refused: this agent's tool rules deny all Daimon tools. Nothing was done."
+    return f"Refused: this agent's tool rule denies {key.partition('/')[2]}. Nothing was done."
 
 
 def _prefix(tenant_id: uuid.UUID) -> str:

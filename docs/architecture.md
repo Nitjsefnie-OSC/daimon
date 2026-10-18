@@ -1067,7 +1067,9 @@ agent-wide `deny` on one of its tools is enforced instead by
 credential (`chat_agent_id` set, no `agent_id`) it reads the tenant's `deny`
 rows for the tool being invoked, which for a `call_tool` proxied call is the
 inner tool, and refuses when one belongs to the caller's agent and names this
-deployment's MCP URL. The same two settings gate it, and a failed read refuses.
+deployment's MCP URL. An agent-wide `deny` on `daimon-mcp/*` refuses every call from
+that agent's credential, `search_tools` and `call_tool` included. The same two settings
+gate it, and a failed read refuses.
 With `DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
 third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is

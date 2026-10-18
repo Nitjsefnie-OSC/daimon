@@ -514,11 +514,66 @@ async def test_deny_rules_for_trusted_tool_returns_only_agent_wide_denies_of_the
     await put(tenant.id, "ma-other-tool", "deny", tool_key="daimon-mcp/list_things")
     await put(other.id, "ma-foreign", "deny")
 
-    rows = await store.deny_rules_for_trusted_tool(db_session, tenant_id=tenant.id, tool_key=key)
+    rows = await store.deny_rules_for_trusted_tool(db_session, tenant_id=tenant.id, tool_keys=[key])
 
     assert sorted(row.agent_id for row in rows) == ["ma-deny", "ma-other-agent"]
     assert {(row.rule, row.channel_id, row.server_url, row.scope) for row in rows} == {
         ("deny", None, url, "chat_and_routines")
     }
-    foreign = await store.deny_rules_for_trusted_tool(db_session, tenant_id=other.id, tool_key=key)
+    foreign = await store.deny_rules_for_trusted_tool(
+        db_session, tenant_id=other.id, tool_keys=[key]
+    )
     assert [row.agent_id for row in foreign] == ["ma-foreign"]
+
+
+@pytest.mark.asyncio
+async def test_the_wildcard_deny_saves_and_is_read_with_the_tools_own_rows(
+    db_session: AsyncSession,
+) -> None:
+    """`daimon-mcp/*` passes the store's `server/tool` check and the `LIKE '%/%'` constraint."""
+    tenant = Tenant(platform="discord", external_id=str(uuid.uuid4()))
+    other = Tenant(platform="discord", external_id=str(uuid.uuid4()))
+    db_session.add_all([tenant, other])
+    await db_session.flush()
+    url = "https://mcp.example/mcp"
+
+    async def put(
+        tenant_id: uuid.UUID,
+        agent: str,
+        tool_key: str,
+        rule: store.Rule | None,
+        channel_id: str | None = None,
+    ) -> None:
+        await store.set_rule(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id=agent,
+            agent_name=agent,
+            tool_key=tool_key,
+            channel_id=channel_id,
+            server_url=url,
+            rule=rule,
+            set_by="admin",
+            actor=Subject(is_admin=True),
+        )
+
+    await put(tenant.id, "ma-all", "daimon-mcp/*", "deny")
+    await put(tenant.id, "ma-one", "daimon-mcp/post_update", "deny")
+    await put(tenant.id, "ma-allow-all", "daimon-mcp/*", "allow")
+    await put(tenant.id, "ma-channel", "daimon-mcp/*", "deny", channel_id="home")
+    await put(tenant.id, "ma-cleared", "daimon-mcp/*", "deny")
+    await put(tenant.id, "ma-cleared", "daimon-mcp/*", None)
+    await put(tenant.id, "ma-third-party", "linear/*", "deny")
+    await put(other.id, "ma-foreign", "daimon-mcp/*", "deny")
+
+    keys = ["daimon-mcp/post_update", "daimon-mcp/*"]
+    rows = await store.deny_rules_for_trusted_tool(db_session, tenant_id=tenant.id, tool_keys=keys)
+
+    assert {(row.agent_id, row.tool_key) for row in rows} == {
+        ("ma-all", "daimon-mcp/*"),
+        ("ma-one", "daimon-mcp/post_update"),
+    }
+    only_wildcard = await store.deny_rules_for_trusted_tool(
+        db_session, tenant_id=tenant.id, tool_keys=["daimon-mcp/*"]
+    )
+    assert [row.agent_id for row in only_wildcard] == ["ma-all"]

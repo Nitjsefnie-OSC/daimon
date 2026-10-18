@@ -112,6 +112,11 @@ class _World:
             self.ran.append("list_things")
             return "listed"
 
+        @mcp.tool(tags=tags)
+        async def publish_report() -> str:  # pyright: ignore[reportUnusedFunction]
+            self.ran.append("publish_report")
+            return "published"
+
         mcp.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
         return mcp
 
@@ -401,3 +406,136 @@ async def test_a_failed_rule_read_refuses_the_call(
     with pytest.raises(ToolError, match="could not check this agent's tool rules"):
         await _direct(world)
     assert world.ran == []
+
+
+# The `daimon-mcp/*` wildcard: a default-deny for the agent's whole Daimon surface.
+
+ALL_REFUSED = "this agent's tool rules deny all Daimon tools"
+
+
+async def test_a_wildcard_deny_refuses_every_call_including_the_search_proxies(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await world.rule("agent-a", "deny", tool="*")
+    _chat(monkeypatch, world)
+    async with Client(world.app()) as client:
+        with pytest.raises(ToolError, match=ALL_REFUSED):
+            await client.call_tool("search_tools", {"query": "list things"})
+        with pytest.raises(ToolError, match=ALL_REFUSED):
+            await client.call_tool("call_tool", {"name": "list_things", "arguments": {}})
+        with pytest.raises(ToolError, match=ALL_REFUSED):
+            await client.call_tool("list_things", {})
+        # A pinned approval tool: listed under its own name, called directly.
+        with pytest.raises(ToolError, match=ALL_REFUSED):
+            await client.call_tool("publish_report", {})
+    assert world.ran == []
+
+
+async def test_a_wildcard_deny_refuses_the_inner_call_even_when_the_proxy_is_not_the_refuser(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both the proxy and the inner call run the middleware, and each is refused."""
+    await world.rule("agent-a", "deny", tool="*")
+    _chat(monkeypatch, world)
+    with pytest.raises(ToolError, match=ALL_REFUSED):
+        await _proxied(world)
+    with pytest.raises(ToolError, match=ALL_REFUSED):
+        await _direct(world)
+    assert world.ran == []
+
+
+async def test_a_wildcard_deny_for_another_agent_or_tenant_does_not_reach_this_agent(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await world.rule("agent-b", "deny", tool="*")
+    await world.rule("agent-a", "deny", tool="*", tenant_id=world.other_tenant_id)
+    _chat(monkeypatch, world, "agent-a")
+    assert await _direct(world) == "posted"
+    assert await _proxied(world) == "posted"
+    _chat(monkeypatch, world, "agent-b")
+    with pytest.raises(ToolError, match=ALL_REFUSED):
+        await _direct(world)
+
+
+async def test_a_channel_scoped_wildcard_and_non_deny_wildcards_are_ignored(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await world.rule("agent-a", "deny", tool="*", channel_id="C1")
+    _chat(monkeypatch, world)
+    assert await _direct(world) == "posted"
+    for rule in ("allow", "ask", None):
+        await world.rule("agent-a", rule, tool="*")
+        assert await _proxied(world) == "posted"
+
+
+async def test_a_wildcard_on_another_server_or_url_is_not_applied(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wildcards are recognised only for `daimon-mcp` at this deployment's URL."""
+    await world.rule("agent-a", "deny", tool="*", server="linear", url=PUBLIC_URL)
+    await world.rule("agent-a", "deny", tool="*", url="https://elsewhere.example.com/mcp")
+    _chat(monkeypatch, world)
+    assert await _direct(world) == "posted"
+    assert await _proxied(world) == "posted"
+
+
+@pytest.mark.parametrize("kind", ["operator", "agent-key", "no-agent"])
+async def test_a_wildcard_deny_leaves_operator_agent_key_and_agentless_tokens_alone(
+    world: _World, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    await world.rule("agent-a", "deny", tool="*")
+    agent = str(world.agent_uuid("agent-a"))
+    claims: dict[str, object] = {"tenant_id": str(world.tenant_id)}
+    if kind == "operator":
+        claims |= {
+            "chat_agent_id": agent,
+            TOKEN_KIND_CLAIM: "operator",
+            SCOPES_CLAIM: ["tenant:read"],
+        }
+    elif kind == "agent-key":
+        claims |= {"agent_id": agent, "chat_agent_id": agent}
+    _as(monkeypatch, **claims)
+    assert await _direct(world) == "posted"
+
+
+async def test_a_wildcard_deny_is_not_enforced_while_rules_are_off_and_fails_closed_on_read_error(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await world.rule("agent-a", "deny", tool="*")
+    _chat(monkeypatch, world)
+    assert await _direct(world, policy=ToolSafetyPolicy(enabled=True)) == "posted"
+    assert await _direct(world, public_url=None) == "posted"
+
+    async def broken(*_a: object, **_k: object) -> list[store.AgentToolRule]:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "deny_rules_for_trusted_tool", broken)
+    async with Client(world.app()) as client:
+        with pytest.raises(ToolError, match="could not check this agent's tool rules"):
+            await client.call_tool("search_tools", {"query": "x"})
+
+
+async def test_a_specific_deny_still_exempts_the_proxies_and_refuses_the_inner_call(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await world.rule("agent-a", "deny")
+    _chat(monkeypatch, world)
+    async with Client(world.app()) as client:
+        await client.call_tool("search_tools", {"query": "list things"})
+        with pytest.raises(ToolError, match=REFUSED):
+            await client.call_tool("call_tool", {"name": "post_update", "arguments": {}})
+    assert world.ran == []
+
+
+def test_the_set_agent_tool_rule_tool_resolves_the_wildcard_key_to_the_agents_daimon_url() -> None:
+    from types import SimpleNamespace
+    from typing import cast
+
+    from daimon.adapters.mcp.tools.agent_tool_rules import (
+        _server_url,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    agent = SimpleNamespace(mcp_servers=[SimpleNamespace(name="daimon-mcp", url=ENTRY_URL)])
+    assert _server_url(cast("object", agent), "daimon-mcp/*") == ENTRY_URL  # type: ignore[arg-type]
+    with pytest.raises(ToolError, match="exactly server/tool"):
+        _server_url(cast("object", agent), "daimon-mcp/a/*")  # type: ignore[arg-type]
