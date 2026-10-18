@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
+from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import (
@@ -299,6 +300,120 @@ class McpSettings(BaseModel):
         if self.public_url is None:
             return None
         return str(self.public_url).rstrip("/").removesuffix("/mcp").rstrip("/")
+
+
+class McpOAuthClientSettings(BaseModel):
+    """One OAuth client registered by hand, and the MCP servers it may sign in to."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    authorization_server_host: str = Field(min_length=1)
+    mcp_servers: list[str] = Field(min_length=1)
+    client_id: str = Field(min_length=1)
+    client_secret: SecretStr
+    token_endpoint_auth_method: Literal["client_secret_basic", "client_secret_post"] = (
+        "client_secret_post"
+    )
+    authorization_endpoint: str | None = None
+    token_endpoint: str | None = None
+    scope: str | None = None
+    send_resource: bool = True
+
+    @field_validator("authorization_server_host")
+    @classmethod
+    def _bare_host(cls, value: str) -> str:
+        host = value.strip().rstrip(".").lower()
+        if not host or any(char in host for char in "/:@ "):
+            raise ValueError("authorization_server_host must be a bare host name")
+        return host
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _public_https_servers(cls, value: list[str]) -> list[str]:
+        # Imported here: the package pulls in the Anthropic SDK, which a plain
+        # settings load should not pay for when no client is configured.
+        from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
+
+        try:
+            return [
+                canonical_mcp_url(assert_public_https_url(url, what="mcp_servers entry"))
+                for url in value
+            ]
+        except McpUrlError as err:
+            raise ValueError(str(err)) from err
+
+    @field_validator("authorization_endpoint", "token_endpoint")
+    @classmethod
+    def _public_https(cls, value: str | None) -> str | None:
+        from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
+
+        if value is None:
+            return None
+        try:
+            return assert_public_https_url(value, what="endpoint override")
+        except McpUrlError as err:
+            raise ValueError(str(err)) from err
+
+    @field_validator("scope")
+    @classmethod
+    def _space_separated(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.split():
+            raise ValueError("scope must name at least one scope, or be left out")
+        return " ".join(value.split())
+
+
+class McpOAuthSettings(BaseModel):
+    clients: Annotated[list[McpOAuthClientSettings], NoDecode] = Field(
+        default_factory=list[McpOAuthClientSettings],
+        description=(
+            "OAuth clients registered by hand, for authorization servers that offer no "
+            "dynamic client registration. A JSON array; each entry has "
+            "authorization_server_host (the bare host of the authorization server), "
+            "mcp_servers (required: the exact https URLs of the MCP servers this client may "
+            "be used for), client_id, client_secret, token_endpoint_auth_method "
+            "(client_secret_post by default, or client_secret_basic), optional "
+            "authorization_endpoint and token_endpoint overrides (public https), optional "
+            "scope (space-separated; replaces the scopes the MCP server publishes) and "
+            "send_resource (default true; false leaves the RFC 8707 resource parameter out "
+            "of sign-in and refresh). A sign-in uses an entry only when its MCP server is "
+            "listed and its authorization server is on that host; it then also asks for "
+            "offline_access when the authorization server offers it. Every other sign-in "
+            "registers a client dynamically. Default: [] (always register)."
+        ),
+    )
+
+    @field_validator("clients", mode="before")
+    @classmethod
+    def _parse_json(cls, value: object) -> object:
+        # Decoded here, not by the settings source: a blank value (a compose
+        # file passing `${DAIMON_MCP_OAUTH__CLIENTS:-}`) must mean "none", and
+        # bad JSON must name this variable rather than the whole section.
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return []
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as err:
+            # The position only: the decoder's message can quote the value, a secret.
+            raise ValueError(
+                f"DAIMON_MCP_OAUTH__CLIENTS is not valid JSON "
+                f"(line {err.lineno}, column {err.colno})"
+            ) from None
+
+    @field_validator("clients")
+    @classmethod
+    def _one_client_per_server(
+        cls, value: list[McpOAuthClientSettings]
+    ) -> list[McpOAuthClientSettings]:
+        seen: set[str] = set()
+        for url in (url for client in value for url in client.mcp_servers):
+            if url in seen:
+                raise ValueError(f"{url} is listed under more than one client")
+            seen.add(url)
+        return value
 
 
 _HUB_SIGNING_KEY_BYTES = 32
@@ -1627,6 +1742,7 @@ class Settings(BaseSettings):
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
+    mcp_oauth: McpOAuthSettings = Field(default_factory=McpOAuthSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
