@@ -25,7 +25,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Protocol, cast
 
 import httpx
 import structlog
@@ -88,11 +88,11 @@ def send_error_details(exc: BaseException) -> tuple[int | None, str | None]:
         return None, None
     status = exc.response.status_code
     try:
-        body = exc.response.json()
+        body: object = exc.response.json()
     except Exception:  # unread streaming body, bad JSON or bad encoding
         return status, None
-    error = body.get("error") if isinstance(body, dict) else None
-    code = error.get("code") if isinstance(error, dict) else None
+    error = cast("dict[str, object]", body).get("error") if isinstance(body, dict) else None
+    code = cast("dict[str, object]", error).get("code") if isinstance(error, dict) else None
     if isinstance(code, str) and _ERROR_CODE.fullmatch(code):
         return status, code
     return status, None
