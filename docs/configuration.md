@@ -1375,9 +1375,11 @@ default; stored rules remain editable but inactive until enabled.
 `dict[str, 'read' | 'write']` · optional · default `{}`
 
 Override the read/write class, e.g. {"linear/get_team": "read", "notion": "write"}. Keys
-are a server name or server/tool. Unlisted tools are classified from their name: a plain
-get_, list_, search_ ... is a read; a compound name (get_or_create, search_and_replace,
-run_query) and anything unknown is a write.
+are a server name or server/tool. Unlisted tools are classified from the server's own
+MCP annotations when it sends them (readOnlyHint true is a read unless destructiveHint
+is also true), otherwise from their name: a plain get_, list_, search_ ... is a read; a
+compound name (get_or_create, search_and_replace, run_query) and anything unknown is a
+write.
 
 ### `DAIMON_TOOL_SAFETY__DENIED`
 

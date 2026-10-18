@@ -69,6 +69,12 @@ from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.continuity.wakes import enqueue_worker_finished
 from daimon.core.fleet import TERMINAL, FleetConflict, FleetWorker, spawn_operation_key, worker_slot
 from daimon.core.github_app_session import close_headless_app_session
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_tool_annotations import (
+    agent_mcp_token_for,
+    mcp_annotation_lookup,
+    no_mcp_token,
+)
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
@@ -492,6 +498,26 @@ async def run_turn_impl(
                     and tool_safety.agent_rules
                     and session_factory is not None
                     and tenant_id is not None
+                    else None
+                ),
+                annotations_for=(
+                    mcp_annotation_lookup(
+                        server_urls={s.name: s.url for s in session.agent.mcp_servers},
+                        # Without a database or tenant no stored credential can
+                        # be resolved, so the catalogue is read anonymously.
+                        token_for=(
+                            agent_mcp_token_for(
+                                session_factory,
+                                fernet=fernet,
+                                tenant_id=tenant_id,
+                                agent_id=agent_uuid
+                                or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id),
+                            )
+                            if session_factory is not None and tenant_id is not None
+                            else no_mcp_token
+                        ),
+                    )
+                    if tool_safety.enabled
                     else None
                 ),
                 trusted_servers=trusted_servers_for(

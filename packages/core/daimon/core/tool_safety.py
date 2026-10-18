@@ -10,7 +10,8 @@ the session on a `requires_action` idle before each call and waits for a
 Three questions, each a total function of its arguments:
 
 - `classify_tool` — is this tool a read or a write? An operator override wins,
-  then the tool's own MCP annotations when the caller has them, then the verb
+  then the tool's own MCP annotations when the caller has them (a destructive
+  hint is always a write; a read-only hint alone is a read), then the verb
   the tool name starts with. Anything still unknown is a write: an unfamiliar
   tool is assumed to change something.
 - `decide_tool_call` — given that class and whether a person is present,
@@ -65,6 +66,7 @@ __all__ = [
     "decide_tool_call",
     "has_confirmation_gate",
     "heal_reserved_server",
+    "needs_annotations",
     "session_tools_for_policy",
     "toolset_permission_policy",
     "trusted_servers_for",
@@ -270,10 +272,10 @@ _CAMEL_BOUNDARY: Final[re.Pattern[str]] = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 class ToolAnnotations(BaseModel):
     """The MCP tool hints this module reads, when a caller has them.
 
-    MA does not forward a third-party server's annotations to daimon, so for
-    attached tools these are usually absent and the name decides. Callers that
-    do hold them (a plugin describing its own tools, daimon's own FastMCP
-    tools) pass them and they win over the name.
+    MA does not forward a third-party server's annotations to daimon, so the
+    approval deciders read them from the server's own `tools/list`
+    (`daimon.core.mcp_tool_annotations`). When that read fails, or the tool
+    carries no hints, these are absent and the name decides.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -315,8 +317,10 @@ class ToolSafetyPolicy(BaseModel):
         description=(
             'Override the read/write class, e.g. {"linear/get_team": "read", "notion": '
             '"write"}. Keys are a server name or server/tool. Unlisted tools are classified '
-            "from their name: a plain get_, list_, search_ ... is a read; a compound name "
-            "(get_or_create, search_and_replace, run_query) and anything unknown is a write."
+            "from the server's own MCP annotations when it sends them (readOnlyHint true is a "
+            "read unless destructiveHint is also true), otherwise from their name: a plain "
+            "get_, list_, search_ ... is a read; a compound name (get_or_create, "
+            "search_and_replace, run_query) and anything unknown is a write."
         ),
     )
     denied: tuple[str, ...] = Field(
@@ -422,23 +426,46 @@ def classify_tool(
 ) -> ToolEffect:
     """Return whether `server_name`'s `tool_name` reads or writes.
 
-    Order: operator override (tool key, then server key); `read_only_hint`
-    (an explicit False is a write whatever the name says); `destructive_hint`;
-    a plainly-read name (`_name_says_read`); otherwise `write`.
+    Order: operator override (tool key, then server key); `destructive_hint`
+    true is a write even beside `read_only_hint` true; `read_only_hint` (an
+    explicit False is a write whatever the name says); a plainly-read name
+    (`_name_says_read`); otherwise `write`. So `destructive_hint=True` or
+    `read_only_hint=False` makes a write, only `read_only_hint=True` without a
+    destructive hint makes a read, and a missing hint leaves the name to decide.
     """
     override = _keyed(policy.effects, server_name=server_name, tool_name=tool_name)
     if override is not None:
         return override
     if annotations is not None:
+        if annotations.destructive_hint is True or annotations.read_only_hint is False:
+            return "write"
         if annotations.read_only_hint is True:
             return "read"
-        if annotations.read_only_hint is False or annotations.destructive_hint is True:
-            return "write"
     return "read" if _name_says_read(tool_name) else "write"
 
 
 def _gated(server_name: str | None, trusted_servers: frozenset[str]) -> bool:
     return server_name is not None and server_name not in trusted_servers
+
+
+def needs_annotations(
+    policy: ToolSafetyPolicy, call: ToolCall, *, trusted_servers: frozenset[str] = frozenset()
+) -> bool:
+    """Whether `decide_tool_call` would read `call`'s annotations: policy on, a
+    gated server, and no operator `effects` override for it.
+
+    Mirrors the guards in `decide_tool_call` before its `classify_tool` call
+    (`policy.enabled`, a server, `_gated`) and the override check at the top of
+    `classify_tool`; a change to either must change this too, or a decider
+    skips a read that would have mattered (the name then decides, which only
+    ever asks more).
+    """
+    return (
+        policy.enabled
+        and call.server_name is not None
+        and _gated(call.server_name, trusted_servers)
+        and _keyed(policy.effects, server_name=call.server_name, tool_name=call.tool_name) is None
+    )
 
 
 def _confirmed_daimon_write(

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from typing import Any
 
 import httpx
+import pytest
 from daimon.core.config import McpSettings
 from daimon.core.headless_runner import run_turn
 from daimon.core.sessions import create_session
@@ -206,3 +208,62 @@ async def test_without_a_daimon_endpoint_the_reserved_name_is_gated_like_any_ser
     servers = {s["name"]: s["url"] for s in agent["mcp_servers"]}
     assert servers["daimon-mcp"] == "https://third-party.example/mcp"
     assert _policies(agent) == {"daimon-mcp": "always_ask", "linear": "always_ask"}
+
+
+async def test_routine_read_marked_read_only_by_its_server_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production wiring: a routine's decider reads the attached server's
+    catalogue, so a noun-first read the server marks `readOnlyHint` runs where
+    its name alone would have been refused. With no database the read is
+    anonymous."""
+    from daimon.core import mcp_tool_annotations
+
+    tokens: list[str | None] = []
+
+    async def _catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
+        assert url == "https://mcp.linear.app/mcp"
+        tokens.append(token)
+        return [
+            {"name": "memory_flag_list", "annotations": {"readOnlyHint": True}},
+            {"name": "create_issue", "annotations": {"readOnlyHint": False}},
+        ]
+
+    monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", _catalogue)
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    router = _router(creates=creates, sends=sends)
+    events = _events()
+    events[0] = {**events[0], "name": "memory_flag_list", "input": {}}
+    # The session freezes the agent with its servers, which is where the
+    # decider finds the URL to read.
+    frozen = ma_session(
+        id="ses_1",
+        agent=ma_agent(
+            id="agent_x",
+            tools=[_LINEAR_TOOLSET],
+            mcp_servers=[{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
+        ),
+        environment_id="env_x",
+    ).model_dump(mode="json")
+    router.routes[:0] = [
+        ("POST", re.compile(r"/v1/sessions$"), lambda r, m: httpx.Response(200, json=frozen)),
+        (
+            "GET",
+            re.compile(r"/v1/sessions/[^/]+/events/stream"),
+            lambda r, m: sse_response(events),
+        ),
+    ]
+    client = build_fake_anthropic(router.dispatch)
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="list the flags",
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+
+    (sent,) = _confirmations(sends)
+    assert sent["result"] == "allow", "readOnlyHint made memory_flag_list a read"
+    assert tokens == [None]

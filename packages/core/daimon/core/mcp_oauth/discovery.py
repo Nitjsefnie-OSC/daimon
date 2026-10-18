@@ -200,14 +200,28 @@ async def list_mcp_tools(mcp_server_url: str, bearer_token: str) -> frozenset[st
     The configured destination is the only authority; redirects are disabled.
     Both JSON and the protocol's SSE response form are accepted.
     """
+    return frozenset(
+        cast(str, tool["name"]) for tool in await read_mcp_catalogue(mcp_server_url, bearer_token)
+    )
+
+
+async def read_mcp_catalogue(
+    mcp_server_url: str, bearer_token: str | None
+) -> tuple[dict[str, JsonValue], ...]:
+    """Every tool definition the server lists, as sent: name, schema, annotations.
+
+    Same protocol and limits as `list_mcp_tools`; `bearer_token=None` sends no
+    `Authorization` header. Raises `ValueError` on any refusal or malformed page.
+    """
     import json
 
     assert_public_https_url(mcp_server_url, what="mcp server url")
     headers = {
         "Accept": "application/json, text/event-stream",
         "MCP-Protocol-Version": _PROTOCOL_VERSION,
-        "Authorization": f"Bearer {bearer_token}",
     }
+    if bearer_token is not None:
+        headers["Authorization"] = f"Bearer {bearer_token}"
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as http:
 
@@ -260,6 +274,7 @@ async def list_mcp_tools(mcp_server_url: str, bearer_token: str) -> frozenset[st
             if response.status_code not in (200, 202, 204):
                 raise ValueError("MCP initialization refused")
             names: set[str] = set()
+            listed: list[dict[str, JsonValue]] = []
             cursor: str | None = None
             seen: set[str] = set()
             for page in range(100):
@@ -279,9 +294,10 @@ async def list_mcp_tools(mcp_server_url: str, bearer_token: str) -> frozenset[st
                     if not isinstance(name, str) or not name or name in names:
                         raise ValueError("invalid or duplicate MCP tool")
                     names.add(name)
+                    listed.append(cast(dict[str, JsonValue], tool))
                 following = result.get("nextCursor")
                 if following is None:
-                    return frozenset(names)
+                    return tuple(listed)
                 if not isinstance(following, str) or not following or following in seen:
                     raise ValueError("invalid MCP catalogue cursor")
                 seen.add(following)
