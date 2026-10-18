@@ -549,3 +549,5 @@ and each one costs a model turn.
 new cache back without posting anything. The `Teams QA token refresh`
 workflow runs it weekly on staging. If it reports `reauthentication
 required`, run the printed `login` command once for that persona.
+
+For exploratory sessions, follow [the agent-facing Teams QA guide](teams/AGENT-QA.md).
