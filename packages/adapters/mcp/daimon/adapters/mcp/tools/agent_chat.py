@@ -95,6 +95,7 @@ from daimon.adapters.mcp.tools._agent_chat_safety import (
     require_session_driver,
     resume_paused,
     rules_channel,
+    single_attempt,
     turn_status,
     watch_turn,
 )
@@ -197,8 +198,9 @@ async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, sc
             db, managed_session_id=session_id
         )
     try:
+        # One attempt: an SDK retry would resend after this send's gate.
         sent = await send_session_events(
-            runtime.client,
+            single_attempt(runtime),
             session_id,
             scope=scope,
             events=[{"type": "user.message", "content": [{"type": "text", "text": message}]}],

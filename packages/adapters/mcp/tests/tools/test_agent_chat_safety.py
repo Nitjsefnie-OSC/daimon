@@ -1027,6 +1027,42 @@ async def test_a_failed_gate_before_a_confirmation_sends_nothing(
     assert fake.calls == []
 
 
+async def test_a_throttled_message_is_not_resent_by_the_sdk(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Finding 2: one attempt; a retry is a new, fully checked call."""
+    fake = FakeSession()
+    fake.throttle = {"message": 1}
+    runtime = _runtime(fake, factory, _ENABLED)
+    with pytest.raises(Exception):  # noqa: B017 - the provider's 429
+        await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+    assert fake.attempts == {"message": 1}
+    assert "message" not in fake.kinds()
+    assert _no_workers()
+
+
+async def test_a_throttled_confirmation_is_decided_again_on_resume(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The allow built before a rule change is never replayed by the SDK."""
+    fake = FakeSession(frozen="always_ask", tool="get_issue")
+    boundary = fake.pause()
+    await _record(factory, boundary)
+    fake.throttle = {"confirm": 1}
+    runtime = _runtime(fake, factory, _RULES)
+    await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    await _settle(runtime)
+    assert fake.attempts == {"confirm": 1} and fake.confirmations == []
+    await _deny_in_channel(factory, "C1")
+    async with factory.begin() as db:
+        await session_settle_state.record_unattended_turn(
+            db, managed_session_id=_SESSION, turn_event_id=boundary, rules_channel_id="C1"
+        )
+    await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+
+
 async def test_a_worker_on_an_older_turn_neither_reads_as_running_nor_blocks_resume(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

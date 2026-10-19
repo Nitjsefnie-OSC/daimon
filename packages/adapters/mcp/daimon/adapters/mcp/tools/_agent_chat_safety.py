@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import structlog
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
@@ -81,6 +82,16 @@ class _Worker:
 _workers: dict[tuple[int, str], _Worker] = {}
 
 
+def single_attempt(runtime: McpRuntime) -> AsyncAnthropic:
+    """The client for a send that changes a session: one attempt, no SDK retry.
+
+    A retried message or confirmation would go out after its gate and its
+    decision, under whatever policy or rule changed meanwhile. A failed or
+    ambiguous attempt raises instead, and is never resent blindly.
+    """
+    return runtime.client.with_options(max_retries=0)
+
+
 def require_session_driver(session: BetaManagedAgentsSession, auth: AuthIdentity) -> None:
     """Refuse anyone but the session's own account, outside a hub read.
 
@@ -97,7 +108,7 @@ def require_session_driver(session: BetaManagedAgentsSession, auth: AuthIdentity
 async def gate(runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession) -> None:
     """Rewrite `session`'s tool config from the current policy before a send."""
     await gate_session_snapshot(
-        runtime.client,
+        single_attempt(runtime),
         session,
         runtime.settings.tool_safety,
         scope=mcp_scope(auth),
@@ -302,7 +313,7 @@ async def _answer(
     ]
     # The session port carries only messages and interrupts; confirmations go
     # through the turn transport the routine driver answers with.
-    await LegacyTurnIO(runtime.client, session.id, scope=mcp_scope(auth)).send(
+    await LegacyTurnIO(single_attempt(runtime), session.id, scope=mcp_scope(auth)).send(
         build_decision_events(decisions)
     )
 
