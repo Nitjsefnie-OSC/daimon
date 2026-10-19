@@ -1,8 +1,9 @@
 """Agent-chat turns under the unattended tool gate, over a fake MA transport.
 
 Every send is preceded by a re-gate of the session's own tool config; every
-pause is answered by the sending process alone, from the current policy; a
-read answers nothing, before or after a restart.
+pause is answered by the sending process, or by its owner's resume of a turn
+agent chat started, from the current policy; a read answers nothing, before
+or after a restart. The deciders, reducer and gate are the real ones.
 """
 
 from __future__ import annotations
@@ -19,19 +20,29 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _agent_chat_safety as safety
+from daimon.adapters.mcp.tools import sessions as general_sessions
 from daimon.adapters.mcp.tools._session_access import hub_session_access
 from daimon.adapters.mcp.tools.agent_chat import (
     _ask_impl,  # pyright: ignore[reportPrivateUsage]
     _continue_turn_impl,  # pyright: ignore[reportPrivateUsage]
+    _deliver_turn_charts_impl,  # pyright: ignore[reportPrivateUsage]
     _get_session_impl,  # pyright: ignore[reportPrivateUsage]
+    _list_events_impl,  # pyright: ignore[reportPrivateUsage]
     _start_turn_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.authz import Subject
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_CHANNEL
+from daimon.core.config import McpSettings
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_PRIVATE_DM,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import agent_tool_rules, session_settle_state
 from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy
 from daimon.testing import ma_agent, ma_environment, ma_session
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, send_events_response
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -42,8 +53,12 @@ _AGENT_UUID = derive_agent_uuid(tenant_id=_TENANT_ID, ma_agent_id=_MA_AGENT_ID)
 _OWNER = uuid.uuid4()
 _OTHER = uuid.uuid4()
 _SESSION = "ses_safety"
+_PUBLIC = "https://daimon.example/mcp"
+_LINEAR_URL = "https://linear.example/mcp"
 _ENABLED = ToolSafetyPolicy(enabled=True)
 _DISABLED = ToolSafetyPolicy(enabled=False)
+
+Call = tuple[str, str, dict[str, Any]]
 
 
 @pytest.fixture(autouse=True)
@@ -51,13 +66,13 @@ def _fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(safety, "_POLL_S", 0.01)
 
 
-def _linear_toolset(policy: str) -> dict[str, Any]:
-    """A third-party toolset frozen as `policy`, with a per-tool override too."""
+def _toolset(server: str, policy: str, *names: str) -> dict[str, Any]:
+    """A toolset frozen as `policy`, with that policy on per-tool configs too."""
     return {
         "type": "mcp_toolset",
-        "mcp_server_name": "linear",
+        "mcp_server_name": server,
         "configs": [
-            {"name": "create_issue", "enabled": True, "permission_policy": {"type": policy}}
+            {"name": name, "enabled": True, "permission_policy": {"type": policy}} for name in names
         ],
         "default_config": {"enabled": True, "permission_policy": {"type": policy}},
     }
@@ -66,9 +81,11 @@ def _linear_toolset(policy: str) -> dict[str, Any]:
 class FakeSession:
     """One MA session: tool updates, the event log, and what was sent, in order.
 
-    A `user.message` starts a turn that calls `tool` on `linear` and pauses;
-    answering every pending call ends the turn. `calls` is the wire order of
-    every mutating request.
+    A `user.message` starts a turn that pauses on each batch of `script` in
+    turn; answering every pending call moves to the next batch, and after the
+    last one the turn ends. `calls` is the wire order of every mutating
+    request. `page_size` pages event lists; `fail_update` / `fail_confirm`
+    refuse those requests.
     """
 
     def __init__(
@@ -77,57 +94,81 @@ class FakeSession:
         account: uuid.UUID = _OWNER,
         frozen: str = "always_allow",
         tool: str = "create_issue",
+        script: list[list[Call]] | None = None,
     ) -> None:
         self.metadata = {MA_METADATA_KEY_ACCOUNT: str(account)}
-        self.tools = [_linear_toolset(frozen)]
-        self.servers = [{"name": "linear", "type": "url", "url": "https://linear.example/mcp"}]
-        self.tool = tool
+        self.tools = [_toolset("linear", frozen, "create_issue")]
+        self.servers = [{"name": "linear", "type": "url", "url": _LINEAR_URL}]
+        self.script = script or [[("linear", tool, {})]]
         self.events: list[dict[str, Any]] = []
-        self.status = "idle"
         self.calls: list[tuple[str, Any]] = []
+        self.page_size = 1000
+        self.fail_update = False
+        self.fail_confirm = False
+        self.on_confirm: Callable[[], None] | None = None
+        self._remaining: list[list[Call]] = []
         self._ids = 0
+
+    def with_daimon(self, url: str = _PUBLIC) -> FakeSession:
+        self.tools.append(_toolset("daimon-mcp", "always_allow"))
+        self.servers.append({"name": "daimon-mcp", "type": "url", "url": url})
+        return self
 
     def _id(self, prefix: str) -> str:
         self._ids += 1
         return f"{prefix}_{self._ids:03d}"
 
-    def pause(self, *, boundary: str | None = None) -> str:
-        """Append a turn paused on one call; returns its boundary id."""
-        boundary = boundary or self._id("evt_user")
-        tool_use = self._id("evt_tool")
-        self.events += [
-            {"id": boundary, "type": "user.message", "content": [{"type": "text", "text": "hi"}]},
-            {
-                "id": tool_use,
-                "type": "agent.mcp_tool_use",
-                "mcp_server_name": "linear",
-                "name": self.tool,
-                "input": {},
-                "evaluated_permission": "ask",
-            },
+    def _pause_on(self, batch: list[Call]) -> None:
+        ids: list[str] = []
+        for server, name, tool_input in batch:
+            tool_use = self._id("evt_tool")
+            ids.append(tool_use)
+            self.events.append(
+                {
+                    "id": tool_use,
+                    "type": "agent.mcp_tool_use",
+                    "mcp_server_name": server,
+                    "name": name,
+                    "input": tool_input,
+                    "evaluated_permission": "ask",
+                }
+            )
+        self.events.append(
             {
                 "id": self._id("evt_pause"),
                 "type": "session.status_idle",
-                "stop_reason": {"type": "requires_action", "event_ids": [tool_use]},
-            },
-        ]
+                "stop_reason": {"type": "requires_action", "event_ids": ids},
+            }
+        )
+
+    def pause(self) -> str:
+        """Append a turn paused on the script's first batch; returns its boundary."""
+        boundary = self._id("evt_user")
+        self.events.append(
+            {"id": boundary, "type": "user.message", "content": [{"type": "text", "text": "hi"}]}
+        )
+        self._remaining = list(self.script)
+        self._pause_on(self._remaining.pop(0))
         return boundary
 
     @property
     def confirmations(self) -> list[dict[str, Any]]:
         return [body for kind, body in self.calls if kind == "confirm"]
 
+    def kinds(self) -> list[str]:
+        return [kind for kind, _ in self.calls]
+
     @property
     def model(self) -> Any:
         return ma_session(
             id=_SESSION,
             agent=ma_agent(id=_MA_AGENT_ID, tools=self.tools, mcp_servers=self.servers),
-            status=self.status,
+            status="idle",
             metadata=self.metadata,
         )
 
-    def router(self) -> MARouter:
-        router = MARouter()
+    def router(self, router: MARouter | None = None) -> MARouter:
+        router = router or MARouter()
         router.add("GET", rf"/v1/sessions/{_SESSION}$", self._retrieve)
         router.add("POST", rf"/v1/sessions/{_SESSION}$", self._update)
         router.add("GET", rf"/v1/sessions/{_SESSION}/events$", self._list)
@@ -138,6 +179,10 @@ class FakeSession:
         return httpx.Response(200, json=self.model.model_dump(mode="json"))
 
     def _update(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        if self.fail_update:
+            return httpx.Response(
+                400, json={"type": "error", "error": {"type": "invalid_request_error"}}
+            )
         agent = json_body(request)["agent"]
         self.calls.append(("update", agent))
         self.tools = agent["tools"]
@@ -152,34 +197,46 @@ class FakeSession:
             events = [e for e in events if e["type"] in types]
         if params.get("order") == "desc":
             events.reverse()
-        if (limit := params.get("limit")) is not None:
-            events = events[: int(limit)]
-        return httpx.Response(200, json={"data": events, "next_page": None})
+        start = int(params.get("page") or 0)
+        size = min(int(params.get("limit") or 100), self.page_size)
+        page = events[start : start + size]
+        more = start + size < len(events)
+        return httpx.Response(
+            200, json={"data": page, "next_page": str(start + size) if more else None}
+        )
 
     def _send(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json_body(request)["events"]
+        if self.fail_confirm and any(e["type"] == "user.tool_confirmation" for e in body):
+            return httpx.Response(
+                400, json={"type": "error", "error": {"type": "invalid_request_error"}}
+            )
         echoed: list[dict[str, Any]] = []
-        for event in json_body(request)["events"]:
+        for event in body:
             if event["type"] == "user.message":
                 self.calls.append(("message", event))
-                boundary = self.pause()
-                echoed.append({**event, "id": boundary})
+                echoed.append({**event, "id": self.pause()})
             elif event["type"] == "user.tool_confirmation":
                 self.calls.append(("confirm", event))
                 self.events.append({**event, "id": self._id("evt_confirm")})
-        pending = self._pending()
-        if self.confirmations and not pending and self.events[-1]["type"] != "session.status_idle":
-            self.events += [
-                {
-                    "id": self._id("evt_msg"),
-                    "type": "agent.message",
-                    "content": [{"type": "text", "text": "done"}],
-                },
-                {
-                    "id": self._id("evt_idle"),
-                    "type": "session.status_idle",
-                    "stop_reason": {"type": "end_turn"},
-                },
-            ]
+        if any(e["type"] == "user.tool_confirmation" for e in body) and not self._pending():
+            if self.on_confirm is not None:
+                self.on_confirm()
+            if self._remaining:
+                self._pause_on(self._remaining.pop(0))
+            else:
+                self.events += [
+                    {
+                        "id": self._id("evt_msg"),
+                        "type": "agent.message",
+                        "content": [{"type": "text", "text": "done"}],
+                    },
+                    {
+                        "id": self._id("evt_idle"),
+                        "type": "session.status_idle",
+                        "stop_reason": {"type": "end_turn"},
+                    },
+                ]
         return send_events_response(data=echoed)
 
     def _pending(self) -> set[str]:
@@ -198,11 +255,12 @@ def _runtime(
     fake: FakeSession,
     factory: async_sessionmaker[AsyncSession],
     policy: ToolSafetyPolicy,
+    *,
+    public_url: str | None = None,
 ) -> McpRuntime:
     settings = MagicMock()
     settings.tool_safety = policy
-    settings.mcp.public_url = None
-    settings.mcp.jwt_secret = None
+    settings.mcp = McpSettings(public_url=public_url, jwt_secret=None)
     settings.github.fallback_pat = None
     return McpRuntime(
         session_factory=factory,
@@ -212,9 +270,16 @@ def _runtime(
     )
 
 
-def _auth(account: uuid.UUID = _OWNER) -> AuthIdentity:
+def _auth(
+    account: uuid.UUID = _OWNER, *, bound: str | None = None, platform: str | None = None
+) -> AuthIdentity:
     return AuthIdentity(
-        account_id=account, tenant_id=_TENANT_ID, role=Role.USER, agent_id=_AGENT_UUID
+        account_id=account,
+        tenant_id=_TENANT_ID,
+        role=Role.USER,
+        agent_id=_AGENT_UUID,
+        bound_channel_id=bound,
+        platform=platform,
     )
 
 
@@ -232,8 +297,22 @@ def _restart() -> None:
     safety._workers.clear()  # pyright: ignore[reportPrivateUsage]
 
 
-def _asks(tools: list[dict[str, Any]]) -> bool:
-    toolset = tools[0]
+def _no_workers() -> bool:
+    return not safety._workers  # pyright: ignore[reportPrivateUsage]
+
+
+async def _record(
+    factory: async_sessionmaker[AsyncSession], boundary: str, channel: str | None = None
+) -> None:
+    """What an agent-chat send left behind before the restart."""
+    async with factory.begin() as db:
+        await session_settle_state.record_unattended_turn(
+            db, managed_session_id=_SESSION, turn_event_id=boundary, rules_channel_id=channel
+        )
+
+
+def _asks(tools: list[dict[str, Any]], server: str = "linear") -> bool:
+    toolset = next(t for t in tools if t.get("mcp_server_name") == server)
     return toolset["default_config"]["permission_policy"]["type"] == "always_ask" and all(
         c["permission_policy"]["type"] == "always_ask" for c in toolset["configs"]
     )
@@ -247,9 +326,9 @@ def factory(
     return committing_sessionmaker
 
 
-async def _start(runtime: McpRuntime, fake: FakeSession, auth: AuthIdentity) -> dict[str, str]:
+def _creation_patches(fake: FakeSession, creator: AsyncMock | None = None) -> Any:
     agent = ma_agent(id=_MA_AGENT_ID, tools=fake.tools, mcp_servers=fake.servers)
-    with (
+    return (
         patch(
             "daimon.adapters.mcp.tools.agent_chat._resolve_ma_agent", AsyncMock(return_value=agent)
         ),
@@ -261,9 +340,14 @@ async def _start(runtime: McpRuntime, fake: FakeSession, auth: AuthIdentity) -> 
         # hands back a session whose frozen config allows, as an old one would.
         patch(
             "daimon.adapters.mcp.tools.agent_chat.create_session",
-            AsyncMock(return_value=fake.model),
+            creator or AsyncMock(return_value=fake.model),
         ),
-    ):
+    )
+
+
+async def _start(runtime: McpRuntime, fake: FakeSession, auth: AuthIdentity) -> dict[str, str]:
+    a, b, c = _creation_patches(fake)
+    with a, b, c:
         return await _start_turn_impl(runtime, auth, "hi")
 
 
@@ -320,7 +404,7 @@ async def test_every_send_is_regated_and_its_pause_decided_by_current_policy(
     await entry(runtime, fake)
     await _settle(runtime)
 
-    kinds = [kind for kind, _ in fake.calls]
+    kinds = fake.kinds()
     assert kinds.index("update") < kinds.index("message")
     assert _asks(fake.calls[kinds.index("update")][1]["tools"])
     assert [c["result"] for c in fake.confirmations] == [expected]
@@ -331,22 +415,13 @@ async def test_ask_new_session_is_gated_before_its_message(
 ) -> None:
     fake = FakeSession()
     runtime = _runtime(fake, factory, _ENABLED)
-    agent = ma_agent(id=_MA_AGENT_ID, tools=fake.tools, mcp_servers=fake.servers)
     creator = AsyncMock(return_value=fake.model)
-    with (
-        patch(
-            "daimon.adapters.mcp.tools.agent_chat._resolve_ma_agent", AsyncMock(return_value=agent)
-        ),
-        patch(
-            "daimon.adapters.mcp.tools.agent_chat.find_environment_by_daimon_tag",
-            AsyncMock(return_value=ma_environment(name="production")),
-        ),
-        patch("daimon.adapters.mcp.tools.agent_chat.create_session", creator),
-    ):
+    a, b, c = _creation_patches(fake, creator)
+    with a, b, c:
         result = await _ask_impl(runtime, _auth(), "hi", poll_interval_seconds=0.01)
     assert result.message == "done"
     assert creator.call_args.kwargs["tool_safety"] == _ENABLED
-    kinds = [kind for kind, _ in fake.calls]
+    kinds = fake.kinds()
     assert kinds.index("update") < kinds.index("message")
     assert [c["result"] for c in fake.confirmations] == ["deny"]
 
@@ -354,20 +429,116 @@ async def test_ask_new_session_is_gated_before_its_message(
 async def test_disabled_policy_is_the_explicit_off_switch(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Off leaves the session as it is and allows what it pauses on."""
+    """Off leaves the session as it is and allows the third-party call it pauses on."""
     fake = FakeSession(frozen="always_ask")
     runtime = _runtime(fake, factory, _DISABLED)
     await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
     await _settle(runtime)
-    assert [kind for kind, _ in fake.calls] == ["message", "confirm"]
+    assert fake.kinds() == ["message", "confirm"]
     assert [c["result"] for c in fake.confirmations] == ["allow"]
+
+
+async def test_a_failed_gate_sends_nothing_and_starts_no_worker(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession()
+    fake.fail_update = True
+    runtime = _runtime(fake, factory, _ENABLED)
+    with pytest.raises(Exception):  # noqa: B017 - whatever the provider's refusal maps to
+        await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+    with pytest.raises(Exception):  # noqa: B017
+        await _start(runtime, fake, _auth())
+    assert fake.calls == []
+    assert _no_workers()
+
+
+async def test_every_pause_of_a_turn_is_decided_and_each_call_on_its_own(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A read beside a write in one pause, then a second pause: per-call verdicts."""
+    fake = FakeSession(
+        script=[
+            [("linear", "get_issue", {}), ("linear", "create_issue", {})],
+            [("linear", "list_teams", {})],
+        ]
+    )
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["allow", "deny", "allow"]
+
+
+async def test_a_paged_history_is_read_back_to_its_boundary(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession()
+    fake.page_size = 2
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+
+
+async def test_history_past_the_page_ceiling_answers_nothing(
+    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(safety, "_MAX_TURN_PAGES", 1)
+    fake = FakeSession()
+    fake.page_size = 1
+    runtime = _runtime(fake, factory, _DISABLED)
+    await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+    await _settle(runtime)  # the worker gave up, failing closed
+    assert fake.confirmations == []
+
+
+async def test_a_refused_confirmation_leaves_the_turn_paused_for_its_owner(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(frozen="always_ask")
+    fake.fail_confirm = True
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+    await _settle(runtime)  # the worker gave up, failing closed
+    info = await _get_session_impl(runtime, _auth(), _SESSION)
+    assert (info.status, info.hint) == ("paused", safety.PAUSED_HINT)
+    fake.fail_confirm = False
+    await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+
+
+async def test_restart_after_a_partial_batch_answers_only_the_rest(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(
+        frozen="always_ask",
+        script=[[("linear", "get_issue", {}), ("linear", "create_issue", {})]],
+    )
+    boundary = fake.pause()
+    first = next(e for e in fake.events if e["type"] == "agent.mcp_tool_use")
+    fake.events.append(
+        {
+            "id": "evt_early",
+            "type": "user.tool_confirmation",
+            "tool_use_id": first["id"],
+            "result": "allow",
+        }
+    )
+    await _record(factory, boundary)
+    runtime = _runtime(fake, factory, _ENABLED)
+    _restart()
+    await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    await _settle(runtime)
+    assert [(c["tool_use_id"], c["result"]) for c in fake.confirmations] == [
+        (next(e["id"] for e in fake.events if e.get("name") == "create_issue"), "deny")
+    ]
 
 
 async def test_restart_then_read_stays_paused_and_answers_nothing(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     fake = FakeSession(frozen="always_ask")
-    fake.pause()
+    await _record(factory, fake.pause())
     runtime = _runtime(fake, factory, _DISABLED)
     _restart()
     for _ in range(3):
@@ -375,7 +546,37 @@ async def test_restart_then_read_stays_paused_and_answers_nothing(
         assert (info.status, info.hint) == ("paused", safety.PAUSED_HINT)
     await asyncio.sleep(0.05)
     assert fake.calls == []
-    assert not safety._workers  # pyright: ignore[reportPrivateUsage]
+    assert _no_workers()
+
+
+async def test_every_read_surface_answers_nothing(
+    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The general get_session reports the pause too; no read sends or starts a worker."""
+    fake = FakeSession(frozen="always_ask")
+    await _record(factory, fake.pause())
+    runtime = _runtime(fake, factory, _ENABLED)
+    _restart()
+    settled: list[str] = []
+
+    async def on_read(session: Any) -> None:
+        settled.append(session.id)
+
+    monkeypatch.setattr(
+        general_sessions,
+        "list_agents_by_tenant",
+        AsyncMock(return_value=[ma_agent(id=_MA_AGENT_ID)]),
+    )
+    general = await general_sessions._get_session_impl(runtime, _auth(), _SESSION)  # pyright: ignore[reportPrivateUsage]
+    assert (general.status, general.hint) == ("paused", safety.PAUSED_HINT)
+    await _get_session_impl(runtime, _auth(), _SESSION, on_read=on_read)
+    await _list_events_impl(runtime, _auth(), _SESSION, None, None, "asc", on_read=on_read)
+    with pytest.raises(ToolError, match="paused"):
+        await _deliver_turn_charts_impl(runtime, _auth(), _SESSION)
+    await asyncio.sleep(0.05)
+    assert fake.calls == []
+    assert _no_workers()
+    assert settled == [_SESSION], "only the transcript read's settle hook ran; it bills only"
 
 
 async def test_hub_admin_read_of_another_accounts_paused_channel_session_answers_nothing(
@@ -384,7 +585,7 @@ async def test_hub_admin_read_of_another_accounts_paused_channel_session_answers
     """Review 2, finding 2: a read grant never drives another account's turn."""
     fake = FakeSession(account=_OTHER, frozen="always_ask")
     fake.metadata[MA_METADATA_KEY_CHANNEL] = "C1"
-    fake.pause()
+    await _record(factory, fake.pause())
     runtime = _runtime(fake, factory, _ENABLED)
     admin = Subject(is_admin=True, platform_user_id="UA")
     with hub_session_access(admin, "read"):
@@ -394,26 +595,43 @@ async def test_hub_admin_read_of_another_accounts_paused_channel_session_answers
         await _continue_turn_impl(runtime, _auth(), _SESSION, None)
     await asyncio.sleep(0.05)
     assert fake.calls == []
+    assert _no_workers()
 
 
-async def test_owner_read_of_a_paused_attended_session_answers_nothing(
+async def test_owner_cannot_resume_a_pause_agent_chat_did_not_start(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """An attended card stays with the person it asks (no agent-chat record)."""
     fake = FakeSession(frozen="always_ask")
     fake.metadata[MA_METADATA_KEY_CHANNEL] = "C1"
     fake.pause()
     runtime = _runtime(fake, factory, _ENABLED)
     info = await _get_session_impl(runtime, _auth(), _SESSION)
-    assert info.status == "paused"
-    await asyncio.sleep(0.05)
-    assert fake.calls == []
+    assert (info.status, info.hint) == ("paused", safety.AWAITING_CARD_HINT)
+    for message in (None, "go on"):
+        with pytest.raises(ToolError, match="approval in the chat"):
+            await _continue_turn_impl(runtime, _auth(), _SESSION, message)
+    assert fake.confirmations == []
+    assert "message" not in fake.kinds()
+
+
+async def test_a_record_of_an_older_turn_does_not_cover_a_newer_card(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(frozen="always_ask")
+    await _record(factory, "evt_older_agent_chat_turn")
+    fake.pause()
+    runtime = _runtime(fake, factory, _DISABLED)
+    with pytest.raises(ToolError, match="approval in the chat"):
+        await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    assert fake.confirmations == []
 
 
 async def test_another_account_cannot_resume_a_paused_session(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     fake = FakeSession(account=_OTHER, frozen="always_ask")
-    fake.pause()
+    await _record(factory, fake.pause())
     runtime = _runtime(fake, factory, _DISABLED)
     with pytest.raises(ToolError, match="not found"):
         await _continue_turn_impl(runtime, _auth(), _SESSION, None)
@@ -427,13 +645,14 @@ async def test_owner_continue_after_restart_resumes_under_current_policy(
     """Review 1, finding 3: the policy now in force decides, enabled or not."""
     fake = FakeSession()
     boundary = fake.pause()
+    await _record(factory, boundary)
     runtime = _runtime(fake, factory, policy)
     _restart()
     started = await _continue_turn_impl(runtime, _auth(), _SESSION, None)
     await _settle(runtime)
     assert started["turn_event_id"] == boundary
     assert [c["result"] for c in fake.confirmations] == [expected]
-    assert "message" not in [kind for kind, _ in fake.calls]
+    assert "message" not in fake.kinds()
     if policy.enabled:
         assert fake.calls[0][0] == "update" and _asks(fake.calls[0][1]["tools"])
     else:
@@ -446,24 +665,60 @@ async def test_continue_with_a_message_resumes_first_then_sends(
 ) -> None:
     fake = FakeSession(frozen="always_ask")
     old = fake.pause()
+    await _record(factory, old)
     runtime = _runtime(fake, factory, _ENABLED)
     started = await _continue_turn_impl(runtime, _auth(), _SESSION, "next")
     await _settle(runtime)
     assert started["turn_event_id"] != old
-    assert [kind for kind, _ in fake.calls] == ["confirm", "message", "confirm"]
+    assert fake.kinds() == ["confirm", "message", "confirm"]
+
+
+async def test_the_message_after_a_resume_is_gated_again_under_the_policy_then(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Review A, finding 3: a policy change during the wait reaches the new message."""
+    fake = FakeSession()
+    await _record(factory, fake.pause())
+    runtime = _runtime(fake, factory, _DISABLED)
+
+    def turn_safety_on() -> None:
+        runtime.settings.tool_safety = _ENABLED
+
+    fake.on_confirm = turn_safety_on
+    await _continue_turn_impl(runtime, _auth(), _SESSION, "next")
+    await _settle(runtime)
+    assert fake.kinds() == ["confirm", "update", "message", "confirm"]
+    assert [c["result"] for c in fake.confirmations] == ["allow", "deny"]
+
+
+async def test_a_failed_gate_after_the_resume_leaves_the_message_unsent(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession()
+    await _record(factory, fake.pause())
+    runtime = _runtime(fake, factory, _DISABLED)
+
+    def turn_safety_on_and_break_updates() -> None:
+        runtime.settings.tool_safety = _ENABLED
+        fake.fail_update = True
+
+    fake.on_confirm = turn_safety_on_and_break_updates
+    with pytest.raises(Exception):  # noqa: B017 - the provider's refusal
+        await _continue_turn_impl(runtime, _auth(), _SESSION, "next")
+    assert fake.kinds() == ["confirm"]
 
 
 async def test_continue_with_a_message_refuses_when_the_resumed_turn_runs_on(
     factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = FakeSession(frozen="always_ask")
-    fake.pause()
+    await _record(factory, fake.pause())
     runtime = _runtime(fake, factory, _ENABLED)
     # The resumed turn never ends here.
     monkeypatch.setattr(FakeSession, "_pending", lambda self: {"evt_still"})
     with pytest.raises(ToolError, match="not sent"):
         await _continue_turn_impl(runtime, _auth(), _SESSION, "next", resume_wait_s=0.1)
-    assert "message" not in [kind for kind, _ in fake.calls]
+    assert "message" not in fake.kinds()
 
 
 async def test_continue_without_a_message_needs_a_paused_session(
@@ -473,7 +728,7 @@ async def test_continue_without_a_message_needs_a_paused_session(
     runtime = _runtime(fake, factory, _ENABLED)
     with pytest.raises(ToolError, match="message is required"):
         await _continue_turn_impl(runtime, _auth(), _SESSION, None)
-    assert "message" not in [kind for kind, _ in fake.calls]
+    assert "message" not in fake.kinds()
 
 
 async def test_worker_answers_only_its_own_turn(
@@ -483,24 +738,167 @@ async def test_worker_answers_only_its_own_turn(
     fake = FakeSession(frozen="always_ask")
     fake.pause()
     runtime = _runtime(fake, factory, _DISABLED)
-    worker = safety.watch_turn(runtime, _auth(), _SESSION, turn_event_id="evt_someone_else")
+    worker = safety.watch_turn(
+        runtime, _auth(), _SESSION, turn_event_id="evt_someone_else", rules_channel_id=None
+    )
     await asyncio.sleep(0.1)
     assert not worker.done()
     worker.cancel()
     assert fake.calls == []
 
 
-async def test_running_worker_reads_as_running(
+async def test_another_runtime_reads_a_pause_it_does_not_answer(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Only the runtime whose worker owns the turn reads it as running; no lease."""
     fake = FakeSession(frozen="always_ask")
-    fake.pause()
+    boundary = fake.pause()
+    await _record(factory, boundary)
+    owner = _runtime(fake, factory, _ENABLED)
+    other = _runtime(fake, factory, _ENABLED)
+    # The owner's worker is stuck before answering: its decider never returns.
+    with patch.object(
+        safety, "_answer", AsyncMock(side_effect=lambda *_a, **_k: asyncio.Event().wait())
+    ):
+        worker = safety.watch_turn(
+            owner, _auth(), _SESSION, turn_event_id=boundary, rules_channel_id=None
+        )
+        try:
+            assert (await _get_session_impl(owner, _auth(), _SESSION)).status == "running"
+            assert (await _get_session_impl(other, _auth(), _SESSION)).status == "paused"
+            await asyncio.sleep(0.05)
+            assert fake.calls == []
+        finally:
+            worker.cancel()
+
+
+@pytest.mark.parametrize("policy", [_ENABLED, _DISABLED], ids=["enabled", "disabled"])
+@pytest.mark.parametrize(
+    "call",
+    [
+        ("daimon-mcp", "request_agent_backend_switch", {"preview_digest": "d1", "revision": 3}),
+        ("daimon-mcp", "microsoft_send", {"action": "send_mail"}),
+    ],
+    ids=["backend_switch", "microsoft_send"],
+)
+async def test_a_protected_first_party_action_is_refused_unattended(
+    policy: ToolSafetyPolicy, call: Call, factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Review A, finding 1: nobody is here to press its card, policy on or off."""
+    fake = FakeSession(script=[[call]]).with_daimon()
+    await _record(factory, fake.pause())
+    runtime = _runtime(fake, factory, policy, public_url=_PUBLIC)
+    _restart()
+    await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+    [(_, agent)] = [c for c in fake.calls if c[0] == "update"]
+    daimon = next(t for t in agent["tools"] if t["mcp_server_name"] == "daimon-mcp")
+    asked = {c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"}
+    assert {"request_agent_backend_switch", "microsoft_send"} <= asked
+
+
+async def test_a_foreign_reserved_server_is_healed_with_safety_off(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Review A, finding 5."""
+    fake = FakeSession().with_daimon(url="https://evil.example/mcp")
+    runtime = _runtime(fake, factory, _DISABLED, public_url=_PUBLIC)
+    await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+    kinds = fake.kinds()
+    assert kinds.index("update") < kinds.index("message")
+    servers = {s["name"]: s["url"] for s in fake.calls[0][1]["mcp_servers"]}
+    assert servers == {"linear": _LINEAR_URL, "daimon-mcp": _PUBLIC}
+
+
+async def _deny_in_channel(
+    factory: async_sessionmaker[AsyncSession], channel: str, tool: str = "get_issue"
+) -> None:
+    async with factory.begin() as db:
+        await make_tenant(db, id=_TENANT_ID)
+    async with factory.begin() as db:
+        await agent_tool_rules.set_rule(
+            db,
+            tenant_id=_TENANT_ID,
+            agent_id=_MA_AGENT_ID,
+            agent_name="safety",
+            tool_key=f"linear/{tool}",
+            channel_id=channel,
+            server_url=_LINEAR_URL,
+            rule="deny",
+            set_by="admin",
+            actor=Subject(is_admin=True, platform_user_id="UA"),
+        )
+
+
+_RULES = ToolSafetyPolicy(enabled=True, agent_rules=True)
+
+
+@pytest.mark.parametrize(
+    ("auth", "stamp", "expected"),
+    [
+        (_auth(bound="C1", platform="discord"), None, "deny"),
+        (_auth(bound="C1:1700000000.0001", platform="slack"), None, "deny"),
+        (_auth(), "C1", "deny"),
+        (_auth(bound="C2", platform="discord"), None, "allow"),
+        (_auth(), None, "allow"),
+    ],
+    ids=["bound-key", "slack-thread-parent", "channel-session", "other-channel", "no-channel"],
+)
+async def test_channel_tool_rules_reach_agent_chat_turns(
+    auth: AuthIdentity,
+    stamp: str | None,
+    expected: str,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Review A, finding 2: the turn's channel's rules apply, a read included."""
+    await _deny_in_channel(factory, "C1")
+    fake = FakeSession(tool="get_issue")
+    if stamp is not None:
+        fake.metadata[MA_METADATA_KEY_CHANNEL] = stamp
+    runtime = _runtime(fake, factory, _RULES)
+    await _continue_turn_impl(runtime, auth, _SESSION, "hi")
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == [expected]
+
+
+async def test_a_dm_never_inherits_its_source_channels_rules(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _deny_in_channel(factory, "C1")
+    fake = FakeSession(tool="get_issue")
+    fake.metadata[MA_METADATA_KEY_CHANNEL] = "C1"
+    fake.metadata[MA_METADATA_KEY_PRIVATE_DM] = "dm-1"
+    assert safety.rules_channel(_auth(), fake.model) is None
+
+
+async def test_a_resumed_turn_keeps_the_channel_it_was_sent_under(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The resuming key's own (absent) channel never replaces the turn's."""
+    await _deny_in_channel(factory, "C1")
+    fake = FakeSession(tool="get_issue")
+    await _record(factory, fake.pause(), channel="C1")
+    runtime = _runtime(fake, factory, _RULES)
+    _restart()
+    await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+
+
+async def test_each_send_records_its_turn_and_channel(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession()
     runtime = _runtime(fake, factory, _ENABLED)
-    worker = safety.watch_turn(runtime, _auth(), _SESSION, turn_event_id="evt_someone_else")
-    try:
-        assert (await _get_session_impl(runtime, _auth(), _SESSION)).status == "running"
-    finally:
-        worker.cancel()
+    started = await _continue_turn_impl(
+        runtime, _auth(bound="C9:1.2", platform="slack"), _SESSION, "hi"
+    )
+    async with factory() as db:
+        recorded = await session_settle_state.unattended_turn(db, managed_session_id=_SESSION)
+    assert recorded == session_settle_state.UnattendedTurn(
+        turn_event_id=started["turn_event_id"], rules_channel_id="C9"
+    )
 
 
 @pytest.mark.parametrize(

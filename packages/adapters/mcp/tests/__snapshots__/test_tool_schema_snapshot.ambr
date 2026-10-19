@@ -44,10 +44,12 @@
         'description': '''
           Send a follow-up on an existing session without waiting.
           <blank line>
-          On a session ``get_session`` reports ``paused`` (waiting on tool
-          confirmations after a restart), this resumes it first: the waiting
-          calls are decided by the current tool policy, and ``message`` is then
-          optional. Only the session's own account can continue or resume it.
+          On a session ``get_session`` reports ``paused`` with the hint to call
+          ``continue_turn`` (a turn started here, waiting on tool confirmations
+          after a restart), this resumes it first: the waiting calls are decided
+          by the current tool policy, and ``message`` is then optional. Only the
+          session's own account can continue or resume it, and never a turn
+          waiting on an approval card in chat.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -96,9 +98,9 @@
         'description': '''
           Status of one session. Poll until ``idle`` before reading ``list_events``.
           <blank line>
-          ``paused`` means the turn waits on tool confirmations nobody is
-          answering; its owner resumes it with ``continue_turn``. Reading never
-          answers them.
+          ``paused`` means the turn waits on tool confirmations; ``hint`` says
+          whether its owner resumes it with ``continue_turn`` or it waits for an
+          approval in chat. Reading never answers them.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -824,14 +826,17 @@
         ``created_at_gte=turn_started_at`` and discard events up to and
         including ``turn_event_id`` to read only this turn's transcript.
         <blank line>
-        When ``get_my_session`` reports ``status`` ``paused``, the turn is
-        waiting on tool confirmations nobody is answering (the service
-        restarted). This call resumes it: the waiting calls are decided by the
-        current tool policy (reads run; writes are refused unless the operator
-        allowed them in unattended runs). ``message`` is then optional:
-        without one, the paused turn's boundary is returned; with one, it is
-        sent once the resumed turn ends, or the call is refused if that takes
-        more than about 90 seconds. Any other session needs a ``message``.
+        When ``get_my_session`` reports ``status`` ``paused`` with the hint
+        to call ``continue_turn``, a turn this tool started is waiting on tool
+        confirmations nobody is answering (the service restarted). This call
+        resumes it: the waiting calls are decided by the current tool policy
+        (reads run; writes are refused unless the operator allowed them in
+        unattended runs). ``message`` is then optional: without one, the
+        paused turn's boundary is returned; with one, it is sent once the
+        resumed turn ends, or the call is refused if that takes more than
+        about 90 seconds. A turn waiting on someone's approval card in chat
+        is refused: only that card answers it. Any other session needs a
+        ``message``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2833,8 +2838,9 @@
         Use this to check whether a turn has finished (``status`` becomes
         ``idle``/``terminated``) before reading the transcript with
         ``list_events``. ``status`` ``paused`` means the turn waits on tool
-        confirmations nobody is answering; ``hint`` says to call
-        ``continue_turn`` to resume it. Reading never answers them.
+        confirmations; ``hint`` says whether ``continue_turn`` resumes it or
+        it waits for an approval in the chat where it was asked. Reading
+        never answers them.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2886,6 +2892,10 @@
     'get_session': dict({
       'description': '''
         Look up one of your sessions by id (tenant-scoped).
+        <blank line>
+        ``status`` ``paused`` means the turn waits on tool confirmations;
+        ``hint`` says who can let it go on. List tools report the provider's
+        own status, so a paused turn lists as ``idle``.
         <blank line>
         A conversation from a sealed channel is refused unless
         ``origin_context_id`` is this turn's origin inside that channel.

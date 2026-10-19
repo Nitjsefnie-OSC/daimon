@@ -111,20 +111,33 @@ with an agent key or on the hub) has nobody to press Approve, so it runs
 under the same tool-safety rules as a routine: reads run, a third-party write
 is refused unless `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES` lists it (or an
 agent `allow` rule with `chat_and_routines` covers it), and `deny` always
-refuses. Before every message the session's tool settings are set again from
-the current policy, so a session created before tool safety was on, or one
-whose agent allowed a tool outright, still asks. Only the process that sent
-the turn answers its tool calls, and it decides each one when it is made.
-With `DAIMON_TOOL_SAFETY__ENABLED` off, the calls a session still asks about
-are allowed.
+refuses. Agent tool rules for the turn's channel apply as well as agent-wide
+ones: the channel of a key minted in a channel, otherwise the channel the
+conversation belongs to (a Slack thread's parent channel; never the source
+channel of a DM). Before every message the session's tool settings are set
+again from the current policy, so a session created before tool safety was
+on, or one whose agent allowed a tool outright, still asks. The process that
+sent the turn answers its tool calls, deciding each one when it is made.
+With `DAIMON_TOOL_SAFETY__ENABLED` off, ordinary third-party calls the
+session still asks about are allowed.
 
-Reading a session never answers a tool call. If the service restarts while a
-turn waits on one, the turn stays paused, and `get_session` and
+Daimon's own actions that wait for a person's card in chat (switching an
+agent's backend, Microsoft mail, invites and file changes) always ask in
+these sessions and are always refused there, with tool safety on or off.
+
+Reading a session never answers a tool call. If the service restarts while an
+agent-chat turn waits on one, the turn stays paused, and `get_session` and
 `get_my_session` report `status: paused` with the hint "paused: call
 continue_turn to resume". Only the session's own account can resume it, by
 calling `continue_turn`, with or without a message; the waiting calls are then
-decided by the policy in force at that moment. An admin who can read another
-member's channel conversation on the hub cannot resume it.
+decided by the policy in force at that moment, under the channel rules of the
+message that started the turn, and the session is checked and its tools set
+again before any new message. An admin who can read another member's channel
+conversation on the hub cannot resume it. A turn that agent chat did not
+start, such as a chat turn waiting on someone's confirmation card, reads as
+paused with the hint "paused: waiting for approval where it was asked", and
+`continue_turn` refuses it: only that card answers it. The list tools report
+the provider's own status, so a paused turn lists as `idle`.
 
 ## Channel rules
 

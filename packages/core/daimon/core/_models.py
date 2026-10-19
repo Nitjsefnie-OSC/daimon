@@ -3700,7 +3700,9 @@ class SessionSettleState(Base):
     (the send's own `user.message`) once it is accepted; both are cleared when
     that turn has been settled (`daimon.core.usage_sweep`). `covered_through`
     is read only on the reserved `backlog-cutoff` row, where it records when
-    this settle path was deployed.
+    this settle path was deployed. `unattended_turn_event_id` is the latest
+    turn an agent-chat send started (`unattended_turn`), never cleared by a
+    settle.
 
     The table keeps its original name; the former catch-up's cursor columns
     are no longer mapped and are dropped later. Private to
@@ -3713,6 +3715,9 @@ class SessionSettleState(Base):
     covered_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     settle_turn_event_id: Mapped[str | None] = mapped_column(Text)
     settle_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The latest turn an agent-chat send started here, and its tool-rule channel.
+    unattended_turn_event_id: Mapped[str | None] = mapped_column(Text)
+    unattended_rules_channel_id: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

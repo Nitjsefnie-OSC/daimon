@@ -1134,19 +1134,27 @@ every send, `gate_session_snapshot` rewrites the session's own frozen tool
 config from the current policy (every gated toolset's default and per-tool
 configs to `always_ask`, Daimon rule tools, a healed `daimon-mcp` URL) and
 fails the send if the update fails; it never restores attachments the
-session hides. The sending process then runs one bounded worker for that
-turn (`_agent_chat_safety.watch_turn`), which answers only pauses after its
-own `user.message` boundary, each decided at call time by
-`unattended_posture` (`unattended_decider` with the agent's rules; never
-`AutoApprove` and never the session's frozen config). `annotations_for` is
-the seam for operator-trusted MCP hints; nothing supplies them yet. A read
-never answers a pause: `get_session` and `get_my_session` report `running`
-while this process's worker owns the turn and `paused` with a hint when the
-turn waits on confirmations nobody answers, such as after a restart. Only
-the session's own account (an agent key, or the hub in `continue` mode) can
-resume it: `continue_turn` re-gates the session and starts a worker on the
-paused turn, which decides from the policy now in force, and then sends the
-caller's message, if any, once that turn ends.
+session hides. It also makes Daimon's card-only actions (`protected_tools`:
+the backend switch and Microsoft sends and writes) ask and heals a foreign
+`daimon-mcp` URL, with the policy on or off. After the send, the turn's
+boundary and tool-rule channel are recorded on the session's settle row
+(`session_settle_state.record_unattended_turn`), and the sending process runs
+one bounded worker for that turn (`_agent_chat_safety.watch_turn`), which
+answers only pauses after its own `user.message` boundary, each decided at
+call time by `unattended_posture`: `unattended_decider` with the agent's
+rules for that channel (`channel_for_tool_rules`), the protected tools
+refused, never `AutoApprove` and never the session's frozen config.
+Confirmations themselves are not re-gated; the gate before the message
+covers the turn. `annotations_for` is the seam for operator-trusted MCP
+hints; nothing supplies them yet. A read never answers a pause: `get_session`
+(both), `get_my_session` and hub `get_session` report `running` while this
+process's worker owns the turn and `paused` with a hint otherwise; list tools
+report the provider's status. Only the session's own account (an agent key,
+or the hub in `continue` mode) can resume a pause, and only on the turn the
+record names, so a chat card is never adopted: `continue_turn` re-gates the
+session, starts a worker on the paused turn with the recorded channel, which
+decides from the policy now in force, and, given a message, sends it once
+that turn ends, after repeating every check and the gate.
 
 With both `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
 an active chat admin can request an agent backend change through that same

@@ -375,10 +375,12 @@ def register_hub_tools(
     ) -> dict[str, str]:
         """Send a follow-up on an existing session without waiting.
 
-        On a session ``get_session`` reports ``paused`` (waiting on tool
-        confirmations after a restart), this resumes it first: the waiting
-        calls are decided by the current tool policy, and ``message`` is then
-        optional. Only the session's own account can continue or resume it.
+        On a session ``get_session`` reports ``paused`` with the hint to call
+        ``continue_turn`` (a turn started here, waiting on tool confirmations
+        after a restart), this resumes it first: the waiting calls are decided
+        by the current tool policy, and ``message`` is then optional. Only the
+        session's own account can continue or resume it, and never a turn
+        waiting on an approval card in chat.
         """
         auth, subject, recheck = await _admitted(ctx, daimon_id, "continue_turn")
         with hub_session_access(subject, "continue"):
@@ -391,9 +393,9 @@ def register_hub_tools(
     ) -> SessionInfo:
         """Status of one session. Poll until ``idle`` before reading ``list_events``.
 
-        ``paused`` means the turn waits on tool confirmations nobody is
-        answering; its owner resumes it with ``continue_turn``. Reading never
-        answers them.
+        ``paused`` means the turn waits on tool confirmations; ``hint`` says
+        whether its owner resumes it with ``continue_turn`` or it waits for an
+        approval in chat. Reading never answers them.
         """
         _, _, auth = await _identity(runtime, ctx, daimon_id)
         with hub_session_access(await load_hub_subject(runtime, auth), "read"):

@@ -224,3 +224,57 @@ async def test_create_isolated_session_makes_zero_vault_or_file_upload_calls() -
     assert all("vault" not in p for p in paths), f"no vault endpoint should be called; got {paths}"
     assert all("files" not in p for p in paths), f"no files.upload call should be made; got {paths}"
     assert paths == ["/v1/sessions"], "exactly one call, to session create, and nothing else"
+
+
+async def test_create_isolated_session_gates_third_party_tools_with_safety_on() -> None:
+    """The bundle path's session asks on a third-party toolset, default and per-tool."""
+    from daimon.core.tool_safety import ToolSafetyPolicy
+
+    agent = ma_agent(
+        id="ag_reader",
+        name="reader",
+        model="claude-opus-4-7",
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "configs": [
+                    {
+                        "name": "create_issue",
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    }
+                ],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        ],
+        mcp_servers=[{"name": "linear", "type": "url", "url": "https://linear.example/mcp"}],
+    )
+    bodies: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_gated", agent_id="ag_reader", environment_id="env_reader"
+            ),
+        )
+
+    await create_isolated_session(
+        build_fake_anthropic_http(_handler),
+        agent=agent,
+        environment=_make_env(),
+        account_id=None,
+        tenant_id=None,
+        resources=[_bundle_resource()],
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+
+    [body] = bodies
+    assert body["agent"]["type"] == "agent_with_overrides"
+    [toolset] = body["agent"]["tools"]
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+    assert [c["permission_policy"] for c in toolset["configs"]] == [{"type": "always_ask"}]
+    assert "vault_ids" not in body

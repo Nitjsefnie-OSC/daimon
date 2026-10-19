@@ -1,12 +1,14 @@
 """Answer the tool confirmations of agent-chat turns, which nobody watches.
 
-Only the process that sent a turn answers its pauses: `watch_turn` starts a
+The process that sent a turn answers its pauses: `watch_turn` starts a
 bounded worker for that one turn boundary, right after an authorized
-`start_turn` or `continue_turn` send. Each pause is decided at call time by
-`unattended_posture` from the current policy. Nothing else answers one. A
-read (`turn_status`) only reports; after a restart the session stays paused
-and gated until its owner calls `continue_turn`, which re-gates it and
-starts a worker on the paused turn (`resume_paused`).
+`start_turn` or `continue_turn` send, and `record_turn` notes in the database
+that agent chat started that turn and under which channel's tool rules. Each
+pause is decided at call time by `unattended_posture` from the current
+policy. A read (`turn_status`) only reports. After a restart the session
+stays paused and gated until its owner calls `continue_turn`, which re-gates
+it and starts a worker on the paused turn (`resume_paused`), only if agent
+chat started that turn: a chat card is left to the person it asks.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from typing import Literal
 import structlog
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.resource_ports import (
     list_session_events,
     mcp_scope,
@@ -27,11 +29,16 @@ from daimon.adapters.mcp.resource_ports import (
 )
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._session_access import hub_access_mode
-from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_PRIVATE_DM,
+)
 from daimon.core.stores import session_settle_state
 from daimon.core.turn.approvals import (
     AnnotationLookup,
     build_decision_events,
+    channel_for_tool_rules,
     pending_confirmation_ids,
     tool_calls_for,
 )
@@ -45,7 +52,15 @@ from fastmcp.exceptions import ToolError
 log = structlog.get_logger(__name__)
 
 PAUSED_HINT = "paused: call continue_turn to resume"
-"""What a read reports for a turn waiting on confirmations nobody is answering."""
+"""What a read reports for an agent-chat turn waiting on confirmations nobody answers."""
+
+AWAITING_CARD_HINT = "paused: waiting for approval where it was asked"
+"""What a read reports for a turn paused on someone's confirmation card."""
+
+NOT_RESUMABLE_MSG = (
+    "this conversation is waiting for an approval in the chat where it was asked; "
+    "agent chat can't answer it. Ask the person to approve or deny it there."
+)
 
 # Newest-first pages read back to a turn's boundary before giving up.
 _MAX_TURN_PAGES = 20
@@ -78,6 +93,49 @@ async def gate(runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgen
         session_factory=runtime.session_factory,
         tenant_id=auth.tenant_id,
     )
+
+
+def rules_channel(auth: AuthIdentity, session: BetaManagedAgentsSession) -> str | None:
+    """The channel whose tool rules a send by `auth` on `session` runs under.
+
+    A channel-bound key's own channel, else the channel the session is a
+    conversation in; never a DM's source channel, and a Slack thread's
+    parent channel (`channel_for_tool_rules`).
+    """
+    metadata = session.metadata or {}
+    return channel_for_tool_rules(
+        platform=auth.platform or "",
+        channel_id=token_channel_id(auth) or metadata.get(MA_METADATA_KEY_CHANNEL),
+        private_dm_id=metadata.get(MA_METADATA_KEY_PRIVATE_DM),
+    )
+
+
+async def record_turn(
+    runtime: McpRuntime, handle: str, *, turn_event_id: str, rules_channel_id: str | None
+) -> None:
+    """Note that agent chat started `turn_event_id`, after its send was accepted.
+
+    Without this record nobody can resume the turn after a restart, which
+    fails closed; the sending worker does not need it.
+    """
+    try:
+        async with runtime.session_factory.begin() as db:
+            await session_settle_state.record_unattended_turn(
+                db,
+                managed_session_id=handle,
+                turn_event_id=turn_event_id,
+                rules_channel_id=rules_channel_id,
+            )
+    except Exception:
+        # Named boundary: the message was accepted; only a later resume is lost.
+        log.exception("mcp.agent_chat.turn_record_failed", session_id=handle)
+
+
+async def _recorded_turn(
+    runtime: McpRuntime, handle: str
+) -> session_settle_state.UnattendedTurn | None:
+    async with runtime.session_factory() as db:
+        return await session_settle_state.unattended_turn(db, managed_session_id=handle)
 
 
 def _public_url(runtime: McpRuntime) -> str | None:
@@ -135,7 +193,12 @@ async def _read_turn(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> _T
 
 
 def watch_turn(
-    runtime: McpRuntime, auth: AuthIdentity, handle: str, *, turn_event_id: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+    *,
+    turn_event_id: str,
+    rules_channel_id: str | None,
 ) -> asyncio.Task[bool]:
     """Answer the pauses of the turn that starts at `turn_event_id`, and no other.
 
@@ -146,7 +209,10 @@ def watch_turn(
     if (previous := _workers.get(key)) is not None:
         previous.cancel()
     task = asyncio.create_task(
-        _watch(runtime, auth, handle, turn_event_id=turn_event_id), context=contextvars.Context()
+        _watch(
+            runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=rules_channel_id
+        ),
+        context=contextvars.Context(),
     )
     _workers[key] = task
 
@@ -159,7 +225,12 @@ def watch_turn(
 
 
 async def _watch(
-    runtime: McpRuntime, auth: AuthIdentity, handle: str, *, turn_event_id: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+    *,
+    turn_event_id: str,
+    rules_channel_id: str | None,
 ) -> bool:
     """True once the turn ended; False if it was left paused (it stays gated)."""
     answered: set[str] = set()
@@ -178,7 +249,7 @@ async def _watch(
                     stop = turn.state.stop_reason
                     ids = pending_confirmation_ids(stop, confirmed=turn.confirmed | answered)
                     if ids:
-                        await _answer(runtime, auth, session, turn, ids)
+                        await _answer(runtime, auth, session, turn, ids, rules_channel_id)
                         answered.update(ids)
                     elif stop is not None and stop.type != "requires_action":
                         if answered:
@@ -197,6 +268,7 @@ async def _answer(
     session: BetaManagedAgentsSession,
     turn: _Turn,
     ids: list[str],
+    rules_channel_id: str | None,
 ) -> None:
     posture = unattended_posture(
         runtime.settings.tool_safety,
@@ -204,6 +276,7 @@ async def _answer(
         public_url=_public_url(runtime),
         session_factory=runtime.session_factory,
         tenant_id=auth.tenant_id,
+        channel_id=rules_channel_id,
         annotations_for=_annotations_for(runtime, auth, session),
     )
     decisions = [
@@ -262,16 +335,23 @@ async def _paused(
 
 async def turn_status(
     runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession
-) -> Literal["running", "paused"] | None:
+) -> tuple[Literal["running", "paused"], str | None] | None:
     """What a read reports for a turn paused on confirmations; never answers one.
 
-    `running` while this process's worker is answering it, `paused` when
-    nobody is; None for any session not paused, which reads as MA reports it.
+    `running` while this process's worker is answering it; otherwise `paused`
+    with a hint: resume with `continue_turn` when agent chat started that
+    turn, approve where it was asked when it did not. None for any session
+    not paused, which reads as MA reports it.
     """
     if not await _paused(runtime, auth, session):
         return None
     worker = _workers.get((id(runtime), session.id))
-    return "running" if worker is not None and not worker.done() else "paused"
+    if worker is not None and not worker.done():
+        return ("running", None)
+    turn = await _read_turn(runtime, auth, session.id)
+    recorded = await _recorded_turn(runtime, session.id)
+    ours = recorded is not None and recorded.turn_event_id == turn.boundary_id
+    return ("paused", PAUSED_HINT if ours else AWAITING_CARD_HINT)
 
 
 @dataclass(frozen=True)
@@ -285,15 +365,24 @@ async def resume_paused(
 ) -> Resumed | None:
     """Answer `session`'s paused turn from the current policy; None if not paused.
 
-    Only for the owner's `continue_turn`, after `gate`, inside its fence.
+    Only for the owner's `continue_turn`, after `gate`, inside its fence, and
+    only for a turn agent chat started (`record_turn`): its tool rules are
+    that send's channel's. A pause on any other turn is refused.
     """
     require_session_driver(session, auth)
     if not await _paused(runtime, auth, session):
         return None
     turn = await _read_turn(runtime, auth, session.id)
-    if turn.boundary_id is None:
-        raise ToolError("This session's paused turn could not be read; try again.")
+    recorded = await _recorded_turn(runtime, session.id)
+    if turn.boundary_id is None or recorded is None or recorded.turn_event_id != turn.boundary_id:
+        raise ToolError(NOT_RESUMABLE_MSG)
     worker = _workers.get((id(runtime), session.id))
     if worker is None or worker.done():
-        worker = watch_turn(runtime, auth, session.id, turn_event_id=turn.boundary_id)
+        worker = watch_turn(
+            runtime,
+            auth,
+            session.id,
+            turn_event_id=turn.boundary_id,
+            rules_channel_id=recorded.rules_channel_id,
+        )
     return Resumed(worker=worker, turn_event_id=turn.boundary_id)
