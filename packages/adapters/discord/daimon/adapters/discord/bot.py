@@ -533,7 +533,7 @@ def _compose_queued_content(messages: list[discord.Message]) -> str:
     return "\n\n".join(f"[{m.author.display_name}]: {m.content}" for m in messages)
 
 
-def _log_bg_task_exception(task: asyncio.Task[None]) -> None:
+def _log_bg_task_exception(task: asyncio.Task[Any]) -> None:
     """Done-callback: surface escaped background-task exceptions immediately
     instead of asyncio's GC-time 'Task exception was never retrieved'."""
     if task.cancelled():
@@ -775,7 +775,7 @@ class DaimonBot(commands.Bot):
         # overwrite a later join's archive clear.
         self._guild_lifecycle_locks: dict[int, asyncio.Lock] = {}
         # Track spawned background tasks so they aren't GC'd; discard on done.
-        self._bg_tasks: set[asyncio.Task[None]] = set()
+        self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._output_sweeps: dict[str, asyncio.Task[None]] = {}
         self._delivery_notice_thread_ids: set[int] = set()
         # Oversize outputs stay listed; each is announced once, not every sweep.
@@ -796,6 +796,10 @@ class DaimonBot(commands.Bot):
         self._ready_reconciled_unjoined_tenant_ids: set[uuid.UUID] = set()
         self._ready_synced_guild_ids: set[int] = set()
         self._global_tree_synced = False
+        # One-shot guard for the boot reconcile watcher: only the first
+        # on_ready's reconcile tasks are watched, so the process logs exactly
+        # one `discord.boot_reconcile_complete`/`_failed` event.
+        self._boot_reconcile_watched = False
         # Inputs already finished by their card-intent transaction need no
         # cleanup DB await while the completed turn still owns its thread.
         self._committed_message_ids: set[str] = set()
@@ -818,7 +822,7 @@ class DaimonBot(commands.Bot):
         # and never in a test that drives setup_hook directly.
         self.wake_poller_enabled: bool = False
 
-    def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+    def _spawn[T](self, coro: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
         """Fire-and-forget a background task, tracked so it isn't GC'd."""
         task = asyncio.create_task(coro)
         self._bg_tasks.add(task)
@@ -1330,7 +1334,7 @@ class DaimonBot(commands.Bot):
 
     async def _seed_tenant_defaults(
         self, *, tenant_id: uuid.UUID, guild: discord.Guild, was_ready: bool
-    ) -> None:
+    ) -> bool | None:
         """Background MA seed. Owns the pending/failed→ready/failed status flip.
         Posts the ✅/⚠️ follow-up on terminal state ONLY when the tenant was not
         already ready -- a fresh install or one recovering from `failed`. An
@@ -1350,9 +1354,14 @@ class DaimonBot(commands.Bot):
         transient provider failure during the boot sweep must not take a
         working guild's turns offline, so only the failure reason is recorded
         and the tenant stays `ready`.
+
+        Returns True when the reconcile succeeded, False when it failed (a
+        failing report, a missing default agent or a caught exception) and
+        None when another seed for the tenant was already in flight. Only the
+        boot reconcile watcher reads it.
         """
         if tenant_id in self._seeding:
-            return
+            return None
         self._seeding.add(tenant_id)
         # Without public_url, reconcile's daimon-mcp merge is a no-op and the
         # seeded agent gets none of the MCP tools its system prompt advertises.
@@ -1414,6 +1423,7 @@ class DaimonBot(commands.Bot):
                         )
                         promo_codes = False
                     await self._post_to_guild(guild, _build_ready_embed(promo_codes=promo_codes))
+                return True
             else:
                 reason = roster_failure_reason or compose_failure_reason(report)
                 if was_ready:
@@ -1437,6 +1447,7 @@ class DaimonBot(commands.Bot):
                         reason=reason,
                     )
                     await self._post_to_guild(guild, _build_snag_embed())
+                return False
         except (DaimonError, _anthropic.APIError, discord.HTTPException) as exc:
             log.warning("guild_seed_failed", tenant_id=str(tenant_id), error=str(exc))
             # Best-effort flip before posting so the tenant is never left wedged in
@@ -1447,6 +1458,7 @@ class DaimonBot(commands.Bot):
             )
             if not was_ready:
                 await self._post_to_guild(guild, _build_snag_embed())
+            return False
         except Exception as exc:  # background-task supervisor boundary
             log.exception("guild_seed_unexpected", tenant_id=str(tenant_id))
             # This branch's message body may carry anything (an unclassified bug,
@@ -1459,13 +1471,17 @@ class DaimonBot(commands.Bot):
             )
             if not was_ready:
                 await self._post_to_guild(guild, _build_snag_embed())
+            return False
         finally:
             self._seeding.discard(tenant_id)
 
-    async def _reconcile_unjoined_tenant_defaults(self, tenant_id: uuid.UUID) -> None:
-        """Refresh defaults for a registered tenant without changing its install state."""
+    async def _reconcile_unjoined_tenant_defaults(self, tenant_id: uuid.UUID) -> bool | None:
+        """Refresh defaults for a registered tenant without changing its install state.
+
+        Returns True on success, False on failure and None when a refresh for
+        the tenant was already in flight, as `_seed_tenant_defaults` does."""
         if tenant_id in self._unjoined_reconciling:
-            return
+            return None
         self._unjoined_reconciling.add(tenant_id)
         public_url = (
             str(self.runtime.settings.mcp.public_url)
@@ -1487,10 +1503,12 @@ class DaimonBot(commands.Bot):
                     tenant_id=str(tenant_id),
                     reason=compose_failure_reason(report),
                 )
-            else:
-                self._ready_reconciled_unjoined_tenant_ids.add(tenant_id)
+                return False
+            self._ready_reconciled_unjoined_tenant_ids.add(tenant_id)
+            return True
         except Exception:
             log.exception("unjoined_guild_reconcile_failed", tenant_id=str(tenant_id))
+            return False
         finally:
             self._unjoined_reconciling.discard(tenant_id)
 
@@ -2074,95 +2092,123 @@ class DaimonBot(commands.Bot):
         if not self._startup_replay_started:
             self._startup_replay_started = True
             self._spawn(self._replay_missed_messages())
-        tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
-        known_tenants = {tr.external_id: tr for tr in tenants}
-        recovered_tenant_ids: set[uuid.UUID] = set()
-        # Provision guilds joined while the bot was down. A known archived tenant
-        # means the bot left and rejoined while this process was stopped: revive
-        # it and reseed without sending a second welcome or signup credit.
-        for guild in self.guilds:
-            if not self._allows_guild(guild.id):
-                continue
-            ws_id = str(guild.id)
-            known_tenant = known_tenants.get(ws_id)
-            if known_tenant is not None and known_tenant.archived_at is None:
-                continue
-            tenant_id = await self._provision_joined_guild(guild)
-            if tenant_id is None:
-                continue
-            if known_tenant is not None:
-                recovered_tenant_ids.add(tenant_id)
-                self._spawn(
-                    self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False)
+        # The first on_ready's reconcile tasks are watched so the process logs one
+        # aggregate event when they have all finished (the staging deploy waits on
+        # it before `daimon defaults verify`). The watcher only awaits; it never
+        # holds on_ready or changes what is reconciled.
+        watch_boot_reconcile = not self._boot_reconcile_watched
+        self._boot_reconcile_watched = True
+        boot_tasks: list[asyncio.Task[bool | None]] = []
+        try:
+            tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
+            known_tenants = {tr.external_id: tr for tr in tenants}
+            recovered_tenant_ids: set[uuid.UUID] = set()
+            # Provision guilds joined while the bot was down. A known archived tenant
+            # means the bot left and rejoined while this process was stopped: revive
+            # it and reseed without sending a second welcome or signup credit.
+            for guild in self.guilds:
+                if not self._allows_guild(guild.id):
+                    continue
+                ws_id = str(guild.id)
+                known_tenant = known_tenants.get(ws_id)
+                if known_tenant is not None and known_tenant.archived_at is None:
+                    continue
+                tenant_id = await self._provision_joined_guild(guild)
+                if tenant_id is None:
+                    continue
+                if known_tenant is not None:
+                    recovered_tenant_ids.add(tenant_id)
+                    boot_tasks.append(
+                        self._spawn(
+                            self._seed_tenant_defaults(
+                                tenant_id=tenant_id, guild=guild, was_ready=False
+                            )
+                        )
+                    )
+                    continue
+                await self._post_to_guild(
+                    guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
                 )
-                continue
-            await self._post_to_guild(
-                guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
-            )
-            self._spawn(
-                self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False)
-            )
-
-        # Reconcile every registered, unarchived tenant against the shipped defaults on
-        # every boot, not just the ones stuck in pending/failed. Because every
-        # deploy restarts this process, this loop is how a defaults edit (a prompt
-        # rewrite, a new skill) reaches an already-provisioned install without any
-        # hand-run command. An in-sync tenant costs roughly 13-15 provider read
-        # calls here and zero writes -- the reconcile's own per-resource fingerprint
-        # gate turns a hash match into a skip -- bounded by the sweep's concurrency
-        # cap above. Per-guild permission check + tree sync for joined guilds.
-        for tr in tenants:
-            if non_production and int(tr.external_id) not in command_guild_ids:
-                continue
-            guild = self.get_guild(int(tr.external_id))
-            # Tracked per path: the joined path adds the roster check and the
-            # ready flip, so a guild back since the last ready still gets them.
-            reconciled_ids = (
-                self._ready_reconciled_unjoined_tenant_ids
-                if guild is None
-                else self._ready_reconciled_tenant_ids
-            )
-            reconciled = tr.provision_status == "ready" and tr.id in reconciled_ids
-            if guild is None:
-                log.warning("registered_guild_not_joined", external_id=tr.external_id)
-                if tr.archived_at is None and not reconciled:
-                    self._spawn(self._reconcile_unjoined_tenant_defaults(tr.id))
-                continue
-            if tr.id not in recovered_tenant_ids and not reconciled:
-                self._spawn(
-                    self._seed_tenant_defaults(
-                        tenant_id=tr.id, guild=guild, was_ready=tr.provision_status == "ready"
+                boot_tasks.append(
+                    self._spawn(
+                        self._seed_tenant_defaults(
+                            tenant_id=tenant_id, guild=guild, was_ready=False
+                        )
                     )
                 )
-            if guild.unavailable:
-                # Listed unavailable in READY (a Discord outage): it has no `me` to
-                # check and is not synced, so a later ready syncs it.
-                log.warning("registered_guild_unavailable", external_id=tr.external_id)
-                continue
-            missing = check_missing_permissions(guild.me.guild_permissions)
-            if missing:
-                log.warning(
-                    "missing_permissions",
-                    guild_id=tr.external_id,
-                    guild_name=guild.name,
-                    missing=missing,
+
+            # Reconcile every registered, unarchived tenant against the shipped defaults on
+            # every boot, not just the ones stuck in pending/failed. Because every
+            # deploy restarts this process, this loop is how a defaults edit (a prompt
+            # rewrite, a new skill) reaches an already-provisioned install without any
+            # hand-run command. An in-sync tenant costs roughly 13-15 provider read
+            # calls here and zero writes -- the reconcile's own per-resource fingerprint
+            # gate turns a hash match into a skip -- bounded by the sweep's concurrency
+            # cap above. Per-guild permission check + tree sync for joined guilds.
+            for tr in tenants:
+                if non_production and int(tr.external_id) not in command_guild_ids:
+                    continue
+                guild = self.get_guild(int(tr.external_id))
+                # Tracked per path: the joined path adds the roster check and the
+                # ready flip, so a guild back since the last ready still gets them.
+                reconciled_ids = (
+                    self._ready_reconciled_unjoined_tenant_ids
+                    if guild is None
+                    else self._ready_reconciled_tenant_ids
                 )
-            else:
-                log.info("permissions_ok", guild_id=tr.external_id, guild_name=guild.name)
-            if non_production or guild.id in self._ready_synced_guild_ids:
-                continue
-            try:
-                guild_obj = discord.Object(id=int(tr.external_id))
-                # Clear any guild-scoped command copies so commands live ONLY at
-                # global scope (synced below). A command registered both globally
-                # and per-guild renders twice in the guild; this also self-heals
-                # guilds that accumulated copies from the old copy_global_to path.
-                self.tree.clear_commands(guild=guild_obj)
-                await self.tree.sync(guild=guild_obj)
-                self._ready_synced_guild_ids.add(guild.id)
-                log.info("tree_synced", guild_id=tr.external_id)
-            except discord.HTTPException as exc:
-                log.warning("tree_sync_failed", guild_id=tr.external_id, error=str(exc))
+                reconciled = tr.provision_status == "ready" and tr.id in reconciled_ids
+                if guild is None:
+                    log.warning("registered_guild_not_joined", external_id=tr.external_id)
+                    if tr.archived_at is None and not reconciled:
+                        boot_tasks.append(
+                            self._spawn(self._reconcile_unjoined_tenant_defaults(tr.id))
+                        )
+                    continue
+                if tr.id not in recovered_tenant_ids and not reconciled:
+                    boot_tasks.append(
+                        self._spawn(
+                            self._seed_tenant_defaults(
+                                tenant_id=tr.id,
+                                guild=guild,
+                                was_ready=tr.provision_status == "ready",
+                            )
+                        )
+                    )
+                if guild.unavailable:
+                    # Listed unavailable in READY (a Discord outage): it has no `me` to
+                    # check and is not synced, so a later ready syncs it.
+                    log.warning("registered_guild_unavailable", external_id=tr.external_id)
+                    continue
+                missing = check_missing_permissions(guild.me.guild_permissions)
+                if missing:
+                    log.warning(
+                        "missing_permissions",
+                        guild_id=tr.external_id,
+                        guild_name=guild.name,
+                        missing=missing,
+                    )
+                else:
+                    log.info("permissions_ok", guild_id=tr.external_id, guild_name=guild.name)
+                if non_production or guild.id in self._ready_synced_guild_ids:
+                    continue
+                try:
+                    guild_obj = discord.Object(id=int(tr.external_id))
+                    # Clear any guild-scoped command copies so commands live ONLY at
+                    # global scope (synced below). A command registered both globally
+                    # and per-guild renders twice in the guild; this also self-heals
+                    # guilds that accumulated copies from the old copy_global_to path.
+                    self.tree.clear_commands(guild=guild_obj)
+                    await self.tree.sync(guild=guild_obj)
+                    self._ready_synced_guild_ids.add(guild.id)
+                    log.info("tree_synced", guild_id=tr.external_id)
+                except discord.HTTPException as exc:
+                    log.warning("tree_sync_failed", guild_id=tr.external_id, error=str(exc))
+        except Exception:
+            if watch_boot_reconcile:
+                self._spawn(self._watch_boot_reconcile(boot_tasks, aborted=True))
+            raise
+        if watch_boot_reconcile:
+            self._spawn(self._watch_boot_reconcile(boot_tasks, aborted=False))
         if non_production:
             # Remove commands left by a production deployment without registering
             # any global commands in this environment. Guild copies stay local.
@@ -2203,6 +2249,40 @@ class DaimonBot(commands.Bot):
             log.info("tree_synced_global")
         except discord.HTTPException as exc:
             log.warning("tree_sync_global_failed", error=str(exc))
+
+    async def _watch_boot_reconcile(
+        self, tasks: list[asyncio.Task[bool | None]], *, aborted: bool
+    ) -> None:
+        """Log one aggregate event once every boot reconcile task has finished.
+
+        `asyncio.wait` does not cancel the tasks if this watcher is cancelled
+        at shutdown, so their lifetimes stay their own. A task that raised or
+        was cancelled, or returned False, counts as failed; None means another
+        reconcile for that tenant was already in flight. `aborted` is set when
+        on_ready raised before it had started every tenant's reconcile.
+        """
+        started = monotonic()
+        if tasks:
+            await asyncio.wait(tasks)
+        succeeded = failed = skipped = 0
+        for task in tasks:
+            if task.cancelled() or task.exception() is not None or task.result() is False:
+                failed += 1
+            elif task.result() is None:
+                skipped += 1
+            else:
+                succeeded += 1
+        fields: dict[str, object] = {
+            "tenants": len(tasks),
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+            "duration_s": round(monotonic() - started, 3),
+        }
+        if failed or aborted:
+            log.warning("discord.boot_reconcile_failed", aborted=aborted, **fields)
+        else:
+            log.info("discord.boot_reconcile_complete", **fields)
 
     async def _replay_missed_messages(self) -> None:
         """Bound history reads, then send missed inputs through normal message gates."""
