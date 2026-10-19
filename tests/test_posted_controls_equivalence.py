@@ -309,6 +309,7 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
         trace = []
         row = SimpleNamespace(
             id=ROUTINE,
+            updated_at=AT,
             tenant_id=UUID(int=9) if scenario == "wrong_tenant" else TENANT,
             enabled=(op == "pause") != (scenario == "stale"),
             created_by_user_id=(
@@ -440,4 +441,13 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             trace.append("error")
         return trace
 
-    assert await run(old) == await run(module)
+    expected = await run(old)
+    actual = await run(module)
+    # Routine transitions now pass the revision checked by the permission
+    # callback. The archived handlers predate that CAS argument; every other
+    # effect (including errors, rollback and rendering) remains equivalent.
+    for item in expected:
+        if isinstance(item, tuple) and item[0] == "write":
+            assert "expected_updated_at" not in item[2]
+            item[2]["expected_updated_at"] = AT
+    assert expected == actual
