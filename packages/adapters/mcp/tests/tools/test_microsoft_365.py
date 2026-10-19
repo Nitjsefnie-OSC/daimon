@@ -509,22 +509,15 @@ async def test_refused_path_never_calls_graph(
     assert not fake.requests, "a refused path must not reach Microsoft"
 
 
-@pytest.mark.parametrize(
-    "change",
-    [{"external_id": "33333333-3333-3333-3333-333333333333"}, {"is_external": True}],
-    ids=["other organisation", "guest"],
-)
-async def test_only_members_of_the_configured_tenant(
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    fake: FakeMicrosoft,
-    change: dict[str, object],
+async def test_only_people_in_the_configured_tenant(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft
 ) -> None:
+    """A caller whose Teams tenant is not the configured Entra tenant is refused."""
     _, auth = await _person(committing_sessionmaker)
+    other = dataclasses.replace(auth, external_id="33333333-3333-3333-3333-333333333333")
     with pytest.raises(ToolError, match="organisation"):
         await connect_microsoft_impl(
-            _runtime(committing_sessionmaker, fake),
-            dataclasses.replace(auth, **change),  # pyright: ignore[reportArgumentType]
-            origin_context_id="",
+            _runtime(committing_sessionmaker, fake), other, origin_context_id=""
         )
 
 

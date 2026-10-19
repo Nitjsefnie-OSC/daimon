@@ -28,8 +28,6 @@ def require_person(runtime: McpRuntime, auth: AuthIdentity) -> tuple[MicrosoftGr
     user_id = _canonical(auth.platform_user_id)
     if auth.platform != "teams" or auth.agent_id is not None or user_id is None:
         raise ToolError("Microsoft 365 access works only for a person in a Teams conversation.")
-    if auth.is_external:
-        raise ToolError("Microsoft 365 access is only for members of this organisation.")
     if _canonical(auth.external_id) != graph.config.tenant_id:
         raise ToolError(
             "Microsoft 365 access is set up for another organisation's Teams, so it "
