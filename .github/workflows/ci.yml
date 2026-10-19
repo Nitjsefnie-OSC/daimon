@@ -95,10 +95,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { suite: core, shard: 0, shards: 4, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
-          - { suite: core, shard: 1, shards: 4, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
-          - { suite: core, shard: 2, shards: 4, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
-          - { suite: core, shard: 3, shards: 4, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: core, shard: 0, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: core, shard: 1, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: core, shard: 2, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: core, shard: 3, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: core, shard: 4, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: core, shard: 5, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
           - { suite: mcp, shard: 0, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
           - { suite: mcp, shard: 1, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
           - { suite: slack, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/slack }
@@ -142,9 +144,19 @@ jobs:
           path: ${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: ignore
 
+  # Sharded like pytest-db (same plugin, same duration table, checked by
+  # shard-check), but with two xdist workers per leg and the hang diagnostics
+  # on every leg.
   pytest-discord:
+    name: pytest-${{ matrix.suite }} (${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { suite: discord, shard: 0, shards: 2, paths: packages/adapters/discord }
+          - { suite: discord, shard: 1, shards: 2, paths: packages/adapters/discord }
     services:
       postgres:
         image: mirror.gcr.io/library/postgres:18-alpine
@@ -166,7 +178,7 @@ jobs:
       - uses: ./.github/actions/setup-daimon
         with:
           database: "true"
-      - name: pytest (discord)
+      - name: pytest (${{ matrix.suite }})
         id: discord-pytest
         timeout-minutes: 13
         env:
@@ -176,12 +188,12 @@ jobs:
           (sleep 360; bash .github/scripts/discord-postgres-diagnostics.sh > "$RUNNER_TEMP/discord-postgres-hang.txt" 2>&1) &
           diagnostic_pid=$!
           trap 'kill "$diagnostic_pid" 2>/dev/null || true' EXIT
-          uv run pytest packages/adapters/discord -n 2 -rfE --tb=short -o faulthandler_timeout=300 --durations=20 --junitxml=discord.xml
+          uv run pytest ${{ matrix.paths }} -n 2 -rfE --tb=short -o faulthandler_timeout=300 -p daimon.testing.ci_shard --ci-shard-by=file --ci-shard-suite=${{ matrix.suite }} --ci-shard-index=${{ matrix.shard }} --ci-shard-count=${{ matrix.shards }} --durations=20 --junitxml=${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: discord-junit
-          path: discord.xml
+          name: ${{ matrix.suite }}-shard-${{ matrix.shard }}-junit
+          path: ${{ matrix.suite }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: ignore
       - name: Discord hang diagnostics
         if: always() && steps.discord-pytest.outcome != 'success'
@@ -261,7 +273,8 @@ jobs:
 
   # Collect-only, so it needs no database: every sharded suite's legs together
   # must collect exactly what the suite collects unsharded, each test file in
-  # exactly one leg. Reads the matrix above, so a new leg is checked as added.
+  # exactly one leg. Reads the matrices of every job that loads the shard
+  # plugin (pytest-db, pytest-discord), so a new leg is checked as added.
   shard-check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
