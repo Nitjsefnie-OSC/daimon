@@ -413,7 +413,8 @@ memory mounts as a live DM, in a new private scope that never touches the
 owner's active DM conversation. It is unattended, so calls that need an
 Approve are refused unless the unattended permissions
 (`DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`, or an agent rule for chat and
-routines) allow them. A DM routine has your normal DM abilities, but nobody is watching what it does along the way: a mistaken send or publish tool call could expose personal content before you see the final DM. Calls that need an approval are refused unless the unattended permissions already allow them; keeping those permissions narrow is the cheapest protection. Daimon posts the final reply only to the
+routines) allow them. DM routines run only on Managed Agents agents; another
+provider is refused before a session exists. A DM routine has your normal DM abilities, but nobody is watching what it does along the way: a mistaken send or publish tool call could expose personal content before you see the final DM. Calls that need an approval are refused unless the unattended permissions already allow them; keeping those permissions narrow is the cheapest protection. Daimon posts the final reply only to the
 owner's DM and never falls back to a channel. A source
 thread and its parent are captured at creation and never changed by an edit;
 Daimon checks both at save, fire and before each delivery chunk. Operator source

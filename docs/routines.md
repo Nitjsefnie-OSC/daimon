@@ -290,6 +290,17 @@ Each fire gets a new private scope and a new session. It starts with no
 conversation history, and never selects, reads or changes the owner's active
 DM conversation. Its usage is billed to the routine's budget channel.
 
+DM routines run only on Managed Agents agents in this release. When the
+routine's agent runs on another provider (an OpenAI or Gemini native backend),
+the fire is refused before any session is created and the routine records
+`DM routines need a Managed Agents agent`.
+
+A run that ends without a final answer (an error, the turn ceiling, a lost
+stream, or a scheduler shutdown) stops the session it was running in,
+including a replacement created by dead-session recovery, and queues nothing.
+A stop the provider does not confirm is logged as `dm_routine.stop_unresolved`
+with the session id and recorded on the routine as `stop_unresolved`.
+
 The run is unattended. Before anything is sent the session's tool settings
 are rewritten from the current policy (`gate_session_snapshot`), and every
 call that pauses is decided by the shared unattended decider
@@ -297,7 +308,9 @@ call that pauses is decided by the shared unattended decider
 nobody can press Approve, so a call that needs one is refused unless
 `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES` or an agent rule for chat and routines
 allows it, and Daimon's protected actions (a backend switch, a Microsoft send)
-are always refused. Calls that run without asking in a live DM run here too.
+are always refused. A replacement session created by dead-session recovery is
+gated the same way before the routine is sent into it. Calls that run without
+asking in a live DM run here too.
 The final reply goes to the outbox for the owner's DM only; refusals record a
 reason and queue nothing.
 

@@ -2220,8 +2220,12 @@ the owner as a cold DM with the routine's agent (`admit`, `is_dm`, `cold_dm`,
 runs it with `run_prepared_turn(origin="routine", attended=False)` through the
 same helper live DM replies use (`_run_admitted_dm_turn`). The session is gated
 with `gate_session_snapshot` and its pauses answered by `unattended_posture`.
-The owner's selected DM conversation, its history and its session are never
-read or changed. The final text goes to the owner-DM outbox. The run has the
+A recovery's replacement session is reported through `run_prepared_turn`'s
+`on_session` hook, gated before anything is sent into it, and tracked, so a
+failed, timed-out or cancelled run interrupts the session actually running
+(`_stop_routine_session`). Only Managed Agents agents run; another provider is
+refused before a session exists. The owner's selected DM conversation, its
+history and its session are never read or changed. The final text goes to the owner-DM outbox. The run has the
 owner's ordinary DM tool authority while nobody watches it, so a mistaken send
 or publish call could expose personal content before the final DM arrives.
 Source channels and threads
