@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Native tenant-scoped lead intake with encrypted capture, Gmail qualification,
+  restricted Discord dossiers and draft replies, conservative HubSpot reuse,
+  durable write recovery, authorized human resolution and retention tombstones.
+
+
 - Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
 
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.

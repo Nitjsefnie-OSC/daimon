@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import UUID
 
 from daimon.core.lead_intake import (
+    IntakeBusy,
     IntakeConfig,
     IntakeRecord,
     IntakeResolution,
@@ -18,7 +19,7 @@ from daimon.core.lead_intake import (
     LeadSubmission,
     verify_lead_evidence,
 )
-from daimon.core.stores.lead_intake import IntakeStore
+from daimon.core.stores.lead_intake import IntakeStore, clear_effect
 from pydantic import BaseModel
 
 
@@ -51,7 +52,7 @@ class IntakePorts(Protocol):
     ) -> tuple[list[str], str | None]: ...
 
 
-type Reauthorize = Callable[[], Awaitable[None]]
+type Reauthorize = Callable[[LeadSource | None], Awaitable[None]]
 
 
 class IntakeService:
@@ -59,7 +60,7 @@ class IntakeService:
         self.store, self.ports, self.reauthorize = store, ports, reauthorize
 
     async def submit(self, draft: LeadDraft, actor_id: str | None) -> IntakeRecord:
-        await self.reauthorize()
+        await self.reauthorize(draft.source)
         config, _ = await self.store.configuration()
         verified = await self.ports.source(config, draft.source, actor_id)
         if verified.source != draft.source:
@@ -111,7 +112,10 @@ class IntakeService:
         payload: dict[str, str],
         identity: str | None = None,
     ) -> str:
-        await self.reauthorize()
+        await self.reauthorize(record.submission.source if record.submission else None)
+        live_record = await self.store.get(record.id)
+        if live_record.submission is None or record.expires_at <= datetime.now(UTC):
+            raise ValueError("intake_erased_or_expired")
         current, _ = await self.store.configuration()
         if current != config:
             raise ValueError("configuration_changed")
@@ -139,7 +143,13 @@ class IntakeService:
         return remote_id
 
     async def resume(self, intake_id: UUID) -> IntakeRecord:
-        await self.reauthorize()
+        try:
+            return await self._resume(intake_id)
+        except IntakeBusy:
+            return await self.store.get(intake_id)
+
+    async def _resume(self, intake_id: UUID) -> IntakeRecord:
+        await self.reauthorize(None)
         await self.store.purge(datetime.now(UTC))
         async with self.store.claim(f"source:{intake_id}"):
             record = await self.store.get(intake_id)
@@ -265,7 +275,7 @@ class IntakeService:
     async def resolve(
         self, intake_id: UUID, resolution: IntakeResolution, actor_id: str
     ) -> IntakeRecord:
-        await self.reauthorize()
+        await self.reauthorize(None)
         async with self.store.claim(f"source:{intake_id}"):
             record = await self.store.get(intake_id)
             if record.status not in {"pending", "review"}:
@@ -274,6 +284,35 @@ class IntakeService:
             before = p.model_dump_json()
             if resolution.deal_id and resolution.separate_opportunity_confirmed:
                 raise ValueError("conflicting_resolution")
+            if resolution.discord_message_id or resolution.discord_post_absence_confirmed:
+                if resolution.discord_message_id and resolution.discord_post_absence_confirmed:
+                    raise ValueError("conflicting_discord_resolution")
+                intent = await self.store.effect(intake_id, "starter")
+                if intent is None or intent.state == "completed" or record.submission is None:
+                    raise ValueError("uncertain_starter_required")
+                config, _ = await self.store.configuration()
+                await self.reauthorize(record.submission.source)
+                check = EffectRequest(
+                    step="starter_resolution",
+                    key=intent.stable_key,
+                    payload={
+                        "content": record.submission.thread_title,
+                        "selected": resolution.discord_message_id or "",
+                        "accepted_at": record.created_at.isoformat(),
+                    },
+                )
+                recovered = await self.ports.recover(config, check)
+                if resolution.discord_message_id:
+                    if recovered is None or recovered != resolution.discord_message_id:
+                        raise ValueError("invalid_starter_selection")
+                    await self.store.finish(intake_id, "starter", recovered)
+                    p.discord_message_id = recovered
+                else:
+                    if datetime.now(UTC) - intent.created_at < timedelta(minutes=10):
+                        raise ValueError("absence_requires_ten_minutes")
+                    if recovered != "absent":
+                        raise ValueError("starter_candidates_require_selection")
+                    await clear_effect(self.store, intake_id, "starter")
             for step in ("company", "contact", "deal"):
                 selected = getattr(resolution, f"{step}_id")
                 effect = await self.store.effect(intake_id, step)
@@ -291,12 +330,11 @@ class IntakeService:
             p.separate_opportunity_confirmed = resolution.separate_opportunity_confirmed
             p.resolved_by, p.resolution_evidence = actor_id, resolution.evidence
             p.review_reason, record.error_code = None, None
-            await self.store.audit(intake_id, actor_id, before, p.model_dump_json())
-            await self.store.save(record)
+            await self.store.audit(record, actor_id, before, p.model_dump_json())
         return await self.resume(intake_id)
 
     async def scan(self) -> dict[str, object]:
-        await self.reauthorize()
+        await self.reauthorize(None)
         config, _ = await self.store.configuration()
         async with self.store.claim(f"mailbox:{config.source_connection_id}"):
             state = await self.store.mailbox(config.source_connection_id)

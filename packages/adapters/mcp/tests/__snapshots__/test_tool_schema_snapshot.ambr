@@ -3213,6 +3213,356 @@
         'type': 'object',
       }),
     }),
+    'lead_intake_get': dict({
+      'description': 'Read one authorized tenant lead, its review state and durable effect progress.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'intake_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'intake_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_health': dict({
+      'description': 'Read tenant lead counts, oldest pending age and mailbox coverage.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_list': dict({
+      'description': 'Read up to 100 tenant leads in the restricted sales queue, oldest first.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after_id': dict({
+            'anyOf': list([
+              dict({
+                'format': 'uuid',
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_resolve': dict({
+      'description': '''
+        Apply evidence-backed human CRM selections as a sales resolver or core-role member.
+        <blank line>
+        Show exact records and proposed writes before approval. Routines never
+        resolve. Completed identities are immutable; uncertain creates must be
+        recovered before selecting replacements. Server admin alone is no grant.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'IntakeResolution': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'company_id': dict({
+                'anyOf': list([
+                  dict({
+                    'pattern': '^\\d+$',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'contact_id': dict({
+                'anyOf': list([
+                  dict({
+                    'pattern': '^\\d+$',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'deal_id': dict({
+                'anyOf': list([
+                  dict({
+                    'pattern': '^\\d+$',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'discord_message_id': dict({
+                'anyOf': list([
+                  dict({
+                    'pattern': '^\\d+$',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'discord_post_absence_confirmed': dict({
+                'default': False,
+                'type': 'boolean',
+              }),
+              'evidence': dict({
+                'maxLength': 2000,
+                'minLength': 20,
+                'type': 'string',
+              }),
+              'separate_opportunity_confirmed': dict({
+                'default': False,
+                'type': 'boolean',
+              }),
+            }),
+            'required': list([
+              'evidence',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'intake_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+          'resolution': dict({
+            '$ref': '#/$defs/IntakeResolution',
+          }),
+        }),
+        'required': list([
+          'intake_id',
+          'resolution',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_resume': dict({
+      'description': '''
+        Recover lead effects and mailbox coverage without blindly retrying uncertain creates.
+        <blank line>
+        Without an ID, resumes up to 25 pending records and scans archived mail
+        from the operator checkpoint. Inspect scan errors and remaining work.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'intake_id': dict({
+            'anyOf': list([
+              dict({
+                'format': 'uuid',
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_submit': dict({
+      'description': '''
+        Verify and durably register one classified Gmail or own explicit Discord lead.
+        <blank line>
+        Classify spam and out-of-scope messages as other. Capture has no external
+        effects. The service posts a title and threaded dossier, writes only a
+        draft reply, conservatively reuses/creates CRM records, then archives
+        Gmail after dossier delivery. Replay the same immutable source on timeout.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'LeadClassification': dict({
+            'enum': list([
+              'consulting',
+              'project',
+              'other',
+            ]),
+            'type': 'string',
+          }),
+          'LeadDraft': dict({
+            'additionalProperties': False,
+            'description': 'Model proposal; original text and verification flags are fetched server-side.',
+            'properties': dict({
+              'classification': dict({
+                '$ref': '#/$defs/LeadClassification',
+              }),
+              'company_domain': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'company_evidence': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'company_name': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'enquirer_email': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'enquirer_evidence': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'enquirer_name': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'opportunity_description': dict({
+                'maxLength': 100000,
+                'minLength': 1,
+                'type': 'string',
+              }),
+              'source': dict({
+                '$ref': '#/$defs/LeadSource',
+              }),
+              'thread_content': dict({
+                'maxLength': 100000,
+                'minLength': 1,
+                'type': 'string',
+              }),
+              'thread_title': dict({
+                'maxLength': 100,
+                'minLength': 1,
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'source',
+              'classification',
+              'opportunity_description',
+              'thread_title',
+              'thread_content',
+            ]),
+            'type': 'object',
+          }),
+          'LeadSource': dict({
+            'description': 'Immutable Gmail message or explicitly registered Discord message.',
+            'properties': dict({
+              'channel_id': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'kind': dict({
+                '$ref': '#/$defs/LeadSourceKind',
+              }),
+              'mailbox': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'message_id': dict({
+                'maxLength': 100000,
+                'minLength': 1,
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'kind',
+              'message_id',
+            ]),
+            'type': 'object',
+          }),
+          'LeadSourceKind': dict({
+            'enum': list([
+              'gmail',
+              'manual',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'draft': dict({
+            '$ref': '#/$defs/LeadDraft',
+          }),
+        }),
+        'required': list([
+          'draft',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'list_agent_keys': dict({
       'description': '''
         What keys does an agent have? List its stored API key names, never values.

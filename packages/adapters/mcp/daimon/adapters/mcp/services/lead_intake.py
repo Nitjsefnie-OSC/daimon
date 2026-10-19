@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast, overload
 
 import httpx
 from daimon.core.lead_intake import (
@@ -27,9 +27,17 @@ class HttpIntakePorts:
     """
 
     def __init__(
-        self, client: httpx.AsyncClient, *, gmail_token: str, hubspot_token: str, discord_token: str
+        self,
+        client: httpx.AsyncClient,
+        *,
+        gmail_token: str,
+        hubspot_token: str,
+        discord_token: str,
+        gmail_refresh_credentials: dict[str, str] | None = None,
     ) -> None:
         self.client = client
+        self.refresh_credentials = gmail_refresh_credentials
+        self.gmail_refreshed = False
         self.tokens = {
             "gmail": gmail_token,
             "hubspot": hubspot_token,
@@ -41,6 +49,29 @@ class HttpIntakePorts:
             "discord": "https://discord.com/api/v10/",
         }
 
+    @overload
+    async def request(
+        self,
+        provider: str,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        params: dict[str, str] | None = None,
+        missing: Literal[False] = False,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    async def request(
+        self,
+        provider: str,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        params: dict[str, str] | None = None,
+        *,
+        missing: Literal[True],
+    ) -> dict[str, Any] | None: ...
+
     async def request(
         self,
         provider: str,
@@ -49,7 +80,15 @@ class HttpIntakePorts:
         payload: dict[str, Any] | None = None,
         params: dict[str, str] | None = None,
         missing: bool = False,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
+        if provider == "gmail" and self.refresh_credentials and not self.gmail_refreshed:
+            response = await self.client.post(
+                "https://oauth2.googleapis.com/token",
+                data={"grant_type": "refresh_token", **self.refresh_credentials},
+            )
+            response.raise_for_status()
+            self.tokens["gmail"] = str(response.json()["access_token"])
+            self.gmail_refreshed = True
         response = await self.client.request(
             method,
             self.hosts[provider] + path,
@@ -200,6 +239,20 @@ class HttpIntakePorts:
 
     async def recover(self, config: IntakeConfig, effect: EffectRequest) -> str | None:
         step, p = effect.step, effect.payload
+        if step == "starter_resolution":
+            bot = await self.request("discord", "GET", "users/@me")
+            matches = [
+                m
+                for m in await self._messages(config.channel_id)
+                if str(m["author"]["id"]) == str(bot["id"])
+                and str(m.get("content", "")) == p["content"]
+                and str(m.get("timestamp", "")) >= p["accepted_at"]
+            ]
+            if p["selected"]:
+                return (
+                    p["selected"] if any(str(m["id"]) == p["selected"] for m in matches) else None
+                )
+            return "absent" if not matches else None
         if step == "thread":
             channel = await self.request("discord", "GET", f"channels/{p['starter']}", missing=True)
             if channel is not None:
@@ -306,6 +359,10 @@ class HttpIntakePorts:
                 company_domain=p["domain"],
                 opportunity_description=p["description"],
             )
+            if p["separate"] != "True" and any(
+                not c.company_ids and not c.contact_ids for c in candidates
+            ):
+                raise ReviewRequired("orphan_opportunity_review")
             match = select_matching_opportunity(
                 candidates,
                 p["description"],

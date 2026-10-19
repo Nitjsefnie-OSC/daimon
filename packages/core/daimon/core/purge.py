@@ -125,6 +125,7 @@ from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import identity as identity_store
+from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
@@ -177,9 +178,11 @@ class PurgeReport(BaseModel):
     platform_user_names: int = 0
     teams_messages: int = 0
     microsoft_user_tokens: int = 0
+    lead_intakes: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
+            lead_intakes=self.lead_intakes + other.lead_intakes,
             routines=self.routines + other.routines,
             principal_links=self.principal_links + other.principal_links,
             cli_principals=self.cli_principals + other.cli_principals,
@@ -235,7 +238,11 @@ async def _purge_principal_in_session(
     platform_user_names_count = 0
     teams_messages_count = 0
     microsoft_user_tokens_count = 0
+    lead_intakes_count = 0
     if isinstance(principal, PlatformPrincipalRow):
+        lead_intakes_count = await lead_intake_store.erase_actor(
+            session, principal.tenant_id, principal.external_id
+        )
         routines_count = await routines_store.delete_for_principal(
             session,
             tenant_id=principal.tenant_id,
@@ -383,6 +390,7 @@ async def _purge_principal_in_session(
             )
 
     return PurgeReport(
+        lead_intakes=lead_intakes_count,
         routines=routines_count,
         principal_links=links_count,
         cli_principals=principal_count if kind == "cli" else 0,

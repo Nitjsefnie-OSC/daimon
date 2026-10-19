@@ -3936,6 +3936,7 @@ class LeadIntakeRecord(Base):
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     source_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_digest: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_payload: Mapped[bytes | None] = mapped_column(LargeBinary)
     encrypted_raw: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -3947,6 +3948,13 @@ class LeadIntakeRecord(Base):
 class LeadIntakeEffect(Base):
     __tablename__ = "lead_intake_effects"
     __table_args__ = (
+        Index(
+            "uq_lead_discord_starter",
+            "tenant_id",
+            "remote_id",
+            unique=True,
+            postgresql_where=text("step = 'starter' AND remote_id IS NOT NULL"),
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "intake_id"],
             ["lead_intakes.tenant_id", "lead_intakes.id"],

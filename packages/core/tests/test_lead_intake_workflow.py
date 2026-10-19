@@ -24,7 +24,9 @@ FIXTURES = json.loads(
 
 
 @pytest.fixture
-async def lead_sessions(db_nullpool_engine: AsyncEngine, db_clean: None) -> async_sessionmaker[AsyncSession]:
+async def lead_sessions(
+    db_nullpool_engine: AsyncEngine, db_clean: None
+) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
 
 
@@ -69,7 +71,7 @@ class FakePorts:
         return (["archived-a"], "next") if not cursor else (["archived-b"], None)
 
 
-async def noop() -> None:
+async def noop(source: LeadSource | None) -> None:
     pass
 
 
@@ -174,7 +176,8 @@ async def test_uncertain_response_recovers_without_duplicates(
     assert first.status == "pending"
     ports.fail_step = None
     results = await asyncio.gather(service.resume(first.id), service.resume(first.id))
-    assert all(r.status == "completed" for r in results)
+    assert all(r.status in {"pending", "completed"} for r in results)
+    assert (await service.resume(first.id)).status == "completed"
     assert ports.writes.count(step) == 1
     assert len(ports.writes) == 9
     assert (await store.get(first.id)).status == "completed"
@@ -307,3 +310,105 @@ async def test_resolution_audits_without_changing_source(
         ).scalar_one()
     assert '"actor": "8"' in store.open(audit)
     assert "verified original identity" in store.open(audit)
+
+
+async def test_privacy_erasure_and_retention_maintenance(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.lead_intake import count_actor, erase_actor, purge_expired
+
+    store, service, _ = await setup(lead_sessions, "active")
+    first = await service.submit(draft(), "7")
+    async with lead_sessions() as session, session.begin():
+        assert await count_actor(session, store.tenant_id, "7") == 1
+        assert await count_actor(session, store.tenant_id, "8") == 0
+        assert await erase_actor(session, store.tenant_id, "7") == 1
+    assert (await store.get(first.id)).status == "expired"
+    assert await store.effect(first.id, "starter") is None
+    second = await service.submit(draft(message="immutable-2"), "8")
+    async with lead_sessions() as session, session.begin():
+        await purge_expired(session, datetime.now(UTC) + timedelta(days=91))
+    assert (await store.get(second.id)).submission is None
+
+
+async def test_mode_cutover_and_configuration_revision(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, ports = await setup(lead_sessions)
+    first = await service.submit(draft(), "7")
+    config, credentials = await store.configuration()
+    await store.configure(config.model_copy(update={"mode": "active"}), credentials)
+    assert (await service.resume(first.id)).status == "completed"
+    assert ports.writes.count("starter") == 1
+    with pytest.raises(ValueError, match="configuration_revision_must_increase"):
+        await store.configure(config.model_copy(update={"channel_id": "different"}), credentials)
+
+
+async def test_queue_and_scan_ignore_completed_history(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, _ = await setup(lead_sessions, "active")
+    first = await service.submit(draft(), "7")
+    assert await store.list(pending_only=True) == []
+    assert (await store.health())["status_counts"] == {"completed": 1}
+    assert await store.list(after_id=first.id) == []
+    config, credentials = await store.configuration()
+    await store.configure(config.model_copy(update={"mode": "capture"}), credentials)
+    pending = await service.submit(draft(message="archived-a"), "7")
+    assert [r.id for r in await store.list(pending_only=True)] == [pending.id]
+    scanned = await service.scan()
+    assert scanned["discovered"] == ["archived-b"]
+
+
+async def test_live_revocation_stops_next_effect(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, _, ports = await setup(lead_sessions, "active")
+    calls = 0
+
+    async def reauthorize(source: LeadSource | None) -> None:
+        nonlocal calls
+        calls += 1
+        if calls >= 4:
+            raise PermissionError("revoked")
+
+    service = IntakeService(store, ports, reauthorize)
+    result = await service.submit(draft(), "7")
+    assert result.status == "pending"
+    assert ports.writes == ["starter"]
+
+
+async def test_execution_grant_is_live_tenant_bound_and_revoked(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.lead_intake_execution import current_intake_execution
+    from daimon.core.stores.lead_intake import execution_is_active, routine_execution
+    from daimon.testing.factories import make_routine
+
+    async with lead_sessions() as session, session.begin():
+        tenant = await make_tenant(session)
+        routine = await make_routine(session, tenant=tenant, created_by_user_id="7")
+    async with routine_execution(lead_sessions, tenant.id, routine.id):
+        grant = current_intake_execution.get()
+        assert grant is not None
+        async with lead_sessions() as session:
+            assert await execution_is_active(session, tenant.id, routine.id, grant[1])
+            assert not await execution_is_active(session, uuid4(), routine.id, grant[1])
+    async with lead_sessions() as session:
+        assert not await execution_is_active(session, tenant.id, routine.id, grant[1])
+    assert current_intake_execution.get() is None
+
+
+async def test_partial_dossier_recovery_precedes_archive(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    _, service, ports = await setup(lead_sessions, "active")
+    prepared = draft().model_copy(update={"thread_content": "DRAFT reply. " * 400})
+    ports.fail_step = "dossier:1"
+    first = await service.submit(prepared, "7")
+    assert first.status == "pending"
+    assert "archive" not in ports.writes
+    ports.fail_step = None
+    assert (await service.resume(first.id)).status == "completed"
+    assert ports.writes.count("dossier:0") == ports.writes.count("dossier:1") == 1
+    assert ports.writes.index("dossier:2") < ports.writes.index("archive")

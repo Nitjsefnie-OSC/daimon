@@ -425,3 +425,20 @@ and Teams to match the same invoker lists as other members; restore the pass
 with `--invoker-admin-bypass`. Both empty lists still mean open. This does not
 change writer rules or agent pin/isolation admin exemptions. Text and JSON
 `access-policy get` output include the switch.
+
+## Lead intake
+
+[Lead intake](lead-intake.md) requires live tenant membership, the configured
+agent and ordinary invoker admission on every call, plus current native sales
+channel access and destination/category/agent policy before effects. The sales
+channel must restrict the default guild role. Manual sources require the
+requester's own explicit registration; isolated source data cannot be exported.
+Only configured user mentions are enabled, with no role or everyone pings.
+
+Resolution requires a configured sales resolver or current core-role membership,
+with immutable completed identities and an encrypted evidence audit. Server
+admin status alone is insufficient. `invoker_admin_bypass` governs ordinary
+admission; disabling it gives admins no exception to the core-role/user gate.
+Agent keys and operator tokens cannot impersonate an interactive resolver.
+Routine calls require the exact configured routine, tenant, executing agent,
+creator and a still-live server-issued execution grant. Routines never resolve.

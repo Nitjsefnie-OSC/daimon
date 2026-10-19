@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
-import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -20,18 +18,19 @@ from daimon.core._models import (
     LeadResolutionAudit,
 )
 from daimon.core.github_credentials import decrypt_token, encrypt_token
-from daimon.core.lead_intake import IntakeConfig, IntakeRecord, LeadSubmission
+from daimon.core.lead_intake import (
+    IntakeBusy,
+    IntakeConfig,
+    IntakeRecord,
+    LeadEffectState,
+    LeadSubmission,
+)
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, literal, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-
-class Effect(BaseModel):
-    step: str
-    stable_key: str
-    state: str
-    remote_id: str | None
+Effect = LeadEffectState
 
 
 class MailboxState(BaseModel):
@@ -62,6 +61,33 @@ class IntakeStore:
             encrypted_credentials=self.seal(json.dumps(credentials)),
         )
         async with self.sessions() as session, session.begin():
+            existing = await session.get(LeadIntakeConfig, self.tenant_id, with_for_update=True)
+            if existing is not None:
+                previous = IntakeConfig.model_validate(existing.config)
+                excluded = {"mode", "revision"}
+                changed = previous.model_dump(exclude=excluded) != config.model_dump(
+                    exclude=excluded
+                )
+                if config.revision < previous.revision or (
+                    changed and config.revision <= previous.revision
+                ):
+                    raise ValueError("configuration_revision_must_increase")
+                if changed:
+                    outstanding = await session.scalar(
+                        select(LeadIntakeEffect.intake_id)
+                        .join(
+                            LeadIntakeRecord,
+                            (LeadIntakeRecord.tenant_id == LeadIntakeEffect.tenant_id)
+                            & (LeadIntakeRecord.id == LeadIntakeEffect.intake_id),
+                        )
+                        .where(
+                            LeadIntakeRecord.tenant_id == self.tenant_id,
+                            LeadIntakeRecord.status.in_(("pending", "review")),
+                        )
+                        .limit(1)
+                    )
+                    if outstanding is not None:
+                        raise ValueError("finish_outstanding_effects_before_reconfiguration")
             await session.execute(
                 insert(LeadIntakeConfig)
                 .values(**values)
@@ -84,18 +110,14 @@ class IntakeStore:
     async def claim(self, key: str) -> AsyncIterator[None]:
         # A dedicated transaction owns the lock while each intent/result commits
         # independently. Connection death releases it; successors reconcile intents.
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            async with self.sessions() as session, session.begin():
-                acquired = await session.scalar(
-                    text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
-                    {"key": f"lead:{self.tenant_id}:{key}"},
-                )
-                if acquired:
-                    yield
-                    return
-            await asyncio.sleep(0.025)
-        raise ValueError("intake_busy")
+        async with self.sessions() as session, session.begin():
+            acquired = await session.scalar(
+                text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"lead:{self.tenant_id}:{key}"},
+            )
+            if not acquired:
+                raise IntakeBusy("intake_busy")
+            yield
 
     async def accept(
         self, config: IntakeConfig, submission: LeadSubmission, actor_id: str | None
@@ -126,6 +148,7 @@ class IntakeStore:
                     tenant_id=self.tenant_id,
                     id=record.id,
                     source_digest=digest,
+                    actor_digest=actor_digest(self.tenant_id, actor_id) if actor_id else None,
                     status=record.status,
                     encrypted_payload=self.seal(record.model_dump_json()),
                     encrypted_raw=self.seal(raw) if raw else None,
@@ -180,19 +203,69 @@ class IntakeStore:
             row = await session.get(LeadIntakeRecord, (self.tenant_id, intake_id))
             if row is None:
                 raise ValueError("intake_not_found")
-            return self._record(row)
+            record = self._record(row)
+            effects = (
+                await session.execute(
+                    select(LeadIntakeEffect)
+                    .where(
+                        LeadIntakeEffect.tenant_id == self.tenant_id,
+                        LeadIntakeEffect.intake_id == intake_id,
+                    )
+                    .order_by(LeadIntakeEffect.created_at)
+                )
+            ).scalars()
+            record.effects = (
+                [
+                    LeadEffectState(
+                        step=e.step,
+                        stable_key=e.stable_key,
+                        state=e.state,
+                        remote_id=e.remote_id,
+                        created_at=e.created_at,
+                    )
+                    for e in effects
+                ]
+                if record.submission
+                else []
+            )
+            return record
 
-    async def list(self, limit: int = 100) -> list[IntakeRecord]:
+    async def list(
+        self, limit: int = 100, *, pending_only: bool = False, after_id: UUID | None = None
+    ) -> list[IntakeRecord]:
         async with self.sessions() as session:
+            query = select(LeadIntakeRecord).where(LeadIntakeRecord.tenant_id == self.tenant_id)
+            if pending_only:
+                query = query.where(LeadIntakeRecord.status.in_(("pending", "review")))
+            if after_id is not None:
+                after = await self.get(after_id)
+                query = query.where(
+                    tuple_(LeadIntakeRecord.created_at, LeadIntakeRecord.id)
+                    > tuple_(literal(after.created_at), literal(after.id))
+                )
             rows = (
                 await session.execute(
-                    select(LeadIntakeRecord)
-                    .where(LeadIntakeRecord.tenant_id == self.tenant_id)
-                    .order_by(LeadIntakeRecord.created_at)
-                    .limit(min(limit, 100))
+                    query.order_by(LeadIntakeRecord.created_at, LeadIntakeRecord.id).limit(
+                        min(limit, 100)
+                    )
                 )
             ).scalars()
             return [self._record(row) for row in rows]
+
+    async def health(self) -> dict[str, object]:
+        async with self.sessions() as session:
+            counts = await session.execute(
+                select(LeadIntakeRecord.status, func.count())
+                .where(LeadIntakeRecord.tenant_id == self.tenant_id)
+                .group_by(LeadIntakeRecord.status)
+            )
+            oldest = await session.scalar(
+                select(func.min(LeadIntakeRecord.created_at)).where(
+                    LeadIntakeRecord.tenant_id == self.tenant_id,
+                    LeadIntakeRecord.status.in_(("pending", "review")),
+                )
+            )
+            return {"status_counts": dict(counts.tuples().all()), "oldest_pending_at": oldest}
 
     async def save(self, record: IntakeRecord) -> None:
         if record.tenant_id != self.tenant_id:
@@ -217,6 +290,7 @@ class IntakeStore:
                     stable_key=row.stable_key,
                     state=row.state,
                     remote_id=row.remote_id,
+                    created_at=row.created_at,
                 )
                 if row
                 else None
@@ -249,13 +323,24 @@ class IntakeStore:
                 .values(state="completed", remote_id=remote_id)
             )
 
-    async def audit(self, intake_id: UUID, actor_id: str, before: str, after: str) -> None:
+    async def audit(self, record: IntakeRecord, actor_id: str, before: str, after: str) -> None:
+        if record.tenant_id != self.tenant_id:
+            raise ValueError("tenant_mismatch")
         async with self.sessions() as session, session.begin():
+            await session.execute(
+                update(LeadIntakeRecord)
+                .where(
+                    LeadIntakeRecord.tenant_id == self.tenant_id,
+                    LeadIntakeRecord.id == record.id,
+                    LeadIntakeRecord.encrypted_payload.is_not(None),
+                )
+                .values(status=record.status, encrypted_payload=self.seal(record.model_dump_json()))
+            )
             session.add(
                 LeadResolutionAudit(
                     id=uuid4(),
                     tenant_id=self.tenant_id,
-                    intake_id=intake_id,
+                    intake_id=record.id,
                     encrypted_resolution=self.seal(
                         json.dumps(dict(actor=actor_id, before=before, after=after))
                     ),
@@ -311,39 +396,48 @@ class IntakeStore:
                 .where(
                     LeadIntakeRecord.tenant_id == self.tenant_id, LeadIntakeRecord.expires_at <= now
                 )
-                .values(encrypted_payload=None, encrypted_raw=None, status="expired")
+                .values(
+                    encrypted_payload=None, encrypted_raw=None, status="expired", actor_digest=None
+                )
             )
 
 
 @asynccontextmanager
 async def routine_execution(
-    sessions: async_sessionmaker[AsyncSession], tenant_id: UUID, routine_id: UUID
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    routine_id: UUID,
+    *,
+    register: bool = True,
 ) -> AsyncIterator[None]:
     """A live, expiring grant ends with the scheduler fire, including cancellation."""
     from daimon.core._models import LeadIntakeExecution
     from daimon.core.lead_intake_execution import current_intake_execution
 
     identity = uuid4()
-    async with sessions() as session, session.begin():
-        session.add(
-            LeadIntakeExecution(
-                tenant_id=tenant_id,
-                id=identity,
-                routine_id=routine_id,
-                expires_at=datetime.now(UTC) + timedelta(hours=1),
+    if register:
+        async with sessions() as session, session.begin():
+            session.add(
+                LeadIntakeExecution(
+                    tenant_id=tenant_id,
+                    id=identity,
+                    routine_id=routine_id,
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                )
             )
-        )
     token = current_intake_execution.set((routine_id, identity))
     try:
         yield
     finally:
         current_intake_execution.reset(token)
-        async with sessions() as session, session.begin():
-            await session.execute(
-                delete(LeadIntakeExecution).where(
-                    LeadIntakeExecution.tenant_id == tenant_id, LeadIntakeExecution.id == identity
+        if register:
+            async with sessions() as session, session.begin():
+                await session.execute(
+                    delete(LeadIntakeExecution).where(
+                        LeadIntakeExecution.tenant_id == tenant_id,
+                        LeadIntakeExecution.id == identity,
+                    )
                 )
-            )
 
 
 async def execution_is_active(
@@ -357,9 +451,13 @@ async def execution_is_active(
 
 async def purge_expired(session: AsyncSession, now: datetime) -> None:
     """Scheduler maintenance uses only ciphertext expiry; no decryption key needed."""
-    expired = select(LeadIntakeRecord.id).where(LeadIntakeRecord.expires_at <= now)
+    expired = select(LeadIntakeRecord.tenant_id, LeadIntakeRecord.id).where(
+        LeadIntakeRecord.expires_at <= now
+    )
     for model in (LeadIntakeEffect, LeadResolutionAudit):
-        await session.execute(delete(model).where(model.intake_id.in_(expired)))
+        await session.execute(
+            delete(model).where(tuple_(model.tenant_id, model.intake_id).in_(expired))
+        )
     await session.execute(
         update(LeadIntakeRecord)
         .where(LeadIntakeRecord.raw_expires_at <= now)
@@ -368,5 +466,71 @@ async def purge_expired(session: AsyncSession, now: datetime) -> None:
     await session.execute(
         update(LeadIntakeRecord)
         .where(LeadIntakeRecord.expires_at <= now)
-        .values(encrypted_payload=None, encrypted_raw=None, status="expired")
+        .values(encrypted_payload=None, encrypted_raw=None, status="expired", actor_digest=None)
     )
+
+
+def actor_digest(tenant_id: UUID, actor_id: str) -> str:
+    return hashlib.sha256(f"{tenant_id}:{actor_id}".encode()).hexdigest()
+
+
+async def erase_actor(session: AsyncSession, tenant_id: UUID, actor_id: str) -> int:
+    """Privacy erasure removes actor-submitted evidence and its effects/audit."""
+    ids = select(LeadIntakeRecord.id).where(
+        LeadIntakeRecord.tenant_id == tenant_id,
+        LeadIntakeRecord.actor_digest == actor_digest(tenant_id, actor_id),
+        LeadIntakeRecord.encrypted_payload.is_not(None),
+    )
+    identities = list(await session.scalars(ids))
+    for model in (LeadIntakeEffect, LeadResolutionAudit):
+        await session.execute(
+            delete(model).where(model.tenant_id == tenant_id, model.intake_id.in_(identities))
+        )
+    await session.execute(
+        update(LeadIntakeRecord)
+        .where(LeadIntakeRecord.tenant_id == tenant_id, LeadIntakeRecord.id.in_(identities))
+        .values(encrypted_payload=None, encrypted_raw=None, actor_digest=None, status="expired")
+    )
+    return len(identities)
+
+
+async def count_actor(session: AsyncSession, tenant_id: UUID, actor_id: str) -> int:
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(LeadIntakeRecord)
+            .where(
+                LeadIntakeRecord.tenant_id == tenant_id,
+                LeadIntakeRecord.actor_digest == actor_digest(tenant_id, actor_id),
+                LeadIntakeRecord.encrypted_payload.is_not(None),
+            )
+        )
+        or 0
+    )
+
+
+async def clear_effect(store: IntakeStore, intake_id: UUID, step: str) -> None:
+    """Called only after authorized provider absence reconciliation under source claim."""
+    async with store.sessions() as session, session.begin():
+        await session.execute(
+            delete(LeadIntakeEffect).where(
+                LeadIntakeEffect.tenant_id == store.tenant_id,
+                LeadIntakeEffect.intake_id == intake_id,
+                LeadIntakeEffect.step == step,
+            )
+        )
+
+
+async def configured_routines(
+    session: AsyncSession, tenant_ids: set[UUID]
+) -> set[tuple[UUID, UUID]]:
+    rows = await session.execute(
+        select(LeadIntakeConfig.tenant_id, LeadIntakeConfig.config).where(
+            LeadIntakeConfig.tenant_id.in_(tenant_ids)
+        )
+    )
+    return {
+        (tenant, config.routine_id)
+        for tenant, payload in rows
+        if (config := IntakeConfig.model_validate(payload)).routine_id is not None
+    }

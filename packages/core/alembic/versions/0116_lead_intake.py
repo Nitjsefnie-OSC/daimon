@@ -19,7 +19,7 @@ def upgrade() -> None:
             config JSONB NOT NULL, encrypted_credentials BYTEA NOT NULL);
         CREATE TABLE lead_intakes (
             tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
-            id UUID NOT NULL, source_digest TEXT NOT NULL, status TEXT NOT NULL,
+            id UUID NOT NULL, source_digest TEXT NOT NULL, actor_digest TEXT, status TEXT NOT NULL,
             encrypted_payload BYTEA, encrypted_raw BYTEA,
             created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
             raw_expires_at TIMESTAMPTZ NOT NULL,
@@ -32,6 +32,8 @@ def upgrade() -> None:
             PRIMARY KEY (tenant_id, intake_id, step),
             FOREIGN KEY (tenant_id, intake_id) REFERENCES lead_intakes(tenant_id, id)
             ON DELETE CASCADE);
+        CREATE UNIQUE INDEX uq_lead_discord_starter ON lead_intake_effects(tenant_id, remote_id)
+            WHERE step = 'starter' AND remote_id IS NOT NULL;
         CREATE TABLE lead_resolution_audit (
             id UUID PRIMARY KEY, tenant_id UUID NOT NULL, intake_id UUID NOT NULL,
             encrypted_resolution BYTEA NOT NULL, created_at TIMESTAMPTZ NOT NULL,

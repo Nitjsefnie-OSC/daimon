@@ -9,7 +9,9 @@ from enum import StrEnum
 from typing import Annotated
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from daimon.core.access_policy import TenantAccessPolicy, is_invoker_allowed
+from daimon.core.membership import Membership
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 NonEmptyStr = Annotated[str, Field(min_length=1, max_length=100_000)]
 
@@ -388,8 +390,14 @@ class IntakeConfig(BaseModel):
     stage: str = "appointmentscheduled"
     deal_fields: dict[str, str] = Field(default_factory=dict)
     retention_days: int = Field(default=90, ge=1, le=90)
-    raw_retention_days: int = Field(default=7, ge=1, le=7)
-    reconciliation_start: datetime
+    raw_retention_days: float = Field(default=7, gt=0, le=7)
+    reconciliation_start: AwareDatetime
+
+    @model_validator(mode="after")
+    def raw_ttl_is_shorter(self) -> IntakeConfig:
+        if self.raw_retention_days >= self.retention_days:
+            raise ValueError("Raw source retention must be shorter than lead retention")
+        return self
 
 
 class LeadDraft(BaseModel):
@@ -409,6 +417,14 @@ class LeadDraft(BaseModel):
     company_evidence: str | None = None
 
 
+class LeadEffectState(BaseModel):
+    step: str
+    stable_key: str
+    state: str
+    remote_id: str | None
+    created_at: datetime
+
+
 class IntakeRecord(BaseModel):
     id: UUID
     tenant_id: UUID
@@ -416,6 +432,7 @@ class IntakeRecord(BaseModel):
     status: str
     submission: LeadSubmission | None
     progress: LeadProgress = Field(default_factory=LeadProgress)
+    effects: list[LeadEffectState] = Field(default_factory=list)
     actor_id: str | None = None
     config_revision: int
     error_code: str | None = None
@@ -430,6 +447,8 @@ class IntakeResolution(BaseModel):
     contact_id: str | None = Field(default=None, pattern=r"^\d+$")
     deal_id: str | None = Field(default=None, pattern=r"^\d+$")
     separate_opportunity_confirmed: bool = False
+    discord_message_id: str | None = Field(default=None, pattern=r"^\d+$")
+    discord_post_absence_confirmed: bool = False
     evidence: str = Field(min_length=20, max_length=2000)
 
 
@@ -448,3 +467,44 @@ def may_resolve(
         and not routine
         and (user_id in resolver_ids or bool(set(role_ids) & set(core_role_ids)))
     )
+
+
+class IntakeBusy(Exception):
+    """Another worker holds the source or company claim; resume later."""
+
+
+def authorize_intake_actor(
+    config: IntakeConfig,
+    policy: TenantAccessPolicy,
+    *,
+    user_id: str,
+    facts: Membership,
+    agent_id: UUID | None,
+    routine_id: UUID | None,
+    execution_active: bool,
+    resolve: bool = False,
+) -> None:
+    """Require live admission plus the named routine or human business grant."""
+    if agent_id != config.agent_id or facts.is_member is not True:
+        raise PermissionError("intake_actor_not_admitted")
+    if not is_invoker_allowed(
+        policy,
+        external_user_id=user_id,
+        is_admin=facts.is_admin,
+        role_ids=facts.role_ids,
+        verified_membership=facts.is_member,
+    ):
+        raise PermissionError("invoker_not_allowed")
+    if routine_id is not None and (
+        routine_id != config.routine_id or not execution_active or resolve
+    ):
+        raise PermissionError("routine_not_authorized")
+    if resolve and not may_resolve(
+        user_id=user_id,
+        role_ids=facts.role_ids,
+        core_role_ids=policy.invoker_role_ids,
+        resolver_ids=config.resolver_user_ids,
+        routine=routine_id is not None,
+        member=facts.is_member is True,
+    ):
+        raise PermissionError("sales_resolver_or_core_role_required")

@@ -2245,3 +2245,19 @@ Fallback-DM files recheck current DM controls, isolation (including a resolved
 Discord parent) and recipient eligibility before each file and after download.
 Delivery error logs record the error type without arbitrary exception text,
 which may contain signed upload URLs.
+
+## Lead intake
+
+The [lead intake](lead-intake.md) coordinator and evidence contracts live in
+core; tenant stores own encrypted submissions, effect intents, resolution audit,
+mailbox coverage and short-lived routine execution grants. The MCP service
+implements Gmail, HubSpot and Discord HTTP ports without adapter-to-adapter
+imports. Six first-party tools expose submit/resume/resolve and private
+get/list/health; `daimon leads configure` provisions encrypted operator-owned
+integration configuration. Scheduler dispatch signs execution provenance into
+routine credentials and revokes it when the fire ends; retention maintenance
+erases expired evidence independently of intake activity.
+
+The Discord `/leads` entry point reads that same core tenant store and admission
+contract for an ephemeral queue/review status; decisions continue through the
+first-party resolver tool. It imports no MCP adapter implementation.

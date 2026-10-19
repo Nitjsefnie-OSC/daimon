@@ -15,13 +15,15 @@ class EmailEvidence:
 
 
 def decode_email(raw: str) -> EmailEvidence:
+    if len(raw) > 20_000_000:
+        raise ValueError("source_too_large")
     message = BytesParser(policy=policy.default).parsebytes(
         base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
     )
     headers = "\n".join(f"{key}: {value}" for key, value in message.items())
     parts: list[str] = []
     for part in message.walk():
-        if part.get_content_disposition() == "attachment":
+        if part.get_content_disposition() == "attachment" or part.get_filename() is not None:
             continue
         if part.get_content_type() not in ("text/plain", "text/html"):
             continue

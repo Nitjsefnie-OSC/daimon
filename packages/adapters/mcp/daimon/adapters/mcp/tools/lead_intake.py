@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -27,10 +26,17 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.access_policy import is_invoker_allowed
-from daimon.core.lead_intake import IntakeRecord, IntakeResolution, LeadDraft, may_resolve
+from daimon.core.authz import Action, Place, Subject, authorize
+from daimon.core.lead_intake import (
+    IntakeRecord,
+    IntakeResolution,
+    LeadDraft,
+    LeadSource,
+    authorize_intake_actor,
+)
 from daimon.core.lead_intake_service import IntakeService
-from daimon.core.permissions import any_own_readers
+from daimon.core.permissions import any_own_readers, home_of
+from daimon.core.stores.accounts import account_exists
 from daimon.core.stores.lead_intake import IntakeStore, execution_is_active
 from daimon.core.stores.routines import get_routine
 from fastmcp import Context, FastMCP
@@ -64,7 +70,10 @@ async def service(
         raise ToolError("lead_intake_agent_or_tenant_mismatch")
     token = runtime.settings.discord.bot_token.get_secret_value()
 
-    async def reauthorize() -> None:
+    async def reauthorize(source_ref: LeadSource | None = None) -> None:
+        async with runtime.session_factory() as session:
+            if not await account_exists(session, auth.account_id):
+                raise ToolError("actor_account_revoked")
         policy = await load_channel_policy(runtime, auth)
         resolver = runtime.membership_resolver
         if resolver is None:
@@ -72,14 +81,7 @@ async def service(
         facts = await resolver.resolve(
             auth.tenant_id, config.guild_id, auth.platform_user_id or "", require_fresh=True
         )
-        if not is_invoker_allowed(
-            policy,
-            external_user_id=auth.platform_user_id or "",
-            is_admin=facts.is_admin,
-            role_ids=facts.role_ids,
-            verified_membership=facts.is_member,
-        ):
-            raise ToolError("invoker_not_allowed")
+        active = False
         routine = auth.routine_id is not None or auth.execution_id is not None
         if routine:
             async with runtime.session_factory() as session:
@@ -108,15 +110,24 @@ async def service(
             # Sealed sources cannot be exported to a CRM by a scheduled agent.
             if any_own_readers(policy) and (row.source_channel_id in policy.channel_rules):
                 raise ToolError("isolated_source_export_denied")
-        if resolve and not may_resolve(
-            user_id=auth.platform_user_id or "",
-            role_ids=facts.role_ids,
-            core_role_ids=policy.invoker_role_ids,
-            resolver_ids=config.resolver_user_ids,
-            routine=routine,
-            member=facts.is_member is True,
-        ):
-            raise ToolError("sales_resolver_or_core_role_required")
+        try:
+            authorize_intake_actor(
+                config,
+                policy,
+                user_id=auth.platform_user_id or "",
+                facts=facts,
+                agent_id=auth.chat_agent_id,
+                routine_id=auth.routine_id,
+                execution_active=active if routine else False,
+                resolve=resolve,
+            )
+        except PermissionError as exc:
+            raise ToolError(str(exc)) from None
+        origins = await list_running_origins(runtime, auth)
+        if not routine and not origins:
+            raise ToolError("interactive_origin_required")
+        if any(home_of(policy, o.parent_channel_id, o.thread_id) for o in origins):
+            raise ToolError("isolated_source_export_denied")
         # Native permissions and category/agent policy are re-read before every effect.
         async with rest_client(token) as client:
             _, member = await _resolve_member(client, config.guild_id, auth.platform_user_id or "")
@@ -137,40 +148,43 @@ async def service(
                 category_id=str(target.category_id) if target.category_id else None,
                 policy=policy,
             )
-            if draft is not None and draft.source.kind == "manual":
-                source = await client.fetch_channel(int(draft.source.channel_id or "0"))
+            if source_ref is not None and source_ref.kind == "manual":
+                source = await client.fetch_channel(int(source_ref.channel_id or "0"))
                 if (
                     not isinstance(source, discord.TextChannel)
                     or str(source.guild.id) != config.guild_id
                 ):
                     raise ToolError("manual_source_channel_required")
                 _check_view_permission(source, member)
-                if any_own_readers(policy):
+                decision = authorize(
+                    policy,
+                    subject=Subject(),
+                    action=Action.READ_CHANNEL,
+                    place=Place(channel_id=str(source.id)),
+                    origin_channel_ids=frozenset(
+                        value
+                        for origin in origins
+                        for value in (origin.parent_channel_id, origin.thread_id)
+                    ),
+                )
+                if not decision or home_of(policy, str(source.id)):
                     raise ToolError("source_export_denied")
-        origins = await list_running_origins(runtime, auth)
-        if not routine and not origins:
-            raise ToolError("interactive_origin_required")
 
-    await reauthorize()
+    await reauthorize(draft.source if draft else None)
     async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
-        gmail_token = credentials.get("gmail_access_token", "")
+        refresh = None
         if credentials.get("gmail_refresh_token"):
-            response = await client.post(
-                "https://oauth2.googleapis.com/token",
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": credentials["gmail_refresh_token"],
-                    "client_id": credentials["gmail_client_id"],
-                    "client_secret": credentials["gmail_client_secret"],
-                },
-            )
-            response.raise_for_status()
-            gmail_token = str(response.json()["access_token"])
+            refresh = {
+                "refresh_token": credentials["gmail_refresh_token"],
+                "client_id": credentials["gmail_client_id"],
+                "client_secret": credentials["gmail_client_secret"],
+            }
         ports = HttpIntakePorts(
             client,
-            gmail_token=gmail_token,
+            gmail_token=credentials.get("gmail_access_token", ""),
             hubspot_token=credentials["hubspot_access_token"],
             discord_token=token,
+            gmail_refresh_credentials=refresh,
         )
         yield IntakeService(store, ports, reauthorize)
 
@@ -203,8 +217,7 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         async with service(runtime, await _auth(ctx)) as intake:
             if intake_id:
                 return {"intake": (await intake.resume(intake_id)).model_dump(mode="json")}
-            records = await intake.store.list()
-            pending = [r for r in records if r.status in {"pending", "review"}]
+            pending = await intake.store.list(limit=26, pending_only=True)
             results = [await intake.resume(r.id) for r in pending[:25]]
             return {
                 "intakes": [r.model_dump(mode="json") for r in results],
@@ -238,11 +251,12 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"discord"})
     async def lead_intake_list(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
+        after_id: UUID | None = None,
     ) -> list[IntakeRecord]:
         """Read up to 100 tenant leads in the restricted sales queue, oldest first."""
         async with service(runtime, await _auth(ctx)) as intake:
             await intake.store.purge(datetime.now(UTC))
-            return await intake.store.list()
+            return await intake.store.list(after_id=after_id)
 
     @mcp.tool(tags={"discord"})
     async def lead_intake_health(  # pyright: ignore[reportUnusedFunction]
@@ -251,12 +265,6 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Read tenant lead counts, oldest pending age and mailbox coverage."""
         async with service(runtime, await _auth(ctx)) as intake:
             await intake.store.purge(datetime.now(UTC))
-            records = await intake.store.list()
             config, _ = await intake.store.configuration()
             state = await intake.store.mailbox(config.source_connection_id)
-            pending = [r.created_at for r in records if r.status in {"pending", "review"}]
-            return {
-                "status_counts": dict(Counter(r.status for r in records)),
-                "oldest_pending_at": min(pending) if pending else None,
-                "mailbox": state.model_dump(mode="json"),
-            }
+            return {**await intake.store.health(), "mailbox": state.model_dump(mode="json")}
