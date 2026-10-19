@@ -1507,3 +1507,31 @@ async def test_minimum_work_pool_retains_turn_headroom(harness: Harness, db_sche
     finally:
         await small.dispatcher.close()
         await engine.dispose()
+
+
+async def test_routine_origin_cannot_promote_handoffs_to_attended(harness: Harness):
+    from daimon.core.stores.turn_origins import get_active_origin
+    from daimon.core.turn_origin import current_origin_id
+
+    observed = []
+
+    async def inspect(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
+        origin_id = current_origin_id.get()
+        assert origin_id is not None
+        async with harness.factory() as db:
+            origin = await get_active_origin(
+                db,
+                origin_id=origin_id,
+                tenant_id=harness.tenant.id,
+                account_id=harness.accounts[OWNER_A],
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert origin is not None
+        observed.append(origin.attended)
+        async for chunk in answer("unattended parent")(upstream, sid):
+            yield chunk
+
+    harness.upstream.scripts = [inspect]
+    result = await harness.routine()
+    assert result.text == "unattended parent" and observed == [False]

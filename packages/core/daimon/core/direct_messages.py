@@ -524,6 +524,7 @@ async def _run_admitted_dm_turn(
             responder_ma_agent_id=prepared.admission.agent.id,
             responder_name=prepared.admission.agent.name,
             role=role,
+            attended=attended if attended is not None else origin != "routine",
         ) as turn_origin_row,
     ):
         user_message = f"{render_turn_origin(turn_origin_row)}\n{prompt}"
