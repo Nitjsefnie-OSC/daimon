@@ -152,9 +152,15 @@ the requester can approve or deny. Each call gets its own card. Answered,
 expired and stopped cards lose
 their buttons.
 
+After install, the success page says to invite Daimon with `/invite @daimon`
+and mention it there, and on a first install the installer gets the same short
+welcome as a DM. A
+DM to Daimon when private chats are off, or before one has been started from a
+channel with `/dm-me`, gets a one-time reply saying how to reach it.
+
 By default Daimon reads only channels the bot is invited to. Members can
-additionally **connect their Slack account** (Daimon nudges them once, and
-offers a link whenever it hits a channel it can't read). A connected member's
+additionally **connect their Slack account** (Daimon offers a link whenever it
+hits a channel it can't read; it doesn't ask before that). A connected member's
 reads run with *their* Slack permissions: any channel or DM they can see, no
 bot invite needed, plus message search (results that come from a DM are only
 surfaced when you ask in a DM with Daimon).

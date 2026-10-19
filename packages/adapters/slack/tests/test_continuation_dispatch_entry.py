@@ -815,7 +815,6 @@ async def test_dispatch_skipped_while_processing_runs_when_the_turn_releases_the
 
     with (
         patch.object(app, "_run_thread_turn", side_effect=_turn_whose_tail_already_ran),
-        patch.object(app, "_maybe_post_connect_nudge", new_callable=AsyncMock),
     ):
         await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
             {"ts": _THREAD_ID, "user": "U_REQUESTER", "text": "hi"},

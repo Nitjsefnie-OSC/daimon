@@ -51,7 +51,12 @@ from daimon.adapters.teams.context import (
     render_user_message,
 )
 from daimon.adapters.teams.credential_requests import TeamsCredentialRequests
-from daimon.adapters.teams.deployment_admins import boot_owner_ids, inbound_is_admin, inbound_role
+from daimon.adapters.teams.deployment_admins import (
+    boot_owner_ids,
+    inbound_is_admin,
+    inbound_role,
+    with_admin_team_if_asked,
+)
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import (
     DENIED,
@@ -1273,6 +1278,7 @@ class TeamsApp:
             refusal = _admission_refusal(err, tenant_id, in_dm=inbound.kind == "dm")
             if refusal is not None and continuation is None:  # queued work settles silently
                 private = isinstance(err, AdmissionDenied) and err.reason in SENDER_ONLY
+                refusal = await with_admin_team_if_asked(self.runtime, refusal)
                 await self._say(inbound, refusal, sender_only=private)
             if reraise:
                 raise
@@ -1368,17 +1374,18 @@ class TeamsApp:
                     default_cap=self._teams.max_concurrent_turns_per_tenant,
                 )
                 if slot != "started":
+                    notice = {
+                        "cancelled": CANCELLED_NOTICE,
+                        "timed_out": retry_hint(
+                            QUEUE_TIMED_OUT_TEXT, direct_chat=inbound.kind == "dm"
+                        ),
+                        "balance_depleted": admission_refusal_text(
+                            "balance_depleted", TEAMS_REFUSAL_NOUNS
+                        ),
+                        "queue_full": _SHED,
+                    }[slot]
                     await lifecycle.close_with_notice(
-                        {
-                            "cancelled": CANCELLED_NOTICE,
-                            "timed_out": retry_hint(
-                                QUEUE_TIMED_OUT_TEXT, direct_chat=inbound.kind == "dm"
-                            ),
-                            "balance_depleted": admission_refusal_text(
-                                "balance_depleted", TEAMS_REFUSAL_NOUNS
-                            ),
-                            "queue_full": _SHED,
-                        }[slot]
+                        await with_admin_team_if_asked(self.runtime, notice)
                     )
                     if reraise:
                         # A continuation that never ran must not settle as

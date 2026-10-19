@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    ADMIN_TEAM,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     TeamsApiFake,
@@ -231,3 +232,25 @@ async def test_a_member_gets_no_dialog_and_no_button(
     assert "Channel settings" not in routing[member], "a member is offered nothing"
     assert "Channel settings" not in routing[LEAD]
     assert "Channel settings" in routing[ADMIN]
+
+
+async def test_a_member_is_told_who_the_admins_are_when_the_admin_team_is_known(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    member = "dddddddd-eeee-ffff-0000-111111111111"
+    line = "Admins are the owners of the Leads team."
+    async with _running(db_session_factory, teams_api_fake) as service:
+        async with db_session_factory.begin() as session:
+            await record_teams_installation(
+                session,
+                tenant_id=TENANT,
+                team_id="19:leads@thread.tacv2",
+                group_id=ADMIN_TEAM,
+                name="Leads",
+            )
+        opened = await post_activity(service, _open(member))
+        submitted = await post_activity(service, _submit(member, "rule", channel=GROWTH))
+
+    expected = f"{channel_settings.channels_need_admin_message()}\n\n{line}"
+    assert opened["task"]["value"] == expected
+    assert submitted["task"]["value"] == expected

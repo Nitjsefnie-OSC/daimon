@@ -11,6 +11,7 @@ from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Final, Literal
 
@@ -100,6 +101,7 @@ from daimon.adapters.discord.vision import (
 )
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.billing_panel import fmt_usd
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.continuity.continuation import (
@@ -163,6 +165,7 @@ from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.pending_skill_adds import is_affirmative
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
+from daimon.core.stores.tenant_ledger import get_prepaid_balance
 from daimon.core.stores.tenants import (
     get_plain_text_mentions,
     get_tenant_liveness,
@@ -547,36 +550,40 @@ def _log_bg_task_exception(task: asyncio.Task[Any]) -> None:
         log.error("bg_task_failed", task_name=task.get_name(), exc_info=exc)
 
 
-def _build_welcome_embed(bot_display_name: str) -> discord.Embed:
-    """Immediate "⏳ setting up…" welcome. Pure — no I/O."""
-    embed = discord.Embed(
+def _build_welcome_embed() -> discord.Embed:
+    """The first message of an install, edited into the ready state. Pure, no I/O."""
+    return discord.Embed(
         title="⏳ Setting up…",
-        description=(
-            "Setting up this server — seeding your default agent, environment, and "
-            "skills. This takes a few moments."
-        ),
+        description="Getting ready. This takes a moment.",
         color=_EMBED_COLOR,
     )
-    embed.add_field(
-        name="Once ready",
-        value=(
-            f"Mention `@{bot_display_name}` anywhere to chat, or run `/agent-setup` "
-            "to see who answers here."
-        ),
-        inline=False,
-    )
-    return embed
 
 
-def _build_ready_embed(*, promo_codes: bool = False) -> discord.Embed:
-    """Terminal success follow-up. Pure — no I/O.
+def _build_ready_embed(
+    bot_display_name: str = "daimon",
+    *,
+    promo_codes: bool = False,
+    credit: Decimal | None = None,
+) -> discord.Embed:
+    """What Daimon does, one thing to try and the setup phrase. Pure, no I/O.
 
     ``promo_codes``: some code is redeemable now, so point admins at /billing.
+    ``credit``: the tenant's balance when it is above zero, named so the first
+    footer showing what is left is no surprise.
     """
-    description = "Mention me anywhere, or run `/agent-setup`."
+    lines = [
+        "I answer questions about data and write code, charts and notebooks.",
+        f"Try it: mention `@{bot_display_name}` with a question, "
+        "or attach a CSV and ask me to summarise it.",
+        'To set things up, mention me and say "help me set up".',
+    ]
+    if credit is not None:
+        lines.append(f"You have {fmt_usd(credit)} of credit. Each answer shows what's left.")
     if promo_codes:
-        description += "\nHave a promo code? Redeem it in `/billing`."
-    return discord.Embed(title="✅ Ready", description=description, color=theme.COLOR_GREEN)
+        lines.append("Have a promo code? Redeem it in `/billing`.")
+    return discord.Embed(
+        title="👋 Daimon is ready", description="\n".join(lines), color=theme.COLOR_GREEN
+    )
 
 
 def _build_snag_embed() -> discord.Embed:
@@ -770,6 +777,8 @@ class DaimonBot(commands.Bot):
         # In-flight seed guard: tenant_ids with a reconcile in progress, mapped
         # to the task running it so the boot reconcile watcher can wait on it.
         self._seeding: dict[uuid.UUID, asyncio.Task[Any] | None] = {}
+        # The "setting up" message of each fresh install, by guild id, until the seed ends.
+        self._welcome_messages: dict[int, discord.Message] = {}
         # Separate guard for unjoined-guild refreshes, so a rejoin during one
         # still runs its own seed and flips the tenant back to ready. The
         # reconcile's per-tenant advisory lock serializes the two.
@@ -1289,13 +1298,16 @@ class DaimonBot(commands.Bot):
         # show Change; the click gets the refusal instead of "interaction failed".
         self.add_dynamic_items(StalePictureChangeButton)
 
-    async def _post_to_guild(self, guild: discord.Guild, embed: discord.Embed) -> None:
-        """Post an embed via the fallback chain: text channel → DM owner → skip."""
+    async def _post_to_guild(
+        self, guild: discord.Guild, embed: discord.Embed
+    ) -> discord.Message | None:
+        """Post an embed via the fallback chain: text channel → DM owner → skip.
+
+        Returns the posted message, or None when nowhere took it."""
         channel = _pick_post_channel(guild)
         if channel is not None:
             try:
-                await channel.send(embed=embed)
-                return
+                return await channel.send(embed=embed)
             except discord.HTTPException as exc:
                 log.warning("guild_post_channel_failed", guild_id=str(guild.id), error=str(exc))
         # DM-owner fallback.
@@ -1307,11 +1319,29 @@ class DaimonBot(commands.Bot):
                 owner = None
         if owner is not None:
             try:
-                await owner.send(embed=embed)
-                return
+                return await owner.send(embed=embed)
             except discord.HTTPException as exc:
                 log.warning("guild_post_dm_failed", guild_id=str(guild.id), error=str(exc))
         log.warning("guild_post_skipped", guild_id=str(guild.id))
+        return None
+
+    async def _post_welcome(self, guild: discord.Guild) -> None:
+        """Post the "setting up" message and keep it so the seed can finish it in place."""
+        welcome = await self._post_to_guild(guild, _build_welcome_embed())
+        if welcome is not None:
+            self._welcome_messages[guild.id] = welcome
+
+    async def _finish_welcome(self, guild: discord.Guild, embed: discord.Embed) -> None:
+        """Turn the "setting up" message into `embed`; post it fresh when there is
+        no such message (a returning install) or it can no longer be edited."""
+        welcome = self._welcome_messages.pop(guild.id, None)
+        if welcome is not None:
+            try:
+                await welcome.edit(embed=embed)
+                return
+            except discord.HTTPException as exc:
+                log.warning("guild_welcome_edit_failed", guild_id=str(guild.id), error=str(exc))
+        await self._post_to_guild(guild, embed)
 
     async def _flip_failed_best_effort(
         self, tenant_id: uuid.UUID, *, reason: str | None, was_ready: bool
@@ -1336,6 +1366,25 @@ class DaimonBot(commands.Bot):
                 )
         except SQLAlchemyError:
             log.exception("guild_seed_status_flip_failed", tenant_id=str(tenant_id))
+
+    async def _ready_embed(self, tenant_id: uuid.UUID) -> discord.Embed:
+        """The ready message with the promo and credit lines that apply right now."""
+        promo_codes = False
+        credit: Decimal | None = None
+        try:
+            async with self.runtime.sessionmaker() as session:
+                promo_codes = await has_redeemable_promo_code(session, now=datetime.now(UTC))
+                # Prepaid only, as the turn footer: an operator-funded tenant has no balance.
+                balance = await get_prepaid_balance(session, tenant_id=tenant_id)
+            credit = balance if balance is not None and balance > 0 else None
+        except SQLAlchemyError as exc:
+            # The guild is ready; a failed lookup only drops those lines.
+            log.warning("guild_seed_ready_lookup_failed", tenant_id=str(tenant_id), error=str(exc))
+        return _build_ready_embed(
+            _resolve_bot_display_name(self.runtime.settings),
+            promo_codes=promo_codes,
+            credit=credit,
+        )
 
     async def _seed_tenant_defaults(
         self, *, tenant_id: uuid.UUID, guild: discord.Guild, was_ready: bool
@@ -1414,20 +1463,7 @@ class DaimonBot(commands.Bot):
                 )
                 self._ready_reconciled_tenant_ids.add(tenant_id)
                 if not was_ready:
-                    try:
-                        async with self.runtime.sessionmaker() as session:
-                            promo_codes = await has_redeemable_promo_code(
-                                session, now=datetime.now(UTC)
-                            )
-                    except SQLAlchemyError as exc:
-                        # The guild is ready; a failed lookup only drops the promo line.
-                        log.warning(
-                            "guild_seed_promo_lookup_failed",
-                            tenant_id=str(tenant_id),
-                            error=str(exc),
-                        )
-                        promo_codes = False
-                    await self._post_to_guild(guild, _build_ready_embed(promo_codes=promo_codes))
+                    await self._finish_welcome(guild, await self._ready_embed(tenant_id))
                 return True
             else:
                 reason = roster_failure_reason or compose_failure_reason(report)
@@ -1451,7 +1487,7 @@ class DaimonBot(commands.Bot):
                         status="failed",
                         reason=reason,
                     )
-                    await self._post_to_guild(guild, _build_snag_embed())
+                    await self._finish_welcome(guild, _build_snag_embed())
                 return False
         except (DaimonError, _anthropic.APIError, discord.HTTPException) as exc:
             log.warning("guild_seed_failed", tenant_id=str(tenant_id), error=str(exc))
@@ -1462,7 +1498,7 @@ class DaimonBot(commands.Bot):
                 tenant_id, reason=f"{type(exc).__name__}: {exc}", was_ready=was_ready
             )
             if not was_ready:
-                await self._post_to_guild(guild, _build_snag_embed())
+                await self._finish_welcome(guild, _build_snag_embed())
             return False
         except Exception as exc:  # background-task supervisor boundary
             log.exception("guild_seed_unexpected", tenant_id=str(tenant_id))
@@ -1475,7 +1511,7 @@ class DaimonBot(commands.Bot):
                 tenant_id, reason=f"unexpected error: {type(exc).__name__}", was_ready=was_ready
             )
             if not was_ready:
-                await self._post_to_guild(guild, _build_snag_embed())
+                await self._finish_welcome(guild, _build_snag_embed())
             return False
         finally:
             self._seeding.pop(tenant_id, None)
@@ -2132,9 +2168,7 @@ class DaimonBot(commands.Bot):
                         )
                     )
                     continue
-                await self._post_to_guild(
-                    guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
-                )
+                await self._post_welcome(guild)
                 boot_tasks.append(
                     self._spawn(
                         self._seed_tenant_defaults(
@@ -2415,9 +2449,7 @@ class DaimonBot(commands.Bot):
                 key=f"install:discord:{guild_id}",
                 message=f"New install: Discord {guild.name} ({guild_id})",
             )
-            await self._post_to_guild(
-                guild, _build_welcome_embed(_resolve_bot_display_name(self.runtime.settings))
-            )
+            await self._post_welcome(guild)
             try:
                 guild_obj = discord.Object(id=guild.id)
                 self.tree.clear_commands(guild=guild_obj)

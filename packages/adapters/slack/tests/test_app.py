@@ -104,7 +104,6 @@ async def test_same_thread_timestamp_in_two_channels_keeps_turns_separate(
     with (
         patch("daimon.adapters.slack.app.get_turn_cap", side_effect=cap),
         patch("daimon.adapters.slack.app.turn_target_protected", side_effect=allowed),
-        patch.object(app, "_maybe_post_connect_nudge", new_callable=AsyncMock),
         patch.object(app, "_run_thread_turn", side_effect=run_turn),
     ):
         first = asyncio.create_task(

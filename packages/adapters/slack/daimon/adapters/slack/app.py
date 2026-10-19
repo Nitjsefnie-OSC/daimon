@@ -136,7 +136,6 @@ from daimon.adapters.slack.here import handle_here_command
 from daimon.adapters.slack.interactions import build_retry_handlers, resolve_web_client
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.memory import handle_memory_command
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.names import remember_payload_names
 from daimon.adapters.slack.output_delivery import NoticeKeys, deliver_session_outputs
 from daimon.adapters.slack.privacy_panel.actions import (
@@ -218,19 +217,16 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.routine_delivery import run_delivery_poller
-from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
-from daimon.core.stores.slack_connect_prompts import mark_connect_prompted, was_connect_prompted
 from daimon.core.stores.slack_event_dedup import insert_if_new
 from daimon.core.stores.slack_turn_contexts import (
     create_slack_turn_context,
     delete_slack_turn_context,
 )
-from daimon.core.stores.slack_user_tokens import get_slack_user_token
 from daimon.core.stores.tenants import get_plain_text_mentions, get_tenant, get_turn_cap
 from daimon.core.stores.thread_agent_bindings import get_binding as get_setup_binding
 from daimon.core.stores.thread_sessions import (
@@ -1604,63 +1600,6 @@ class SlackApp:
             self._bot_user_ids[team_id] = bot_user_id
         return bot_user_id
 
-    async def _maybe_post_connect_nudge(
-        self,
-        web_client: AsyncWebClient,
-        *,
-        team_id: str,
-        slack_user_id: str,
-        channel: str,
-        thread_ts: str,
-    ) -> None:
-        """Once-ever ephemeral tip: connect your account for user-token reads.
-
-        Raises on Slack/DB failure — the caller wraps in contextlib.suppress so
-        the nudge can never fail the turn. Marked prompted only AFTER a
-        successful post so a failed post retries on the next mention.
-        """
-        slack_settings = self.runtime.settings.slack
-        app_root_url = self.runtime.settings.mcp.app_root_url
-        if slack_settings is None or app_root_url is None or not slack_user_id:
-            return
-        async with self.runtime.sessionmaker() as s:
-            if (
-                await get_slack_user_token(s, team_id=team_id, slack_user_id=slack_user_id)
-                is not None
-            ):
-                return
-            if await was_connect_prompted(s, team_id=team_id, slack_user_id=slack_user_id):
-                return
-        connect_url = build_slack_connect_url(
-            app_root_url=app_root_url,
-            signing_secret=slack_settings.signing_secret.get_secret_value(),
-            team_id=team_id,
-            slack_user_id=slack_user_id,
-            now=time.time(),
-        )
-        await web_client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-            channel=channel,
-            user=slack_user_id,
-            thread_ts=thread_ts,
-            text=(
-                "👋 Tip: connect your Slack account and "
-                f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))} "
-                "can read any channel "
-                "or DM *you* can see — no invites needed — plus search your messages "
-                "(in a DM with "
-                f"{escape_mrkdwn(resolve_bot_display_name(self.runtime.settings))}).\n"
-                f"Connect: {connect_url}\n"
-                "_The link is personal and expires in about an hour. If your "
-                "workspace requires admin approval for app permissions, an admin "
-                "may need to approve first. Disconnect any time via `/privacy`._"
-            ),
-        )
-        async with self.runtime.sessionmaker() as s:
-            await mark_connect_prompted(
-                s, team_id=team_id, slack_user_id=slack_user_id, now=datetime.now(tz=UTC)
-            )
-            await s.commit()
-
     def _history_page_limit(self) -> int:
         slack_settings = self.runtime.settings.slack
         assert slack_settings is not None, (
@@ -1813,16 +1752,6 @@ class SlackApp:
                         channel=channel,
                         timestamp=event_ts,
                         name="eyes",
-                    )
-                with contextlib.suppress(
-                    SlackApiError, SQLAlchemyError, aiohttp.ClientError, asyncio.TimeoutError
-                ):
-                    await self._maybe_post_connect_nudge(
-                        web_client,
-                        team_id=team_id,
-                        slack_user_id=str(event.get("user") or ""),
-                        channel=channel,
-                        thread_ts=thread_id,
                     )
                 await self._run_thread_turn(
                     event,

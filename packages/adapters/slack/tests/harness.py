@@ -59,7 +59,7 @@ def make_orchestrate_app(
     max_concurrent_turns_per_tenant: int = 3,
     deployment_default: DeploymentDefault | None = None,
     crypto_key: str | None = None,
-    connect_nudge_url: str | None = None,
+    app_root_url: str | None = None,
 ) -> tuple[SlackApp, AsyncAnthropic]:
     """Build a SlackApp for orchestration tests.
 
@@ -76,9 +76,8 @@ def make_orchestrate_app(
     ``crypto_key`` is None by default; pass one when the test also drives
     ``_handle_app_mention``, whose per-event token decrypt needs a real key.
 
-    ``connect_nudge_url`` is None by default, which short-circuits
-    ``_maybe_post_connect_nudge``; pass the app root URL to run the nudge
-    path (a real signing secret is set alongside it).
+    ``app_root_url`` is None by default; pass the app root URL when a test needs the
+    deployment to be able to mint links (a real signing secret is set alongside it).
     """
     settings = MagicMock()
     settings.crypto.keys = (SecretStr(crypto_key),) if crypto_key is not None else ()
@@ -87,8 +86,8 @@ def make_orchestrate_app(
     settings.slack.history_page_limit = 100
     settings.slack.bot_display_name = "daimon"
     settings.mcp.public_url = None
-    settings.mcp.app_root_url = connect_nudge_url
-    if connect_nudge_url is not None:
+    settings.mcp.app_root_url = app_root_url
+    if app_root_url is not None:
         settings.slack.signing_secret = SecretStr("test-signing-secret")
     settings.defaults_root = MagicMock()
     settings.billing.markup = Decimal("1.0")

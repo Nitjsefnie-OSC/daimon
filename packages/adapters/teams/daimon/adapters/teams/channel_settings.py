@@ -28,6 +28,7 @@ from daimon.adapters.teams.card_actions import (
     guarded,
     submitted_fields,
 )
+from daimon.adapters.teams.deployment_admins import with_admin_team
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.answering_map import load_answering_map
@@ -129,6 +130,10 @@ class ChannelSettingsDialog:
     ) -> TaskModuleInvokeResponse:
         return await _guarded(self._submit(ctx.activity), dialog_message(FAILED))
 
+    async def _need_admin(self) -> str:
+        """The refusal for a caller who is not an admin, with who the admins are."""
+        return await with_admin_team(self._runtime, channels_need_admin_message())
+
     async def _subject(self, actor: Actor) -> Subject:
         async with self._runtime.sessionmaker() as session:
             return await load_live_subject(
@@ -162,7 +167,7 @@ class ChannelSettingsDialog:
             return dialog_message(DENIED)
         subject = await self._subject(actor)
         if not actor.is_admin:
-            return dialog_message(channels_need_admin_message())
+            return dialog_message(await self._need_admin())
         return await self._picker(actor, subject)
 
     async def _settings(
@@ -250,12 +255,12 @@ class ChannelSettingsDialog:
         if not actor.is_admin:
             if audit_op is not None:
                 await self._audit(actor, audit_op, outcome="denied", reason="needs_admin")
-            return dialog_message(channels_need_admin_message())
+            return dialog_message(await self._need_admin())
         if audit_op is None:
             return await self._settings(actor, subject, channel_id)
         if audit_op != "environment" and not actor.is_admin:
             await self._audit(actor, audit_op, outcome="denied", reason="needs_admin")
-            return dialog_message(ADMIN_ONLY)
+            return dialog_message(await with_admin_team(self._runtime, ADMIN_ONLY))
         if audit_op == "environment":
             notice = await self._save_environment(actor, subject, channel_id, data)
         elif audit_op == "channel_rule":
@@ -294,7 +299,7 @@ class ChannelSettingsDialog:
             )
             if pick.decision.reason == "not_a_reader":
                 return build_limited_network_refusal(environment_name=name)
-            return channels_need_admin_message()
+            return await self._need_admin()
         if name is not None and pick.missing:
             return build_missing_environment_note(name)
         if pick.needs_confirm:

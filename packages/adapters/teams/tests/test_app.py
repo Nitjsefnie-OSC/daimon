@@ -34,6 +34,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.domain import Role, TurnCardIntentRow
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.tenants import set_plain_text_mentions, set_turn_cap
 from daimon.core.stores.thread_agent_bindings import create_binding, update_lifecycle
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
@@ -869,6 +870,35 @@ async def test_a_denied_turn_says_why_without_a_card(
         "Your team's Daimon credit has run out.\n\nAn admin can top up with `billing` in a 1:1 chat with me."
     ], "the refusal says why, in the organisation's nouns"
     assert await _open_intents(db_session_factory) == [], "no card, so no intent"
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize("named", [True, False])
+async def test_a_refusal_that_sends_the_person_to_an_admin_says_who_the_admins_are(
+    db_session_factory: async_sessionmaker[AsyncSession], named: bool
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    teams.runtime.settings.teams = teams.runtime.settings.teams.model_copy(
+        update={"admin_team_id": ADMIN_TEAM}
+    )
+    if named:
+        async with db_session_factory.begin() as session:
+            await record_teams_installation(
+                session,
+                tenant_id=TENANT,
+                team_id="19:admins@thread.tacv2",
+                group_id=ADMIN_TEAM,
+                name="Leads",
+            )
+    err = MissingTurnConfigError(
+        missing=("agent",), agent_name_tier=None, environment_name_tier=None
+    )  # pyright: ignore[reportArgumentType]
+    with patch.object(app_module, "admit", AsyncMock(side_effect=err)):
+        await teams._run_turn(make_inbound(), TENANT)
+    [notice] = [a.text for a in sender.activities]
+    assert notice.startswith("Daimon isn't set up in this channel yet.\n\nAsk an admin to ")
+    assert notice.endswith("\n\nAdmins are the owners of the Leads team.") is named
 
 
 def _unprompted_reply() -> TeamsInbound:

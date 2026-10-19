@@ -20,6 +20,8 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.core.config import Settings
 from daimon.core.direct_messages import (
+    ColdDmNotices,
+    cold_dm_text,
     reply_to_dm,
     require_dm_enabled,
     require_unsealed_source,
@@ -57,6 +59,7 @@ def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
 class DirectMessageCog(commands.Cog):
     def __init__(self, bot: DaimonBot) -> None:
         self.bot = bot
+        self._cold_dm_notices = ColdDmNotices()
 
     @app_commands.command(name="dm-me", description=DESCRIPTIONS["dm_me"])
     @app_commands.guild_only()
@@ -178,6 +181,19 @@ class DirectMessageCog(commands.Cog):
         with self.bot.runtime.turn_deps.running_turns.track():
             await self._reply(message)
 
+    async def _explain_no_private_chat(
+        self, message: discord.Message, *, dms_on: bool | None
+    ) -> None:
+        """Answer a DM that has no conversation to continue, once per person per process."""
+        person = str(message.author.id)
+        if not self._cold_dm_notices.first_time(person):
+            return
+        try:
+            await message.channel.send(cold_dm_text("discord", dms_on=dms_on))
+        except discord.HTTPException as exc:
+            self._cold_dm_notices.forget(person)
+            log.warning("discord.dm.cold_notice_failed", error_type=type(exc).__name__)
+
     async def _reply(self, message: discord.Message) -> None:
         assert isinstance(message.channel, discord.DMChannel)
         runtime = self.bot.runtime
@@ -188,9 +204,12 @@ class DirectMessageCog(commands.Cog):
                 route_key=str(message.channel.id),
                 external_user_id=str(message.author.id),
             )
-            if conversation is None or not await dm_enabled(
-                session, tenant_id=conversation.tenant_id
-            ):
+            if conversation is None:
+                # A DM names no server, so say nothing about whether DMs are on in one.
+                await self._explain_no_private_chat(message, dms_on=None)
+                return
+            if not await dm_enabled(session, tenant_id=conversation.tenant_id):
+                await self._explain_no_private_chat(message, dms_on=False)
                 return
         try:
             guild = self.bot.get_guild(int(conversation.workspace_id))

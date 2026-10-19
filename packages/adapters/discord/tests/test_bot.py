@@ -855,7 +855,20 @@ def _make_sweep_guild(guild_id: int) -> MagicMock:
     perms = MagicMock()
     perms.send_messages = True
     sys_ch.permissions_for = MagicMock(return_value=perms)
-    sys_ch.send = AsyncMock()
+    # Everything a reader saw, in order: each post, then each edit of it.
+    sys_ch.shown = []
+
+    async def send(*, embed: discord.Embed) -> MagicMock:
+        sys_ch.shown.append(embed)
+        message = MagicMock(spec=discord.Message)
+
+        async def edit(*, embed: discord.Embed) -> None:
+            sys_ch.shown.append(embed)
+
+        message.edit = AsyncMock(side_effect=edit)
+        return message
+
+    sys_ch.send = AsyncMock(side_effect=send)
     guild.me = me
     guild.system_channel = sys_ch
     guild.text_channels = []
@@ -1015,16 +1028,16 @@ class TestOnReadySweepProvisioning:
             await _asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
 
         sys_ch = mock_guild.system_channel
-        assert sys_ch.send.await_count >= 2, (  # pyright: ignore[reportUnknownMemberType]
+        assert len(sys_ch.shown) >= 2, (  # pyright: ignore[reportUnknownMemberType]
             "sweep-provisioned guild must receive at least the welcome embed + terminal embed"
         )
-        first_embed = sys_ch.send.await_args_list[0].kwargs["embed"]  # pyright: ignore[reportUnknownMemberType]
+        first_embed = sys_ch.shown[0]  # pyright: ignore[reportUnknownMemberType]
         first_text = (first_embed.title or "") + (first_embed.description or "")
         assert "setting up" in first_text.lower(), (
             "#144-3: sweep provision must post the welcome 'setting up' embed first, "
             f"before the terminal embed; got: {first_text!r}"
         )
-        last_embed = sys_ch.send.await_args_list[-1].kwargs["embed"]  # pyright: ignore[reportUnknownMemberType]
+        last_embed = sys_ch.shown[-1]  # pyright: ignore[reportUnknownMemberType]
         last_text = (last_embed.title or "") + (last_embed.description or "")
         assert "ready" in last_text.lower() or "snag" in last_text.lower(), (
             "final embed must be the terminal ready/snag embed"
