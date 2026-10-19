@@ -106,6 +106,12 @@ rules on two channels, a thread, a category and two agents with rules.
 
 ## Agent-chat turns
 
+Native OpenAI session credentials carry an isolated session grant installed
+during preparation. Preparation alone grants no origin authority: the driver
+binds the grant to the current execution and its attendance, and revokes that
+binding when the turn ends. Reuse binds a new origin; child sessions receive
+a separate grant and cannot borrow a parent execution.
+
 Agent chat and the hub can drive only sessions created through agent chat.
 They cannot continue, cancel or archive a platform conversation, even for the
 same account and agent. Older sessions without this creation provenance must

@@ -1186,6 +1186,14 @@ and worker-completion turns and their model-created handoffs stay unattended;
 a real human message or private-input action supplies attended provenance.
 Queue reasons alone cannot upgrade a turn to human approval surfaces.
 
+OpenAI captures MCP bearers at session creation, so its preparation host
+installs a scope-bound session grant before allocation and records it in the
+binding. The grant participates in the creation digest, refusing legacy
+ungranted bindings or receipts. The prepared driver binds it to each current
+origin, narrows attendance from dispatch provenance, and clears it on exit.
+Child preparation installs its own isolated grant, independently of inherited
+rendering or execution contexts. Source token expiry and revocation still apply.
+
 Agent-chat session creation records headless provenance. Continue, ask with a
 handle, cancel and archive require it, including inside the mutation fence.
 A platform session cannot lend its credential or attended origin grant to a

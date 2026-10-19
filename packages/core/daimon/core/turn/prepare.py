@@ -210,6 +210,7 @@ class PreparedTurn:
     session_ref: ResourceRef | None = None
     runtime: TurnRuntime | None = None
     native_footer_cost: NativeFooterCostContext | None = None
+    native_chat_session_id: str | None = field(default=None, kw_only=True)
     _scope: Scope | None = field(default=None, kw_only=True, compare=False, repr=False)
     _source: BackendAgent | None = field(default=None, kw_only=True, compare=False, repr=False)
     _preparation: ProviderPreparationRequest | None = field(

@@ -1133,6 +1133,15 @@ async def run_prepared_turn_impl(
                     and mapping.effective_config is not None
                     else None
                 )
+                if (
+                    mapping_id is None
+                    and session_id == prepared.ma_session_id
+                    and admission == prepared.admission
+                    and prepared.session_ref is not None
+                    and prepared.session_ref.tenant_id == str(tenant_id)
+                    and prepared.session_ref.account_id == str(admission.account_id)
+                ):
+                    grant = prepared.native_chat_session_id
                 await bind_origin_session(
                     db, origin_id=origin_id, chat_session_id=grant, attended=not unattended
                 )

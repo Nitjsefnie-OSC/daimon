@@ -22,7 +22,9 @@ import json
 import os
 import stat
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from decimal import Decimal
 from pathlib import Path
 
@@ -74,6 +76,27 @@ def read_private_credential(path: Path) -> str:
     return token
 
 
+# Only native session construction sets this explicit scope-bound grant. It is
+# separate from ambient rendering/execution origins, including a parent worker.
+_native_session_grant: ContextVar[tuple[Scope, str | None] | None] = ContextVar(
+    "native_mcp_session_grant", default=None
+)
+
+
+@contextmanager
+def native_mcp_session(scope: Scope, grant: str | None) -> Iterator[None]:
+    """Install an isolated provider-session grant before native credential capture.
+
+    A grant carries no origin authority until the prepared driver binds it.
+    Explicit None masks inherited execution grants during child construction.
+    """
+    token = _native_session_grant.set((scope, grant))
+    try:
+        yield
+    finally:
+        _native_session_grant.reset(token)
+
+
 async def resolve_agent_mcp_credential(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -101,6 +124,14 @@ async def resolve_agent_mcp_credential(
     )
     if await list_mcp_tools(destination, token) != frozenset(tools):
         raise ValueError("target MCP catalogue differs from captured source")
+    if chat_execution and (prepared_grant := _native_session_grant.get()) is not None:
+        authorized, grant = prepared_grant
+        if authorized != scope:
+            raise ValueError("native MCP session grant has a foreign scope")
+        if grant is None:
+            return token
+        claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
+        return pyjwt.encode({**claims, "chat_session_id": grant}, secret, algorithm="HS256")
     if chat_execution:
         from daimon.core.ma_identity import derive_agent_uuid
         from daimon.core.stores.accounts import get_account_with_tenant
@@ -109,7 +140,7 @@ async def resolve_agent_mcp_credential(
 
         origin_id = current_execution_origin_id.get()
         if origin_id is not None:
-            # Native runtimes resolve the credential inside the executing turn.
+            # Send-time native runtimes resolve inside the executing turn.
             # Derive a grant from that trusted context, keeping the SAME registry
             # owner, expiry and revocation as the validated source credential.
             async with sessionmaker.begin() as db:
