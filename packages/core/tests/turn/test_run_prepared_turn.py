@@ -3216,6 +3216,7 @@ async def test_an_unattended_prepared_turn_uses_the_unattended_decider_with_safe
     assert not protected.allow and prompts == []
 
 
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize(
     ("runtime", "failed_batch"),
     [
@@ -3230,6 +3231,7 @@ async def test_an_unattended_prepared_turn_uses_the_unattended_decider_with_safe
     ],
 )
 async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_read(
+    platform: str,
     runtime: str,
     failed_batch: int | None,
     db_session: AsyncSession,
@@ -3249,14 +3251,6 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    row = await make_thread_session(
-        db_session,
-        tenant=tenant,
-        account=account,
-        platform="discord",
-        thread_id="wake-gate",
-        ma_session_id="sess_wake_gate",
-    )
     await db_session.commit()
     gateable = runtime in ("legacy", "mux", "mux-with-read")
     agent = ma_agent(
@@ -3336,6 +3330,68 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         turn_path="legacy" if runtime == "legacy" else "mux",
         tool_safety=ToolSafetyPolicy(enabled=gateable),
     )
+    # A timer's genuine chat origin can call MCP hand_off_task. Queueing that
+    # tool's continuation must retain attendance through the destination run.
+    from daimon.adapters.mcp.auth.resolver import AuthIdentity
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.adapters.mcp.tools.task_continuity import (
+        _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.config import DatabaseSettings, Settings
+    from daimon.core.continuity.continuation import continuation_attended
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.task_continuations import list_pending_continuations
+    from daimon.core.turn_origin import turn_origin
+    from pydantic import PostgresDsn
+
+    router.add("GET", r"/v1/agents", lambda r, m: list_response([agent.model_dump(mode="json")]))
+    handoff_runtime = McpRuntime(
+        session_factory=db_session_factory,
+        client=deps.anthropic,
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test"))
+        ),
+        deployment_default=DeploymentDefault(agent_name=agent.name),
+    )
+    async with turn_origin(
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform=platform,
+        parent_channel_id="C1",
+        thread_id="wake-gate",
+        responder_ma_agent_id="ag_timer",
+        responder_name="timer-agent",
+        role=Role.USER,
+        attended=False,
+    ) as origin:
+        await _hand_off_task_impl(
+            handoff_runtime,
+            AuthIdentity(
+                tenant_id=tenant.id,
+                account_id=account.id,
+                role=Role.USER,
+                platform=platform,
+                platform_user_id="user-1",
+            ),
+            origin_context_id=str(origin.id),
+            agent_id=agent.id,
+            continuation="continue the timer's work",
+        )
+    async with db_session_factory() as session:
+        [queued] = await list_pending_continuations(
+            session, tenant_id=tenant.id, platform=platform, thread_id="wake-gate"
+        )
+    assert queued.reason == "task_handoff" and not queued.attended
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform=platform,
+        thread_id="wake-gate",
+        ma_session_id="sess_wake_gate",
+    )
+    await db_session.commit()
     admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
     prepared = _prepared_turn(
         deps=deps,
@@ -3364,7 +3420,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         )
     elif runtime == "non-anthropic":
         revision = ConfigRevision.create(
-            ChannelRef(tenant_id=str(tenant.id), platform="discord", channel_id="C1"),
+            ChannelRef(tenant_id=str(tenant.id), platform=platform, channel_id="C1"),
             1,
             ResolvedBackend(
                 backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna"
@@ -3415,7 +3471,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         thread_id="wake-gate",
         external_user_id="user-1",
         user_message="wake up",
@@ -3424,7 +3480,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         reseed_user_message=_reseed,
         recovery_lifecycle=_recovery_lifecycle,
         origin="chat",
-        attended=False,
+        attended=continuation_attended(queued),
         provider_action=unused_provider_action,
         render_interval_s=0.001,
     )

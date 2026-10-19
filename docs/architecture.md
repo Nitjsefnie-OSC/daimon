@@ -1146,6 +1146,11 @@ after Stop never runs anything. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.
 
+A queued handoff inherits attendance from its trusted execution origin. Timer
+and worker-completion turns and their model-created handoffs stay unattended;
+a real human message or private-input action supplies attended provenance.
+Queue reasons alone cannot upgrade a turn to human approval surfaces.
+
 Agent-chat turns (`start_turn`, `continue_turn` and `ask`, per agent and on
 the hub) have nobody to press Approve, so they take the unattended rules
 through one core gate, `packages/core/daimon/core/turn/unattended.py`. Before

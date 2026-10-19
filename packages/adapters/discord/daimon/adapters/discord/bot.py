@@ -105,6 +105,7 @@ from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     check_wake_responder,
+    continuation_attended,
     load_asking_agent_id,
 )
 from daimon.core.continuity.messages import (
@@ -4094,6 +4095,7 @@ class DaimonBot(commands.Bot):
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
+                attended=continuation_attended(row),
                 tenant_id=tenant_id,
                 account_id=admission.account_id,
                 platform="discord",
@@ -4114,7 +4116,7 @@ class DaimonBot(commands.Bot):
                     thread_id=row.thread_id,
                     external_user_id=row.requester_external_user_id,
                     origin="handoff" if handoff_notice is not None else "chat",
-                    attended=row.reason not in ("timer", "worker_finished"),
+                    attended=continuation_attended(row),
                     user_message=(
                         render_turn_origin(
                             origin,

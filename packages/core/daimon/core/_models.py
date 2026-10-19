@@ -2432,6 +2432,7 @@ class TurnOrigin(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
+    attended: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -2604,6 +2605,7 @@ class TaskContinuation(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
     )
+    attended: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)

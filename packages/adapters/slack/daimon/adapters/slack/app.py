@@ -196,7 +196,11 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
-from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
+from daimon.core.continuity.continuation import (
+    check_wake_responder,
+    continuation_attended,
+    load_asking_agent_id,
+)
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
@@ -3310,6 +3314,7 @@ class SlackApp:
         try:
             async with turn_origin(
                 self.runtime.sessionmaker,
+                attended=continuation_attended(row),
                 tenant_id=tenant_id,
                 account_id=follow_admission.account_id,
                 platform="slack",
@@ -3332,7 +3337,7 @@ class SlackApp:
                     thread_id=thread_id,
                     external_user_id=row.requester_external_user_id,
                     origin="handoff" if handoff_notice is not None else "chat",
-                    attended=row.reason not in ("timer", "worker_finished"),
+                    attended=continuation_attended(row),
                     user_message=(
                         render_turn_origin(
                             follow_origin,

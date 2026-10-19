@@ -319,6 +319,7 @@ def _make_continuation_row(
         target_name="test-agent" if target_ma_agent_id == "ag_test" else "target-agent",
         requested_work="finish the migration",
         reason=reason,
+        attended=True,
         status="claimed",
         skip_reason=None,
         idempotency_key=uuid.uuid4(),
@@ -374,6 +375,7 @@ async def _run_continuation(
     *,
     workspace_id: str,
     reason: ContinuationReason,
+    attended: bool = True,
     guild: MagicMock | None = None,
     prior_role: Role | None = None,
     target_ma_agent_id: str = "ag_test",
@@ -410,6 +412,8 @@ async def _run_continuation(
     )
     decision = ContinuationDecision(action="dispatch", seed_user_message="finish the migration")
 
+    row = row.model_copy(update={"attended": attended})
+
     with (
         patch(
             "daimon.core.turn.admission.resolve_config", new_callable=AsyncMock
@@ -436,6 +440,33 @@ async def _run_continuation(
             mapping_id=None,
             recovered=False,
         )
+
+        async def check_origin(*args, **kwargs):
+            from daimon.core.stores.turn_origins import get_active_origin
+            from daimon.core.turn_origin import current_origin_id
+
+            origin_id = current_origin_id.get()
+            assert origin_id is not None
+            async with db_session_factory() as session:
+                principal = await get_or_create_platform_principal(
+                    session,
+                    tenant_id=tenant.id,
+                    platform=row.platform,
+                    external_id=row.requester_external_user_id,
+                )
+                origin = await get_active_origin(
+                    session,
+                    origin_id=origin_id,
+                    tenant_id=tenant.id,
+                    account_id=principal.account_id,
+                    platform=row.platform,
+                    now=datetime.now(UTC),
+                )
+            assert origin is not None
+            assert origin.attended is kwargs["attended"]
+            return run_turn.return_value
+
+        run_turn.side_effect = check_origin
         await bot._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
             row, decision, thread=thread, tenant_id=tenant.id, guild_id=workspace_id
         )
@@ -456,7 +487,7 @@ async def _run_continuation(
         str(thread.id),
     )
     assert run_turn.await_args.kwargs["attended"] is (
-        row.reason not in ("timer", "worker_finished")
+        row.attended and row.reason not in ("timer", "worker_finished")
     )
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
@@ -1320,4 +1351,11 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
         "discord",
         str(_THREAD_ID - 1),
         str(_THREAD_ID),
+    )
+
+
+@pytest.mark.parametrize("attended", [False, True])
+async def test_handoff_retains_initiation_at_dispatch(db_session_factory, attended):
+    await _run_continuation(
+        db_session_factory, workspace_id="710000177", reason="task_handoff", attended=attended
     )
