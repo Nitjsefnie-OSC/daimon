@@ -7,8 +7,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0110_microsoft_accounts"
-down_revision: str | None = "0109_github_tokens_live_index"
+revision: str = "0113_microsoft_accounts"
+down_revision: str | None = "0112_unattended_turn_provenance"
 branch_labels: str | None = None
 depends_on: str | None = None
 
