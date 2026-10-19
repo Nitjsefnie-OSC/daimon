@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An agent's stored keys are listed, and written to its mounted `.env`, in the same order on every Postgres: by codepoint, whatever collation the database was created with. On a glibc or ICU `en_US` database (such as Cloud SQL) the order used to follow that collation, so `.env` bytes and their hash depended on the database. After upgrading, a live session whose keys sort differently (mixed case, or `API_KEY` beside `APIKEY`) has its `.env` swapped in place once, on its next turn.
+
 - A turn footer no longer shows a negative balance such as `$-0.01 left` when a turn settles just past zero; it reads `No credit left`.
 
 - Agents whose GitHub repos span several organizations can now push a clone of a repo from another organization through the mounted GitHub helper (`github-repo.sh owner/repo push <branch>`); they used to push it with the working organization's token and get a 404.

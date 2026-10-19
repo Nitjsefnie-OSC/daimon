@@ -299,14 +299,21 @@ async def list_agent_files(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
 ) -> list[AgentFileRow]:
-    """Return all files for this (tenant, agent) ordered by key."""
+    """Return all files for this (tenant, agent) ordered by key, by codepoint.
+
+    The order is part of the contract, not display: `assemble_env_bytes` writes
+    the `.env` lines in row order and that file's sha256 is the session's
+    `env_sha256`. `COLLATE "C"` pins it to byte order whatever collation the
+    database was created with (en_US on glibc sorts `mid` before `ZED` and
+    `API_KEY` before `APIKEY`; musl and "C" do not).
+    """
     result = await session.execute(
         select(AgentFile)
         .where(
             AgentFile.tenant_id == tenant_id,
             AgentFile.agent_id == agent_id,
         )
-        .order_by(AgentFile.key)
+        .order_by(AgentFile.key.collate("C"))
     )
     rows = result.scalars().all()
     cipher = _cipher(session) if rows else None
@@ -316,11 +323,14 @@ async def list_agent_files(
 async def list_agent_file_revisions(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
 ) -> tuple[tuple[str, datetime], ...]:
-    """Read owned key identities/generations without loading or decoding values."""
+    """Read owned key identities/generations without loading or decoding values.
+
+    Ordered by codepoint, like `list_agent_files`, whatever the database collation.
+    """
     result = await session.execute(
         select(AgentFile.key, AgentFile.updated_at)
         .where(AgentFile.tenant_id == tenant_id, AgentFile.agent_id == agent_id)
-        .order_by(AgentFile.key)
+        .order_by(AgentFile.key.collate("C"))
     )
     return tuple((key, updated_at) for key, updated_at in result)
 
