@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import structlog
@@ -21,6 +22,7 @@ from daimon.core._models import ThreadSession
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.setup_conversations import setup_thread_name
@@ -47,6 +49,7 @@ from .conftest import (
     make_card_action,
     make_invoke,
     make_message_activity,
+    notice_text,
     patched_turns,
     post_activity,
     running_service,
@@ -324,7 +327,7 @@ async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
             mine = await post_activity(service, _dialog("submit", revoke))
             again = await post_activity(service, _dialog("submit", revoke))
 
-    assert refused["task"]["value"] == setup_panel.NEEDS_ADMIN.format(name="analyst")
+    assert notice_text(refused) == setup_panel.NEEDS_ADMIN.format(name="analyst")
     assert minted["task"]["type"] == "continue" and "claude mcp add" in card
     token = card.split("Bearer ")[1].split("\\")[0]
     assert token not in json.dumps(logs, default=str), "the token value is never logged"
@@ -347,6 +350,32 @@ async def test_coding_tools_mint_is_admin_only_and_only_the_minter_revokes(
 
 
 PINNED, ELSEWHERE = "19:pinned@thread.tacv2", "19:elsewhere@thread.tacv2"
+
+
+async def test_a_member_opening_the_operator_dialog_is_refused_as_a_one_line_dialog(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    fetch = {"dialog_id": setup_card.OPERATOR_DIALOG}
+    async with _running(db_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as (service, _):
+        refused = await post_activity(service, _dialog("fetch", fetch, user=OTHER_AAD_OBJECT_ID))
+
+    assert notice_text(refused) == setup_panel.OPERATOR_NEEDS_ADMIN
+
+
+@pytest.mark.parametrize(
+    "dialog_id", [setup_card.TOKEN_DIALOG, setup_card.OPERATOR_DIALOG, setup_card.SKILL_DIALOG]
+)
+async def test_a_failure_opening_a_dialog_answers_as_a_one_line_dialog(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    dialog_id: str,
+) -> None:
+    boom = AsyncMock(side_effect=DaimonError("boom"))
+    async with _running(db_session_factory, teams_api_fake, (AAD_OBJECT_ID,)) as (service, _):
+        with patch.object(setup_panel, "card_actor", boom):
+            failed = await post_activity(service, _dialog("fetch", {"dialog_id": dialog_id}))
+
+    assert notice_text(failed) == setup_panel.FAILED
 
 
 async def test_an_admin_mints_lists_and_revokes_operator_tokens_and_a_member_cannot(

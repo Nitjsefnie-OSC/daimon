@@ -17,7 +17,7 @@ from __future__ import annotations
 import functools
 import re
 import uuid
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 
 import anthropic
@@ -35,6 +35,7 @@ from daimon.adapters.teams.card_actions import (
     card_actor,
     dialog,
     dialog_message,
+    dialog_notice,
     edit_origin_card,
     get_or_create_account,
     guarded,
@@ -115,6 +116,24 @@ ALREADY_ENDED = "This setup conversation has already ended."
 _NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+_NEW_AGENT_TITLE = "New agent"
+_TOKEN_TITLE = "Use from your coding tools"
+_OPERATOR_TITLE = "Operator tokens"
+_SKILL_TITLE = "Add a skill"
+
+# Opening a dialog and answering its submit take different replies to a refusal:
+# Teams shows "Unable to reach app" for a message answering the open.
+type Refuse = Callable[[str], TaskModuleInvokeResponse]
+
+
+def _token_notice(text: str) -> TaskModuleInvokeResponse:
+    return dialog_notice(_TOKEN_TITLE, text)
+
+
+def _operator_notice(text: str) -> TaskModuleInvokeResponse:
+    return dialog_notice(_OPERATOR_TITLE, text)
+
+
 async def _guarded[T](work: Awaitable[T], failed: T) -> T:
     return await guarded(work, failed, "teams.agent_setup.failed", errors=SENDING_PANEL_ERRORS)
 
@@ -153,8 +172,8 @@ class SetupPanel:
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
         if await card_actor(self._runtime, ctx.activity) is None:
-            return dialog_message(DENIED)
-        return dialog("New agent", cards.new_agent_form(_models(), {}))
+            return dialog_notice(_NEW_AGENT_TITLE, DENIED)
+        return dialog(_NEW_AGENT_TITLE, cards.new_agent_form(_models(), {}))
 
     async def on_create_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -164,7 +183,7 @@ class SetupPanel:
     async def on_token_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._mint(ctx.activity), dialog_message(FAILED))
+        return await _guarded(self._mint(ctx.activity), _token_notice(FAILED))
 
     async def on_token_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -174,7 +193,7 @@ class SetupPanel:
     async def on_operator_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._operator_open(ctx.activity), dialog_message(FAILED))
+        return await _guarded(self._operator_open(ctx.activity), _operator_notice(FAILED))
 
     async def on_operator_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -184,7 +203,7 @@ class SetupPanel:
     async def on_skill_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._skill_open(ctx.activity), dialog_message(FAILED))
+        return await _guarded(self._skill_open(ctx.activity), dialog_notice(_SKILL_TITLE, FAILED))
 
     async def on_skill_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -199,18 +218,18 @@ class SetupPanel:
     async def _skill_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
         if actor is None:
-            return dialog_message(DENIED)
+            return dialog_notice(_SKILL_TITLE, DENIED)
         agent = await self._skill_target(
             actor, str(submitted_fields(activity.value.data).get("agent") or "")
         )
         if agent is None:
-            return dialog_message(GONE)
+            return dialog_notice(_SKILL_TITLE, GONE)
         account_id = await get_or_create_account(self._runtime, actor)
         if refusal := await skill_change_refusal(
             self._runtime, actor, agent, account_id=account_id
         ):
-            return dialog_message(refusal)
-        return dialog(f"Add a skill to {agent.name}", cards.add_skill_form(agent.name))
+            return dialog_notice(f"{_SKILL_TITLE} to {agent.name}", refusal)
+        return dialog(f"{_SKILL_TITLE} to {agent.name}", cards.add_skill_form(agent.name))
 
     async def _skill_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -263,14 +282,14 @@ class SetupPanel:
             rows = await list_panel_operator_tokens(
                 session, tenant_id=actor.tenant_id, now=datetime.now(UTC)
             )
-        return dialog("Operator tokens", cards.operator_tokens_card(rows, notice=notice))
+        return dialog(_OPERATOR_TITLE, cards.operator_tokens_card(rows, notice=notice))
 
     async def _operator_open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
         if actor is None or not actor.is_admin:
-            return dialog_message(OPERATOR_NEEDS_ADMIN)
+            return _operator_notice(OPERATOR_NEEDS_ADMIN)
         if self._runtime.settings.mcp.jwt_secret is None:
-            return dialog_message(OPERATOR_NOT_CONFIGURED)
+            return _operator_notice(OPERATOR_NOT_CONFIGURED)
         return await self._operator_tokens(actor)
 
     async def _operator_submit(
@@ -674,7 +693,7 @@ class SetupPanel:
             except DaimonError as exc:
                 error = str(exc)
         if error is not None or created_id is None:
-            return dialog("New agent", cards.new_agent_form(_models(), values, error))
+            return dialog(_NEW_AGENT_TITLE, cards.new_agent_form(_models(), values, error))
         log.info("teams.agent_setup.created", tenant_id=str(actor.tenant_id), agent_name=name)
         queue_agent_face(
             self._runtime.sessionmaker,
@@ -699,13 +718,13 @@ class SetupPanel:
         """Mint a coding token for an admin."""
         actor = await card_actor(self._runtime, activity)
         if actor is None:
-            return dialog_message(DENIED)
+            return _token_notice(DENIED)
         name = str(submitted_fields(activity.value.data).get("agent") or "")
         if self._runtime.settings.mcp.jwt_secret is None or (
             self._runtime.settings.mcp.public_url is None
         ):
-            return dialog_message(NOT_CONFIGURED)
-        return await self._issue(actor, name, channel_id=None)
+            return _token_notice(NOT_CONFIGURED)
+        return await self._issue(actor, name, channel_id=None, refuse=_token_notice)
 
     async def _token_submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleInvokeResponse:
         data = submitted_fields(activity.value.data)
@@ -719,19 +738,21 @@ class SetupPanel:
             actor,
             str(data.get("agent") or ""),
             channel_id=None if channel == cards.UNBOUND else channel,
+            refuse=dialog_message,
         )
 
     async def _issue(
-        self, actor: Actor, name: str, *, channel_id: str | None
+        self, actor: Actor, name: str, *, channel_id: str | None, refuse: Refuse
     ) -> TaskModuleInvokeResponse:
         """Mint `name`'s token as `authorize_coding_token` decides, as Discord and Slack do.
 
         `channel_id` is checked with the current policy for stale form submissions.
+        `refuse` words a refusal for the open or the submit that asked.
         """
         secret = self._runtime.settings.mcp.jwt_secret
         public_url = self._runtime.settings.mcp.public_url
         if secret is None or public_url is None:
-            return dialog_message(NOT_CONFIGURED)
+            return refuse(NOT_CONFIGURED)
         roster = await self._roster(actor.tenant_id, None, is_admin=None)
         target = next((row for row in roster.rows if row.name == name), None)
         try:
@@ -746,7 +767,7 @@ class SetupPanel:
                     ),
                 )
         except AccessPolicyUnreadable:
-            return dialog_message(POLICY_UNREADABLE_REFUSAL)
+            return refuse(POLICY_UNREADABLE_REFUSAL)
         agent = AgentRef.of(name)
         if target is not None and channel_id is not None and any_agent_rules(policy):
             ma_agent = await retrieve_agent(
@@ -763,9 +784,9 @@ class SetupPanel:
             await self._audit(
                 actor, "coding_token_mint", outcome="denied", reason=f"authz:{decision.reason}"
             )
-            return dialog_message(NEEDS_ADMIN)
+            return refuse(NEEDS_ADMIN)
         if target is None:
-            return dialog_message(GONE)
+            return refuse(GONE)
         account_id = await get_or_create_account(self._runtime, actor)
         async with self._runtime.sessionmaker.begin() as session:
             token = await mint_agent_mcp_token(
@@ -795,7 +816,7 @@ class SetupPanel:
         card = cards.token_card(
             agent_name=name, cli=cli, mcp_json=mcp_json, jti=str(jti), channel_id=bound_channel_id
         )
-        return dialog("Use from your coding tools", card)
+        return dialog(_TOKEN_TITLE, card)
 
     async def _audit(
         self,

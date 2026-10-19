@@ -46,6 +46,7 @@ from .conftest import (
     build_teams_runtime,
     make_card_action,
     make_invoke,
+    notice_text,
     patched_turns,
     post_activity,
     running_service,
@@ -228,7 +229,7 @@ async def test_a_member_gets_no_dialog_and_no_button(
             for user in (member, LEAD, ADMIN)
         }
 
-    assert refused["task"]["value"] == channel_settings.channels_need_admin_message()
+    assert notice_text(refused) == channel_settings.channels_need_admin_message()
     assert "Channel settings" not in routing[member], "a member is offered nothing"
     assert "Channel settings" not in routing[LEAD]
     assert "Channel settings" in routing[ADMIN]
@@ -252,5 +253,5 @@ async def test_a_member_is_told_who_the_admins_are_when_the_admin_team_is_known(
         submitted = await post_activity(service, _submit(member, "rule", channel=GROWTH))
 
     expected = f"{channel_settings.channels_need_admin_message()}\n\n{line}"
-    assert opened["task"]["value"] == expected
+    assert notice_text(opened) == expected
     assert submitted["task"]["value"] == expected

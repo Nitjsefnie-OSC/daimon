@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - In Teams, 👍 on an answer now shows "Thanks." in a small dialog. It recorded the vote but showed "Unable to reach app. Please try again.", as did a refused vote.
 
+- In Teams, a refusal or an error when opening another dialog (setup, routines, Ask a person, channel settings, credential requests) now shows its message in a small dialog instead of "Unable to reach app. Please try again."
+
 - A turn footer no longer shows a negative balance such as `$-0.01 left` when a turn settles just past zero; it reads `No credit left`.
 
 - Agents whose GitHub repos span several organizations can now push a clone of a repo from another organization through the mounted GitHub helper (`github-repo.sh owner/repo push <branch>`); they used to push it with the working organization's token and get a 404.

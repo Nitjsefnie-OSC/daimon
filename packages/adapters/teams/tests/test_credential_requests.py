@@ -63,6 +63,7 @@ from .conftest import (
     TeamsApiFake,
     build_teams_runtime,
     make_invoke,
+    notice_text,
     post_activity,
     running_service,
 )
@@ -206,8 +207,8 @@ async def test_only_the_requester_gets_the_private_form(
     card = form["task"]["value"]["card"]["content"]
     assert "value" not in _field(form), "never prefilled"
     assert card["actions"][0]["data"] == {"action": module.SUBMIT, "token": row.token}
-    assert stranger["task"]["value"] == WRONG_REQUESTER_MESSAGE
-    assert elsewhere["task"]["value"] == unknown["task"]["value"] == NO_LONGER_VALID_MESSAGE
+    assert notice_text(stranger) == WRONG_REQUESTER_MESSAGE
+    assert notice_text(elsewhere) == notice_text(unknown) == NO_LONGER_VALID_MESSAGE
 
 
 async def test_a_late_click_marks_the_card_expired_only_for_the_requester(
@@ -222,8 +223,8 @@ async def test_a_late_click_marks_the_card_expired_only_for_the_requester(
         late = await post_activity(service, _open(row.token))
         await service.turns.drain(5)
 
-    assert stranger["task"]["value"] == WRONG_REQUESTER_MESSAGE and not untouched
-    assert late["task"]["value"].startswith(EXPIRED_HEADLINE)
+    assert notice_text(stranger) == WRONG_REQUESTER_MESSAGE and not untouched
+    assert notice_text(late).startswith(EXPIRED_HEADLINE)
     assert EXPIRED_HEADLINE in _edits(fake)[0]
 
 
@@ -302,6 +303,17 @@ async def test_an_env_value_is_refused_without_encryption_keys(
     async with db_session_factory() as session:
         live = await peek_credential_request(session, token=row.token)
     assert live is not None and live.used_at is None, "the request stays live for a retry"
+
+
+async def test_a_failed_open_answers_as_a_one_line_dialog(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    row = await _request(db_session_factory, account_id, kind="repo")
+    boom = AsyncMock(side_effect=DaimonError("boom"))
+    with patch.object(module, "find_agent_by_derived_uuid", boom):
+        async with _running(TeamsApiFake(), _runtime(db_session_factory)) as (service, _):
+            failed = await post_activity(service, _open(row.token))
+    assert notice_text(failed) == module.FAILED
 
 
 async def test_a_failed_submit_reports_nothing_that_could_carry_the_value(
@@ -457,7 +469,7 @@ async def test_an_oauth_click_hands_the_requester_a_private_sign_in_link(
     (button,) = link["task"]["value"]["card"]["content"]["actions"]
     assert button["type"] == "Action.OpenUrl"
     assert button["url"].startswith("https://daimon.example.com/")
-    assert again["task"]["value"] != link["task"]["value"], "the link is handed out once"
+    assert notice_text(again) == module.ALREADY_USED_MESSAGE, "the link is handed out once"
     assert _edits(fake), "the card stops offering the button"
 
 
@@ -637,7 +649,7 @@ async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
         )
         await service.turns.drain(5)
     if kind == "mcp_oauth":
-        assert answer["task"]["value"] == PIN_WRITE_REFUSAL
+        assert notice_text(answer) == PIN_WRITE_REFUSAL
     async with db_session_factory() as session:
         live = await peek_credential_request(session, token=row.token)
         file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key="API_KEY")

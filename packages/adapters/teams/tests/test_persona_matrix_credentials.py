@@ -169,7 +169,7 @@ async def test_credential_request_persona_matrix(
     async with db_session_factory() as session:
         stored = await peek_credential_request(session, token=row.token)
     assert stored is not None
-    assert wrong["task"]["type"] == "message", wrong
+    assert wrong["task"]["type"] == "continue", wrong
     assert "someone else" in json.dumps(wrong).lower(), wrong
     if kind == "mcp_oauth":
         assert opened["task"]["type"] == "continue", opened

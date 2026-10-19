@@ -24,6 +24,7 @@ from daimon.adapters.teams.card_actions import (
     card_actor,
     dialog,
     dialog_message,
+    dialog_notice,
     get_or_create_account,
     guarded,
     submitted_fields,
@@ -97,6 +98,9 @@ def channels_need_admin_message() -> str:
     return f"Only {_ADMIN} can change this."
 
 
+TITLE = "Channel settings"
+
+
 async def _guarded[T](work: Awaitable[T], failed: T) -> T:
     return await guarded(work, failed, "teams.channel_settings.failed", errors=SENDING_PANEL_ERRORS)
 
@@ -123,7 +127,7 @@ class ChannelSettingsDialog:
     async def on_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._open(ctx.activity), dialog_message(FAILED))
+        return await _guarded(self._open(ctx.activity), dialog_notice(TITLE, FAILED))
 
     async def on_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
@@ -159,15 +163,15 @@ class ChannelSettingsDialog:
             policy = await load_access_policy(session, tenant_id=actor.tenant_id)
         channels = cards.visible_channels(listed, own_reader_channels(policy))
         form = cards.channel_picker_form(channels, free_entry=actor.is_admin, notice=notice)
-        return dialog("Channel settings", form)
+        return dialog(TITLE, form)
 
     async def _open(self, activity: TaskFetchInvokeActivity) -> TaskModuleInvokeResponse:
         actor = await card_actor(self._runtime, activity)
         if actor is None:
-            return dialog_message(DENIED)
+            return dialog_notice(TITLE, DENIED)
         subject = await self._subject(actor)
         if not actor.is_admin:
-            return dialog_message(await self._need_admin())
+            return dialog_notice(TITLE, await self._need_admin())
         return await self._picker(actor, subject)
 
     async def _settings(
@@ -222,7 +226,7 @@ class ChannelSettingsDialog:
             rule=channel_rule_status(policy, channel_id) if actor.is_admin else None,
             skills=tuple(skills) if actor.is_admin else None,
         )
-        return dialog("Channel settings", cards.channel_settings_form(settings, notice=notice))
+        return dialog(TITLE, cards.channel_settings_form(settings, notice=notice))
 
     async def _audit(
         self, actor: Actor, op: PanelOp, *, outcome: PanelOutcome, reason: str

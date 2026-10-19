@@ -29,6 +29,7 @@ from .conftest import (
     make_card_action,
     make_invoke,
     make_message_activity,
+    notice_text,
     post_activity,
     running_service,
 )
@@ -121,7 +122,7 @@ async def test_support_persona_matrix(
         if actor.name in {"admin", "member", "guest"}:
             assert result["task"]["type"] == "continue", result
         else:
-            assert result["task"]["type"] == "message", result
+            notice_text(result)  # a refusal opens as a one-line dialog, not a message
     elif route == "support_send":
         assert count == (1 if actor.name in {"admin", "member", "guest"} else 0), result
     else:

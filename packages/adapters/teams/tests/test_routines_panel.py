@@ -28,6 +28,7 @@ from .conftest import (
     make_card_action,
     make_invoke,
     make_message_activity,
+    notice_text,
     post_activity,
     running_service,
 )
@@ -163,7 +164,7 @@ async def test_create_dialog_is_admin_only(
 
     assert admin["task"]["type"] == "continue", "an admin gets the form"
     assert '"daimon"' in json.dumps(admin), "the agent picker lists the tenant's agents"
-    assert user["task"] == {"type": "message", "value": ADMIN_ONLY}
+    assert notice_text(user) == ADMIN_ONLY, "a refusal opens as a one-line dialog"
 
 
 async def test_create_rejects_a_bad_cron_then_creates_the_routine_for_the_admin(
