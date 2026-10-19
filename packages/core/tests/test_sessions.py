@@ -2845,6 +2845,7 @@ async def test_shared_projection_lists_agent_tokens_but_no_caller_vault(
         projected = await project_session_resources(
             source,
             agent=agent,
+            tool_safety=OPEN_TOOL_SAFETY,
             environment=ma_environment(tenant_id=str(tenant.id)),
             session_factory=sessions,
             tenant_id=tenant.id,
