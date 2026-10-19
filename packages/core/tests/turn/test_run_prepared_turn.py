@@ -3637,6 +3637,11 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         ("ceiling", "decision_join"),
         ("cancel", "stop_join"),
         ("ceiling", "stop_join"),
+        ("cancel", "stop_retire"),
+        ("ceiling", "stop_retire"),
+        ("cancel_twice", "decision_join"),
+        ("cancel_twice", "stop_join"),
+        ("cancel_twice", "stop_retire"),
     ],
 )
 async def test_prepared_runtime_without_session_reads_aborts_without_confirmations(
@@ -3738,14 +3743,20 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
     entered = asyncio.Event()
     cancel = asyncio.Event()
     joining = asyncio.Event()
+    abort_entered = asyncio.Event()
+    release_abort = asyncio.Event()
     original_bounded = driver._bounded
 
     async def bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> None:
-        if boundary != "pending" and what == "decide_task_join" and not joining.is_set():
+        step = "retire_unsent_confirmations" if boundary == "stop_retire" else "decide_task_join"
+        if boundary != "pending" and what == step and not joining.is_set():
             # First outside cancellation lands after the decision race, while
-            # joining either a completed refusal or the Stop-cancelled decider.
+            # joining a completed refusal or a Stop winner, or retiring its cards.
             joining.set()
             await asyncio.Event().wait()
+        if abort == "cancel_twice" and what == "deadline_refusal":
+            abort_entered.set()
+            await release_abort.wait()
         await original_bounded(task, what=what, session_id=session_id)
 
     monkeypatch.setattr(driver, "_bounded", bounded)
@@ -3776,14 +3787,18 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
         )
     )
     await asyncio.wait_for(entered.wait(), timeout=5)
-    if abort == "stop" or boundary == "stop_join":
+    if abort == "stop" or boundary.startswith("stop_"):
         cancel.set()
     if boundary != "pending":
         await asyncio.wait_for(joining.wait(), timeout=5)
         assert not turn.done()
-    if abort == "cancel":
+    if abort in ("cancel", "cancel_twice"):
         turn.cancel()
-    if abort == "cancel":
+    if abort == "cancel_twice":
+        await asyncio.wait_for(abort_entered.wait(), timeout=5)
+        turn.cancel()
+        release_abort.set()
+    if abort in ("cancel", "cancel_twice"):
         with pytest.raises(asyncio.CancelledError):
             await turn
     else:
