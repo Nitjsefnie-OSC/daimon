@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discoveries without service credentials. Nested attachments are excluded,
   discoveries expire, source tombstones survive connection renames, and actor
   erasure prevents racing resolution audits from recreating personal data.
+  Intake authority is bound to one attended session grant; routine provenance
+  remains isolated through refresh and resolution is protected unattended.
 
 
 - Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.

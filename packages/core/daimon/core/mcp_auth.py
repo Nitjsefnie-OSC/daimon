@@ -237,6 +237,7 @@ async def mint_chat_mcp_token(
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
     chat_session_id: str | None = None,
+    routine_execution: tuple[uuid.UUID, uuid.UUID] | None = None,
 ) -> tuple[str, uuid.UUID, dt.datetime]:
     """Register one expiring ordinary-chat credential with the existing token owner.
 
@@ -263,7 +264,7 @@ async def mint_chat_mcp_token(
         created_at=now,
         expires_at=expires_at,
     )
-    execution = current_intake_execution.get()
+    execution = (routine_execution or current_intake_execution.get()) if chat_session_id else None
     token = mint_jwt(
         routine_id=execution[0] if execution else None,
         execution_id=execution[1] if execution else None,

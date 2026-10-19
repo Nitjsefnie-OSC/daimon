@@ -658,3 +658,8 @@ signed execution grant expires when its scheduler fire ends; stale grants and
 routine resolution are refused. Capture has no external effects. `crm_paused`
 still posts dossiers and archives Gmail. Alert only configured authorized owners
 with minimal IDs/error codes and private links, never public fallback content.
+
+Lead-intake routines use isolated session credentials with signed routine and
+execution identity, retained during refresh. They cannot borrow an attended
+conversation’s read or approval authority, and lead resolution is always refused
+unattended.

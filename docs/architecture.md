@@ -2324,3 +2324,9 @@ expire with the retention policy.
 Intake authorization carries the actual destination thread through recovery and
 write intents. Both MCP record readback and the private Discord queue evaluate
 that thread’s current policy and native visibility before returning its data.
+
+Routine intake provenance is signed only into the isolated provider-session
+credential. Refresh preserves its routine/execution discriminator and session
+grant; the shared personal-credential vault never receives routine provenance.
+Every unattended confirmation path protects lead resolution, even with general
+tool safety disabled.
