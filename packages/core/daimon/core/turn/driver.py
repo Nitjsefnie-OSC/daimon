@@ -289,7 +289,9 @@ async def _decide_or_refuse_on_cancel(
 
     async def join_children() -> None:
         for task in (decide_task, cancel_task):
-            if not task.done():
+            # A Stop may already have cancelled the decider. Let its cleanup
+            # finish rather than injecting another cancellation into its hooks.
+            if not task.done() and not task.cancelling():
                 task.cancel()
             await _bounded(task, what="decide_task_join", session_id=session_id)
 
