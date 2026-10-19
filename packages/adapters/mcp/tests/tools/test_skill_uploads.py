@@ -492,7 +492,7 @@ async def test_a_member_cannot_change_an_unbound_agent_or_a_default(
     [
         ("discord", "https://evil.example/skill.zip", "Discord attachment link"),
         ("discord", "http://cdn.discordapp.com/a/b/skill.zip", "Discord attachment link"),
-        (None, "https://cdn.discordapp.com/a/b/skill.zip", "only from Discord, Slack or Teams"),
+        (None, "https://cdn.discordapp.com/a/b/skill.zip", "Attachments aren't available here"),
         ("teams", "https://cdn.discordapp.com/a/b/skill.zip", "SharePoint or OneDrive link"),
         ("teams", "http://contoso.sharepoint.com/s/skill.zip", "SharePoint or OneDrive link"),
         ("teams", "https://contoso.sharepoint.com.evil.example/x", "SharePoint or OneDrive link"),

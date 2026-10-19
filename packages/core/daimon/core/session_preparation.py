@@ -914,6 +914,7 @@ async def _prepare_session_for_turn_locked(
             confirmed_tools=confirmed_tools_for_turn(deps),
             daimon_rule_tools=admission.daimon_rule_tools,
             channel_skills=admission.channel_skills,
+            system_override=admission.system_override,
         )
         if fresh_start:
             decision = ReplaceSession(reasons=())

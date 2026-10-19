@@ -110,13 +110,11 @@ def _will_happen(preview: PurgePreview) -> list[str]:
     if preview.mcp_tokens.count:
         lines.append(f"🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}")
     if preview.slack_user_tokens.count:
-        lines.append(
-            f"🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"
-        )
+        lines.append(f"🔐 Delete {amount(preview.slack_user_tokens.count, 'saved access token')}")
     if preview.microsoft_user_tokens.count:
         lines.append("🔌 Disconnect your Microsoft account")
     if preview.slack_turn_contexts.count:
-        n = amount(preview.slack_turn_contexts.count, "temporary Slack request record")
+        n = amount(preview.slack_turn_contexts.count, "temporary request record")
         lines.append(f"💬 Delete {n}")
     if preview.direct_message_conversations.count:
         n = amount(preview.direct_message_conversations.count, "private conversation")

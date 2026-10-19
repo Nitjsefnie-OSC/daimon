@@ -76,7 +76,7 @@ def _output_text(call_result: dict[str, object]) -> str:
 
 
 def test_slack_unsupported_message() -> None:
-    with pytest.raises(ToolError, match="not supported on Slack yet"):
+    with pytest.raises(ToolError, match="isn't available here yet"):
         _slack_unsupported("search_messages")
 
 
@@ -159,7 +159,7 @@ async def test_slack_caller_tools_list_omits_list_threads(
         f"a hidden tool must be uncallable, not just unlisted; got {call_result!r}"
     )
     output_text = _output_text(call_result)
-    assert "list_threads is not supported on Slack yet" not in output_text, (
+    assert "list_threads isn't available here yet" not in output_text, (
         "a Slack caller calling a hidden tool must hit the registry's unknown-tool "
         f"error, not the runtime gate copy (unreachable through the registered "
         f"surface); got {output_text!r}"
@@ -232,7 +232,7 @@ async def test_search_messages_slack_caller_no_longer_hits_unsupported_branch(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "search_messages is not supported on Slack yet" not in output_text, (
+    assert "search_messages isn't available here yet" not in output_text, (
         "search_messages must no longer hit the Slack-unsupported branch"
     )
     assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
@@ -275,7 +275,7 @@ async def test_send_message_slack_caller_no_longer_hits_unsupported_branch(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "send_message is not supported on Slack yet" not in output_text, (
+    assert "send_message isn't available here yet" not in output_text, (
         "send_message must no longer hit the Slack-unsupported branch"
     )
     assert "slack tools require DAIMON_CRYPTO__KEYS" in output_text, (
@@ -383,7 +383,7 @@ async def test_read_channel_slack_caller_rejects_discord_before_param(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "before is Discord-only" in output_text, (
+    assert "before isn't accepted here" in output_text, (
         f"Slack caller's before param must be rejected, not dropped; got {output_text!r}"
     )
 
@@ -417,7 +417,7 @@ async def test_read_channel_discord_caller_rejects_slack_cursor_param(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "cursor is Slack/Teams-only" in output_text, (
+    assert "cursor isn't accepted here" in output_text, (
         f"Discord caller's cursor param must be rejected, not dropped; got {output_text!r}"
     )
 
@@ -451,7 +451,7 @@ async def test_read_thread_slack_caller_rejects_discord_before_param(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "before is Discord-only" in output_text, (
+    assert "before isn't accepted here" in output_text, (
         f"Slack caller's before param must be rejected, not dropped; got {output_text!r}"
     )
 
@@ -485,7 +485,7 @@ async def test_read_thread_discord_caller_rejects_slack_cursor_param(
 
     assert call_result.get("isError") is True
     output_text = _output_text(call_result)
-    assert "cursor is Slack/Teams-only" in output_text, (
+    assert "cursor isn't accepted here" in output_text, (
         f"Discord caller's cursor param must be rejected, not dropped; got {output_text!r}"
     )
 

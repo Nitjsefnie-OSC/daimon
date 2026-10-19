@@ -316,8 +316,8 @@ def register_hub_tools(
         """List every Daimon you can reach on this platform, across all your workspaces.
 
         Call this first. ``id`` is what every other tool takes as ``daimon_id``;
-        ``workspace`` tells you which Slack workspace or Discord server the Daimon
-        lives in. Two Daimons may share a ``name`` in different workspaces.
+        ``workspace`` tells you which workspace the Daimon lives in. Two Daimons may
+        share a ``name`` in different workspaces.
         """
         return await _list_daimons_impl(runtime, await _hub_auth(ctx))
 

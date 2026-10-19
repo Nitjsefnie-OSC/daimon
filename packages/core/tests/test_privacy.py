@@ -240,12 +240,12 @@ async def test_collect_purge_preview_lists_principals_as_example_when_account_ha
 
     preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
 
-    assert preview.linked_principals.example == "Discord:1234, CLI:os_user=alice", (
+    assert preview.linked_principals.example == "1234, CLI:os_user=alice", (
         "example must enumerate platform principals first, then CLI principals, comma-joined"
     )
 
 
-async def test_collect_purge_preview_linked_principals_example_uses_platform_capitalization(
+async def test_collect_purge_preview_linked_principals_example_names_no_chat_platform(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -262,9 +262,8 @@ async def test_collect_purge_preview_linked_principals_example_uses_platform_cap
 
     preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
 
-    assert preview.linked_principals.example is not None
-    assert preview.linked_principals.example.startswith("Discord:"), (
-        "platform name must be capitalized in display"
+    assert preview.linked_principals.example == "42", (
+        "the panel must not name a chat platform: it may be another one than the viewer's"
     )
 
 

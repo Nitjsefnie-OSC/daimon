@@ -77,6 +77,7 @@ from daimon.core.permissions import (
     home_of,
     limiting_ids_at,
 )
+from daimon.core.platform_system import system_for_platform
 from daimon.core.scope import ResolvedConfig, ScopeContext
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
@@ -202,6 +203,9 @@ class Admission:
     # (`turn_platform_skills`, on the Anthropic backend only), then the
     # channel's (`daimon.core.channel_skills`).
     channel_skills: tuple[MaSkill, ...] = ()
+    # The system prompt this platform's session runs instead of the agent's own
+    # (`daimon.core.platform_system`), or None when the agent's own is right.
+    system_override: str | None = None
     # Which of `channel_skills` are the platform's, so a create the provider
     # refuses for one of them can run without it (`create_ma_session`).
     platform_skill_ids: frozenset[str] = frozenset()
@@ -963,6 +967,7 @@ async def admit_impl(
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
         budget_channel_id=budget_channel_id,
         channel_skills=channel_skills,
+        system_override=system_for_platform(agent.system, platform),
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
     )

@@ -135,7 +135,7 @@ async def _teams_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
     file_handles: list[str] | None = None,
 ) -> TeamsMessageRow:
     if attachments:
-        raise ToolError("attachments takes Discord CDN URLs; on Teams post files with file_handles")
+        raise ToolError("attachments aren't accepted here; post files with file_handles")
     if file_handles and len(file_handles) > MAX_FILES:
         raise ToolError(f"max {MAX_FILES} files per message")
     if content.strip() or not file_handles:
@@ -269,7 +269,7 @@ async def _post_teams_wizard_impl(  # pyright: ignore[reportUnusedFunction]  # u
     A bare channel gets a new post, whose thread the form and its turn then live in.
     """
     if any(step.image_handle is not None for step in spec.steps):
-        raise ToolError("step images are Discord-only; describe the picture in the question")
+        raise ToolError("step images aren't available here; describe the picture in the question")
     conversation_id = _conversation_id(channel_id)
     channel, root = split_thread(conversation_id)
     is_channel = _CHANNEL.fullmatch(channel) is not None

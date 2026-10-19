@@ -240,10 +240,8 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         workspace default sealed channels would run in: pass
         ``confirm_open_network=true`` only after the caller confirms it.
 
-        Pass the parent channel's id: Discord
-        ``<channel platform="discord" id="..." role="parent_channel">``, Slack
-        ``<channel platform="slack" id="...">``, Teams ``19:…@thread.tacv2``; a thread
-        id resolves to its parent. The caller must be able to see the channel.
+        Pass the parent channel's id: ``parent_channel_id`` from turn_controls; a
+        thread id resolves to its parent. The caller must be able to see the channel.
         """
         return await _set_channel_environment_impl(
             runtime,

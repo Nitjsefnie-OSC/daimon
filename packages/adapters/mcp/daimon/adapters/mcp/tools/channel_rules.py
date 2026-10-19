@@ -77,7 +77,7 @@ class SetAgentRuleResult:
 
 def _platform(auth: AuthIdentity) -> str:
     if auth.platform not in ("discord", "slack", "teams"):
-        raise ToolError("Rules exist only on Discord, Slack and Teams.")
+        raise ToolError("Rules aren't available here.")
     return auth.platform
 
 
@@ -264,8 +264,8 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         agent, without credentials, as the channel's default. To make agent X the only
         agent in a channel, set the channel's default to X first. ``release_agents``
         drops the rules of the agents kept to the channel, once readers aren't ``own``.
-        Rules are per channel: ``channel_id`` names a channel, never a thread (a Slack or
-        Teams thread id names its channel; on Discord pass ``<channel role="parent_channel">``).
+        Rules are per channel: ``channel_id`` names a channel, never a thread. Pass
+        the parent channel's id from turn_controls (``parent_channel_id``).
         """
         return await _set_channel_rule_impl(
             runtime,

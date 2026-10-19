@@ -298,7 +298,7 @@ async def test_callers_without_a_chat_platform_are_refused(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
-    with pytest.raises(ToolError, match="only for Discord, Slack and Teams channels"):
+    with pytest.raises(ToolError, match="channel budgets aren't available here"):
         await _list_channel_budgets_impl(
             _runtime(committing_sessionmaker),
             _auth(tenant, account_id, admin=True, platform="cli"),

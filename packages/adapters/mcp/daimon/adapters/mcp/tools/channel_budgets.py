@@ -125,7 +125,7 @@ def _result(status: ChannelBudgetStatus) -> ChannelBudgetResult:
 
 def _require_platform(auth: AuthIdentity) -> str:
     if auth.platform not in _PLATFORMS:
-        raise ToolError("channel budgets exist only for Discord, Slack and Teams channels")
+        raise ToolError("channel budgets aren't available here")
     return cast(str, auth.platform)
 
 

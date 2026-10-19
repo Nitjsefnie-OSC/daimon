@@ -384,9 +384,7 @@ async def _fetch_platform_attachment(
             return await fetch_teams_attachment(http, url)
         except httpx.HTTPError as exc:
             raise ToolError(f"Could not download the attachment: {exc}") from exc
-    raise ToolError(
-        "Attachments come only from Discord, Slack or Teams. Pass skill_md or repo_url instead."
-    )
+    raise ToolError("Attachments aren't available here. Pass skill_md or repo_url instead.")
 
 
 async def _fetch_slack_attachment(

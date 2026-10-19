@@ -290,6 +290,7 @@ async def desired_snapshot_for(
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
     channel_skills: Sequence[MaSkill] = (),
+    system_override: str | None = None,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
 
@@ -385,6 +386,7 @@ async def desired_snapshot_for(
             {} if recorded is None else recorded.token_issued_at_by_installation
         ),
         channel_skills=channel_skills,
+        system_override=system_override,
         tool_safety=tool_safety,
         public_url=public_url,
     )

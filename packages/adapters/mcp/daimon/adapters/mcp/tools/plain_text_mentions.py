@@ -28,7 +28,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 _CHAT_PLATFORMS: Final = frozenset({"discord", "slack", "teams"})
-_WRONG_PLATFORM = "Plain-text mentions only apply on Discord, Slack and Teams; nothing was changed."
+_WRONG_PLATFORM = "Plain-text mentions aren't available here; nothing was changed."
 
 
 @dataclass(frozen=True)

@@ -32,7 +32,6 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._words import space_noun
 from daimon.adapters.mcp.tools.discord import verify_participation_scope
 from daimon.adapters.mcp.tools.teams._participation import verify_teams_participation_scope
 from daimon.core.stores.thread_participation import (
@@ -49,16 +48,14 @@ from daimon.core.thread_participation import (
     build_participation_note,
     resolve_participation,
     scope_label,
+    tier_word,
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 _PLATFORMS: Final = frozenset({"discord", "teams"})
 
-_WRONG_PLATFORM = (
-    "Following threads is only available on Discord and Teams right now, so there is "
-    "nothing to turn on here."
-)
+_WRONG_PLATFORM = "Following threads isn't available here yet, so there is nothing to turn on."
 _DEPLOYMENT_DISABLED = (
     "Participation is disabled for this deployment and cannot be turned on. "
     "I only reply when @mentioned; the operator would have to change that."
@@ -198,10 +195,11 @@ async def _set_thread_participation_impl(
         )
         above = _resolve_above(scope, deployment, before)
         if requested is ParticipationMode.ON and above.mode is ParticipationMode.DISABLED:
+            tier = tier_word(above.tier, auth.platform)
             raise ToolError(
-                f"Participation is disabled at the {above.tier} level, so "
-                f"{scope_label(scope, scope_id, space_noun(auth.platform))} cannot be "
-                f"turned on. An admin would have to change the {above.tier} setting first."
+                f"Participation is disabled at the {tier} level, so "
+                f"{scope_label(scope, scope_id, auth.platform)} cannot be turned on. "
+                f"An admin would have to change the {tier} setting first."
             )
 
         if requested is None:
@@ -246,7 +244,7 @@ async def _set_thread_participation_impl(
             scope_id=scope_id,
             requested=requested,
             effective=effective,
-            space=space_noun(auth.platform),
+            platform=auth.platform,
         ),
     )
 
@@ -289,7 +287,9 @@ async def _get_thread_participation_impl(
         thread_mode=modes.thread.value if modes.thread is not None else None,
         effective_mode=effective.mode.value,
         effective_tier=effective.tier,
-        explanation=build_participation_explanation(effective, thread_id=thread_id),
+        explanation=build_participation_explanation(
+            effective, thread_id=thread_id, platform=auth.platform
+        ),
     )
 
 

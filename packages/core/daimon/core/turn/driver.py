@@ -1837,7 +1837,7 @@ async def _finalize_success_or_error(
             case AutoApprove() | PolicyApproval():
                 message = "The agent stopped because it couldn't confirm your approval."
             case RequireApproval():
-                message = "Approvals aren't available here. Ask in Discord, Slack or Teams."
+                message = "Approvals aren't available here yet."
         err = TurnError(kind="requires_action", message=message)
         final_state = dataclasses.replace(
             final_state, error=err, termination=TerminationReason.REQUIRES_ACTION

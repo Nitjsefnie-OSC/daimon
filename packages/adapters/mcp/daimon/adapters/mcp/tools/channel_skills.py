@@ -88,7 +88,7 @@ def _summary(channel_id: str, rows: Sequence[ChannelSkillRow]) -> str:
 
 async def _target(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> tuple[str, str]:
     if auth.platform not in _PLATFORMS:
-        raise ToolError("channel skills exist only for Discord, Slack and Teams channels")
+        raise ToolError("channel skills aren't available here")
     if not channel_id.strip():
         raise ToolError("channel_id is required: the channel the user named.")
     target = (await resolve_channel(runtime, auth, channel_id.strip())).channel_id

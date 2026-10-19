@@ -67,7 +67,7 @@ async def resolve_channel(
     if lenient and auth.platform != "discord":
         return parsed
     if auth.platform == "discord" and not parsed.channel_id.isdigit():
-        raise ToolError(f"{parsed.channel_id!r} is not a Discord channel id")
+        raise ToolError(f"{parsed.channel_id!r} is not a channel id")
     try:
         if auth.platform == "discord":
             parent = await resolve_visible_channel(runtime, auth, parsed.channel_id)
@@ -80,7 +80,7 @@ async def resolve_channel(
         if lenient:
             return parsed
         raise
-    raise ToolError("channel tools exist only for Discord, Slack and Teams channels")
+    raise ToolError("channel tools aren't available here")
 
 
 async def _visible_slack_channel(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:

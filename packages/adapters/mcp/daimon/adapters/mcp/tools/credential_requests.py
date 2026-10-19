@@ -841,7 +841,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
     ) -> RequestCredentialResult:
         """Connect an agent such as research-bot to Linear through an MCP endpoint
         with a bearer token, not browser OAuth. GitHub repos use github_connect.
-        For a server that only signs people in through a browser (Notion, Slack,
+        For a server that only signs people in through a browser (Notion,
         Atlassian) use
         ``request_mcp_oauth`` instead; such servers reject a pasted key.
         Match supported authentication; an API key is not automatically an MCP token.
@@ -891,7 +891,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         pending_task: Annotated[str | None, Field(description=_PENDING_TASK_DESCRIPTION)] = None,
     ) -> RequestCredentialResult:
         """Connect an agent to an MCP server that signs people in through the browser,
-        such as Notion, Slack or Atlassian. Each person connects their own account:
+        such as Notion or Atlassian. Each person connects their own account:
         the grant is theirs alone, and other members connect separately when asked.
 
         Use ``request_mcp_token`` for servers that take a pasted bearer token and

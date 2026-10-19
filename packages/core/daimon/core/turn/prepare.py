@@ -672,6 +672,7 @@ async def create_ma_session(
             before_create=fence,
             on_app_access=capture_app_access,
             channel_skills=skills,
+            system_override=admission.system_override,
             resource_source=preparation.source
             if preparation is not None and preparation.worker is not None
             else None,
@@ -750,6 +751,7 @@ async def create_ma_session(
                 else next(iter(ma_session.vault_ids), None)
             ),
             sent_skills=session_skills(admission.agent, admission.channel_skills),
+            sent_system=admission.system_override,
             github_mode=github_mode,
             personal_memory_store_ids=(
                 () if personal_memory_store_id is None else (personal_memory_store_id,)

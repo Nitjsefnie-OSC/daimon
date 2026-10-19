@@ -46,7 +46,7 @@ class ArchiveChannelCopyResult:
 def _channel(auth: AuthIdentity, channel_id: str) -> str:
     platform = auth.platform
     if platform not in ("discord", "slack", "teams"):
-        raise ToolError("Channels exist only on Discord, Slack and Teams. Nothing was changed.")
+        raise ToolError("Channels aren't available here. Nothing was changed.")
     try:
         channel = normalize_channel_id(
             platform, parse_channel_target(platform, channel_id).channel_id

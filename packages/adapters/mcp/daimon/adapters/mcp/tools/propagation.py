@@ -482,7 +482,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str | None = None,
         expected_ma_agent_id: str | None = None,
     ) -> SetDefaultResult:
-        """Make an agent answer in a channel or become the whole workspace/server/team default.
+        """Make an agent answer in a channel or become the whole workspace's default.
         For example, make churn-explorer answer in #growth. Changes the agent that answers;
         use ``clear_agent_default`` to stop that routing.
 
@@ -491,13 +491,10 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
         core). Requires an admin.
 
-        Discord: ``channel_id`` MUST be the parent channel's id — the one
-        your context gives as
-        ``<channel platform="discord" id="..." role="parent_channel">``.
-        Never pass the current thread's id here. Slack: use the id from
-        ``<channel platform="slack" id="...">`` — Slack's context always
-        names the parent channel. Teams: use ``parent_channel_id`` from
-        turn_controls. A channel default is resolved from the parent;
+        ``channel_id`` MUST be the parent channel's id: ``parent_channel_id`` from
+        turn_controls, the same id your context gives on the ``<channel ...
+        role="parent_channel">`` element where it has one. Never pass the current
+        thread's id here. A channel default is resolved from the parent;
         setup threads keep their bound responder. A default
         written against a thread id is a scope nothing ever reads: the write
         succeeds, this tool reports success, and the channel keeps answering
@@ -520,11 +517,8 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         omit it to clear the workspace-wide default.  If the scope had no
         default the call is a no-op (idempotent). Requires an admin.
 
-        Discord: ``channel_id`` MUST be the parent channel's id
-        (``<channel platform="discord" id="..." role="parent_channel">``),
-        never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Teams: use
-        ``parent_channel_id`` from turn_controls. Clearing a thread id is a
+        ``channel_id`` MUST be the parent channel's id: ``parent_channel_id`` from
+        turn_controls, never the current thread's id. Clearing a thread id is a
         silent no-op that leaves the channel's real default in place.
         """
         return await _clear_agent_default_impl(runtime, await _auth(ctx), channel_id)
@@ -553,10 +547,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel-bound keys can read their own channel. Hidden agents and configuration
         targets are omitted. Admins retain their routing view within channel isolation.
 
-        Discord: ``channel_id`` MUST be the parent channel's id
-        (``<channel platform="discord" id="..." role="parent_channel">``),
-        never the current thread's id. Slack: use the id from
-        ``<channel platform="slack" id="...">``. Teams: ``parent_channel_id``
+        ``channel_id`` MUST be the parent channel's id: ``parent_channel_id``
         from turn_controls, with its ``thread_id``. Asking about a thread id
         reports that thread's own (almost always empty) scope, which reads
         as a confident answer about the channel and is not one — and if the

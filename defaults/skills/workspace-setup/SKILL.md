@@ -114,7 +114,7 @@ their snapshots. Selecting a target does not change who answers or routing.
 4. **MCP servers.** Use `attach_mcp_server` for a server needing no token,
    `request_mcp_token` for one that takes a pasted bearer token, or
    `request_mcp_oauth` for one that signs people in through a browser (Notion,
-   Slack, Atlassian). Adding a server to an agent other people use needs an
+   Atlassian). Adding a server to an agent other people use needs an
    admin; a member who asks gets the admin handoff below. An OAuth connection
    is per person: once the server is on the agent, any member signs in with
    their own account through their own card. An API key
@@ -286,8 +286,8 @@ does not — never promise otherwise.
 A move to a new workspace carries working files across as an archive the old
 workspace builds for itself, so where a file was written decides whether it
 survives. Keep working files in `/root/work`, and put only files the person
-should receive in `/mnt/session/outputs` (daimon attaches those to the reply on
-Discord, Slack and Teams 1:1 chats); both travel, and so does the working repo
+should receive in `/mnt/session/outputs` (daimon attaches those to the reply);
+both travel, and so does the working repo
 checkout. Say this plainly when someone asks where their file went
 after a model, instructions, skill, repo or environment change or a handoff:
 the archive is built from those places, and nothing in it is posted to the
@@ -315,8 +315,8 @@ Resolution cascades deployment default (the operator's environment), then
 workspace, then channel, then thread: the narrowest scope with a setting wins,
 except that a `disabled` tier beats every tier below it. Any member may set a
 thread; channel and workspace scopes require an admin (`words.admin`),
-and a non-admin caller is refused with no write. Discord and Teams;
-not Slack yet.
+and a non-admin caller is refused with no write. Where following threads
+isn't available yet, the tool says so.
 
 ## Answering to your name typed as text
 
