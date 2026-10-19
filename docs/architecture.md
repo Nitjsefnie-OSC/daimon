@@ -1170,7 +1170,9 @@ boundary and tool-rule channel are recorded on the session's settle row
 one bounded worker for that turn (`_agent_chat_safety.watch_turn`), which
 answers only pauses after its own `user.message` boundary, each decided at
 call time by `unattended_posture`: `unattended_decider` with the agent's
-rules for that channel (`channel_for_tool_rules`), the protected tools
+rules for that channel (`channel_for_tool_rules`, which retains routine
+channels despite their private transcript stamp and excludes genuine DM
+source channels), the protected tools
 refused, never `AutoApprove` and never the session's frozen config.
 Each confirmation batch resumes the turn, so the worker gates the session
 again before deciding it, and a failed gate sends nothing. Messages,

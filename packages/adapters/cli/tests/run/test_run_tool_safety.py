@@ -271,3 +271,86 @@ async def test_a_stamped_session_runs_under_its_own_tenant_and_channel_rules(
         ToolSafetyPolicy(enabled=True, agent_rules=True),
     )
     assert _confirmations(session) == [expected]
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack"])
+async def test_continuing_a_created_routine_session_keeps_channel_deny(
+    platform: str,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.authz import Subject
+    from daimon.core.rule_views import routine_origin
+    from daimon.core.sessions import create_session
+    from daimon.core.stores import agent_tool_rules, routines
+    from daimon.testing.factories import make_tenant
+    from daimon.testing.ma_models import ma_environment
+
+    async with db_session_factory() as db:
+        tenant = await make_tenant(db, platform=platform, workspace_id="routine-cli")
+        routine = await routines.create_routine(
+            db,
+            tenant_id=tenant.id,
+            created_by_user_id="U1",
+            agent_id="ag_cli",
+            agent_name="cli",
+            cron_expr="0 * * * *",
+            timezone_="UTC",
+            trigger_message="check the issue",
+            destination_kind="channel",
+            destination_id="C1",
+            channel_id="C1",
+        )
+        await agent_tool_rules.set_rule(
+            db,
+            tenant_id=tenant.id,
+            agent_id="ag_cli",
+            agent_name="cli",
+            tool_key="linear/get_issue",
+            channel_id="C1",
+            server_url=_LINEAR["url"],
+            rule="deny",
+            set_by="admin",
+            actor=Subject(is_admin=True, platform_user_id="UA"),
+        )
+        await db.commit()
+    place = routine_origin(TenantAccessPolicy(), routine, platform=platform)
+    assert place is not None
+    session = _Session([_toolset("linear")], [_LINEAR])
+    router = session.router(_events("linear", "get_issue"))
+
+    def created(request: httpx.Request, _m: Any) -> httpx.Response:
+        body = json_body(request)
+        session.metadata = body["metadata"]
+        return httpx.Response(200, json=session.model())
+
+    router.add("POST", r"/v1/sessions$", created)
+    client = build_fake_anthropic(router.dispatch)
+    try:
+        snapshot = await create_session(
+            client,
+            agent=ma_agent(id="ag_cli", tools=session.tools, mcp_servers=session.servers),
+            environment=ma_environment(),
+            tenant_id=tenant.id,
+            tool_safety=ToolSafetyPolicy(enabled=True, agent_rules=True),
+            requester_is_headless=True,
+            memory_read_only=True,
+            origin_channel_id=place.channel_id,
+            origin_thread_id=place.thread_id,
+            origin_seal_ids=place.seal_ids,
+            private_dm_id=place.private_dm_id,
+            budget_channel_id="BUDGET_ONLY",
+        )
+        assert snapshot.metadata["daimon_private_dm"] == f"routine:{routine.id}"
+        assert snapshot.metadata["daimon_channel"] == "C1"
+    finally:
+        await client.close()
+    await _run(
+        monkeypatch,
+        db_session_factory,
+        session,
+        _events("linear", "get_issue"),
+        ToolSafetyPolicy(enabled=True, agent_rules=True),
+    )
+    assert _confirmations(session) == ["deny"]

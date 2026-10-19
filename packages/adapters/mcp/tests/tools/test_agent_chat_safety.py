@@ -908,6 +908,22 @@ async def test_channel_tool_rules_reach_agent_chat_turns(
     assert [c["result"] for c in fake.confirmations] == [expected]
 
 
+@pytest.mark.parametrize("channel", ["C1", "C1:1234.5678"])
+async def test_a_routine_privacy_stamp_keeps_its_channel_rules(factory, channel):
+    from dataclasses import replace
+
+    await _deny_in_channel(factory, "C1")
+    fake = FakeSession(tool="get_issue")
+    fake.metadata[MA_METADATA_KEY_CHANNEL] = channel
+    fake.metadata[MA_METADATA_KEY_PRIVATE_DM] = "routine:job"
+    auth = replace(_auth(), platform="slack")
+    assert safety.rules_channel(auth, fake.model) == "C1"
+    runtime = _runtime(fake, factory, _RULES)
+    await _continue_turn_impl(runtime, auth, _SESSION, "continue the routine")
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+
+
 async def test_a_dm_never_inherits_its_source_channels_rules(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

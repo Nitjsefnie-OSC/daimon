@@ -1422,8 +1422,9 @@ async def test_a_checkpoint_turn_is_decided_by_the_unattended_rules(
     [
         ({"daimon_channel": "B"}, "deny"),
         ({"daimon_channel": "B", "daimon_private_dm": "dm-1"}, "allow"),
+        ({"daimon_channel": "B", "daimon_private_dm": "routine:job"}, "deny"),
     ],
-    ids=["conversation-channel", "dm-excluded"],
+    ids=["conversation-channel", "dm-excluded", "routine-private"],
 )
 async def test_a_checkpoint_follows_its_conversations_rules_not_its_budget_channel(
     stamp: dict[str, str],

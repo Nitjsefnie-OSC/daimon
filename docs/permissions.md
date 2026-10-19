@@ -114,7 +114,9 @@ agent `allow` rule with `chat_and_routines` covers it), and `deny` always
 refuses. Agent tool rules for the turn's channel apply as well as agent-wide
 ones: the channel of a key minted in a channel, otherwise the channel the
 conversation belongs to (a Slack thread's parent channel; never the source
-channel of a DM). Before every message the session's tool settings are set
+channel of a DM). A routine's private transcript stamp keeps its channel
+rules when the session is continued through the CLI, MCP or a checkpoint.
+Before every message the session's tool settings are set
 again from the current policy, so a session created before tool safety was
 on, or one whose agent allowed a tool outright, still asks. The process that
 sent the turn answers its tool calls, deciding each one when it is made.
