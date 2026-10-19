@@ -522,7 +522,7 @@ async def test_a_guest_from_another_organisation_is_not_sent_to_a_one_to_one_cha
             await microsoft_search_impl(
                 runtime, auth, query="budget", kinds=["event"], size=5, origin_context_id=origin
             )
-    assert "1:1" not in str(refused.value), "a guest has no 1:1 chat to ask again in"
+    assert _ONE_TO_ONE.search(str(refused.value)) is None, "a guest has no 1:1 chat to ask again in"
     assert not fake.graph_requests, "nothing is fetched for them"
 
 
