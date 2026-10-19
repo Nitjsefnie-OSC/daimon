@@ -9,6 +9,7 @@ skills, tool descriptions) stays platform-neutral and points at the per-turn not
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cache
@@ -329,13 +330,19 @@ _LABEL = r"[^\[\]\n]{0,500}"
 _TITLE = r"[^)\n]{0,200}"
 _SCHEME = r"(?i:[a-z][a-z0-9+.-]{1,15}):"
 _TRAILING_PUNCTUATION = r"[^\s<>()\[\].,;:!?'\"*_`~]"
+_URL_CHAR = r"[^\s<>()\[\]]"
+# A bracketed IPv6 host, and one level of balanced parentheses in a path
+# (`/wiki/Foo_(bar)`), stay inside the token instead of splitting it.
+_IPV6_HOST = r"(?:\[[0-9A-Fa-f:.]{2,45}\])"
+_URL_PARENS = r"(?:\([^\s<>()\[\]]{0,200}\))"
 #: Every URL is one opaque token, bare, as a Markdown target or as Slack's `<url|label>`. Only
 #: afterwards, from its parsed host, is it replaced whole or kept byte for byte.
 _URL_TOKEN = (
     rf"(?P<markdown>!?\[(?P<markdown_label>{_LABEL})\]"
     rf"\(\s*<?(?P<markdown_url>{_SCHEME}//[^\s<>)]+)>?{_TITLE}\))"
     rf"|(?P<angle><(?P<angle_url>{_SCHEME}//[^\s<>|]+)(?:\|(?P<angle_label>[^>\n]{{0,500}}))?>)"
-    rf"|(?<![\w+.-])(?P<bare>{_SCHEME}//[^\s<>()\[\]]*{_TRAILING_PUNCTUATION})"
+    rf"|(?<![\w+.-])(?P<bare>{_SCHEME}//{_IPV6_HOST}?"
+    rf"(?:{_URL_CHAR}|{_URL_PARENS})*(?:{_TRAILING_PUNCTUATION}|{_URL_PARENS}|(?<=\])))"
 )
 
 
@@ -502,19 +509,61 @@ def _replace_blunt(text: str, needle: str, ignore_case: bool) -> str:
     return OTHER_APP.join(parts)
 
 
+#: Plain domain substrings for the fallback, which may not use a regex.
+_BLUNT_DOMAINS: Mapping[ChatPlatform, tuple[str, ...]] = MappingProxyType(
+    {
+        "discord": ("discord.com", "discord.gg", "discord.net", "discord.media", "discordapp."),
+        "slack": ("slack.com", "slack-edge.com", "slack-files.com", "slack-imgs.com"),
+        "teams": ("teams.microsoft.com", "teams.live.com"),
+    }
+)
+
+
+def _blunt_token(token: str, others: tuple[ChatPlatform, ...]) -> str:
+    """One whitespace-free run: a URL whole or not at all, anything else name by name."""
+    if "://" in token:
+        folded = unicodedata.normalize("NFKC", token).lower()
+        if any(domain in folded for other in others for domain in _BLUNT_DOMAINS[other]):
+            return OTHER_APP
+        return token
+    for other in others:
+        for needle, ignore_case in _BLUNT[other]:
+            if " " not in needle:
+                token = _replace_blunt(token, needle, ignore_case)
+    return token
+
+
 def blunt_scrub_other_platforms(text: str, platform: str | None) -> str:
     """The fallback when the scrub itself fails: replace the other apps' names, nothing smarter.
 
-    Total and regex-free (`str.replace` and `str.find`), so it cannot fail on any input; it
-    ignores word boundaries, URLs and grammar ("Discordant" becomes "another appant"), and
-    it is idempotent. A reply posted through it is ugly, never lost and never leaking."""
+    Total and regex-free (`str.replace` and `str.find`), so it cannot fail on any input. A
+    whitespace-free run holding "://" is a URL: replaced whole if its NFKC-folded text holds
+    another app's domain, else kept byte for byte. Elsewhere it ignores word boundaries and
+    grammar ("Discordant" becomes "another appant"). Idempotent. A reply posted through it
+    is ugly, never lost and never leaking."""
     if platform not in CHAT_PLATFORMS:
         return text
-    for other in CHAT_PLATFORMS:
-        if other != platform:
-            for needle, ignore_case in _BLUNT[other]:
+    others: tuple[ChatPlatform, ...] = tuple(other for other in WORDS if other != platform)
+    # A name with a space in it ("Microsoft Teams") cannot sit inside a URL, which has none.
+    for other in others:
+        for needle, ignore_case in _BLUNT[other]:
+            if " " in needle:
                 text = _replace_blunt(text, needle, ignore_case)
-    return text
+    parts: list[str] = []
+    start = 0
+    length = len(text)
+    while start < length:
+        end = start
+        while end < length and not text[end].isspace():
+            end += 1
+        if end > start:
+            parts.append(_blunt_token(text[start:end], others))
+        space_end = end
+        while space_end < length and text[space_end].isspace():
+            space_end += 1
+        parts.append(text[end:space_end])
+        start = space_end
+    return "".join(parts)
 
 
 def scrub_other_platforms(text: str, platform: str | None) -> str:

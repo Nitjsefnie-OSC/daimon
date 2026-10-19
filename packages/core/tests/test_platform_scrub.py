@@ -368,7 +368,7 @@ def test_a_failing_scrub_falls_back_to_the_blunt_one_and_logs_only_the_error_typ
         (
             "teams",
             "See https://acme.SLACK.com/x and Slack",
-            "See https://acme.another app/x and another app",
+            "See another app and another app",
         ),
         (
             "discord",
@@ -392,3 +392,34 @@ def test_the_blunt_fallback_replaces_names_without_a_regex(
 def test_the_blunt_fallback_survives_text_whose_lowercase_changes_its_length() -> None:
     text = "\u0130 DISCORD \u0130"
     assert blunt_scrub_other_platforms(text, "teams") == "\u0130 another app \u0130"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.org/(Discord)",
+        "https://en.wikipedia.org/wiki/Foo_(Discord)",
+        "https://[::1]/Discord",
+        "https://[::1]",
+    ],
+)
+def test_a_bare_url_with_parentheses_or_an_ipv6_host_stays_whole(url: str) -> None:
+    assert scrub_other_platforms(f"See {url} now.", "teams") == f"See {url} now."
+
+
+def test_the_fallback_keeps_an_unrelated_url_whole() -> None:
+    text = "https://github.com/discord/x and Discord"
+    assert (
+        blunt_scrub_other_platforms(text, "teams") == "https://github.com/discord/x and another app"
+    )
+
+
+def test_the_fallback_replaces_a_full_width_foreign_url() -> None:
+    assert blunt_scrub_other_platforms("open https://ｄｉｓｃｏｒｄ.com/x", "teams") == (
+        "open another app"
+    )
+
+
+def test_the_fallback_keeps_whitespace_exactly() -> None:
+    text = "Use Slack\n\tnow  https://slack.com/a "
+    assert blunt_scrub_other_platforms(text, "teams") == "Use another app\n\tnow  another app "
