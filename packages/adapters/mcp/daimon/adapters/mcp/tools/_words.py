@@ -46,9 +46,15 @@ def top_up_noun(platform: str | None) -> str:
     return words.top_up() if words is not None else _NEUTRAL_TOP_UP
 
 
-def setup_instruction(platform: str | None, *, place: Place = "channel") -> str:
+def setup_instruction(
+    platform: str | None, *, place: Place = "channel", foreign: bool | None = False
+) -> str:
     """How to reach the setup panel, e.g. "run `/agent-setup`" or
-    "send `setup` in a 1:1 chat with Daimon"."""
+    "send `setup` in a 1:1 chat with Daimon". For a `foreign` sender (from another
+    organisation, with no 1:1 chat) it says who to ask instead, and when that is not
+    known (None) on Teams it names no chat at all."""
+    if foreign is None and platform == "teams":
+        return _NEUTRAL_SETUP
     words = _words(platform)
-    said = words.say("setup", place=place, me="Daimon") if words is not None else None
+    said = words.say("setup", place=place, me="Daimon", foreign=foreign is True) if words else None
     return said or _NEUTRAL_SETUP
