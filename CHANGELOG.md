@@ -56,6 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output write; a failed check latches delivery off through cleanup. Startup audits
   resolve the real ingress schema and refuse unsafe effective database privileges.
   Expired batches never absorb fresh events.
+- Add deterministic polling of reviewed OS read tools, bounded projections, saved
+  baselines, separate poll leases and error backoff. Owner MCP tools manage watches
+  and deliver page signing keys privately once. Offline imports remain paused until
+  their exact owner and destination are confirmed; unmapped page-data polls stay
+  paused and queue a private owner notice.
 
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
 

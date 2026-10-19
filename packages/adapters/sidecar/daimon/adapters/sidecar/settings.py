@@ -1,5 +1,7 @@
 """Sidecar's independent environment allowlist; no provider or vault settings."""
 
+from typing import Literal
+
 from daimon.core.continuity.page_events import KEY_ID
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,6 +40,17 @@ class SidecarSettings(BaseSettings):
     )
     request_timeout_s: float = Field(
         default=10, ge=1, le=30, description="Total callback body and database deadline in seconds."
+    )
+
+    os_executor_origin: Literal["http://mcp:8765", "http://127.0.0.1:8765"] = Field(
+        default="http://mcp:8765",
+        description="Fixed private OS executor origin. No outside hosts, redirects or source URLs.",
+    )
+    poll_interval_s: float = Field(
+        default=5,
+        ge=1,
+        le=60,
+        description="Seconds between bounded scheduling ticks. Disabled producers never poll.",
     )
 
     @field_validator("signing_keys")

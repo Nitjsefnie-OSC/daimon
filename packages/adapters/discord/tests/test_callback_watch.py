@@ -35,10 +35,11 @@ from .watch_fixtures import (
 
 
 @pytest.mark.fresh_schema
+@pytest.mark.parametrize("source", ["page_event", "poll"])
 @pytest.mark.parametrize("mode", ["ready", "revoked_owner", "deleted", "policy_revoked"])
-async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monkeypatch):
+async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, source, monkeypatch):
     db_session_factory, now, tenant, principal, mapping, watch, key = await enrolled_page_watch(
-        db_session_factory, monkeypatch
+        db_session_factory, monkeypatch, source=source
     )
     target = ma_agent(
         id="ag_target",

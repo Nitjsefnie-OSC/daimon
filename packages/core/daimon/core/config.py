@@ -1727,7 +1727,8 @@ class WatchesSettings(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Enable OS-signed page-event watch producers and dispatch. Keep disabled "
+            "Enable OS-signed page-event and reviewed READ-tool polling producers and dispatch. "
+            "Keep disabled "
             "until the execution-bound unattended origin grants, non-gateable cleanup "
             "and watch release are reviewed. "
             "The database global gate must also be explicitly enabled by an operator."

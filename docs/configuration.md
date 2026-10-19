@@ -1368,9 +1368,10 @@ Read from `daimon.core.config.WatchesSettings`. Prefix `DAIMON_WATCHES__`.
 
 `bool` · optional · default `False`
 
-Enable OS-signed page-event watch producers and dispatch. Keep disabled until the
-execution-bound unattended origin grants, non-gateable cleanup and watch release are
-reviewed. The database global gate must also be explicitly enabled by an operator.
+Enable OS-signed page-event and reviewed READ-tool polling producers and dispatch. Keep
+disabled until the execution-bound unattended origin grants, non-gateable cleanup and
+watch release are reviewed. The database global gate must also be explicitly enabled by
+an operator.
 
 ## Private Channel Messages
 
@@ -1634,6 +1635,18 @@ Maximum concurrent callback transactions; excess requests receive 429.
 `float` · optional · default `10`
 
 Total callback body and database deadline in seconds.
+
+### `DAIMON_SIDECAR__OS_EXECUTOR_ORIGIN`
+
+`'http://mcp:8765' | 'http://127.0.0.1:8765'` · optional · default `http://mcp:8765`
+
+Fixed private OS executor origin. No outside hosts, redirects or source URLs.
+
+### `DAIMON_SIDECAR__POLL_INTERVAL_S`
+
+`float` · optional · default `5`
+
+Seconds between bounded scheduling ticks. Disabled producers never poll.
 
 ## Notebook host (standalone service)
 

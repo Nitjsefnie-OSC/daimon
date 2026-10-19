@@ -558,6 +558,9 @@ def create_mcp_app(
     time.register_time_tools(mcp, runtime)
     routines.register_routines_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
+    from daimon.adapters.mcp.tools.watches import register_watch_tools
+
+    register_watch_tools(mcp, runtime)
     register_timer_tools(mcp, runtime)  # one-shot timers on the wake queue
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):
@@ -633,6 +636,9 @@ def create_mcp_app(
         ),
         methods=["PUT"],
     )
+    from daimon.adapters.mcp.watch_polling import poll_endpoint
+
+    app.add_route("/internal/watches/{watch_id}/poll", poll_endpoint(runtime), methods=["POST"])
     app.add_route("/healthz", _healthz, methods=["GET"])
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
     app.add_route(

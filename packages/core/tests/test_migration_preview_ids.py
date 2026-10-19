@@ -33,7 +33,8 @@ FORK = "0109_github_tokens_live_index"
 MAIN = "0110_microsoft_accounts"
 PREVIOUS_HEAD = "0117_clear_legacy_routine_output"
 LEAD_HEAD = "0118_lead_intake"
-HEAD = "0119_watches"
+WATCH_HEAD = "0119_watches"
+HEAD = "0118_watch_polling"
 CHAIN = [
     MAIN,
     "0111_cold_dm_agent",
@@ -44,6 +45,7 @@ CHAIN = [
     "0116_thread_model_settings",
     PREVIOUS_HEAD,
     LEAD_HEAD,
+    WATCH_HEAD,
     HEAD,
 ]
 TABLES = {
