@@ -87,6 +87,7 @@ from daimon.core.tool_safety import (
     trusted_servers_for,
 )
 from daimon.core.turn.approvals import (
+    AnnotationLookup,
     agent_rule_lookup,
     daimon_rule_tools_for,
     headless_tool_confirmation,
@@ -186,6 +187,7 @@ async def run_turn(
     agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    annotations_for: AnnotationLookup | None = None,
     on_state: Callable[[TurnState], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
@@ -216,6 +218,7 @@ async def run_turn(
             agent_github_app=agent_github_app,
             deadline=deadline,
             tool_safety=tool_safety,
+            annotations_for=annotations_for,
             on_state=on_state,
             budget_channel_id=budget_channel_id,
             origin_place=origin_place,
@@ -246,6 +249,7 @@ async def run_turn(
                 agent_github_app=agent_github_app,
                 deadline=deadline,
                 tool_safety=tool_safety,
+                annotations_for=annotations_for,
                 on_state=on_state,
                 budget_channel_id=budget_channel_id,
                 origin_place=origin_place,
@@ -280,6 +284,7 @@ async def run_turn_impl(
     agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    annotations_for: AnnotationLookup | None = None,
     on_state: Callable[[TurnState], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
@@ -501,6 +506,7 @@ async def run_turn_impl(
             billing=billing,
             tool_confirmation=headless_tool_confirmation(
                 tool_safety,
+                annotations_for=annotations_for,
                 rules_for=(
                     agent_rule_lookup(
                         session_factory,

@@ -32,6 +32,7 @@ from daimon.core.tool_safety import (
     trusted_servers_for,
 )
 from daimon.core.turn.approvals import (
+    AnnotationLookup,
     agent_rule_lookup,
     build_decision_events,
     daimon_rule_tools_for,
@@ -98,7 +99,12 @@ async def gate_session(
 
 
 def watch_turn(
-    runtime: McpRuntime, auth: AuthIdentity, handle: str, *, turn_event_id: str | None = None
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+    *,
+    turn_event_id: str | None = None,
+    annotations_for: AnnotationLookup | None = None,
 ) -> None:
     """Keep one bounded confirmation worker per handle, independent of the request."""
     key = (id(runtime), handle)
@@ -107,7 +113,8 @@ def watch_turn(
             return
         _workers[key].cancel()
     task = asyncio.create_task(
-        _watch(runtime, auth, handle, turn_event_id=turn_event_id), context=contextvars.Context()
+        _watch(runtime, auth, handle, turn_event_id=turn_event_id, annotations_for=annotations_for),
+        context=contextvars.Context(),
     )
     _workers[key] = task
 
@@ -119,7 +126,12 @@ def watch_turn(
 
 
 async def _watch(
-    runtime: McpRuntime, auth: AuthIdentity, handle: str, *, turn_event_id: str | None = None
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+    *,
+    turn_event_id: str | None = None,
+    annotations_for: AnnotationLookup | None = None,
 ) -> None:
     try:
         async with asyncio.timeout(TURN_CEILING_S):
@@ -171,6 +183,7 @@ async def _watch(
                         )
                         decide = unattended_decider(
                             policy,
+                            annotations_for=annotations_for,
                             trusted_servers=trusted_servers_for(public_url),
                             rules_for=agent_rule_lookup(
                                 runtime.session_factory,
@@ -204,7 +217,11 @@ async def _watch(
 
 
 async def pending_turn(
-    runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session: BetaManagedAgentsSession,
+    *,
+    annotations_for: AnnotationLookup | None = None,
 ) -> bool:
     """Hide approval pauses from reply pollers and reattach after a restart."""
     if (id(runtime), session.id) in _workers:
@@ -220,6 +237,6 @@ async def pending_turn(
     if result.data:
         event = result.data[0]
         if event.type == "session.status_idle" and event.stop_reason.type == "requires_action":
-            watch_turn(runtime, auth, session.id)
+            watch_turn(runtime, auth, session.id, annotations_for=annotations_for)
             return True
     return False

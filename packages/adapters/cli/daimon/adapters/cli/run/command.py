@@ -19,14 +19,13 @@ from daimon.adapters.cli.run.events import (
 from daimon.adapters.cli.run.lifecycle import NdjsonLifecycle
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import discover_tenant
-from daimon.core.config import load_settings, load_turn_settings
-from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_backend import platform_scope
+from daimon.core.config import Settings, load_settings, load_turn_settings
+from daimon.core.mux_backend import platform_scope, resource_scope
 from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
-from daimon.core.turn.approvals import agent_rule_lookup, chat_tool_confirmation
+from daimon.core.turn.approvals import AnnotationLookup, agent_rule_lookup, chat_tool_confirmation
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.outcomes import current_outcome, observe_turn
@@ -61,41 +60,50 @@ def run_command(
 
     settings = load_settings()
 
-    async def _with_defaults() -> int:
-        async with build_runtime(settings) as rt:
-            public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
-            rules_for = None
-            if settings.tool_safety.enabled and settings.tool_safety.agent_rules:
-                snapshot = await retrieve_session_record(
-                    rt.anthropic, session, scope=platform_scope("CLI operator run bindings")
-                )
-                async with rt.sessionmaker() as db:
-                    tenant_id = await discover_tenant(db)
-                rules_for = agent_rule_lookup(
-                    rt.sessionmaker,
-                    tenant_id=tenant_id,
-                    agent_id=snapshot.agent.id,
-                    server_urls={s.name: s.url for s in snapshot.agent.mcp_servers},
-                    also_urls=daimon_endpoint(public_url),
-                )
-            tool_confirmation = chat_tool_confirmation(
-                settings.tool_safety,
-                requester_platform_user_id=settings.cli.local_user or "cli",
-                confirm=None,
-                attended=False,
-                trusted_servers=trusted_servers_for(public_url),
-                rules_for=rules_for,
-                daimon_rules=True,
-            )
-            return await run_conversation(
-                rt=rt,
-                session_id=session,
-                user_message=user_message,
-                tool_confirmation=tool_confirmation,
-            )
-
-    exit_code = asyncio.run(_with_defaults())
+    exit_code = asyncio.run(_run_with_defaults(settings, session, user_message))
     raise typer.Exit(code=exit_code)
+
+
+async def _run_with_defaults(
+    settings: Settings,
+    session: str,
+    user_message: str,
+    *,
+    annotations_for: AnnotationLookup | None = None,
+) -> int:
+    """Build unattended session-bound policy, optionally using host-supplied hints."""
+    async with build_runtime(settings) as rt:
+        public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
+        rules_for = None
+        if settings.tool_safety.enabled and settings.tool_safety.agent_rules:
+            snapshot = await retrieve_session_record(
+                rt.anthropic, session, scope=platform_scope("CLI operator run bindings")
+            )
+            async with rt.sessionmaker() as db:
+                tenant_id = await discover_tenant(db)
+            rules_for = agent_rule_lookup(
+                rt.sessionmaker,
+                tenant_id=tenant_id,
+                agent_id=snapshot.agent.id,
+                server_urls={s.name: s.url for s in snapshot.agent.mcp_servers},
+                also_urls=daimon_endpoint(public_url),
+            )
+        tool_confirmation = chat_tool_confirmation(
+            settings.tool_safety,
+            requester_platform_user_id=settings.cli.local_user or "cli",
+            confirm=None,
+            attended=False,
+            trusted_servers=trusted_servers_for(public_url),
+            rules_for=rules_for,
+            daimon_rules=True,
+            annotations_for=annotations_for,
+        )
+        return await run_conversation(
+            rt=rt,
+            session_id=session,
+            user_message=user_message,
+            tool_confirmation=tool_confirmation,
+        )
 
 
 # `RequireApproval` is frozen and field-less; one shared default (ruff B008).

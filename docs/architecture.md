@@ -1503,6 +1503,8 @@ admission before any of this runs.
 - **`daimon run`**, in
   `packages/adapters/cli/daimon/adapters/cli/run/command.py`, is a single-turn
   subprocess entry point that calls `run_turn` directly with `BillingExempt`.
+  It uses the shared unattended decider with the existing session agent and
+  server bindings.
 - **Wakes** run a turn in an existing thread later, with nobody mentioning the
   bot: a handoff's first turn for the new agent, work unblocked by a private
   form, a one-shot timer (`daimon.core.continuity.timers`, the `create_timer`
@@ -2092,5 +2094,3 @@ existing progress card while it waits behind the tenant cap. The same card
 returns to ordinary progress when the slot is granted. Stop, queue limits and
 FIFO admission are unchanged, and the card displays no tenant identities or
 queue counts. Drained follow-up turns keep their existing card wording.
-
-Operator `daimon run` uses the shared unattended decider with the existing session agent and server bindings.

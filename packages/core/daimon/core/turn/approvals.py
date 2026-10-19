@@ -589,16 +589,22 @@ def headless_tool_confirmation(
     trusted_servers: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
     daimon_rules: bool = False,
+    annotations_for: AnnotationLookup | None = None,
 ) -> ToolConfirmation:
     """Posture for a run nobody is watching (routines, smoke, transfers).
 
+    Hosts may supply `annotations_for` to feed trusted hints into the shared verdict.
     Disabled keeps `AutoApprove`, byte-identical to before the policy existed.
     """
     if not policy.enabled:
         return AutoApprove()
     return PolicyApproval(
         decide=unattended_decider(
-            policy, trusted_servers=trusted_servers, rules_for=rules_for, daimon_rules=daimon_rules
+            policy,
+            trusted_servers=trusted_servers,
+            rules_for=rules_for,
+            daimon_rules=daimon_rules,
+            annotations_for=annotations_for,
         )
     )
 
@@ -615,6 +621,7 @@ def chat_tool_confirmation(
     rules_for: RuleLookup | None = None,
     rule_card_for: RuleCardFor | None = None,
     daimon_rules: bool = False,
+    annotations_for: AnnotationLookup | None = None,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -635,6 +642,7 @@ def chat_tool_confirmation(
             rules_for=rules_for,
             rule_card_for=rule_card_for,
             daimon_rules=daimon_rules,
+            annotations_for=annotations_for,
         )
         if attended
         else unattended_decider(
@@ -643,6 +651,7 @@ def chat_tool_confirmation(
             confirmed_tools=confirmed_tools,
             rules_for=rules_for,
             daimon_rules=daimon_rules,
+            annotations_for=annotations_for,
         )
     )
     if not policy.enabled:

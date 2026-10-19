@@ -4215,7 +4215,9 @@ async def test_mcp_turn_unattended_policy(
             await client.close()
 
 
+@pytest.mark.parametrize("enabled", [False, True])
 async def test_restart_recovers_frozen_confirmation_after_safety_disabled(
+    enabled: bool,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     import asyncio
@@ -4286,12 +4288,21 @@ async def test_restart_recovers_frozen_confirmation_after_safety_disabled(
     router.add("POST", r"/v1/sessions/ses_restart/events$", send)
     client = build_fake_anthropic(router.dispatch)
     runtime = _runtime(client, db_session_factory, environment_name=_ENV_NAME)
-    runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
+    runtime.settings.tool_safety = ToolSafetyPolicy(enabled=enabled)
     try:
         assert (id(runtime), session.id) not in safety._workers  # pyright: ignore[reportPrivateUsage]
-        assert await safety.pending_turn(runtime, _auth(), session)
+        from daimon.core.tool_safety import ToolAnnotations
+
+        lookups = []
+
+        async def annotations_for(call):
+            lookups.append(call.tool_name)
+            return ToolAnnotations(read_only_hint=True)
+
+        assert await safety.pending_turn(runtime, _auth(), session, annotations_for=annotations_for)
         worker = safety._workers[(id(runtime), session.id)]  # pyright: ignore[reportPrivateUsage]
         await asyncio.wait_for(worker, timeout=5)
         assert [e["result"] for e in confirmations] == ["allow"]
+        assert lookups == (["create_issue"] if enabled else [])
     finally:
         await client.close()

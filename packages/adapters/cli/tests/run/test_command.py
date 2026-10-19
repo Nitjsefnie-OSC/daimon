@@ -288,3 +288,39 @@ def test_cli_entrypoint_uses_unattended_policy(
     monkeypatch.setattr(cmd_mod, "run_conversation", conversation)
     result = _invoke(["hello", "--session", "s1"])
     assert result.exit_code == 0, result.exception
+
+
+@pytest.mark.asyncio
+async def test_cli_annotation_hook_reaches_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    from contextlib import asynccontextmanager
+
+    from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+
+    settings = Settings()
+    settings.tool_safety = ToolSafetyPolicy(enabled=True)
+
+    @asynccontextmanager
+    async def runtime(_settings: Settings):
+        yield _make_rt()
+
+    monkeypatch.setattr(cmd_mod, "build_runtime", runtime)
+    seen = []
+
+    async def annotations_for(call: ToolCall):
+        seen.append(call.tool_name)
+        return ToolAnnotations(read_only_hint=True)
+
+    async def conversation(**kwargs: Any) -> int:
+        posture = kwargs["tool_confirmation"]
+        assert isinstance(posture, PolicyApproval)
+        assert (
+            await posture.decide(ToolCall(tool_use_id="t", server_name="third", tool_name="opaque"))
+        ).allow
+        return 0
+
+    monkeypatch.setattr(cmd_mod, "run_conversation", conversation)
+    assert (
+        await cmd_mod._run_with_defaults(settings, "s", "hi", annotations_for=annotations_for) == 0
+    )  # pyright: ignore[reportPrivateUsage]
+    assert seen == ["opaque"]

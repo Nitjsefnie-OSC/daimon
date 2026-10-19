@@ -263,13 +263,24 @@ async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before(
 
 async def test_headless_uses_the_attended_read_classifier(monkeypatch) -> None:
     from daimon.core import tool_safety
-    from daimon.core.tool_safety import ToolCall
+    from daimon.core.tool_safety import ToolAnnotations, ToolCall
     from daimon.core.turn.approvals import interactive_decider
 
     # Stand in for an operator-trusted annotation classifier supplied by the host.
-    monkeypatch.setattr(tool_safety, "classify_tool", lambda *args, **kwargs: "read")
+    hints = ToolAnnotations(read_only_hint=True)
+
+    async def annotations_for(call: ToolCall):
+        return hints
+
+    def classify(*args, **kwargs):
+        assert kwargs["annotations"] is hints
+        return "read"
+
+    monkeypatch.setattr(tool_safety, "classify_tool", classify)
     policy = ToolSafetyPolicy(enabled=True)
-    attended = interactive_decider(policy, requester_platform_user_id="operator")
+    attended = interactive_decider(
+        policy, requester_platform_user_id="operator", annotations_for=annotations_for
+    )
     assert (
         await attended(
             ToolCall(tool_use_id="evt_tu", server_name="linear", tool_name="create_issue", input={})
@@ -283,5 +294,6 @@ async def test_headless_uses_the_attended_read_classifier(monkeypatch) -> None:
         environment_id="env_x",
         trigger_message="read tonight's bugs",
         tool_safety=policy,
+        annotations_for=annotations_for,
     )
     assert [event["result"] for event in _confirmations(sends)] == ["allow"]
