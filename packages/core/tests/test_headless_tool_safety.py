@@ -220,16 +220,41 @@ async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
     anonymous. A server outside `trusted_annotations` is never listed and its
     name decides."""
     from daimon.core import mcp_tool_annotations
+    from daimon.core.mcp_oauth import discovery
 
     tokens: list[str | None] = []
 
     async def _catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
         assert url == "https://mcp.linear.app/mcp"
         tokens.append(token)
-        return [
-            {"name": "memory_flag_list", "annotations": {"readOnlyHint": True}},
-            {"name": "create_issue", "annotations": {"readOnlyHint": False}},
-        ]
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            assert str(request.url) == url
+            assert request.headers.get("authorization") is None
+            body = json.loads(request.content)
+            if body["method"] == "notifications/initialized":
+                return httpx.Response(204)
+            result = (
+                {
+                    "tools": [
+                        {"name": "memory_flag_list", "annotations": {"readOnlyHint": True}},
+                        {"name": "create_issue", "annotations": {"readOnlyHint": False}},
+                    ]
+                }
+                if body["method"] == "tools/list"
+                else {}
+            )
+            return httpx.Response(200, json={"id": body["id"], "result": result})
+
+        original = httpx.AsyncClient
+
+        def client(**kwargs: Any) -> httpx.AsyncClient:
+            return original(transport=httpx.MockTransport(handle), **kwargs)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(httpx, "AsyncClient", client)
+            scoped.setattr(discovery, "assert_public_https_url", lambda *a, **k: None)
+            return list(await discovery.read_mcp_catalogue(url, token))
 
     monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", _catalogue)
     creates: list[dict[str, Any]] = []
