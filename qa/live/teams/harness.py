@@ -121,10 +121,15 @@ def _format(message: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _messages(
-    driver: GraphTeamsDriver, persona: str, source: str, deadline: float
+    driver: GraphTeamsDriver,
+    persona: str,
+    source: str,
+    deadline: float,
+    chat_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if source == "chat":
-        chat_id, _ = await driver.bot_chat(persona)
+        if chat_id is None:
+            chat_id, _ = await driver.bot_chat(persona)
         return await driver.chat_messages(persona, chat_id, deadline)
     if source == "channel":
         return await driver.channel_messages(persona, deadline)
@@ -223,12 +228,21 @@ async def wait(
         quiet_since: float | None = None
         prior_snapshot: tuple[tuple[str, str], ...] = ()
         in_progress = False
+        chat_id = (await driver.bot_chat(persona))[0] if source == "chat" else None
         while driver.now() < deadline:
-            messages = await _messages(driver, persona, source, deadline)
+            # Each poll gets its own Graph budget so the last one near the
+            # deadline is not starved into a transport error.
+            poll_deadline = driver.now() + READ_DEADLINE
+            try:
+                messages = await _messages(driver, persona, source, poll_deadline, chat_id)
+            except GraphRequestError:
+                if after_time is None or driver.now() < deadline:
+                    raise
+                break
             if after_time is None:
                 anchor = next((item for item in messages if str(item.get("id")) == after), None)
                 if anchor is None and source.startswith("thread:") and source[7:] == after:
-                    anchor = await driver.channel_message(persona, after, deadline)
+                    anchor = await driver.channel_message(persona, after, poll_deadline)
                 if (
                     anchor is None
                     or (after_time := graph_time(anchor.get("createdDateTime"))) is None

@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from qa.live.teams.config import TeamsQaConfig
-from qa.live.teams.graph import GraphTeamsDriver
+from qa.live.teams.graph import GraphRequestError, GraphTeamsDriver
 from qa.live.teams.harness import parse_since, read, send, wait
 from qa.live.teams.tokens import ReauthRequired, Secret, TokenStore
 
@@ -227,6 +227,58 @@ async def test_wait_progress_never_finishes(config: TeamsQaConfig) -> None:
         "after": "start",
         "in_progress": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_wait_resolves_chat_once_and_times_out_on_late_poll_failure(
+    config: TeamsQaConfig,
+) -> None:
+    driver, graph = fake(config)
+    now = datetime.now(UTC)
+    driver.items = [message("start", now - timedelta(seconds=10)), progress("reply", now)]
+    calls = {"bot_chat": 0, "budgets": []}
+
+    async def bot_chat(persona: str) -> tuple[str, list[dict[str, Any]]]:
+        calls["bot_chat"] += 1
+        return "bot-chat", driver.items
+
+    async def chat_messages(
+        persona: str, chat_id: str, deadline: float | None = None
+    ) -> list[dict[str, Any]]:
+        calls["budgets"].append(None if deadline is None else deadline - driver.clock)
+        if driver.clock >= 4.5:
+            driver.clock = 6.0
+            raise GraphRequestError("Graph request deadline reached")
+        return driver.items
+
+    driver.bot_chat = bot_chat  # type: ignore[method-assign]
+    driver.chat_messages = chat_messages  # type: ignore[method-assign]
+    assert await wait(graph, "admin", "start", 5) == {
+        "ok": False,
+        "error": "timeout",
+        "after": "start",
+        "in_progress": True,
+    }
+    assert calls["bot_chat"] == 1
+    assert all(budget == 30.0 for budget in calls["budgets"])
+
+
+@pytest.mark.asyncio
+async def test_wait_reports_graph_failure_before_deadline(config: TeamsQaConfig) -> None:
+    driver, graph = fake(config)
+    now = datetime.now(UTC)
+    driver.items = [message("start", now - timedelta(seconds=10)), progress("reply", now)]
+
+    async def chat_messages(
+        persona: str, chat_id: str, deadline: float | None = None
+    ) -> list[dict[str, Any]]:
+        if driver.clock >= 2:
+            raise GraphRequestError("Graph transport failed")
+        return driver.items
+
+    driver.chat_messages = chat_messages  # type: ignore[method-assign]
+    result = await wait(graph, "admin", "start", 5)
+    assert result["error"] == "graph_request_failed"
 
 
 @pytest.mark.asyncio
