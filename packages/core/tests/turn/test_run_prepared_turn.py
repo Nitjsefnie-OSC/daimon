@@ -2907,7 +2907,9 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
             reseed_user_message=_reseed,
             recovery_lifecycle=_recovery_lifecycle,
             render_interval_s=0.001,
-            deadline=datetime.now(UTC) + timedelta(seconds=5.0),
+            # The turn ceiling fires while link_replacement sleeps; the archive
+            # answers at once, so only this deadline is waited out.
+            deadline=datetime.now(UTC) + timedelta(seconds=1.0),
         )
     finally:
         await engine.dispose()

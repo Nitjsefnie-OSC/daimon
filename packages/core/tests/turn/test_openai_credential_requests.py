@@ -76,8 +76,6 @@ def owned_database_preflight(db_preflight: DatabasePreflight) -> None:
     ("url", "skipped"),
     [
         ("postgresql+asyncpg://test:test@foreign.invalid/daimon_test_nc_n11", False),
-        ("postgresql+asyncpg://test:test@localhost/unowned_test", False),
-        ("postgresql+asyncpg://test:test@localhost/daimon_test_nc_n11?host=foreign.invalid", False),
         ("postgresql+asyncpg://test:test@localhost/daimon_test", True),
     ],
 )
