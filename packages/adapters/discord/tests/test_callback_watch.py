@@ -122,11 +122,16 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
         tenant_id=tenant.id,
         tools=[
             {
+                "type": "agent_toolset_20260401",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            },
+            {
                 "type": "mcp_toolset",
                 "mcp_server_name": "linear",
                 "configs": [],
                 "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
-            }
+            },
         ],
         mcp_servers=[{"name": "linear", "type": "url", "url": "https://linear.example/mcp"}],
     )
@@ -134,6 +139,9 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
     sent = []
     user_sent = asyncio.Event()
     updates = []
+    sent_tools = []
+    original_tools = snapshot.agent.tools
+    original_servers = snapshot.agent.mcp_servers
     router = MARouter()
     router.add(
         "GET",
@@ -166,6 +174,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
 
     def send(request, _match):
         sent.extend(json.loads(request.content)["events"])
+        sent_tools.append(snapshot.agent.tools)
         user_sent.set()
         return send_events_response()
 
@@ -246,11 +255,13 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
                 policy=TenantAccessPolicy(invoker_user_ids=("someone_else",)),
             )
 
+    bound = []
+
     async def bind(_deps, admission, **_kwargs):
         async def record(**_event):
             pass
 
-        return PreparedTurn(
+        prepared = PreparedTurn(
             admission=admission,
             ma_session_id="sess_watch",
             mapping_id=mapping.id,
@@ -259,6 +270,8 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
             session_account_id=principal.account_id,
             _record=record,
         )
+        bound.append(prepared)
+        return prepared
 
     with (
         patch(
@@ -302,6 +315,32 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
         assert "Summarize the upload" in str(sent)
         assert thread.send.await_count > 0
         thread.history.assert_not_called()
+        assert snapshot.agent.tools == original_tools
+        assert snapshot.agent.mcp_servers == original_servers
+        assert sent_tools[0] != original_tools
+
+        # An attended turn reusing the same prepared session/thread must get its
+        # ordinary tools, even without another bind or agent-config change.
+        from daimon.core.turn.run import run_prepared_turn
+        from daimon.testing.turn_fakes import RecordingLifecycle
+
+        user_sent.clear()
+        await run_prepared_turn(
+            deps,
+            bound[0],
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="4242",
+            external_user_id="555",
+            user_message="An attended follow-up.",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=AsyncMock(return_value="An attended follow-up."),
+            recovery_lifecycle=MagicMock(),
+            attended=True,
+        )
+        assert len(sent_tools) == 2
+        assert sent_tools[1] == original_tools
     else:
         assert wake.status == "skipped", wake
         assert sent == []

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -97,8 +98,8 @@ async def constrain_session(
 
     No sandbox toolset, delegation or Daimon management proxy is offered.
     Skills cannot be updated mid-session, so sessions carrying skills are refused.
-    Existing conversation/session identity is preserved. The next ordinary bind
-    can reconcile its own session snapshot; a watch never restores broad tools.
+    The caller must save the original snapshot before mutation and restore it
+    before releasing the turn, including when gating or streaming fails.
     """
     if snapshot.agent.skills:
         raise AdmissionDenied(reason="backend_unsupported")
@@ -151,3 +152,36 @@ async def constrain_session(
         session_factory=sessions,
         tenant_id=tenant_id,
     )
+
+
+async def restore_session_tools(
+    client: AsyncAnthropic,
+    snapshot: BetaManagedAgentsSession,
+    *,
+    scope: Scope,
+) -> None:
+    """Finish restoring the original tool configuration even during cancellation.
+
+    Only tool arrays changed by the watch are restored. The persisted snapshot
+    has invalidated tool hashes, so a crash or failed provider update forces
+    the next preparation to reapply its ordinary tool configuration.
+    """
+    agent = {
+        "tools": [tool.model_dump(mode="json") for tool in snapshot.agent.tools],
+        "mcp_servers": [server.model_dump(mode="json") for server in snapshot.agent.mcp_servers],
+    }
+    restore = asyncio.create_task(
+        update_session_record(
+            client,
+            snapshot.id,
+            scope=scope,
+            agent_id=snapshot.agent.id,
+            revision=Revision(local=snapshot.agent.version, native=str(snapshot.agent.version)),
+            agent=cast(BetaManagedAgentsSessionAgentUpdateParam, agent),
+        )
+    )
+    try:
+        await asyncio.shield(restore)
+    except asyncio.CancelledError:
+        await restore
+        raise

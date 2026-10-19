@@ -170,3 +170,72 @@ async def test_watch_reads_recheck_current_agent_denials_without_allowing_writes
             ToolCall(tool_use_id="w", server_name="linear", tool_name="create_issue")
         )
     ).allow
+
+
+async def test_restore_finishes_before_cancellation_releases_watch_session(monkeypatch):
+    import asyncio
+
+    from daimon.core.continuity import watch_turn
+
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    restored = asyncio.Event()
+    snapshot = ma_session()
+
+    async def update(*args, **kwargs):
+        started.set()
+        await finish.wait()
+        assert kwargs["agent"]["tools"] == [
+            tool.model_dump(mode="json") for tool in snapshot.agent.tools
+        ]
+        restored.set()
+
+    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    task = asyncio.create_task(
+        watch_turn.restore_session_tools(
+            MagicMock(),
+            snapshot,
+            scope=Scope(
+                tenant_id=str(uuid.uuid4()),
+                account_id=str(uuid.uuid4()),
+                principal_id="watch-owner",
+                authorization_id="test-grant",
+            ),
+        )
+    )
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert restored.is_set()
+
+
+async def test_watch_refuses_skill_session_before_any_provider_mutation(monkeypatch):
+    from daimon.core.continuity import watch_turn
+    from daimon.core.turn.errors import AdmissionDenied
+
+    update = AsyncMock()
+    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await constrain_session(
+            MagicMock(),
+            ma_session(
+                agent=ma_agent(
+                    skills=[{"type": "custom", "skill_id": "skill_test", "version": "latest"}]
+                )
+            ),
+            ToolSafetyPolicy(),
+            scope=Scope(
+                tenant_id=str(uuid.uuid4()),
+                account_id=str(uuid.uuid4()),
+                principal_id="watch-owner",
+                authorization_id="test-grant",
+            ),
+            public_url=None,
+            sessions=MagicMock(),
+            tenant_id=uuid.uuid4(),
+        )
+    update.assert_not_awaited()

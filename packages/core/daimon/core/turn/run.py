@@ -1185,7 +1185,7 @@ async def run_prepared_turn_impl(
         try:
             selected_path = deps.turn_path or load_turn_settings().path
             posture = tool_confirmation
-            with contextlib.ExitStack() as stack:
+            async with contextlib.AsyncExitStack() as stack:
                 stack.enter_context(execution_origin(origin_id))
                 if unattended:
                     revision = admission.backend_revision
@@ -1239,10 +1239,14 @@ async def run_prepared_turn_impl(
                             from daimon.core.continuity.watch_turn import (
                                 constrain_session,
                                 require_watch_send,
+                                restore_session_tools,
                             )
                             from daimon.core.session_ports_compat import retrieve_session_record
 
+                            original_snapshot: BetaManagedAgentsSession | None = None
+
                             async def watch_gate() -> None:
+                                nonlocal original_snapshot
                                 assert watch_row is not None
                                 await require_watch_send(
                                     deps.sessionmaker,
@@ -1272,6 +1276,20 @@ async def run_prepared_turn_impl(
                                     from daimon.core.turn.errors import AdmissionDenied
 
                                     raise AdmissionDenied(reason="invoker_not_allowed")
+                                if original_snapshot is None:
+                                    from daimon.core.stores.thread_sessions import (
+                                        invalidate_session_tools,
+                                    )
+
+                                    async with deps.sessionmaker.begin() as db:
+                                        await invalidate_session_tools(db, ma_session_id=session_id)
+                                    original_snapshot = snapshot
+                                    stack.push_async_callback(
+                                        restore_session_tools,
+                                        deps.anthropic.with_options(max_retries=0, timeout=30),
+                                        original_snapshot,
+                                        scope=gate_scope,
+                                    )
                                 await constrain_session(
                                     deps.anthropic.with_options(max_retries=0),
                                     snapshot,

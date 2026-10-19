@@ -393,11 +393,27 @@ async def test_real_restricted_login_cannot_enumerate_credentials_edit_policy_or
         # A digest is not a signing key; the privileged verifier hashes raw material itself.
         with pytest.raises((DBAPIError, ValueError)):
             await deliver(sessions, event(registered, key="b" * 64), key="b" * 64)
-        async with db_engine.begin() as db:
-            await db.execute(text(f"ALTER ROLE {name} CREATEDB"))
-        async with sessions.begin() as db:
-            with pytest.raises(ValueError, match="Unsafe"):
-                await watches.audit_sidecar_identity(db)
+        for grant, revoke in (
+            (f"ALTER ROLE {name} CREATEDB", f"ALTER ROLE {name} NOCREATEDB"),
+            (f"GRANT pg_read_all_data TO {name}", f"REVOKE pg_read_all_data FROM {name}"),
+            (
+                f'GRANT SELECT ON "{schema}".watch_capabilities TO PUBLIC',
+                f'REVOKE SELECT ON "{schema}".watch_capabilities FROM PUBLIC',
+            ),
+            (
+                f'GRANT SELECT(digest) ON "{schema}".watch_capabilities TO {name}',
+                f'REVOKE SELECT(digest) ON "{schema}".watch_capabilities FROM {name}',
+            ),
+        ):
+            async with db_engine.begin() as db:
+                await db.execute(text(grant))
+            try:
+                async with sessions.begin() as db:
+                    with pytest.raises(ValueError, match="Unsafe"):
+                        await watches.audit_sidecar_identity(db)
+            finally:
+                async with db_engine.begin() as db:
+                    await db.execute(text(revoke))
     finally:
         await engine.dispose()
         async with db_engine.begin() as db:
@@ -486,9 +502,21 @@ async def test_database_rate_and_row_quotas_are_independent_of_wake_coalescing(
         await deliver(db_session_factory, event(registered))
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize(
+    "platform,ending",
+    [
+        ("discord", "normal"),
+        ("slack", "normal"),
+        ("teams", "normal"),
+        ("discord", "gate_error"),
+        ("discord", "driver_error"),
+        ("discord", "cancelled"),
+        ("discord", "restore_error"),
+        ("discord", "dead_session"),
+    ],
+)
 async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
-    db_session_factory, registered, platform, monkeypatch
+    db_session_factory, registered, platform, ending, monkeypatch
 ):
     from dataclasses import replace
     from unittest.mock import AsyncMock, MagicMock
@@ -496,6 +524,12 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     from daimon.core import session_ports_compat
     from daimon.core.continuity import watch_turn
     from daimon.core.scope import ResolvedConfig
+    from daimon.core.session_snapshot import (
+        fingerprint_identity,
+        fingerprint_mutable,
+        snapshot_from_retrieved_session,
+    )
+    from daimon.core.stores.thread_sessions import get_live_thread_session, record_snapshot
     from daimon.core.turn import driver
     from daimon.core.turn import run as run_module
     from daimon.core.turn.admission import Admission
@@ -536,12 +570,40 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         deps_for(client=build_fake_anthropic(router.dispatch), sm=db_session_factory),
         turn_path="legacy",
     )
-    constrain = AsyncMock()
+    snapshot = ma_session(id=registered.session_id, agent=agent)
+    cached = snapshot_from_retrieved_session(snapshot)
+    async with db_session_factory.begin() as db:
+        live = await get_live_thread_session(
+            db,
+            tenant_id=registered.tenant_id,
+            platform=platform,
+            thread_id=registered.thread_id,
+            account_id=registered.owner_account_id,
+        )
+        await record_snapshot(
+            db,
+            id=live.id,
+            snapshot=cached,
+            identity_fingerprint=fingerprint_identity(cached),
+            mutable_fingerprint=fingerprint_mutable(cached),
+        )
+    prepared = replace(prepared, mapping_id=live.id)
+    replacement = AsyncMock(
+        side_effect=AssertionError("watch must not recreate an unbound session")
+    )
+    monkeypatch.setattr(run_module, "_replace_dead_session", replacement)
+    constrain = AsyncMock(
+        side_effect=RuntimeError("gate failed") if ending == "gate_error" else None
+    )
+    restore = AsyncMock(
+        side_effect=RuntimeError("restore failed") if ending == "restore_error" else None
+    )
     monkeypatch.setattr(watch_turn, "constrain_session", constrain)
+    monkeypatch.setattr(watch_turn, "restore_session_tools", restore)
     monkeypatch.setattr(
         session_ports_compat,
         "retrieve_session_record",
-        AsyncMock(return_value=ma_session(id=registered.session_id, agent=agent)),
+        AsyncMock(return_value=snapshot),
     )
 
     async def run_driver(**kwargs):
@@ -552,10 +614,32 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
             await watches.revoke_capabilities(db, registered.id, now=datetime.now(UTC))
         with pytest.raises(AdmissionDenied):
             await gate()
+        if ending == "dead_session":
+            import anthropic
+            import httpx
+            from daimon.core.errors import TurnError
+
+            return TurnState(
+                error=TurnError(
+                    kind="upstream",
+                    message="gone",
+                    cause=anthropic.NotFoundError(
+                        "gone",
+                        response=httpx.Response(
+                            404, request=httpx.Request("GET", "https://offline.invalid/session")
+                        ),
+                        body=None,
+                    ),
+                )
+            )
+        if ending == "driver_error":
+            raise RuntimeError("driver failed")
+        if ending == "cancelled":
+            raise asyncio.CancelledError
         return TurnState()
 
     monkeypatch.setattr(run_module, "run_turn", run_driver)
-    await run_module.run_prepared_turn(
+    call = run_module.run_prepared_turn(
         deps,
         prepared,
         tenant_id=registered.tenant_id,
@@ -570,7 +654,44 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         attended=False,
         watch_row=row,
     )
+    if ending in ("normal", "dead_session"):
+        outcome = await call
+        assert not outcome.recovered
+    else:
+        with pytest.raises(asyncio.CancelledError if ending == "cancelled" else RuntimeError):
+            await call
     constrain.assert_awaited_once()
+    restore.assert_awaited_once()
+    replacement.assert_not_awaited()
+    async with db_session_factory() as db:
+        live = await get_live_thread_session(
+            db,
+            tenant_id=registered.tenant_id,
+            platform=platform,
+            thread_id=registered.thread_id,
+            account_id=registered.owner_account_id,
+        )
+        assert live.effective_config is not None
+        assert live.effective_config.tools_sha256 == ""
+        assert live.effective_config.mcp_servers_sha256 == ""
+        assert live.mutable_fingerprint is None
+        assert live.identity_fingerprint == fingerprint_identity(cached)
+        from daimon.core.session_compat import (
+            DEFAULT_MA_CAPABILITIES,
+            ReplaceToolsAndMcpServers,
+            UpdateInPlace,
+            decide_session_compatibility,
+        )
+
+        decision = decide_session_compatibility(
+            recorded=live.effective_config,
+            desired=cached,
+            capabilities=DEFAULT_MA_CAPABILITIES,
+            now=datetime.now(UTC),
+        )
+        assert isinstance(decision, UpdateInPlace)
+        assert ReplaceToolsAndMcpServers() in decision.ops
+        assert decision.reasons == ("tools", "mcp_servers")
 
 
 async def test_invalid_requests_are_rate_bounded_before_body_and_database_work(
