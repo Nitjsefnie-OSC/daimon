@@ -87,7 +87,7 @@ def token_row_refusal(
                 return "chat_binding_mismatch"
         elif chat is not None:
             if row.scopes or not registered_agent_claims_match(
-                row, claims, now=now, chat_execution=True
+                row, claims, now=now, chat_execution=True, allow_session_grant=True
             ):
                 return "chat_binding_mismatch"
         elif claims.get("agent_id") != row.agent_id:

@@ -22,7 +22,8 @@ parameter (confused-deputy mitigation). Path B (most-recent-active-session
 walks) and Path C (re-call MA `sessions.retrieve`) are explicitly REJECTED.
 
 The separate ``chat_agent_id`` claim populates ``chat_agent_id`` only. Ordinary
-chat keeps ``agent_id=None``; only the Google token path consumes chat identity.
+chat keeps ``agent_id=None``. Origin tools additionally require the signed
+``chat_session_id`` grant to match the live origin's server-prepared session.
 
 ``token_kind``, ``token_jti`` and ``scopes`` come from the token's registry row
 (the verifier writes them under verifier-only claim keys). An operator token
@@ -55,6 +56,8 @@ class AuthIdentity:
     is_admin: bool = False
     # Signed execution grant; never supplied as a tool parameter.
     slack_turn_context_id: uuid.UUID | None = None
+    # Signed grant for one isolated provider session, never a tool argument.
+    chat_session_id: str | None = None
     # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
     token_kind: McpTokenKind | None = None
     token_jti: uuid.UUID | None = None

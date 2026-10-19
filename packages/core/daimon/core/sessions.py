@@ -76,6 +76,7 @@ from daimon.core.github_app_session import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
+from daimon.core.mcp_server_url import session_mcp_url
 from daimon.core.mcp_vault import (
     GITHUB_COPILOT_MCP_URL,
     ensure_agent_mcp_vault,
@@ -122,7 +123,7 @@ from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
-from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
 from mux.drivers.anthropic.resources.agents import UNCLASSIFIED_SOURCE_NAMESPACE, agent_record
@@ -557,7 +558,9 @@ async def create_session(
 
     When ``mcp_settings`` has both ``public_url`` and ``jwt_secret``,
     ``ensure_agent_mcp_vault()`` runs first (refreshing its registered credential
-    when needed) and the per-agent vault id is attached to the session.
+    when needed). A separate identity vault, registered token and URL slot
+    bind origin use to this provider session; the per-agent vault remains
+    mounted for personal OAuth and external MCP connections.
     Both ``account_id``, ``agent_uuid``, and ``session_factory`` are required in
     that case — no fallback to an account-scoped vault. The vault get-or-create
     is serialized per (account_id, agent_id) via a blocking Postgres advisory
@@ -768,6 +771,12 @@ async def create_session(
     )
     vault_id: str | None = None
     caller_vault_id: str | None = None
+    chat_session_id = (
+        str(uuid.uuid4())
+        if caller_vault and any(server.name == DAIMON_SERVER_NAME for server in agent.mcp_servers)
+        else None
+    )
+    execution_vault_id: str | None = None
     try:
         if app_mode:
             assert tenant_id is not None and agent_uuid is not None and session_factory is not None
@@ -846,6 +855,23 @@ async def create_session(
                 now=dt.datetime.now(dt.UTC),
                 session_factory=session_factory,
                 slack_turn_context_id=slack_turn_context_id,
+                scope=scope,
+            )
+
+        if chat_session_id is not None:
+            assert mcp_settings is not None and mcp_settings.public_url is not None
+            assert mcp_settings.jwt_secret is not None and account_id is not None
+            assert agent_uuid is not None and session_factory is not None
+            execution_vault_id = await ensure_agent_mcp_vault(
+                anthropic,
+                account_id=account_id,
+                agent_id=agent_uuid,
+                jwt_secret=mcp_settings.jwt_secret.get_secret_value().encode(),
+                public_url=session_mcp_url(str(mcp_settings.public_url), chat_session_id),
+                now=dt.datetime.now(dt.UTC),
+                session_factory=session_factory,
+                slack_turn_context_id=slack_turn_context_id,
+                chat_session_id=chat_session_id,
                 scope=scope,
             )
 
@@ -1012,6 +1038,7 @@ async def create_session(
             tool_safety=tool_safety,
             public_url=public_url,
             confirmed_tools=confirmed_tools,
+            chat_session_id=chat_session_id,
         )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
@@ -1055,6 +1082,8 @@ async def create_session(
             billing_exempt=billing_exempt,
             budget_channel_id=budget_channel_id,
         )
+        if chat_session_id is not None:
+            metadata["daimon_chat_session_id"] = chat_session_id
         if slack_turn_context_id is not None:
             metadata[MA_METADATA_KEY_PRIVATE_DM] = str(slack_turn_context_id)
         elif private_dm_id is not None:
@@ -1137,15 +1166,12 @@ async def create_session(
                 agent=agent_argument,
                 environment_id=environment.id,
                 metadata=metadata if metadata else None,
-                vault_ids=(
-                    [caller_vault_id, vault_id]
-                    if caller_vault_id is not None and vault_id is not None
-                    else [vault_id]
-                    if vault_id is not None
-                    else [caller_vault_id]
-                    if caller_vault_id is not None
-                    else None
-                ),
+                vault_ids=[
+                    vault
+                    for vault in (execution_vault_id, caller_vault_id, vault_id)
+                    if vault is not None
+                ]
+                or None,
                 resources=resources if resources else None,
             )
             if budget_cents is not None:

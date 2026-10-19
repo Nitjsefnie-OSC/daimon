@@ -56,6 +56,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Final, Literal, cast
 
+from daimon.core.mcp_server_url import is_session_mcp_url
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
@@ -666,6 +667,7 @@ def heal_reserved_server(
         if (
             entry.get("name") == DAIMON_SERVER_NAME
             and (url.rstrip("/") if isinstance(url, str) else None) != canonical
+            and not (isinstance(url, str) and is_session_mcp_url(url, public_url))
         ):
             entry["url"] = public_url
             changed = True

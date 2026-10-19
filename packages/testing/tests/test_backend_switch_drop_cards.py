@@ -149,6 +149,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_nullpool_engine)
             role=Role.ADMIN,
             now=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            chat_session_id="test-session",
         )
     gated = ma_agent(
         id="agent_owned",
@@ -216,6 +217,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_nullpool_engine)
             is_admin=True,
             platform=platform,  # pyright: ignore[reportArgumentType]
             platform_user_id=requester,
+            chat_session_id="test-session",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_owned"),
         )
         service = make_backend_service(sessions, settings.turn)

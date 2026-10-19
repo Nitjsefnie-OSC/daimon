@@ -6,7 +6,7 @@ downgrade: unsupported
 from alembic import op
 
 revision = "0116_lead_intake"
-down_revision = "0114_turn_attendance"
+down_revision = "0115_origin_session_grants"
 branch_labels = None
 depends_on = None
 

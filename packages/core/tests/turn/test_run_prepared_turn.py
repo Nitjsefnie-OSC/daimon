@@ -3484,6 +3484,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         responder_name="timer-agent",
         role=Role.USER,
         attended=False,
+        chat_session_id="timer-session",
     ) as origin:
         await _hand_off_task_impl(
             handoff_runtime,
@@ -3493,6 +3494,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
                 role=Role.USER,
                 platform=platform,
                 platform_user_id="user-1",
+                chat_session_id="timer-session",
             ),
             origin_context_id=str(origin.id),
             agent_id=agent.id,
@@ -3621,3 +3623,305 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
             "update refused"
         ]
         assert len(confirmations) == failed_batch - 1
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
+@pytest.mark.parametrize("abort", ["stop", "cancel", "ceiling", "normal"])
+async def test_prepared_runtime_without_session_reads_aborts_without_confirmations(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    replay: bool,
+    abort: str,
+) -> None:
+    """Exercise the actual prepared non-gateable context and real driver/transport."""
+    from daimon.core.mux_backend import managed_agents, resource_ref
+    from daimon.core.tool_safety import ToolCall
+    from daimon.core.turn.posture import ToolConfirmationResult
+    from daimon.core.turn.prepare import admitted_session_scope
+    from daimon.core.turn.unattended import refuse_ungated_confirmation
+    from daimon.testing.ma_models import ma_session
+    from mux.drivers.anthropic.sessions_lifecycle import SessionReads
+    from mux.errors import UnsupportedCapability
+
+    from .conftest import make_end_turn, make_mcp_tool_use, make_requires_action
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    mapping = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="ungated",
+        ma_session_id="sess_ungated",
+    )
+    await db_session.commit()
+    pre = make_mcp_tool_use(event_id="call", name="create_issue", mcp_server_name="linear")
+    pause = make_status_idle(event_id="pause", stop_reason=make_requires_action(event_ids=["call"]))
+    ack = make_status_idle(event_id="end", stop_reason=make_end_turn())
+    replay_events = [pre.model_dump(mode="json"), pause.model_dump(mode="json")]
+    sent: list[dict[str, Any]] = []
+    stream_calls = 0
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_ungated",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_ungated", status="idle").model_dump(mode="json")
+        ),
+    )
+    router.add(
+        "GET", r"/v1/sessions/sess_ungated/events", lambda _r, _m: list_response(replay_events)
+    )
+
+    def stream(_request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        nonlocal stream_calls
+        stream_calls += 1
+        events = (
+            replay_events[:1]
+            if replay and stream_calls == 1
+            else (replay_events if stream_calls == 1 else [ack.model_dump(mode="json")])
+        )
+        return sse_response(events)
+
+    def send(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        sent.extend(json.loads(request.content)["events"])
+        return send_events_response()
+
+    router.add("GET", r"/v1/sessions/sess_ungated/events/stream", stream)
+    router.add("POST", r"/v1/sessions/sess_ungated/events", send)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router), turn_path="mux"
+    )
+    admission = _admission(account_id=account.id, agent=ma_agent(), env=ma_environment())
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user",
+        ma_session_id=mapping.ma_session_id,
+        mapping_id=mapping.id,
+        session_account_id=account.id,
+    )
+    scope = admitted_session_scope(admission, tenant_id=tenant.id, session_id=mapping.ma_session_id)
+    backend = managed_agents(
+        deps.anthropic, scope=scope, resources=frozenset({("session", mapping.ma_session_id)})
+    )
+    original_extension = backend.extension
+
+    def extension(port: Any, *, namespace: str, version: int) -> Any:
+        if port is SessionReads:
+            raise UnsupportedCapability((namespace,), "anthropic.managed_agents")
+        return original_extension(port, namespace=namespace, version=version)
+
+    monkeypatch.setattr(backend, "extension", extension)
+    prepared = dataclasses.replace(
+        prepared,
+        backend=backend,
+        session_ref=resource_ref(backend, "session", mapping.ma_session_id, scope=scope),
+    )
+    entered = asyncio.Event()
+    cancel = asyncio.Event()
+
+    async def refusal(call: ToolCall) -> ToolConfirmationResult:
+        entered.set()
+        if abort != "normal":
+            await asyncio.Event().wait()
+        return await refuse_ungated_confirmation(call)
+
+    monkeypatch.setattr(run_module, "refuse_ungated_confirmation", refusal)
+    turn = asyncio.create_task(
+        run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="ungated",
+            external_user_id="user",
+            user_message="wake up",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            attended=False,
+            render_interval_s=0.001,
+            deadline=datetime.now(UTC) + timedelta(seconds=1) if abort == "ceiling" else None,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    if abort == "stop":
+        cancel.set()
+    elif abort == "cancel":
+        turn.cancel()
+    if abort == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+    else:
+        outcome = await asyncio.wait_for(turn, timeout=5)
+        if abort == "ceiling":
+            assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    confirmations = [event for event in sent if event["type"] == "user.tool_confirmation"]
+    if abort == "normal":
+        assert len(confirmations) == 1 and confirmations[0]["result"] == "deny"
+        assert "cannot refresh" in confirmations[0]["deny_message"]
+    else:
+        assert confirmations == []
+        assert any(event["type"] == "user.interrupt" for event in sent)
+
+
+@pytest.mark.parametrize(
+    "kind,origin_attended,caller_attended",
+    [("chat", True, True), ("chat", True, False), ("chat", False, True), ("worker", True, False)],
+)
+async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    kind: str,
+    origin_attended: bool,
+    caller_attended: bool,
+) -> None:
+    from daimon.core.session_snapshot import (
+        fingerprint_identity,
+        fingerprint_mutable,
+        snapshot_from_created_session,
+    )
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.thread_sessions import record_snapshot
+    from daimon.core.stores.turn_origins import create_origin, get_active_origin
+    from daimon.core.turn_origin import current_execution_origin_id, turn_origin
+    from daimon.testing.ma_models import ma_session
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    grant = str(uuid.uuid4())
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-1",
+        ma_session_id="sess_1",
+    )
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    snapshot = snapshot_from_created_session(
+        ma_session(id="sess_1", agent=agent, metadata={"daimon_chat_session_id": grant}),
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id="vlt_own",
+        sent_skills=(),
+    )
+    await record_snapshot(
+        db_session,
+        id=row.id,
+        snapshot=snapshot,
+        identity_fingerprint=fingerprint_identity(snapshot),
+        mutable_fingerprint=fingerprint_mutable(snapshot),
+    )
+    stale = await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="C1",
+        thread_id="thread-1",
+        responder_ma_agent_id=agent.id,
+        responder_name="daimon",
+        role=Role.USER,
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        now=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        attended=True,
+        chat_session_id=grant,
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_1",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_1", agent=agent).model_dump(mode="json")
+        ),
+    )
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router), turn_path="legacy"
+    )
+    admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id=row.ma_session_id,
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    seen = []
+    async with turn_origin(
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="C1",
+        thread_id="thread-1",
+        responder_ma_agent_id=agent.id,
+        responder_name="daimon",
+        role=Role.USER,
+        attended=origin_attended,
+    ) as origin:
+
+        async def read_origin():
+            async with db_session_factory() as session:
+                return await get_active_origin(
+                    session,
+                    origin_id=origin.id,
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+
+        async def before_send() -> None:
+            bound = await read_origin()
+            assert bound is not None
+            assert bound.chat_session_id == (None if kind == "worker" else grant)
+            assert bound.attended is (
+                origin_attended if kind == "worker" else origin_attended and caller_attended
+            )
+            assert current_execution_origin_id.get() == (None if kind == "worker" else origin.id)
+            async with db_session_factory() as db:
+                previous = await get_active_origin(
+                    db,
+                    origin_id=stale.id,
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+            assert previous is not None
+            assert previous.chat_session_id == (grant if kind == "worker" else None)
+            seen.append(bound.id)
+
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            attended=caller_attended,
+            origin=kind,
+            render_interval_s=0.001,
+            before_send=before_send,
+        )
+        assert outcome.state.error is None
+        released = await read_origin()
+        assert released is not None and released.chat_session_id is None
+    assert seen == [origin.id]

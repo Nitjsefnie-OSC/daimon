@@ -31,13 +31,14 @@ ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = ROOT / "packages/core/alembic"
 FORK = "0109_github_tokens_live_index"
 MAIN = "0110_microsoft_accounts"
-PREVIOUS_HEAD = "0114_turn_attendance"
+PREVIOUS_HEAD = "0115_origin_session_grants"
 HEAD = "0116_lead_intake"
 CHAIN = [
     MAIN,
     "0111_cold_dm_agent",
     "0112_routine_dm_destination",
     "0113_unattended_turn_provenance",
+    "0114_turn_attendance",
     PREVIOUS_HEAD,
     HEAD,
 ]

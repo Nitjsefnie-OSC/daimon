@@ -672,6 +672,7 @@ class DiscordDriver:
             deployment_default=DeploymentDefault(),
         )
         auth = AuthIdentity(
+            chat_session_id="parity-card-session",
             account_id=parity_account_id(tenant_id, user_id),
             tenant_id=tenant_id,
             role=Role.ADMIN,
@@ -700,6 +701,7 @@ class DiscordDriver:
                 role=Role.ADMIN,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
+                chat_session_id="parity-card-session",
             )
 
         posted: list[dict[str, Any]] = []

@@ -92,6 +92,7 @@ class _World:
             external_id=external_id,
             platform_user_id=USER if platform else None,
             is_admin=admin,
+            chat_session_id="test-session",
         )
 
 
@@ -215,6 +216,7 @@ async def _chat_turn(
             role=Role.ADMIN if admin else Role.USER,
             expires_at=now + timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
     if live:
         await _live_session(world, thread_id=CHAT_THREAD, responder=responder, gated=gated)
@@ -678,6 +680,7 @@ async def _setup_thread_origin(world: _World, factory: async_sessionmaker[AsyncS
             expires_at=now + timedelta(minutes=10),
             now=now,
             is_setup=True,
+            chat_session_id="test-session",
         )
     await _live_session(world, thread_id=SETUP_THREAD, responder="agent_shared")
     return str(origin.id)
@@ -840,6 +843,7 @@ async def _reply(
         responder_name="helper",
         role=auth.role,
         message_text=text,
+        chat_session_id="test-session",
     ) as origin:
         yield str(origin.id)
 

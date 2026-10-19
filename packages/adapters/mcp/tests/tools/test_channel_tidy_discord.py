@@ -338,6 +338,7 @@ class _World:
                 expires_at=now + timedelta(hours=1),
                 now=now,
                 is_setup=is_setup,
+                chat_session_id="test-session",
             )
         auth = AuthIdentity(
             account_id=self.account_id,
@@ -347,6 +348,7 @@ class _World:
             external_id=_GUILD,
             platform_user_id=_CALLER,
             chat_agent_id=derive_agent_uuid(tenant_id=self.tenant_id, ma_agent_id=agent),
+            chat_session_id="test-session",
         )
         return auth, str(origin.id)
 
@@ -679,6 +681,7 @@ async def test_a_call_with_no_agent_or_no_turn_is_refused(
         platform="discord",
         external_id=_GUILD,
         platform_user_id=_CALLER,
+        chat_session_id="test-session",
     )
 
     with pytest.raises(ToolError, match="only an agent"):
@@ -1184,6 +1187,7 @@ async def test_an_agent_key_has_one_turn_bucket_whatever_origins_it_names(
         platform_user_id=_CALLER,
         agent_id=chat_auth.chat_agent_id,
         token_jti=uuid.uuid4(),
+        chat_session_id="test-session",
     )
     for i in range(10):
         await _edit_message_impl(

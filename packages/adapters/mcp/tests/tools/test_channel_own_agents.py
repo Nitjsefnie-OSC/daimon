@@ -134,6 +134,7 @@ class _World:
             chat_agent_id=None
             if executing is None
             else derive_agent_uuid(tenant_id=self.tenant_id, ma_agent_id=executing),
+            chat_session_id="test-session",
         )
 
 
@@ -537,6 +538,7 @@ async def _setup_thread_origin(
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
             is_setup=responder == "shared",
+            chat_session_id="test-session",
         )
     return str(origin.id)
 
@@ -586,6 +588,7 @@ async def test_the_setup_thread_configures_its_channels_own_agent(
         platform="discord",
         platform_user_id="444444444444444444",
         agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_shared"),
+        chat_session_id="test-session",
     )
     with pytest.raises(ToolError, match="not found"):
         await _get_agent_impl(runtime, agent_key, "local", origin_context_id=origin)
@@ -685,6 +688,7 @@ def _key(world: _World, *, bound: str | None) -> AuthIdentity:
         platform_user_id="444444444444444444",
         agent_id=derive_agent_uuid(tenant_id=world.tenant_id, ma_agent_id="agent_local"),
         bound_channel_id=bound,
+        chat_session_id="test-session",
     )
 
 
@@ -818,6 +822,7 @@ async def _chat_turn_in_room(
             role=Role.USER,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
         if not live:
             return str(origin.id)
@@ -1099,6 +1104,7 @@ async def test_turns_running_in_two_own_agents_channels_refuse_an_unnamed_call(
             role=Role.USER,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
     origin_id = await _setup_thread_origin(committing_sessionmaker, world)
     builtin = world.auth(admin=False, executing="agent_shared")
