@@ -12,6 +12,8 @@
           result to continue the same conversation. Discord replies require live membership
           and invoker-policy access at delivery. On timeout the error carries
           the handle; resume with it rather than asking again.
+          Only handles opened through agent chat can be continued here; platform
+          conversations and legacy sessions without this provenance are refused.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -52,6 +54,8 @@
           ``message`` is sent once the resumed turn ends, waiting up to about 90
           seconds. Only the session's own account can continue or resume it,
           and never a turn waiting on an approval card in chat.
+          Only handles opened through agent chat can be continued here; platform
+          conversations and legacy sessions without this provenance are refused.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -500,6 +504,8 @@
         usage collection. This is NOT a cancel — to stop a running turn, use
         the cancel tool instead. Returns ``{"handle": "<session_id>",
         "archived": "true"}``.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -559,6 +565,8 @@
         images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
         continue that conversation instead of starting a new one.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -668,6 +676,8 @@
         ``terminated``. An interrupted turn is still billed for what it
         already consumed before the interrupt landed: the model work already
         done is real work and is not refunded.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -844,6 +854,8 @@
         about 90 seconds. A turn waiting on someone's approval card in chat
         is refused: only that card answers it. Any other session needs a
         ``message``.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
       ''',
       'parameters': dict({
         'additionalProperties': False,

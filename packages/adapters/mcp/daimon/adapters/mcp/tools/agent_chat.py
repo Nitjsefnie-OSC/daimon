@@ -1462,6 +1462,8 @@ def register_agent_chat_tools(
         images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
         continue that conversation instead of starting a new one.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         auth = await _check_admission(
             ctx,
@@ -1507,6 +1509,8 @@ def register_agent_chat_tools(
         about 90 seconds. A turn waiting on someone's approval card in chat
         is refused: only that card answers it. Any other session needs a
         ``message``.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         auth = await _check_admission(
             ctx,
@@ -1543,6 +1547,8 @@ def register_agent_chat_tools(
         usage collection. This is NOT a cancel — to stop a running turn, use
         the cancel tool instead. Returns ``{"handle": "<session_id>",
         "archived": "true"}``.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         return await _archive_my_session_impl(runtime, await _auth(ctx), handle)
 
@@ -1558,6 +1564,8 @@ def register_agent_chat_tools(
         ``terminated``. An interrupted turn is still billed for what it
         already consumed before the interrupt landed: the model work already
         done is real work and is not refunded.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         return await _cancel_turn_impl(runtime, await _auth(ctx), handle)
 
