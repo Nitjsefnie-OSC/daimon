@@ -1,8 +1,9 @@
 """Liveness of adapter processes holding a PostgreSQL session advisory lock."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 
 import structlog
 from asyncpg import (  # pyright: ignore[reportMissingTypeStubs]
@@ -10,7 +11,6 @@ from asyncpg import (  # pyright: ignore[reportMissingTypeStubs]
     InternalClientError,
     PostgresError,
 )
-from daimon.core.stores.discord_gateway_lease import GatewayLease, GatewayLeaseLost
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
@@ -66,8 +66,11 @@ class OwnershipExpired(Exception):
     """A replacement may already have reclaimed this owner's work."""
 
 
-class GatewayLeaseExpired(OwnershipExpired, GatewayLeaseLost):
-    """Another process may already have taken the Discord gateway."""
+@dataclass
+class WorkerOwner:
+    connection: Callable[[], AsyncConnection | None]
+    lock: asyncio.Lock
+    confirm_reconnect: Callable[[AsyncConnection], Awaitable[bool]] | None = None
 
 
 @asynccontextmanager
@@ -77,12 +80,11 @@ async def hold_worker_owner(
     owner_key: int,
     ownership_lost: asyncio.Event,
     probe_interval_s: float = OWNER_PROBE_INTERVAL_S,
-    gateway_lock_key: int | None = None,
-) -> AsyncIterator[GatewayLease]:
+) -> AsyncIterator[WorkerOwner]:
     """Retry brief owner-connection loss; fail stop before reclaim becomes safe.
 
-    Yields the gateway lease that shares this owner connection: a lease that
-    cannot be re-confirmed after a reconnect fails stop like an expired owner.
+    Adapters can attach a reconnect fence to the same guarded connection.
+    A fence that refuses reacquisition fails stop like an expired owner.
     """
     # asyncpg failures can surface as raw socket errors, not SQLAlchemyError.
     failures = (
@@ -97,12 +99,7 @@ async def hold_worker_owner(
     connection: AsyncConnection | None = None
     # Serialises the heartbeat probe, reconnects and gateway lease queries on the one connection.
     connection_lock = asyncio.Lock()
-    lease = GatewayLease(
-        owner_key,
-        connection=lambda: connection,
-        lock=connection_lock,
-        **({} if gateway_lock_key is None else {"lock_key": gateway_lock_key}),
-    )
+    owner = WorkerOwner(connection=lambda: connection, lock=connection_lock)
 
     async def acquire(*, reconnect: bool = False) -> AsyncConnection:
         candidate = await engine.connect()
@@ -121,8 +118,12 @@ async def hold_worker_owner(
                 {"key": owner_key, "grace": OWNER_LOSS_GRACE_S},
             ):
                 raise OwnershipExpired("owner heartbeat expired before reacquisition")
-            if reconnect and lease.held and not await lease.confirm_after_reconnect(candidate):
-                raise GatewayLeaseExpired("gateway lease moved on during owner reconnect")
+            if (
+                reconnect
+                and owner.confirm_reconnect is not None
+                and not await owner.confirm_reconnect(candidate)
+            ):
+                raise OwnershipExpired("adapter lease moved on during owner reconnect")
             await candidate.execute(
                 text("""INSERT INTO discord_worker_heartbeats (owner_key, seen_at, lease_aware)
                      VALUES (:key, clock_timestamp(), true)
@@ -211,7 +212,7 @@ async def hold_worker_owner(
 
     guard_task = asyncio.create_task(guard(), name="discord.worker_owner_guard")
     try:
-        yield lease
+        yield owner
     finally:
         guard_task.cancel()
         with suppress(asyncio.CancelledError):

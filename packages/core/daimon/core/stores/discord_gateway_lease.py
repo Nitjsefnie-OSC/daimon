@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable
 
 import structlog
+from daimon.core.stores.worker_ownership import owner_is_alive
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -29,12 +30,6 @@ log = structlog.get_logger()
 DISCORD_GATEWAY_LOCK_KEY = 0x44_49_53_43_47_41_54_45  # "DISCGATE"
 GATEWAY_POLL_INTERVAL_S = 0.2
 GATEWAY_OP_TIMEOUT_S = 5.0
-
-
-async def owner_is_alive(conn: AsyncConnection, key: int) -> bool:
-    from daimon.core.stores.worker_ownership import owner_is_alive as check_owner
-
-    return await check_owner(conn, key)
 
 
 class GatewayLeaseUnavailable(Exception):

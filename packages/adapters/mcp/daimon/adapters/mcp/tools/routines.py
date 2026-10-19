@@ -88,7 +88,7 @@ class DeleteResult(BaseModel):
 
 
 def _routine_for_reader(auth: AuthIdentity, row: RoutineRow) -> RoutineRow:
-    """Admins can manage metadata without reading a personal-memory result."""
+    """Admins see aggregate lifecycle counts without private results or failure details."""
     if row.destination_kind == "dm" and row.created_by_user_id != auth.platform_user_id:
         return row.model_copy(
             update={

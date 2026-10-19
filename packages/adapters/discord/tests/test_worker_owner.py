@@ -265,7 +265,7 @@ async def test_sustained_owner_loss_drains_without_cancellation(
 
     exit_process = MagicMock()
     monkeypatch.setattr("daimon.adapters.discord.__main__.os._exit", exit_process)
-    monkeypatch.setattr("daimon.adapters.discord.runtime.OWNER_RETRY_BUDGET_S", 0.2)
+    monkeypatch.setattr("daimon.core.stores.worker_ownership.OWNER_RETRY_BUDGET_S", 0.2)
     ownership_lost, stopped = asyncio.Event(), asyncio.Event()
     bot = MagicMock()
     bot.runtime.ownership_lost = ownership_lost

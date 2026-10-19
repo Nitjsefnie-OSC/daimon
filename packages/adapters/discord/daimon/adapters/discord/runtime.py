@@ -26,12 +26,15 @@ from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.discord_gateway_lease import GatewayLease
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.worker_ownership import (
+    OWNER_PROBE_INTERVAL_S,
+)
+from daimon.core.stores.worker_ownership import (
     hold_worker_owner as hold_process_owner,
 )
 from daimon.core.turn.admission import AdmissionGrant
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.lifecycle import EditFn, SendFn
@@ -62,8 +65,34 @@ class FleetCardFactory(Protocol):
 log = structlog.get_logger()
 
 
-# Keep the Discord gateway lease on the same guarded owner connection.
-hold_worker_owner = hold_process_owner
+@asynccontextmanager
+async def hold_worker_owner(
+    engine: AsyncEngine,
+    *,
+    owner_key: int,
+    ownership_lost: asyncio.Event,
+    probe_interval_s: float = OWNER_PROBE_INTERVAL_S,
+    gateway_lock_key: int | None = None,
+) -> AsyncIterator[GatewayLease]:
+    """Keep Discord's gateway lease on the guarded process owner connection."""
+    async with hold_process_owner(
+        engine,
+        owner_key=owner_key,
+        ownership_lost=ownership_lost,
+        probe_interval_s=probe_interval_s,
+    ) as owner:
+        lease = GatewayLease(
+            owner_key,
+            connection=owner.connection,
+            lock=owner.lock,
+            **({} if gateway_lock_key is None else {"lock_key": gateway_lock_key}),
+        )
+
+        async def confirm(connection: AsyncConnection) -> bool:
+            return not lease.held or await lease.confirm_after_reconnect(connection)
+
+        owner.confirm_reconnect = confirm
+        yield lease
 
 
 @dataclass(frozen=True)

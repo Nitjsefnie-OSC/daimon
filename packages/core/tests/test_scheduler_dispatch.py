@@ -433,3 +433,29 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
     assert rows[0].reason == TerminationReason.CEILING
     assert rows[0].error_class == "TimeoutError"
     assert saved is not None and saved.last_error is not None and "timeout" in saved.last_error
+
+
+async def test_repeated_close_cancellation_still_joins_owned_fire_cleanup() -> None:
+    dispatcher = RoutineDispatcher(1)
+    started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def fire() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+
+    dispatcher.start(uuid.uuid4(), fire(), updated_at=NOW)
+    await started.wait()
+    close = asyncio.create_task(dispatcher.close())
+    await cleaning.wait()
+    close.cancel()
+    await asyncio.sleep(0)
+    close.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await close
+    assert not dispatcher.in_flight_ids
+    await dispatcher.close()

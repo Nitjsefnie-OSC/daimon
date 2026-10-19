@@ -455,6 +455,9 @@ class RoutineSession(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     ma_session_id: Mapped[str | None] = mapped_column(Text)
+    discovered_session_ids: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
     mapping_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False, server_default="recorded")

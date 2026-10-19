@@ -24,6 +24,9 @@ def upgrade() -> None:
         sa.Column("account_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("ma_agent_id", sa.Text(), nullable=False),
         sa.Column("ma_session_id", sa.Text()),
+        sa.Column(
+            "discovered_session_ids", postgresql.JSONB(), nullable=False, server_default="[]"
+        ),
         sa.Column("mapping_id", postgresql.UUID(as_uuid=True)),
         sa.Column("owner_key", sa.BigInteger(), nullable=False),
         sa.Column("state", sa.Text(), nullable=False, server_default="recorded"),

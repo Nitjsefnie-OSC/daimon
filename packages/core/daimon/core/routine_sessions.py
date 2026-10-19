@@ -86,13 +86,14 @@ class RoutineSessionSupervisor:
 
     async def _attempt(self, intent_id: uuid.UUID) -> None:
         try:
-            completing = self.completions.get(intent_id)
-            if completing is not None:
-                # A failed completion write leaves the intent pending.
-                with suppress(Exception):
-                    await asyncio.shield(completing)
-            # Five seconds includes claim, provider confirmation, and final DB write.
+            # Five seconds includes completion joins, claim, provider I/O and persistence.
             async with asyncio.timeout(5):
+                completing = self.completions.get(intent_id)
+                if completing is not None:
+                    # A failed completion write leaves the intent pending.
+                    with suppress(Exception):
+                        await asyncio.shield(completing)
+                    self.completions.pop(intent_id, None)
                 async with self.sm.begin() as db:
                     row = await store.begin_attempt(db, intent_id, owner_key=self.owner_key)
                 if row is None or row.state in store.TERMINAL:
@@ -128,32 +129,40 @@ class RoutineSessionSupervisor:
         ids: set[str] = set()
         if row.ma_session_id is not None:
             ids.add(row.ma_session_id)
-        backend = managed_agents(
-            self.client, scope=scope, resources=frozenset({("agent", row.ma_agent_id)})
-        )
-        port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
-        async for record in legacy_iter(
-            port.sessions_for_agent(
-                scope, resource_ref(backend, "agent", row.ma_agent_id, scope=scope)
+            ids.update(row.discovered_session_ids)
+        else:
+            backend = managed_agents(
+                self.client, scope=scope, resources=frozenset({("agent", row.ma_agent_id)})
             )
-        ):
-            metadata = record.get("metadata")
-            if not isinstance(metadata, dict):
-                continue
-            if (
-                metadata.get("daimon_routine_session") == str(row.id)
-                and metadata.get("daimon_tenant") == str(row.tenant_id)
-                and metadata.get("daimon_account") == str(row.account_id)
+            port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+            async for record in legacy_iter(
+                port.sessions_for_agent(
+                    scope, resource_ref(backend, "agent", row.ma_agent_id, scope=scope)
+                )
             ):
-                session_id = record.get("id")
-                if isinstance(session_id, str):
-                    ids.add(session_id)
-        # Absence after an ambiguous create is never evidence of cessation.
-        if not ids:
-            return False
-        # Do not truncate discovery to a single match; all matches must stop.
-        async with self.sm.begin() as db:
-            await store.transition(db, row.id, "stopping", session_id=sorted(ids)[0])
+                metadata = record.get("metadata")
+                if not isinstance(metadata, dict):
+                    continue
+                if (
+                    metadata.get("daimon_routine_session") == str(row.id)
+                    and metadata.get("daimon_tenant") == str(row.tenant_id)
+                    and metadata.get("daimon_account") == str(row.account_id)
+                ):
+                    session_id = record.get("id")
+                    if isinstance(session_id, str):
+                        ids.add(session_id)
+            # Absence after an ambiguous create is never evidence of cessation.
+            if not ids:
+                return False
+            # Do not truncate discovery to a single match; all matches must stop.
+            async with self.sm.begin() as db:
+                await store.transition(
+                    db,
+                    row.id,
+                    "stopping",
+                    session_id=sorted(ids)[0],
+                    discovered_session_ids=tuple(sorted(ids)),
+                )
         results = [
             await stop_routine_session(self.client, session_id=sid, scope=scope) for sid in ids
         ]

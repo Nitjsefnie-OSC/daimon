@@ -35,6 +35,7 @@ from daimon.core.turn.posture import PolicyApproval
 from daimon.core.turn.prepare import PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import (
     make_account,
     make_ledger_entry,
@@ -246,7 +247,10 @@ async def test_routine_never_touches_the_owners_selected_cold_dm(
         from daimon.core.turn.state import TextBlock
 
         return RunOutcome(
-            state=TurnState(content=[TextBlock(kind="text", text="Your week: all green.")]),
+            state=TurnState(
+                content=[TextBlock(kind="text", text="Your week: all green.")],
+                termination=TerminationReason.COMPLETED,
+            ),
             ma_session_id=prepared.ma_session_id,
             mapping_id=None,
             recovered=False,

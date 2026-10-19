@@ -409,10 +409,12 @@ def make_discord_routine_poster(
                 return refused
             try:
                 dm = await open_dm(int(tenant.external_id), int(row.destination_id))
-                text = (
-                    f"Routine {row.trigger_message[:60]}\n"
-                    f"Run {row.id} / {row.last_fired_at}\n\n" + render_fallback_post(row)
-                )
+                text = render_fallback_post(row)
+                if row.delivery_note != "stop_unresolved_notice":
+                    text = (
+                        f"Routine {row.trigger_message[:60]}\n"
+                        f"Run {row.id} / {row.last_fired_at}\n\n" + text
+                    )
                 for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
                     if (refused := await creator_still_cleared(row)) is not None:
                         return refused

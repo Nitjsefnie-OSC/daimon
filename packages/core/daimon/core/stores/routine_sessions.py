@@ -50,6 +50,7 @@ async def transition(
     *,
     session_id: str | None = None,
     mapping_id: uuid.UUID | None = None,
+    discovered_session_ids: tuple[str, ...] | None = None,
     failure: str | None = None,
 ) -> RoutineSessionRow:
     row = (
@@ -59,6 +60,14 @@ async def transition(
     ).scalar_one()
     if row.state in TERMINAL:
         return RoutineSessionRow.model_validate(row)
+    allowed: dict[str, frozenset[str]] = {
+        "recorded": frozenset({"recorded", "session_created", "stopping"}),
+        "session_created": frozenset({"session_created", "running", "stopping"}),
+        "running": frozenset({"running", "completed", "stopping"}),
+        "stopping": frozenset({"stopping", "session_created", "stopped", "stop_unresolved"}),
+    }
+    if state not in allowed[row.state]:
+        raise ValueError(f"invalid routine lifecycle transition: {row.state} -> {state}")
     # Late receipts must not move a stop back into execution.
     if row.state != "stopping" or state in {"stopped", "stop_unresolved"}:
         row.state = state
@@ -66,6 +75,8 @@ async def transition(
         row.ma_session_id = session_id
     if mapping_id is not None:
         row.mapping_id = mapping_id
+    if discovered_session_ids is not None:
+        row.discovered_session_ids = list(discovered_session_ids)
     if failure is not None:
         row.failure_detail = failure[:500]
     row.updated_at = datetime.now(UTC)
@@ -169,4 +180,23 @@ async def claim_unresolved_notices(db: AsyncSession, *, platform: str) -> list[R
     for row in rows:
         row.notice_claimed_at = datetime.now(UTC)
     await db.flush()
+    return [RoutineSessionRow.model_validate(row) for row in rows]
+
+
+async def list_for_routine(
+    db: AsyncSession,
+    *,
+    routine_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> list[RoutineSessionRow]:
+    rows = (
+        await db.scalars(
+            select(RoutineSession)
+            .where(
+                RoutineSession.routine_id == routine_id,
+                RoutineSession.tenant_id == tenant_id,
+            )
+            .order_by(RoutineSession.created_at, RoutineSession.id)
+        )
+    ).all()
     return [RoutineSessionRow.model_validate(row) for row in rows]

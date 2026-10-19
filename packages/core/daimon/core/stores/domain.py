@@ -241,6 +241,7 @@ class RoutineSessionRow(BaseModel):
     account_id: uuid.UUID
     ma_agent_id: str
     ma_session_id: str | None
+    discovered_session_ids: tuple[str, ...] = ()
     mapping_id: uuid.UUID | None
     owner_key: int
     state: RoutineSessionState

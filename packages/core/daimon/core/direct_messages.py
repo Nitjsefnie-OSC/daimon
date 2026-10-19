@@ -558,6 +558,13 @@ async def _run_admitted_dm_turn(
         await on_sealed()
     if outcome.state.error is not None:
         raise outcome.state.error
+    if origin == "routine":
+        from daimon.core.turn.termination import TerminationReason
+
+        if outcome.state.termination != TerminationReason.COMPLETED:
+            raise DirectMessageAccessRevoked(
+                "execution_incomplete", message="The run did not complete."
+            )
     answer = (
         extract_final_response(outcome.state.content) or "The turn completed without a text reply."
     )

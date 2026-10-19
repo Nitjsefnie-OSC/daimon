@@ -66,3 +66,41 @@ async def test_attempts_survive_recovery_and_exhaust(
         assert exhausted.id == row.id and exhausted.ma_session_id is None
         status = await store.status(db, routine_id=row.routine_id, tenant_id=row.tenant_id)
         assert status.stop_unresolved == 1 and status.pending == 0
+
+
+async def test_deleting_a_routine_cannot_delete_its_pending_stop(
+    db_session_factory: async_sessionmaker[AsyncSession],
+):
+    from daimon.core.stores.routines import create_routine, delete_routine
+    from daimon.testing.factories import make_tenant
+
+    sm = db_session_factory
+    async with sm.begin() as db:
+        tenant = await make_tenant(db)
+        routine = await create_routine(
+            db,
+            tenant_id=tenant.id,
+            created_by_user_id="owner",
+            agent_id="ag_test",
+            agent_name="test",
+            cron_expr="* * * * *",
+            timezone_="UTC",
+            trigger_message="work",
+        )
+        intent = await store.record(
+            db,
+            routine_id=routine.id,
+            fire_id=uuid.uuid4(),
+            tenant_id=tenant.id,
+            account_id=uuid.uuid4(),
+            ma_agent_id="ag_test",
+            owner_key=123,
+        )
+        await store.transition(db, intent.id, "stopping", failure="x" * 1000)
+    async with sm.begin() as db:
+        assert await delete_routine(db, routine.id, tenant_id=tenant.id)
+    async with sm() as db:
+        pending = await store.get(db, intent.id)
+        assert pending is not None and pending.state == "stopping"
+        assert pending.failure_detail == "x" * 500
+        assert any(row.id == intent.id for row in await store.pending(db))

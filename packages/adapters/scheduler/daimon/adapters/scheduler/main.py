@@ -1597,24 +1597,37 @@ async def run(
 
         return 0
     finally:
-        await dispatcher.close()
-        owner_watcher.cancel()
-        await asyncio.gather(owner_watcher, return_exceptions=True)
-        await owner_context.__aexit__(None, None, None)
-        health_server.close()
-        await health_server.wait_closed()
-        try:
-            await lock_conn.execute(
-                text("SELECT pg_advisory_unlock(:key)"),
-                {"key": scheduler_settings.advisory_lock_key},
-            )
-        except Exception:
-            log.exception("advisory unlock failed")
-        await lock_conn.close()
-        await client.close()
-        await drain_outcomes()
-        if _engine_override is None:
-            await engine.dispose()
+
+        async def shutdown() -> None:
+            await dispatcher.close()
+            owner_watcher.cancel()
+            await asyncio.gather(owner_watcher, return_exceptions=True)
+            await owner_context.__aexit__(None, None, None)
+            health_server.close()
+            await health_server.wait_closed()
+            try:
+                await lock_conn.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": scheduler_settings.advisory_lock_key},
+                )
+            except Exception:
+                log.exception("advisory unlock failed")
+            await lock_conn.close()
+            await client.close()
+            await drain_outcomes()
+            if _engine_override is None:
+                await engine.dispose()
+
+        shutdown_task = asyncio.create_task(shutdown())
+        cancelled = False
+        while not shutdown_task.done():
+            try:
+                await asyncio.shield(shutdown_task)
+            except asyncio.CancelledError:
+                cancelled = True
+        shutdown_task.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 async def _drain_github_push_resync(
