@@ -262,7 +262,7 @@ def _push_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     capture = tmp_path / "capture"
     capture.mkdir()
     clone = tmp_path / "clone"
-    subprocess.run([real_git, "init", "-q", str(clone)], check=True)
+    subprocess.run([real_git, "init", "-q", "-b", "main", str(clone)], check=True)
     subprocess.run(
         [
             real_git,
@@ -275,6 +275,13 @@ def _push_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
         ],
         check=True,
     )
+    identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run(
+        [real_git, "-C", str(clone), *identity, "commit", "-q", "--allow-empty", "-m", "x"],
+        check=True,
+    )
+    for branch in ("feature", "other/nested"):
+        subprocess.run([real_git, "-C", str(clone), "branch", branch], check=True)
     env = os.environ.copy()
     env.update(
         {
@@ -319,14 +326,14 @@ def test_push_goes_to_origin_through_credential_helper_without_exposing_placehol
     script, env, capture, clone = _push_fixture(tmp_path)
     recorded = capture / "push-args"
 
-    pushed = _run_in(script, env, clone, "OWNERB/repob.git", "push", "feature", "main:other")
+    pushed = _run_in(script, env, clone, "OWNERB/repob.git", "push", "feature", "other/nested")
     assert pushed.returncode == 0, pushed.stderr
     assert recorded.read_text().splitlines() == [
         *_PUSH_PREFIX,
         "push",
         "origin",
-        "feature",
-        "main:other",
+        "refs/heads/feature:refs/heads/feature",
+        "refs/heads/other/nested:refs/heads/other/nested",
     ]
     pushed_env = (capture / "push-env").read_text()
     assert "GIT_TERMINAL_PROMPT=0" in pushed_env.splitlines()
@@ -351,7 +358,7 @@ def test_push_goes_to_origin_through_credential_helper_without_exposing_placehol
             "push",
             "-q",
             "origin",
-            "feature",
+            "refs/heads/feature:refs/heads/feature",
         ]
         assert "opaque-placeholder" not in quiet.stdout + quiet.stderr
 
@@ -416,16 +423,89 @@ def test_push_refuses_origin_mismatch_unmapped_repo_and_every_other_flag(
         ("refs/heads/*:refs/heads/*",),
         ("feature:main:extra",),
         ("-q", "+feature"),
+        ("0000000000000000000000000000000000000000",),
+        ("0000000000000000000000000000000000000000:refs/heads/main",),
+        ("main:other",),
+        ("HEAD",),
+        ("@{-1}",),
+        ("nonexistent",),
+        ("feature", "nonexistent"),
+        ("refs/heads/feature",),
+        ("feature*",),
+        ("feat?re",),
+        ("feature^",),
+        ("feature..other",),
     ):
         refused = _run_in(script, env, clone, "OwnerB/RepoB", "push", *flags)
         assert refused.returncode == 2, flags
-        assert "usage: sh github-repo.sh owner/repo push" in refused.stderr, flags
+        assert (
+            "usage: sh github-repo.sh owner/repo push" in refused.stderr
+            or "no local branch" in refused.stderr
+        ), flags
         assert "opaque-placeholder" not in refused.stdout + refused.stderr
     assert not pushed.exists(), "git push must not run for any refused invocation"
     wrong_repo = _run_in(script, env, clone, "OwnerA/RepoA", "push", "-q", "feature")
     assert wrong_repo.returncode == 2
     assert not pushed.exists()
     assert "opaque-placeholder" not in mismatch.stdout + mismatch.stderr + unmapped.stderr
+
+
+def test_push_names_the_missing_local_branch_and_accepts_only_branch_names(
+    tmp_path: Path,
+) -> None:
+    script, env, capture, clone = _push_fixture(tmp_path)
+    missing = _run_in(script, env, clone, "OwnerB/RepoB", "push", "nonexistent")
+    assert missing.returncode == 2
+    assert "no local branch nonexistent" in missing.stderr
+    # A full ref name is not a branch name: refs/heads/refs/heads/feature does not exist.
+    full_ref = _run_in(script, env, clone, "OwnerB/RepoB", "push", "refs/heads/feature")
+    assert full_ref.returncode == 2
+    assert "no local branch refs/heads/feature" in full_ref.stderr
+    bad_format = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature..other")
+    assert bad_format.returncode == 2
+    assert "usage: sh github-repo.sh owner/repo push" in bad_format.stderr
+    assert not (capture / "push-args").exists()
+
+
+def test_push_ignores_configured_push_refspec_and_uses_the_explicit_one(tmp_path: Path) -> None:
+    script, env, capture, clone = _push_fixture(tmp_path)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    subprocess.run(
+        [
+            real_git,
+            "-C",
+            str(clone),
+            "config",
+            "remote.origin.push",
+            "+refs/heads/feature:refs/heads/main",
+        ],
+        check=True,
+    )
+    pushed = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    assert pushed.returncode == 0, pushed.stderr
+    assert (capture / "push-args").read_text().splitlines() == [
+        *_PUSH_PREFIX,
+        "push",
+        "origin",
+        "refs/heads/feature:refs/heads/feature",
+    ]
+
+
+def test_push_refuses_more_than_one_push_url(tmp_path: Path) -> None:
+    script, env, capture, clone = _push_fixture(tmp_path)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    for url in ("https://github.com/ownerb/repob.git", "https://github.com/OwnerA/RepoA.git"):
+        subprocess.run(
+            [real_git, "-C", str(clone), "config", "--add", "remote.origin.pushurl", url],
+            check=True,
+        )
+    # Two push URLs: the first matches the repo, the second does not.
+    refused = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+    assert refused.returncode == 2
+    assert "more than one push URL" in refused.stderr
+    assert not (capture / "push-args").exists()
 
 
 def test_push_refuses_a_push_url_redirected_away_from_the_repo(tmp_path: Path) -> None:

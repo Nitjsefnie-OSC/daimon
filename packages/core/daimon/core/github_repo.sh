@@ -124,7 +124,7 @@ if [ "$1" = clone ]; then
 elif [ "$1" = push ]; then
     shift
     push_usage() {
-        printf 'usage: sh github-repo.sh owner/repo push [-q|--quiet] <refspec>...\n' >&2
+        printf 'usage: sh github-repo.sh owner/repo push [-q|--quiet] <branch>...\n' >&2
         exit 2
     }
     quiet=
@@ -132,28 +132,47 @@ elif [ "$1" = push ]; then
         -q|--quiet) quiet=$1; shift ;;
     esac
     [ "$#" -ge 1 ] || push_usage
-    # Plain <src> or <src>:<dst> only: no force (+), delete (:dst) or globs.
-    for refspec in "$@"; do
-        case "$refspec" in
-            ''|-*|+*|:*|*'*'*|*:*:*) push_usage ;;
+    for branch in "$@"; do
+        case "$branch" in
+            ''|-*) push_usage ;;
         esac
     done
-    # The effective push URL, after pushurl, insteadOf and pushInsteadOf.
-    origin_url=$(git remote get-url --push origin 2>/dev/null || true)
-    case "$origin_url" in
-        https://github.com/*) origin_repo=${origin_url#https://github.com/} ;;
-        *)
+    # Exactly one effective push URL, after pushurl, insteadOf and
+    # pushInsteadOf, and it must be the requested repository.
+    origin_urls=$(git remote get-url --push --all origin 2>/dev/null || true)
+    case "$origin_urls" in
+        '')
             printf 'this clone does not have a GitHub origin for %s\n' "$selected_repo" >&2
             exit 2
             ;;
+        *'
+'*)
+            printf 'this clone has more than one push URL for origin\n' >&2
+            exit 2
+            ;;
     esac
-    origin_key=$(printf '%s' "$origin_repo" | tr '[:upper:]' '[:lower:]')
+    origin_key=$(printf '%s' "$origin_urls" | tr '[:upper:]' '[:lower:]')
     origin_key=${origin_key%.git}
     selected_key=$(printf '%s' "$selected_repo" | tr '[:upper:]' '[:lower:]')
-    if [ "$origin_key" != "$selected_key" ]; then
+    if [ "$origin_key" != "https://github.com/$selected_key" ]; then
         printf 'this clone is not a clone of %s\n' "$selected_repo" >&2
         exit 2
     fi
+    # Only existing local branches, each pushed by an explicit same-name
+    # refspec (no +, no bare name), so remote.origin.push, push.default and
+    # null or deleting sources never apply.
+    count=$#
+    while [ "$count" -gt 0 ]; do
+        branch=$1
+        shift
+        count=$((count - 1))
+        git check-ref-format --branch "$branch" >/dev/null 2>&1 || push_usage
+        if ! git rev-parse --verify -q "refs/heads/$branch^{commit}" >/dev/null 2>&1; then
+            printf 'no local branch %s\n' "$branch" >&2
+            exit 2
+        fi
+        set -- "$@" "refs/heads/$branch:refs/heads/$branch"
+    done
     # The credential helper answers over stdin, so the placeholder never
     # appears in argv or a URL. The empty entry resets inherited helpers.
     helper='!sh /mnt/session/uploads/github-repo.sh --git-credential'
