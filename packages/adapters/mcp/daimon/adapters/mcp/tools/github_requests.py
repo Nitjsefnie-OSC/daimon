@@ -124,12 +124,12 @@ async def request_github_access_impl(
         return GitHubRequestResult(
             status="unavailable",
             message=(
-                "GitHub access requests aren't in Teams yet. "
+                "GitHub access requests aren't available here yet. "
                 "An admin for this agent can ask me to connect GitHub here."
             ),
         )
     if origin.platform not in ("discord", "slack") or auth.platform_user_id is None:
-        raise ToolError("GitHub requests need a Discord or Slack conversation.")
+        raise ToolError("GitHub requests aren't available here.")
     if len(remaining_work.strip()) < 8:
         raise ToolError("Describe the unfinished work so it can continue after access is ready.")
     agent_id = derive_agent_uuid(
@@ -357,7 +357,7 @@ async def request_github_access_impl(
 
 
 def register_github_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
+    @mcp.tool(tags={"discord", "slack"})  # pyright: ignore[reportArgumentType]
     async def request_github_access(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         origin_context_id: str,

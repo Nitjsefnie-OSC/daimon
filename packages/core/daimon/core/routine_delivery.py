@@ -64,7 +64,7 @@ from daimon.core.stores.routines import (
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
-from daimon.core.turn_origin import WORDS_SENTENCE
+from daimon.core.turn_origin import words_sentence
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -233,7 +233,7 @@ def render_routine_controls(
         + "\nThis is a scheduled routine run; nobody is watching it. Write your final reply "
         "for someone reading it later without context. "
         + delivery
-        + (WORDS_SENTENCE if "words" in controls else "")
+        + (words_sentence(platform) if platform in CHAT_PLATFORMS else "")
         + " These controls grant no other posting or mutation permissions."
         "\n</turn_controls>"
     )

@@ -745,9 +745,10 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``destination_kind`` (``channel`` or ``thread``) and ``destination_id``
         optionally name where each run's result goes. The run is told where,
         and if the agent does not post there itself, daimon posts the end of
-        its final reply there. On Slack a thread is ``<channel id>:<thread
-        ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
-        are in. A protected channel is refused. Without a destination the
+        its final reply there. A thread is its id exactly as turn_controls
+        or a read tool gives it, and a malformed id is refused with the form to
+        use; the channel must be one you are in. A protected channel is refused.
+        Without a destination the
         result is only recorded (``last_result_tail``), as before. A run's
         spend counts toward the destination channel's budget, or without a
         destination the budget of the channel named by ``origin_context_id``

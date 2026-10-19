@@ -188,7 +188,8 @@ def _router(
                 "id": new_id,
                 "type": "session",
                 "agent": {
-                    "id": body["agent"],
+                    # A bare id, or `agent_with_overrides` carrying one.
+                    "id": body["agent"]["id"] if isinstance(body["agent"], dict) else body["agent"],
                     "mcp_servers": [],
                     "model": {"id": created_model},
                     "name": "daimon",

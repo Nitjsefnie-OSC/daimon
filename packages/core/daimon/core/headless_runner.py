@@ -74,6 +74,7 @@ from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
 from daimon.core.neutral_resources import WorkerPermissions, resolve_worker_spec
+from daimon.core.platform_system import system_for_platform
 from daimon.core.pricing import ModelRates, ProviderPrice
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
@@ -191,6 +192,7 @@ async def run_turn(
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
     personal_memory: bool = False,
+    platform: str | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -221,6 +223,7 @@ async def run_turn(
             origin_place=origin_place,
             model_override=model_override,
             personal_memory=personal_memory,
+            platform=platform,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -251,6 +254,7 @@ async def run_turn(
                 origin_place=origin_place,
                 model_override=model_override,
                 personal_memory=personal_memory,
+                platform=platform,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -285,6 +289,7 @@ async def run_turn_impl(
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
     personal_memory: bool = False,
+    platform: str | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -450,6 +455,7 @@ async def run_turn_impl(
             origin_seal_ids=origin_place.seal_ids if origin_place is not None else (),
             private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
             model_override=model_override,
+            system_override=system_for_platform(agent.system, platform),
         )
 
     try:

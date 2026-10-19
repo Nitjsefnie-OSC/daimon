@@ -597,7 +597,7 @@ async def test_post_wizard_refuses_on_slack(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
-    with pytest.raises(ToolError, match="not supported on Slack"):
+    with pytest.raises(ToolError, match="isn't available here"):
         await _post_wizard_impl(
             _runtime(committing_sessionmaker),
             auth,

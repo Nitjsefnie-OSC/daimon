@@ -119,6 +119,7 @@ async def test_caller_guard_identity_is_composed_and_refuses_before_native_alloc
                 request.admission,
                 tenant_id=request.tenant_id,
                 preparation=request,
+                platform="discord",
             ),
         )
     assert callback_calls == [caller]
@@ -256,7 +257,11 @@ async def test_real_root_allocation_carries_native_budget_and_replays_ack(root_t
 
     async def create():
         return await create_ma_session(
-            request.deps, request.admission, tenant_id=request.tenant_id, preparation=request
+            request.deps,
+            request.admission,
+            tenant_id=request.tenant_id,
+            preparation=request,
+            platform="discord",
         )
 
     first = await run_controlled_preparation(request, create())
@@ -439,7 +444,11 @@ async def test_busy_preallocation_closes_unstarted_native_preparation_without_io
         slot, holder="other-root", turn_id="other-root", now=request.now(), ttl=timedelta(minutes=5)
     )
     preparing = create_ma_session(
-        request.deps, request.admission, tenant_id=request.tenant_id, preparation=request
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        preparation=request,
+        platform="discord",
     )
     before = len(root_turn[-1].requests)
     try:

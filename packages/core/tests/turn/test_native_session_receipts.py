@@ -369,7 +369,7 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
                     update={
                         key: value
                         for key, value in payload["agent"].items()
-                        if key in ("skills", "tools", "mcp_servers")
+                        if key in ("skills", "tools", "mcp_servers", "system")
                     }
                 )
             native["session"] = ma_session(
@@ -604,7 +604,11 @@ async def _exercise_session_receipt(native_worker, fault, *, native_path=False):
                 before_native=fresh_guard,
             )
         return await create_ma_session(
-            request.deps, executing, tenant_id=request.tenant_id, preparation=selected
+            request.deps,
+            executing,
+            tenant_id=request.tenant_id,
+            preparation=selected,
+            platform="discord",
         )
 
     controls["fault"] = fault

@@ -321,10 +321,14 @@ def snapshot_from_created_session(
     repo_token_issued_at: int | None,
     vault_id: str | None,
     sent_skills: Sequence[MaSkill],
+    sent_system: str | None = None,
     github_mode: Literal["legacy", "app"] = "app",
     personal_memory_store_ids: Collection[str] = (),
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
+
+    `sent_system` is the system prompt sent as the session's own override
+    (`daimon.core.platform_system`); it is hashed instead of the agent's.
 
     `personal_memory_store_ids` are the personal stores the creator may have
     mounted; a memory-store resource is classed as personal only by its id,
@@ -339,7 +343,7 @@ def snapshot_from_created_session(
     desired snapshot (built from the agent's `"latest"`) would read as drift
     on every turn after.
     """
-    return _snapshot_from_session(
+    snapshot = _snapshot_from_session(
         session,
         skills_sha256=hash_skills(sent_skills),
         env_sha256=env_sha256,
@@ -349,6 +353,9 @@ def snapshot_from_created_session(
         github_mode=github_mode,
         personal_memory_store_ids=personal_memory_store_ids,
     )
+    if sent_system is None:
+        return snapshot
+    return snapshot.model_copy(update={"system_sha256": hash_system(sent_system)})
 
 
 def snapshot_from_retrieved_session(
@@ -572,6 +579,7 @@ def desired_snapshot(
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     public_url: str | None = None,
     channel_skills: Sequence[MaSkill] = (),
+    system_override: str | None = None,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would be running.
 
@@ -587,12 +595,14 @@ def desired_snapshot(
     the deployment's, for the same reason: both arrays are hashed as
     `create_session` gates them (`session_tools`). `channel_skills` are the
     turn's channel's extra skills, hashed with the agent's (`session_skills`).
+    `system_override` is the prompt sent in place of the agent's own, hashed
+    instead of it.
     """
     return SessionSnapshot(
         ma_agent_id=agent.id,
         model_id=agent.model.id,
         model_speed=getattr(agent.model, "speed", None) or "standard",
-        system_sha256=hash_system(agent.system),
+        system_sha256=hash_system(agent.system if system_override is None else system_override),
         skills_sha256=hash_skills(session_skills(agent, channel_skills)),
         environment_id=environment_id,
         github_mode=github_mode,

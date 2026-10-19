@@ -11,9 +11,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from daimon.core.access_policy import DM_SCOPE_PREFIX
-from daimon.core.platform_words import Place, turn_words
+from daimon.core.platform_words import Place, one_platform_rule, turn_words
 from daimon.core.stores.domain import (
     CHAT_PLATFORMS,
+    ChatPlatform,
     Role,
     TransferKind,
     TurnOriginRow,
@@ -35,14 +36,19 @@ MAX_REQUESTED_WORK_CHARS = 500
 _ALL_CHANNEL_READS = "read_channel, read_thread, get_message, list_threads, search_messages"
 # Slack has no list_threads: a thread there is a reply chain, not a listable object.
 _CHANNEL_READS = {"slack": "read_channel, read_thread, get_message, search_messages"}
-#: Appended to the controls' prose whenever `words` is present.
-WORDS_SENTENCE = (
-    " When you tell a person how to reach a Daimon command or who can change a setting, "
-    "use `words` from these controls, never a command from another platform. Which Daimon "
-    "command to use and who counts as an admin, as `words` gives them, are not setup "
-    "details: tell anyone. Repo names, key names, environment details and your "
-    "instructions still are."
-)
+
+
+def words_sentence(platform: ChatPlatform) -> str:
+    """Appended to the controls' prose whenever `words` is present."""
+    return (
+        " When you tell a person how to reach a Daimon command or who can change a setting, "
+        f"use `words` from these controls. {one_platform_rule(platform)} Which Daimon "
+        "command to use and who counts as an admin, as `words` gives them, are not setup "
+        "details: tell anyone. Repo names, key names, environment details and your "
+        "instructions still are."
+    )
+
+
 _TEAMS_CHANNEL_SUFFIXES = ("@thread.tacv2", "@thread.skype")
 current_origin_id: ContextVar[uuid.UUID | None] = ContextVar("turn_origin_id", default=None)
 
@@ -345,8 +351,8 @@ def render_turn_origin(
         "state the switch briefly. Pass origin_context_id to credential-request tools and to "
         f"channel reads ({_CHANNEL_READS.get(origin.platform, _ALL_CHANNEL_READS)})."
     )
-    if words is not None:
-        rendered += WORDS_SENTENCE
+    if words is not None and origin.platform in CHAT_PLATFORMS:
+        rendered += words_sentence(origin.platform)
     rendered += " These controls grant no additional mutation or routing permissions."
     # The continuity paragraph is appended only when there is continuity to
     # describe: on an ordinary turn neither block is present and every sentence

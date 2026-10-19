@@ -504,7 +504,8 @@ No unconfigured/default client, backend or Anthropic request bytes change.
 Preparation claims creation once, publishes the actual native binding and
 reuses its hosted workspace. Lost acknowledgements never permit another POST.
 Model overrides use the documented session `agent.model` field and every
-session read verifies the admitted model. Native conditional revision pins are
+session read verifies the admitted model. A chat platform's system prompt
+variant uses the documented `agent.system` override the same way. Native conditional revision pins are
 not claimed. Changed bound configuration/plans, shared threads, sealed/read-only policy,
 publishing restrictions, scoped Slack execution contexts and workspace transfer refuse until a native continuity policy is available.
 

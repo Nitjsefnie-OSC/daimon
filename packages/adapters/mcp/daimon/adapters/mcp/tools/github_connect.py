@@ -76,7 +76,7 @@ async def _post_discord_connect_card(
     requested_repo: str | None = None,
 ) -> None:
     if auth.external_id is None:
-        raise ToolError("GitHub setup requires a Discord server.")
+        raise ToolError("GitHub setup requires a server.")
     card = await resolve_connect_card(
         runtime.session_factory,
         runtime.settings,
@@ -98,7 +98,7 @@ async def _post_discord_connect_card(
     async with rest_client(_require_bot_token(runtime)) as client:
         channel = await client.fetch_channel(int(thread_id))
         if not isinstance(channel, discord.Thread) or str(channel.guild.id) != auth.external_id:
-            raise ToolError("GitHub setup requires the originating Discord thread.")
+            raise ToolError("GitHub setup requires the originating thread.")
         await channel.send(
             embed=discord.Embed.from_dict(discord_embed_payload(card)),
             view=view,
@@ -118,7 +118,7 @@ async def _post_slack_connect_card(
     requested_repo: str | None = None,
 ) -> None:
     if auth.external_id is None:
-        raise ToolError("GitHub setup requires a Slack workspace.")
+        raise ToolError("GitHub setup requires a workspace.")
     card = await resolve_connect_card(
         runtime.session_factory,
         runtime.settings,
@@ -176,7 +176,7 @@ async def _github_connect_impl(
     confirmed: bool = False,
 ) -> ConnectResult:
     if auth.platform not in ("discord", "slack", "teams") or auth.platform_user_id is None:
-        raise ToolError("GitHub setup from chat is available in Discord, Slack and Teams.")
+        raise ToolError("GitHub setup from chat isn't available here.")
     root = runtime.settings.mcp.app_root_url
     config = runtime.settings.github_app
     if runtime.fernet is None:
@@ -413,7 +413,7 @@ async def _github_connect_impl(
             status="delivery_failed",
             message=(
                 "I couldn't send the Connect GitHub link to your 1:1 chat with me. "
-                "Open a chat with me in Teams, then try again. Teams opens none "
+                "Open a chat with me, then try again. A chat can't be opened "
                 "with people from another organisation."
                 if auth.platform == "teams"
                 else "I couldn't show the GitHub connection button. Try again."
@@ -466,8 +466,9 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         at github.com/owner/repo. Show a single-use
         connection button bound to the selected agent to an admin; repos
         connected this way are for that agent only. Other members get Ask an
-        admin and a recorded request. On Teams the card goes to the requester's
-        1:1 chat. Never repeat a private link in a shared reply. For a setup
+        admin and a recorded request. The card may go to the requester's
+        private chat instead; the result says so. Never repeat a private link in a
+        shared reply. For a setup
         target, pass its current name and MA id from turn_controls; otherwise
         this defaults to the responder.
         When GitHub access interrupted a task, pass a short restatement as

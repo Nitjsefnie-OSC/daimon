@@ -11,6 +11,7 @@ from dataclasses import replace
 from uuid import NAMESPACE_URL, uuid5
 
 from daimon.core.native_footer_cost import NativeFooterCostContext
+from daimon.core.platform_system import system_for_platform
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini import (
@@ -141,9 +142,12 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     if prior is None:
         agent = deployment.native_agent
         if agent is None:
-            agent = await backend.agents.create(
-                request.scope, deployment.agent, key=f"{binding_id}:agent"
-            )
+            # The inline agent is created once per thread, with this platform's variant of
+            # the system prompt; a named catalog agent above is shared and keeps its own.
+            spec = deployment.agent
+            if (variant := system_for_platform(spec.system, request.platform)) is not None:
+                spec = spec.model_copy(update={"system": variant})
+            agent = await backend.agents.create(request.scope, spec, key=f"{binding_id}:agent")
         environment = (
             await backend.environments.create(
                 request.scope, deployment.environment, key=f"{binding_id}:environment"

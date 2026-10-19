@@ -537,6 +537,7 @@ async def _build_fire(
             # The owner's personal memory, read-only, only for a routine whose
             # result goes to nobody else; decided again from the row each fire.
             personal_memory=routine_answers_only_owner(row),
+            platform=platform,
         )
 
         if row.destination_kind is None:

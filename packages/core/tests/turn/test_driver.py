@@ -186,7 +186,7 @@ async def test_run_turn_finalizes_requires_action_idle_as_actionable_failure() -
 
     assert final.error is not None
     assert final.error.kind == "requires_action"
-    assert final.error.message == "Approvals aren't available here. Ask in Discord, Slack or Teams."
+    assert final.error.message == "Approvals aren't available here yet."
     assert len(lc.terminal_failures) == 1
     assert lc.terminal_success == []
 

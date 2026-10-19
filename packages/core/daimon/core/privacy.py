@@ -110,13 +110,13 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.github_user_links, "linked GitHub account"),
         (preview.mcp_tokens, "Daimon access token"),
         (preview.gemini_records, "Gemini conversation record"),
-        (preview.slack_user_tokens, "saved Slack access token"),
-        (preview.slack_turn_contexts, "temporary Slack request record"),
+        (preview.slack_user_tokens, "saved access token"),
+        (preview.slack_turn_contexts, "temporary request record"),
         (preview.direct_message_conversations, "private conversation"),
         (preview.channel_admins, "channel admin list"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
-        (preview.teams_messages, "Teams message record"),
+        (preview.teams_messages, "message record"),
         (preview.microsoft_user_tokens, "saved Microsoft account"),
     )
     parts = [
@@ -175,8 +175,8 @@ def delete_scope_lines(display_name: str) -> tuple[str, str]:
 
 
 def _format_platform_principal(p: PlatformPrincipalRow) -> str:
-    # Capitalize the platform name for display, e.g. "Discord:1234567890".
-    return f"{p.platform.capitalize()}:{p.external_id}"
+    # The id alone: the panel must not name a chat app other than the one it is shown on.
+    return p.external_id
 
 
 def _format_cli_principal(p: CliPrincipalRow) -> str:

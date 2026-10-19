@@ -125,6 +125,8 @@ def test_routine_controls_carry_the_destination_platforms_words(
     assert controls["words"]["setup"] == setup
     assert admin in controls["words"]["admin"]
     assert "use `words` from these controls" in text
+    assert "Never name or hint at another chat app" in text
+    assert "only place" not in text
 
 
 def test_routine_controls_for_an_unknown_platform_carry_no_words() -> None:

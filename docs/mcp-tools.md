@@ -143,8 +143,8 @@ Shared channel MCP tools with per-platform dispatch.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `create_thread` | Discord callers, Slack callers, Teams callers | Create a new thread and post content as its first message. |
-| `get_message` | Discord callers, Slack callers, Teams callers | Fetch a single message by channel and message id (Slack: the message ts). |
-| `list_channels` | Discord callers, Slack callers, Teams callers | List channels in this server/workspace that you can view. |
+| `get_message` | Discord callers, Slack callers, Teams callers | Fetch a single message by channel and message id. |
+| `list_channels` | Discord callers, Slack callers, Teams callers | List the channels here that you can view. |
 | `list_threads` | Discord callers, Teams callers | List active and archived public threads for a channel. |
 | `parse_link` | Discord callers, Slack callers, Teams callers | Extract IDs from a channel or message link. |
 | `read_channel` | Discord callers, Slack callers, Teams callers | Read channel messages, oldest-first, with pagination metadata. |
@@ -171,7 +171,7 @@ Post requester-only private forms for agent keys, MCP tokens and GitHub access.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `request_agent_key` | Discord callers, Slack callers, Teams callers | Give an agent an API key or token for any service: Toggl, OpenAI, Higgsfield, or a platform that just launched. |
-| `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion, Slack or Atlassian. |
+| `request_mcp_oauth` | Discord callers, Slack callers, Teams callers | Connect an agent to an MCP server that signs people in through the browser, such as Notion or Atlassian. |
 | `request_mcp_token` | Discord callers, Slack callers, Teams callers | Connect an agent such as research-bot to Linear through an MCP endpoint with a bearer token, not browser OAuth. |
 
 ## `environments`
@@ -216,7 +216,7 @@ Turn-bound GitHub access requests and private admin delivery.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `request_github_access` | Discord callers, Slack callers, Teams callers | Ask for token access to a repo needed for this agent's current request. |
+| `request_github_access` | Discord callers, Slack callers | Ask for token access to a repo needed for this agent's current request. |
 
 ## `github_working_repo`
 
@@ -301,7 +301,7 @@ Propagation tools: set and clear agent defaults at workspace or channel scope.
 | --- | --- | --- |
 | `clear_agent_default` | admin only, operator tokens with channels:write | Stop an agent answering in a channel by clearing its default routing. |
 | `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers, the environment it runs in, and which routing tier decided each. |
-| `set_agent_default` | admin only, operator tokens with channels:write | Make an agent answer in a channel or become the whole workspace/server/team default. |
+| `set_agent_default` | admin only, operator tokens with channels:write | Make an agent answer in a channel or become the whole workspace's default. |
 
 ## `publish`
 
@@ -405,7 +405,7 @@ Channel tidy tools: edit_message, delete_message, archive_thread, delete_thread.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `archive_thread` | Discord callers | Archive a Discord thread you opened, with create_thread or from a mention. |
-| `delete_message` | Discord callers, Slack callers, Teams callers | Delete one message you posted, or on Discord one of your replies or status cards. |
+| `delete_message` | Discord callers, Slack callers, Teams callers | Delete one message you posted, or one of your replies or status cards. |
 | `delete_thread` | Discord callers, Slack callers | Remove your own messages from a thread you opened. |
 | `edit_message` | Discord callers, Slack callers, Teams callers | Replace the text of a message you posted. |
 

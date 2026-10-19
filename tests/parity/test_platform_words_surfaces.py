@@ -151,7 +151,7 @@ def test_the_participation_notes_name_the_platforms_space(platform: ChatPlatform
         scope_id=None,
         requested=ParticipationMode.ON,
         effective=ResolvedParticipation(mode=ParticipationMode.ON, tier="workspace"),
-        space=space,
+        platform=platform,
     )
     _assert_native(platform, note)
     assert f"the whole {space}" in note

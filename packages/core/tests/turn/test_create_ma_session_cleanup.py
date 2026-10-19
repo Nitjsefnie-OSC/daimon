@@ -130,7 +130,7 @@ async def _create(deps: TurnDeps, tenant_id: uuid.UUID, account_id: uuid.UUID) -
     agent = ma_agent(id="ag_1", tenant_id=tenant_id)
     env = ma_environment(id="env_1", tenant_id=tenant_id)
     admission = _admission(account_id=account_id, agent=agent, env=env)
-    return await create_ma_session(deps, admission, tenant_id=tenant_id)
+    return await create_ma_session(deps, admission, tenant_id=tenant_id, platform="discord")
 
 
 async def test_cancel_during_the_personal_memory_lookup_archives_the_created_session(
@@ -477,7 +477,11 @@ async def _prepared_root_create(root_turn, monkeypatch: pytest.MonkeyPatch):
         return await run_controlled_preparation(
             request,
             create_ma_session(
-                request.deps, request.admission, tenant_id=request.tenant_id, preparation=request
+                request.deps,
+                request.admission,
+                tenant_id=request.tenant_id,
+                preparation=request,
+                platform="discord",
             ),
         )
 

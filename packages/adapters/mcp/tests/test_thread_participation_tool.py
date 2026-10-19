@@ -377,7 +377,7 @@ async def test_a_slack_caller_is_refused(
             _CHANNEL,
         )
 
-    assert "Discord" in str(exc_info.value), "the refusal must name where it works"
+    assert "isn't available here" in str(exc_info.value), "the refusal must say so, naming no app"
     assert (await _modes(db_session, tenant_id)).thread is None, "no row may be written"
 
 
@@ -507,7 +507,7 @@ async def test_get_refuses_a_slack_caller_too(
 ) -> None:
     tenant_id = await _seed(committing_sessionmaker)
 
-    with pytest.raises(ToolError, match="Discord"):
+    with pytest.raises(ToolError, match="isn't available here"):
         await _get_thread_participation_impl(
             _runtime(committing_sessionmaker, ParticipationMode.ON),
             _auth(tenant_id=tenant_id, admin=False, platform="slack"),

@@ -527,6 +527,7 @@ async def create_session(
     | None = None,
     channel_skills: Sequence[MaSkill] = (),
     model_override: str | None = None,
+    system_override: str | None = None,
     resource_source: BackendAgent | None = None,
     worker: ResolvedWorkerSpec | None = None,
     native_budget_usd: Decimal | None = None,
@@ -555,6 +556,9 @@ async def create_session(
 
     ``model_override`` replaces the model for this session through
     ``agent_with_overrides``. It never changes the stored agent.
+
+    ``system_override`` replaces the system prompt the same way, for a platform
+    whose variant differs from the agent's own (`daimon.core.platform_system`).
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
     toward (for a DM, the channel it was moved from). It is stamped apart from
@@ -971,7 +975,14 @@ async def create_session(
         )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
-        if hidden or gated or healed or channel_skills or model_override is not None:
+        if (
+            hidden
+            or gated
+            or healed
+            or channel_skills
+            or model_override is not None
+            or system_override is not None
+        ):
             overrides: BetaManagedAgentsAgentWithOverridesParams = {
                 "type": "agent_with_overrides",
                 "id": agent.id,
@@ -990,6 +1001,8 @@ async def create_session(
             }
             if model_override is not None:
                 overrides["model"] = model_override
+            if system_override is not None:
+                overrides["system"] = system_override
             if channel_skills:
                 # A full replacement too: the agent's own at the versions it pins.
                 overrides["skills"] = [

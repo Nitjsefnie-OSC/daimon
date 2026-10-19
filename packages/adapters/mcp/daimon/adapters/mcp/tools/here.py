@@ -118,7 +118,7 @@ async def _where_am_i_impl(
         if channel_id not in visible:
             raise ToolError("missing channel access")
     else:
-        raise ToolError("/here is available for Discord, Slack and Teams channel turns")
+        raise ToolError("where_am_i is available for channel turns only")
     if thread_id is not None:
         await _require_thread_in_channel(runtime, auth, channel_id, thread_id)
     async with runtime.session_factory() as session:
@@ -163,7 +163,7 @@ def register_here_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         publishing needs approval, or whose token or sign-in you hold. Never
         guess these facts from the conversation. Pass the parent channel id
         from turn controls and the current thread id when present. A bound
-        coding token can omit channel_id. Discord, Slack and Teams channel turns
-        only. Unknown visibility is reported as unknown.
+        coding token can omit channel_id. Channel turns only. Unknown visibility is
+        reported as unknown.
         """
         return await _where_am_i_impl(runtime, await _auth(ctx), channel_id, thread_id)

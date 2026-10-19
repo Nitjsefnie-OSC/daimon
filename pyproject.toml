@@ -244,6 +244,7 @@ source_modules = [
     "daimon.core.pending_file_sweeper",
     "daimon.core.permissions",
     "daimon.core.platform_names",
+    "daimon.core.platform_system",
     "daimon.core.platform_words",
     "daimon.core.posted_controls",
     "daimon.core.pricing",

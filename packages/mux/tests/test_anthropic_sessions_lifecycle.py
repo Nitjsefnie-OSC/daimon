@@ -144,7 +144,10 @@ async def test_override_cannot_select_another_agent(model_fields: dict[str, Json
     assert not transport.requests
 
 
-@pytest.mark.parametrize("model_fields", [{}, {"model": None}, {"model": "claude-haiku-5-5"}])
+@pytest.mark.parametrize(
+    "model_fields",
+    [{}, {"model": None}, {"model": "claude-haiku-5-5"}, {"system": "You are Daimon."}],
+)
 async def test_create_preserves_override_tool_key_order_in_request_bytes(
     model_fields: dict[str, JsonValue],
 ) -> None:

@@ -50,6 +50,7 @@ from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, r
 from daimon.core.mux_compat import legacy_call, retrieve_agent, sdk_agent
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.permissions import any_readers_limited
+from daimon.core.platform_system import system_for_platform
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
 from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
@@ -468,6 +469,7 @@ async def create_ma_session(
     extra_resources: tuple[Resource, ...] = (),
     predecessor_session_id: str | None = None,
     preparation: ProviderPreparationRequest | None = None,
+    platform: str,
 ) -> CreatedSession:
     """Create a brand-new MA session and snapshot the configuration it froze.
 
@@ -487,6 +489,10 @@ async def create_ma_session(
     (`reauthorize`): a pin added during a transfer or lock wait refuses the
     turn before any session exists, and a seal added since is stamped on the
     session and mounts memory read-only.
+
+    `platform` picks the system prompt the session runs (`system_for_platform`),
+    derived here from the executing agent's own system, so a fleet worker keeps
+    its composed instructions.
     """
     if _admitted_profile(admission) != "anthropic.managed_agents":
         raise AdmissionDenied(reason="backend_unsupported")
@@ -672,6 +678,7 @@ async def create_ma_session(
             before_create=fence,
             on_app_access=capture_app_access,
             channel_skills=skills,
+            system_override=system_for_platform(admission.agent.system, platform),
             resource_source=preparation.source
             if preparation is not None and preparation.worker is not None
             else None,
@@ -750,6 +757,7 @@ async def create_ma_session(
                 else next(iter(ma_session.vault_ids), None)
             ),
             sent_skills=session_skills(admission.agent, admission.channel_skills),
+            sent_system=system_for_platform(admission.agent.system, platform),
             github_mode=github_mode,
             personal_memory_store_ids=(
                 () if personal_memory_store_id is None else (personal_memory_store_id,)
@@ -902,6 +910,7 @@ async def create_fresh_session(
         tenant_id=tenant_id,
         extra_resources=extra_resources,
         predecessor_session_id=predecessor_session_id,
+        platform=platform,
         **({"preparation": preparation} if preparation is not None else {}),
     )
     async with deps.sessionmaker() as session:
@@ -1571,6 +1580,7 @@ async def bind_session_impl(
                 executing,
                 tenant_id=tenant_id,
                 preparation=replace(selected, admission=executing),
+                platform=platform,
             )
             try:
                 if await recapture() != selected.source:

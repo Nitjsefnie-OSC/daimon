@@ -52,6 +52,7 @@
             "thread_id": null
           },
           "personal_memory": false,
+          "platform": "discord",
           "session_factory": {
             "fixture_type": "async_sessionmaker"
           },

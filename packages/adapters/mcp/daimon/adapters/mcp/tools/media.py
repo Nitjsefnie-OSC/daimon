@@ -224,7 +224,7 @@ def register_upload_tool(mcp: FastMCP, *, runtime: McpRuntime) -> None:
         """Post, send, or share a file to another channel, or from a routine — step 1 of 2.
 
         Not for attaching a file to your reply. In the chat you were invoked
-        from (Discord, Slack, a Teams 1:1 chat), save the file under
+        from, save the file under
         /mnt/session/outputs/ and daimon attaches it to your reply after the
         turn; posting it into that thread with this tool delivers a duplicate.
         Use this tool for a file you were asked to post to a channel or thread
