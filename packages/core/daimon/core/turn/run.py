@@ -59,6 +59,7 @@ from daimon.core.stores.thread_sessions import (
 from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.approvals import (
+    AnnotationLookup,
     agent_rule_lookup,
     channel_for_tool_rules,
     chat_tool_confirmation,
@@ -77,7 +78,7 @@ from daimon.core.turn.lifecycle import (
     acknowledge,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
-from daimon.core.turn.posture import Billed, BillingPosture, UsageRecorder
+from daimon.core.turn.posture import Billed, BillingPosture, ToolConfirmation, UsageRecorder
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
     CreatedSession,
@@ -117,6 +118,41 @@ class _TurnPortKwargs(TypedDict, total=False):
 
 class _ProviderActionKwargs(TypedDict, total=False):
     provider_actions: ProviderActionApproval
+
+
+def prepared_annotation_lookup(
+    deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID
+) -> AnnotationLookup | None:
+    """Operator-trusted MCP hints for `prepared`'s servers, or None.
+
+    Only servers the operator trusts for annotations are read; with none
+    trusted no catalogue is ever listed.
+    """
+    if not (
+        getattr(deps.tool_safety, "enabled", False)
+        and getattr(deps.tool_safety, "trusted_annotations", ())
+    ):
+        return None
+    source = prepared._source  # pyright: ignore[reportPrivateUsage]
+    return mcp_annotation_lookup(
+        server_urls={
+            s.name: s.url
+            for s in prepared.admission.agent.mcp_servers
+            if s.name in deps.tool_safety.trusted_annotations
+        },
+        token_for=agent_mcp_token_for(
+            deps.sessionmaker,
+            fernet=deps.fernet,
+            tenant_id=tenant_id,
+            agent_id=(
+                source.agent_id
+                if source is not None
+                else derive_agent_uuid(
+                    tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
+                )
+            ),
+        ),
+    )
 
 
 def prepared_billing(prepared: PreparedTurn, *, tenant_id: uuid.UUID) -> BillingPosture:
@@ -802,6 +838,7 @@ async def run_prepared_turn(
     confirm_write: ConfirmationHook | None = None,
     provider_action: ProviderActionHook | None = None,
     attended: bool | None = None,
+    tool_confirmation: ToolConfirmation | None = None,
     operation_key: str | None = None,
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
@@ -845,6 +882,7 @@ async def run_prepared_turn(
                 confirm_write=confirm_write,
                 provider_action=provider_action,
                 attended=attended,
+                tool_confirmation=tool_confirmation,
                 operation_key=operation_key,
                 active_turn_message_id=active_turn_message_id,
                 before_send=before_send,
@@ -880,6 +918,7 @@ async def run_prepared_turn_impl(
     confirm_write: ConfirmationHook | None = None,
     provider_action: ProviderActionHook | None = None,
     attended: bool | None = None,
+    tool_confirmation: ToolConfirmation | None = None,
     operation_key: str | None = None,
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
@@ -919,6 +958,8 @@ async def run_prepared_turn_impl(
     the unattended rules (`attended=False`). An adapter that passes no hook
     gets `no_confirmation_surface`, so its writes are refused, never run
     unseen. With the policy off the posture stays `RequireApproval`.
+    `tool_confirmation` replaces that posture for the whole turn, recovery
+    included: an unattended DM routine passes the shared `unattended_posture`.
 
     `active_turn_message_id` is the in-flight marker the adapter wrote on
     `prepared.mapping_id` for this turn, if any. A recovery moves it onto the
@@ -950,8 +991,7 @@ async def run_prepared_turn_impl(
             and get_profile(revision.profile).support_for("tool_confirmation") not in SUPPORTED
         ):
             confirmed_tools = frozenset()
-    prepared_source = prepared._source  # pyright: ignore[reportPrivateUsage]
-    tool_confirmation = chat_tool_confirmation(
+    posture = chat_tool_confirmation(
         deps.tool_safety,
         requester_platform_user_id=external_user_id,
         confirm=confirm_write,
@@ -1010,33 +1050,10 @@ async def run_prepared_turn_impl(
                 else None
             )
         ),
-        annotations_for=(
-            mcp_annotation_lookup(
-                server_urls={
-                    s.name: s.url
-                    for s in prepared.admission.agent.mcp_servers
-                    if s.name in deps.tool_safety.trusted_annotations
-                },
-                token_for=agent_mcp_token_for(
-                    deps.sessionmaker,
-                    fernet=deps.fernet,
-                    tenant_id=tenant_id,
-                    agent_id=(
-                        prepared_source.agent_id
-                        if prepared_source is not None
-                        else derive_agent_uuid(
-                            tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
-                        )
-                    ),
-                ),
-            )
-            # Only servers the operator trusts for annotations are read; with
-            # none trusted no catalogue is ever listed.
-            if getattr(deps.tool_safety, "enabled", False)
-            and getattr(deps.tool_safety, "trusted_annotations", ())
-            else None
-        ),
+        annotations_for=prepared_annotation_lookup(deps, prepared, tenant_id=tenant_id),
     )
+    if tool_confirmation is not None:
+        posture = tool_confirmation
 
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
@@ -1144,7 +1161,7 @@ async def run_prepared_turn_impl(
                 cancel=cancel,
                 render_interval_s=render_interval_s,
                 billing=prepared_billing(prepared, tenant_id=tenant_id),
-                tool_confirmation=tool_confirmation,
+                tool_confirmation=posture,
                 **action_kwargs,
                 image_blocks=image_blocks,
                 system_blocks=prepared.continuity.system_blocks,
@@ -1301,7 +1318,7 @@ async def run_prepared_turn_impl(
                         cancel=fresh_cancel,
                         render_interval_s=render_interval_s,
                         billing=Billed(record=new_record),
-                        tool_confirmation=tool_confirmation,
+                        tool_confirmation=posture,
                         image_blocks=image_blocks,
                         system_blocks=loss_system_blocks,
                         # Reseeding and opening the stream await platform and MA

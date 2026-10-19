@@ -2961,74 +2961,224 @@ async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) 
     assert calls == expected, f"usage pass ran {calls} times with enabled={enabled}"
 
 
-@pytest.mark.parametrize("explicit_dm", [False, True])
-async def test_explicit_dm_never_reads_personal_memory_and_legacy_owner_only_can(
-    explicit_dm: bool,
+async def _dm_routine_fixture(
     db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Decided from the row at every fire: the same routine reads its owner's
-    personal memory while it posts nowhere, and stops once it gets a destination."""
-    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
-    tenant = await make_tenant(db_session)
+    *,
+    destination_kind: str | None = "dm",
+    policy: object | None = None,
+    source_channel_id: str | None = "456",
+):
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    if policy is not None:
+        from daimon.core.stores.access_policy import set_access_policy
+
+        await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)  # type: ignore[arg-type]
     row = await create_routine(
         db_session,
+        tenant_id=tenant.id,
         created_by_user_id="123",
         agent_id="agent_z",
         agent_name="daimon",
         cron_expr="* * * * *",
         timezone_="UTC",
-        trigger_message="trigger",
-        destination_kind="dm" if explicit_dm else None,
-        next_fire_at=now - timedelta(minutes=1),
-        tenant_id=tenant.id,
+        trigger_message="what is on my plate today?",
+        destination_kind=destination_kind,
+        destination_id="456" if destination_kind == "channel" else None,
+        channel_id=source_channel_id,
+        source_thread_id=None,
     )
-    if explicit_dm:
-        from daimon.core.stores.direct_messages import set_dm_enabled
-
-        await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
     await db_session.commit()
-    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
-    calls: list[dict[str, object]] = []
+    return tenant, row
+
+
+@pytest.mark.parametrize("kind", ["dm", "channel", None])
+async def test_dm_routine_runs_as_owner_dm_turn_and_others_stay_headless(
+    kind: str | None,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit owner DM runs as its owner's DM turn (personal memory, live-DM
+    tools, unattended) and queues its answer for the owner's DM only. A channel
+    routine stays on the headless runner with no personal memory; the legacy
+    owner-only routine keeps its read-only personal mount."""
+    from daimon.core.direct_messages import DmRoutineReply
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.routine_delivery import DeliveryOutcome, poll_deliveries_once
+
+    tenant, row = await _dm_routine_fixture(db_session, destination_kind=kind)
+    if kind is None:
+        row = row.model_copy(update={"channel_id": None})
+    headless: list[dict[str, object]] = []
+    private: list[dict[str, object]] = []
 
     async def capturing_run_turn(**kwargs: object) -> str:
-        calls.append(kwargs)
+        headless.append(kwargs)
         return "tail"
+
+    async def capturing_dm_routine(deps: object, **kwargs: object) -> DmRoutineReply:
+        private.append({"deps": deps, **kwargs})
+        return DmRoutineReply(text="Today: two reviews.", session_id="sess_dm", grant=None)  # type: ignore[arg-type]
+
+    async def no_files(client: object, *, session_id: str, text: str) -> str:
+        return text
 
     async def fake_resolve(*args: object, **kwargs: object) -> str:
         return "agent_z"
 
-    from daimon.core.membership import CachedMembershipResolver, Membership
-
-    async def member(tenant_id, guild_id, user_id):
+    async def member(*args: object) -> Membership:
         return Membership(is_member=True)
 
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
     fire = await _build_fire(
-        client=fake_client,
+        client=client,
         sm=db_session_factory,
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        membership_resolver=CachedMembershipResolver(member) if explicit_dm else None,
-    )
-    posting = row.model_copy(
-        update={"destination_kind": "channel", "destination_id": "chan-9", "channel_id": "chan-9"}
+        membership_resolver=CachedMembershipResolver(member),
     )
     with (
         unittest.mock.patch(
             "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
         ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_dm_routine", side_effect=capturing_dm_routine
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.collect_routine_files", no_files),
         unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
         unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
     ):
         await fire(row)
-        await fire(posting)
-    await fake_client.close()
+    await client.close()
 
-    assert [call["personal_memory"] for call in calls] == [not explicit_dm, False]
-    assert calls[0]["account_id"] is not None, "the owner's account selects the store"
+    if kind != "dm":
+        assert private == [], "only an explicit owner DM runs as a DM turn"
+        assert [call["personal_memory"] for call in headless] == [kind is None]
+        return
+    assert headless == [], "never the headless runner"
+    (call,) = private
+    assert call["owner_user_id"] == "123", "the creator is the principal"
+    assert call["agent_name"] == "daimon", "the routine's saved agent"
+    assert call["budget_channel_id"] == "456", "billed to its budget channel"
+    from daimon.core.turn.admission import DmSource
+
+    assert call["source"] == DmSource(channel_id="456", thread_id=None)
+    assert str(call["prompt"]).endswith("what is on my plate today?")
+    assert getattr(call["deps"], "membership_resolver", None) is not None
+    async with db_session_factory() as s:
+        after = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert after is not None and after.last_error is None
+    assert after.delivery_status == "pending" and after.last_result_tail == "Today: two reviews."
+
+    posted: list[tuple[str | None, str | None]] = []
+
+    async def post(claimed: RoutineRow) -> DeliveryOutcome:
+        posted.append((claimed.destination_kind, claimed.destination_id))
+        return DeliveryOutcome(status="delivered")
+
+    await poll_deliveries_once(
+        db_session_factory, platform="discord", post=post, now=datetime.now(UTC)
+    )
+    assert posted == [("dm", "123")], "delivered once, to the owner's DM only"
+
+
+@pytest.mark.parametrize("reason", ["own_agents_only", "source_sealed"])
+async def test_dm_routine_refusal_is_recorded_and_nothing_is_queued(
+    reason: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.direct_messages import DirectMessageAccessRevoked
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.turn.errors import AdmissionDenied
+
+    tenant, row = await _dm_routine_fixture(db_session)
+
+    async def refuse(deps: object, **kwargs: object) -> object:
+        if reason == "source_sealed":
+            raise DirectMessageAccessRevoked(reason, message="sealed")
+        raise AdmissionDenied(reason="own_agents_only")
+
+    async def member(*args: object) -> Membership:
+        return Membership(is_member=True)
+
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        membership_resolver=CachedMembershipResolver(member),
+    )
+    with unittest.mock.patch("daimon.adapters.scheduler.main.run_dm_routine", side_effect=refuse):
+        await fire(row)
+    await client.close()
+    async with db_session_factory() as s:
+        after = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert after is not None and after.last_error == reason
+    assert after.delivery_status is None and after.delivery_payload is None
+
+
+@pytest.mark.parametrize("bypass", [True, False])
+async def test_dm_routine_follows_the_admin_invoker_switch(
+    bypass: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H1b: an admin creator outside the allowlist runs only while the admin pass is on."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.direct_messages import DmRoutineReply
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    tenant, row = await _dm_routine_fixture(
+        db_session,
+        policy=TenantAccessPolicy(invoker_role_ids=("777",), invoker_admin_bypass=bypass),
+    )
+    ran: list[object] = []
+
+    async def dm_routine(deps: object, **kwargs: object) -> DmRoutineReply:
+        ran.append(kwargs)
+        return DmRoutineReply(text="ok", session_id="sess_dm", grant=None)  # type: ignore[arg-type]
+
+    async def no_files(client: object, *, session_id: str, text: str) -> str:
+        return text
+
+    async def admin(*args: object) -> Membership:
+        return Membership(is_member=True, is_admin=True)
+
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        membership_resolver=CachedMembershipResolver(admin),
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_dm_routine", side_effect=dm_routine
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.collect_routine_files", no_files),
+    ):
+        await fire(row)
+    await client.close()
+    async with db_session_factory() as s:
+        after = await get_routine(s, row.id, tenant_id=tenant.id)
+    assert after is not None
+    if bypass:
+        assert len(ran) == 1 and after.delivery_status == "pending"
+    else:
+        assert ran == [] and after.last_error == "invoker_not_allowed"
+        assert after.delivery_status is None
 
 
 async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
@@ -3174,9 +3324,13 @@ async def test_dm_fire_refuses_disabled_or_unverified_private_access(
         resolver_cache=new_resolver_cache(),
         membership_resolver=CachedMembershipResolver(member),
     )
-    with unittest.mock.patch("daimon.adapters.scheduler.main.run_turn") as turn:
+    with (
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn") as turn,
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_dm_routine") as private,
+    ):
         await fire(row)
         turn.assert_not_called()
+        private.assert_not_called()
     async with db_session_factory() as session:
         after = await get_routine(session, row.id, tenant_id=tenant.id)
     assert after is not None and after.last_error and after.delivery_status is None

@@ -27,6 +27,7 @@ import signal
 import sys
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -54,6 +55,7 @@ from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
+from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_app_session import (
     archive_app_vault,
@@ -144,6 +146,9 @@ from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refresh
 from daimon.core.tenant_balance import is_over_balance
+from daimon.core.turn.admission import DmSource
+from daimon.core.turn.deps import TurnDeps, build_turn_deps
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -229,6 +234,7 @@ async def _build_fire(
     deployment_default: DeploymentDefault,
     resolver_cache: ResolverCache,
     membership_resolver: MembershipResolver | None = None,
+    billing_config: BillingConfig | None = None,
 ) -> FireFn:
     """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
 
@@ -253,6 +259,108 @@ async def _build_fire(
         if settings.discord is not None
         else None
     )
+
+    turn_deps: list[TurnDeps] = []
+
+    def _turn_deps() -> TurnDeps:
+        """The ordinary turn dependencies a DM routine runs with, built on first use."""
+        if not turn_deps:
+            turn_deps.append(
+                replace(
+                    build_turn_deps(
+                        settings,
+                        client,
+                        sm,
+                        deployment_default=deployment_default,
+                        resolver_cache=resolver_cache,
+                        billing_config=billing_config,
+                    ),
+                    membership_resolver=membership_resolver,
+                )
+            )
+        return turn_deps[0]
+
+    async def _refused_over_channel_budget(row: RoutineRow, *, platform: str) -> bool:
+        """Record and refuse a fire over its channel budget. Keyed on `row.channel_id`,
+        the channel the fire is billed to (the destination's parent, else where the
+        routine was made)."""
+        if not await is_over_channel_budget(
+            sessionmaker=sm,
+            tenant_id=row.tenant_id,
+            platform=platform,
+            channel_id=row.channel_id,
+            now=datetime.now(UTC),
+        ):
+            return False
+        if (observation := current_outcome.get()) is not None:
+            observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
+        log.info(
+            "routine.skipped.over_channel_budget",
+            routine_id=str(row.id),
+            tenant_id=str(row.tenant_id),
+            channel_id=row.channel_id,
+        )
+        async with sm() as s, s.begin():
+            await record_failure(
+                s,
+                row.id,
+                error="channel_budget_exceeded",
+                reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+            )
+        return True
+
+    async def _fire_dm(row: RoutineRow, owner_user_id: str, *, direct_post: DirectPost) -> None:
+        """Run an explicit owner-DM routine as a fresh private DM turn of its owner.
+
+        Same admission, session, memory and tools as a fresh live DM of the
+        owner with the routine's agent, unattended; the final text is queued
+        for the owner's DM only. Admission rechecks the owner's live
+        membership, the cold-DM agent rules and the creation source's seal.
+        """
+        if await _refused_over_channel_budget(row, platform="discord"):
+            return
+        prompt = (
+            render_routine_controls(row, platform="discord", direct_post=direct_post)
+            + "\n"
+            + row.trigger_message
+        )
+        # Source-free stays source-free; a known source is rechecked for a seal.
+        source = (
+            DmSource(channel_id=row.source_channel_id, thread_id=row.source_thread_id)
+            if row.source_channel_id is not None
+            else None
+        )
+        try:
+            reply = await run_dm_routine(
+                _turn_deps(),
+                tenant_id=row.tenant_id,
+                owner_user_id=owner_user_id,
+                agent_name=row.agent_name,
+                prompt=prompt,
+                source=source,
+                budget_channel_id=row.channel_id,
+            )
+        except (AdmissionDenied, DirectMessageAccessRevoked) as error:
+            log.info(
+                "routine.skipped.invoker_policy",
+                routine_id=str(row.id),
+                tenant_id=str(row.tenant_id),
+                reason=error.reason,
+            )
+            async with sm() as s, s.begin():
+                await record_result(s, row.id, tail=None, error=error.reason)
+            return
+        payload = await collect_routine_files(client, session_id=reply.session_id, text=reply.text)
+        async with sm() as s, s.begin():
+            await record_result(
+                s,
+                row.id,
+                tail=reply.text,
+                delivery_payload=payload,
+                error=None,
+                delivery="pending",
+                expected_destination=(row.destination_kind, row.destination_id),
+            )
 
     async def _fire(row: RoutineRow) -> None:
         if row.created_by_user_id is None:
@@ -415,6 +523,10 @@ async def _build_fire(
                 )
             return
 
+        if row.destination_kind == "dm":
+            await _fire_dm(row, row.created_by_user_id, direct_post=direct_post)
+            return
+
         # Bind routine context now; headless_runner calls the factory once
         # (session_id, model_id) are known after create_session.
         platform_user_id = row.created_by_user_id
@@ -502,30 +614,8 @@ async def _build_fire(
                     await record_result(pin_s, row.id, tail=None, error=refusal)
                 return
         # Admission gate: the routine's channel budget, after the cap (run_one_tick),
-        # balance and pin gates. Keyed on `row.channel_id`, the channel the fire is
-        # billed to (the destination's parent, else where the routine was made).
-        if await is_over_channel_budget(
-            sessionmaker=sm,
-            tenant_id=row.tenant_id,
-            platform=platform,
-            channel_id=row.channel_id,
-            now=datetime.now(UTC),
-        ):
-            if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
-            log.info(
-                "routine.skipped.over_channel_budget",
-                routine_id=str(row.id),
-                tenant_id=str(row.tenant_id),
-                channel_id=row.channel_id,
-            )
-            async with sm() as s, s.begin():
-                await record_failure(
-                    s,
-                    row.id,
-                    error="channel_budget_exceeded",
-                    reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
-                )
+        # balance and pin gates.
+        if await _refused_over_channel_budget(row, platform=platform):
             return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
@@ -588,8 +678,7 @@ async def _build_fire(
                 if fire_policy is not None
                 else None
             ),
-            # Explicit DM delivery retains ordinary tool authority and must not
-            # load personal memory. Preserve the legacy owner-only behavior.
+            # Only a legacy owner-only routine; explicit DMs run in `_fire_dm`.
             personal_memory=routine_mounts_personal_memory(row),
         )
 
@@ -1362,7 +1451,8 @@ async def run(
     health_server = await start_liveness_responder(scheduler_settings.health_port)
 
     deployment_default = parse_deployment_default(settings.defaults_root)
-    caps = _CapsAdapter(sm, billing_config=load_billing_config())
+    billing_config = load_billing_config()
+    caps = _CapsAdapter(sm, billing_config=billing_config)
     resolver_cache = new_resolver_cache()
     fire = await _build_fire(
         client=client,
@@ -1370,6 +1460,7 @@ async def run(
         settings=settings,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
+        billing_config=billing_config,
     )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)

@@ -131,9 +131,9 @@ def routine_answers_only_owner(row: RoutineRow) -> bool:
 
     Explicit DM delivery reaches only the owner, even with a saved source
     channel. A legacy routine with neither destination nor channel also keeps
-    its result private. Only the legacy owner-only case may read personal
-    memory; explicit DM routines retain ordinary tool authority and never
-    mount personal memory.
+    its result private. Both read their owner's personal memory: an explicit
+    DM routine as its owner's fresh DM turn (`direct_messages.run_dm_routine`),
+    the legacy one on the headless runner (`routine_mounts_personal_memory`).
     A channel/thread routine may fall back to a DM, but cannot read personal
     memory because public delivery remains possible. Decided at every fire.
     """
@@ -143,10 +143,12 @@ def routine_answers_only_owner(row: RoutineRow) -> bool:
 
 
 def routine_mounts_personal_memory(row: RoutineRow) -> bool:
-    """Only legacy owner-only runs mount personal memory.
+    """Whether a headless routine run mounts its owner's personal memory.
 
-    Explicit DM delivery retains ordinary tool authority, so its execution
-    must never load the owner's personal store.
+    Only the legacy owner-only routine (no destination, no channel), read-only.
+    An explicit DM routine does not run headless: the scheduler runs it as
+    its owner's DM turn, which mounts personal memory exactly as a live DM
+    does (`direct_messages.run_dm_routine`), so it answers False here.
     """
     return row.destination_kind != "dm" and routine_answers_only_owner(row)
 
