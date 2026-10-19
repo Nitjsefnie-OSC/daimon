@@ -180,7 +180,7 @@ async def test_create_rejects_a_bad_cron_then_creates_the_routine_for_the_admin(
 
     assert bad["task"]["type"] == "continue", "the form comes back to fix"
     assert "That schedule or time zone isn't valid." in json.dumps(bad)
-    assert "Routine created for daimon" in good["task"]["value"]
+    assert "Routine created for daimon, every day at 09:00 UTC." in good["task"]["value"]
     async with db_session_factory() as session:
         [row] = await list_routines_for_tenant(session, tenant_id=TENANT)
     assert row.created_by_user_id == AAD_OBJECT_ID, "the clicker owns the routine"
