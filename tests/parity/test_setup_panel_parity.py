@@ -307,7 +307,7 @@ async def test_roster_lists_the_same_agents_in_the_same_order_on_both_platforms(
         "Details",
         "Details",
         "Details",
-        f"Manage {_ANSWERING}",
+        f"Set up {_ANSWERING}",
         "New agent",
         "Who answers where",
         *(("GitHub",) if driver.param_id in ("discord", "slack") else ()),
@@ -377,7 +377,7 @@ async def test_empty_roster_shows_the_setup_copy_and_keeps_the_setup_action(
     assert view.rows == (EMPTY_ROSTER_COPY,), (
         f"{driver.param_id}: an empty roster says what to do next, and lists nothing else"
     )
-    assert "Manage agents" in view.action_labels, (
+    assert "Set up agents" in view.action_labels, (
         f"{driver.param_id}: setup stays available with no agent answering here"
     )
     assert view.page is None, f"{driver.param_id}: an empty roster needs no pager"

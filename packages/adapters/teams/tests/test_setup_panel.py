@@ -134,7 +134,10 @@ async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
             agent_name="analyst",
             mode="agent",
         )
-    async with _running(db_session_factory, teams_api_fake) as (service, _):
+    async with _running(db_session_factory, teams_api_fake, admins=(AAD_OBJECT_ID,)) as (
+        service,
+        _,
+    ):
         details = await post_activity(service, _click("details", agent="analyst"))
         routing = await post_activity(service, _click("routing"))
         gone = await post_activity(service, _click("details", agent="deleted-one"))
@@ -143,6 +146,26 @@ async def test_details_and_routing_replace_the_card_and_a_gone_agent_says_so(
     assert "Model:" in json.dumps(details) and "Use from your coding tools" in json.dumps(details)
     assert "Organisation default" in json.dumps(routing)
     assert setup_panel.GONE in json.dumps(gone), "the roster returns with a notice"
+
+
+async def test_details_offers_a_member_no_coding_tools_button_that_could_only_refuse(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=TENANT, channel_id=CONVERSATION_ID),
+            tenant_id=TENANT,
+            agent_name="analyst",
+            mode="agent",
+        )
+    async with _running(db_session_factory, teams_api_fake) as (service, _):
+        details = json.dumps(await post_activity(service, _click("details", agent="analyst")))
+
+    assert "Model:" in details, "the member still reads the agent"
+    assert "Use from your coding tools" not in details
+    assert "Coding-tool access is not configured" not in details
+    assert "Set up " in details, "the way to ask for a change stays"
 
 
 @pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])

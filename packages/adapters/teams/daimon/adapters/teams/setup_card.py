@@ -223,12 +223,17 @@ def details_card(
     here: str,
     page: int,
     coding_tools: bool,
+    is_admin: bool,
     github_panel: GrantsPanel | None = None,
     expanded: DetailListName | None = None,
     backend_options: tuple[Provider, ...] = (),
     backend_selection: Provider | None = None,
 ) -> AdaptiveCard:
-    """One agent's readable state. Key values are not in the model, so never here."""
+    """One agent's readable state. Key values are not in the model, so never here.
+
+    Add skill and the coding-tool token are admin changes, so only an admin is
+    offered them: a member's press could only end in a refusal.
+    """
     purpose = details.purpose
     body: list[CardElement] = [_text(clip(purpose, _PURPOSE_MAX_CHARS))] if purpose else []
     places = [_place(place, here=here) for place in details.answers_in]
@@ -274,13 +279,13 @@ def details_card(
             ]
         )
     actions: list[Action] = []
-    if not details.daimon_managed:
+    if is_admin and not details.daimon_managed:
         add = OpenDialogData(SKILL_DIALOG, {"agent": details.name})
         actions.append(SubmitAction(title="➕ Add skill", data=add))
-    if coding_tools:
+    if is_admin and coding_tools:
         data = OpenDialogData(TOKEN_DIALOG, {"agent": details.name})
         actions.append(SubmitAction(title="🧰 Use from your coding tools", data=data))
-    else:
+    elif is_admin:
         body.append(_text("Coding-tool access is not configured for this deployment.", subtle=True))
     actions.append(_button("Back", "agents", page=page))
     return _card(details.name, body, actions)

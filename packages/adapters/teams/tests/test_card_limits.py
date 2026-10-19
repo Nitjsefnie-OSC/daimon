@@ -193,7 +193,7 @@ def _details(expanded: DetailListName) -> AdaptiveCard:
         applies_note=f"Changes to {NAME} apply from the next message to it.",
     )
     return setup_card.details_card(
-        details, here=CHANNEL, page=10**6, coding_tools=True, expanded=expanded
+        details, here=CHANNEL, page=10**6, coding_tools=True, is_admin=True, expanded=expanded
     )
 
 
