@@ -197,6 +197,17 @@ card and deliver the final answer. Anthropic keeps its native event tap.
 Alternate-provider usage does not become an Anthropic meter; an unverified
 display cost is omitted.
 
+Whatever a model writes for a person on one chat platform has the other two
+apps' names replaced by "another app" before it is posted
+(`platform_words.scrub_other_platforms`, a plain-text pass that leaves lowercase
+"slack" and "teams" alone). `run_prepared_turn` wraps each chat turn's lifecycle
+so the card, the answer and any sealed answer arrive scrubbed on all three
+platforms, and the status card does the same for its draft and tool lines. The
+tools that post for the model (`send_message`, `create_thread`, `edit_message`,
+`send_direct_message`, `post_wizard`), a routine's delivered result, the Discord
+thread title and a Discord reply recovered after a restart pass through it too.
+Stored transcripts, logs and everything sent to the model keep the original text.
+
 **Stage one, `admit()` — `packages/core/daimon/core/turn/admission.py`.** One
 call does identity resolution, config resolution, and every pre-turn gate, and
 returns a frozen `Admission` (account id, MA agent, MA environment, resolved

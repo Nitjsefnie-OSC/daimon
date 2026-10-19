@@ -173,7 +173,9 @@ def make_discord_routine_poster(
         try:
             dm = await open_dm(int(guild_id), int(creator))
             for chunk in split_fenced(
-                render_fallback_dm(row, reason), _DISCORD_MAX_CHARS, word_boundary=True
+                render_fallback_dm(row, reason, platform="discord"),
+                _DISCORD_MAX_CHARS,
+                word_boundary=True,
             ):
                 await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
         except (discord.HTTPException, LookupError) as err:
@@ -265,7 +267,9 @@ def make_discord_routine_poster(
         )
         if client is None or identity is None or identity.builtin:
             for chunk in split_fenced(
-                render_fallback_post(row), _DISCORD_MAX_CHARS, word_boundary=True
+                render_fallback_post(row, platform="discord"),
+                _DISCORD_MAX_CHARS,
+                word_boundary=True,
             ):
                 sent = await channel.send(
                     content=chunk, allowed_mentions=discord.AllowedMentions.none()
@@ -283,7 +287,11 @@ def make_discord_routine_poster(
             identity_enabled=True,
         )
         for index, chunk in enumerate(
-            split_fenced(render_fallback_post(row, as_agent=True), limit, word_boundary=True)
+            split_fenced(
+                render_fallback_post(row, as_agent=True, platform="discord"),
+                limit,
+                word_boundary=True,
+            )
         ):
             sent = await transport.send(
                 content=chunk,

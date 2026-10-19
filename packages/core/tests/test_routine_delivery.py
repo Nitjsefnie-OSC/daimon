@@ -708,3 +708,22 @@ async def test_full_result_is_queued_separately_from_marked_tail(db_session, del
     assert saved.last_result_tail.endswith("LAST COMPLETE PARAGRAPH.")
     assert "HEAD-ONLY" not in saved.last_result_tail
     assert saved.delivery_payload == (result if delivery == "pending" else None)
+
+
+@pytest.mark.parametrize(
+    ("platform", "payload", "scrubbed"),
+    [
+        ("discord", "Sent to Discord, Slack and Teams.", "Sent to Discord, other apps."),
+        ("slack", "Sent to Discord or Microsoft Teams.", "Sent to another app."),
+        ("teams", "Sent to Discord and Slack.", "Sent to other apps."),
+    ],
+)
+def test_a_routine_result_never_names_another_chat_app(
+    platform: str, payload: str, scrubbed: str
+) -> None:
+    row = _row(delivery_payload=payload)
+    assert render_fallback_post(row, platform=platform).endswith(f"\n\n{scrubbed}")
+    assert render_fallback_post(row, as_agent=True, platform=platform).endswith(f"\n\n{scrubbed}")
+    dm = render_fallback_dm(row, "destination_unavailable", platform=platform)
+    assert dm.endswith(f"\n\n{scrubbed}")
+    assert render_fallback_post(row).endswith(payload), "no platform, no scrubbing"

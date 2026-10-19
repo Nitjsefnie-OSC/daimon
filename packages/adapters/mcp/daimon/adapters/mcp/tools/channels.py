@@ -89,6 +89,7 @@ from daimon.adapters.mcp.tools.teams._send import (
     _teams_replace_file_impl,  # pyright: ignore[reportPrivateUsage]
     _teams_send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.teams_threads import is_group_chat
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -148,8 +149,12 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         sent, so do not blindly resend the whole message. No attachments or
         cross-tenant messages.
         """
+        auth = await _auth(ctx)
         return await send_direct_message_impl(
-            runtime, await _auth(ctx), recipient_id=recipient_id, content=content
+            runtime,
+            auth,
+            recipient_id=recipient_id,
+            content=scrub_other_platforms(content, auth.platform),
         )
 
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
@@ -378,6 +383,8 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         workspace marked protected.
         """
         auth = await _auth(ctx)
+        name = scrub_other_platforms(name, auth.platform)
+        content = scrub_other_platforms(content, auth.platform)
         if auth.platform == "slack":
             return await _slack_create_thread_impl(
                 runtime, auth, channel_id=channel_id, content=content
@@ -507,6 +514,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         unasked.
         """
         auth = await _auth(ctx)
+        content = scrub_other_platforms(content, auth.platform)
         if auth.platform == "teams":
             return await _teams_send_message_impl(
                 runtime,

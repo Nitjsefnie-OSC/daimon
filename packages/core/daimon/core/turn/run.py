@@ -74,6 +74,7 @@ from daimon.core.turn.lifecycle import (
     TurnLifecycle,
     acknowledge,
 )
+from daimon.core.turn.outbound import scrubbed_for
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import Billed, BillingPosture, UsageRecorder
 from daimon.core.turn.prepare import (
@@ -863,6 +864,10 @@ async def run_prepared_turn(
     return result
 
 
+#: Origins whose lifecycle draws the turn in a chat for a person to read.
+_CHAT_RENDERED_ORIGINS: frozenset[TurnContext] = frozenset({"chat", "handoff"})
+
+
 async def run_prepared_turn_impl(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -945,6 +950,9 @@ async def run_prepared_turn_impl(
     signal (`_is_dead_session` gates on `kind == "upstream"`), so a ceiling
     breach can never loop into a second wall-clock-priced attempt.
     """
+    if origin in _CHAT_RENDERED_ORIGINS:
+        # A worker's lifecycle hands its result back to a model, not to a person.
+        lifecycle, recovery_lifecycle = scrubbed_for(platform, lifecycle, recovery_lifecycle)
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
     confirmed_tools: frozenset[str] = confirmed_tools_for_turn(deps)
     if confirmed_tools:

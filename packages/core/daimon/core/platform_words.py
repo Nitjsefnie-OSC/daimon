@@ -8,8 +8,10 @@ skills, tool descriptions) stays platform-neutral and points at the per-turn not
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import cache
 from types import MappingProxyType
 from typing import Literal
 
@@ -283,3 +285,115 @@ def turn_words(platform: ChatPlatform, *, place: Place, foreign: bool = False) -
     # Credit is added from the billing card, which on Teams lives in the 1:1 chat.
     out["billing"] = words.say_top_up(place=place, me="Daimon", foreign=foreign)
     return out
+
+
+# --- Keeping other chat apps' names out of what Daimon posts -------------------------------
+
+#: What replaces a name; a list of them reads "other apps".
+OTHER_APP = "another app"
+OTHER_APPS = "other apps"
+
+#: Hosts (the registrable domain, any subdomain too) that give a platform away.
+_HOSTS: Mapping[ChatPlatform, str] = MappingProxyType(
+    {
+        "discord": r"discord(?:app)?\.(?:com|net|gg|media)",
+        "slack": r"slack(?:-edge|-files|-imgs)?\.com",
+        "teams": r"teams\.(?:microsoft|live)\.com",
+    }
+)
+
+#: A platform's name as prose. Discord is matched in any case. Slack and Teams only
+#: capitalised, so "cut some slack" and "my teams" stay. The cost is a false positive when
+#: Slack or Teams opens a sentence in its other sense ("Teams of three work best"): that
+#: reads "Another app of three ...", accepted over letting the name through.
+_NAMES: Mapping[ChatPlatform, str] = MappingProxyType(
+    {
+        "discord": r"(?i:discord)",
+        "slack": r"(?:Slack(?:bot)?|SLACK)",
+        "teams": r"(?:(?i:microsoft)\s+Teams|MS\s+Teams|Teams)",
+    }
+)
+
+# Letters and digits end a word; an underscore does not, so `discord_send_message` is caught.
+_NOT_AFTER_WORD = r"(?<![^\W_])"
+_NOT_BEFORE_WORD = r"(?![^\W_])"
+_URL_TAIL = r"(?::\d+)?(?:/(?:[^\s<>()\[\]]*[^\s<>()\[\].,;:!?'\"*_`~])?)?"
+_SEPARATOR = r"(?P<sep>\s*,\s*(?:(?i:and|or)\s+)?|\s+(?i:and|or)\s+|\s*[/&]\s*)"
+
+
+def _item_pattern(platform: ChatPlatform) -> str:
+    """One mention of `platform`: a link to it, a bare URL, or its name."""
+    url = rf"(?<![\w./-])(?i:(?:https?://)?(?:[a-z0-9-]+\.)*{_HOSTS[platform]}){_URL_TAIL}"
+    markdown_link = rf"!?\[[^\]\n]*\]\(\s*<?{url}[^)\n]*\)"
+    angle_link = rf"<{url}(?:\|[^>\n]*)?>"
+    name = rf"{_NOT_AFTER_WORD}{_NAMES[platform]}{_NOT_BEFORE_WORD}"
+    return f"(?:{markdown_link}|{angle_link}|{url}|{name})"
+
+
+@dataclass(frozen=True, slots=True)
+class _Patterns:
+    run: re.Pattern[str]
+    """A run of the other apps' names: the whole of what gets replaced."""
+    step: re.Pattern[str]
+    """One separator and the name after it, to read the separators out of a run."""
+
+
+@cache
+def _patterns(platform: ChatPlatform) -> _Patterns:
+    item = "|".join(_item_pattern(other) for other in CHAT_PLATFORMS if other != platform)
+    item = f"(?:{item})"
+    run = re.compile(
+        rf"(?P<article>{_NOT_AFTER_WORD}(?i:an?|the)\s+)?"
+        rf"(?P<first>{item})"
+        rf"(?P<more>(?:{_SEPARATOR}{item})*)"
+        r"(?P<possessive>['\u2019]s\b)?"
+    )
+    return _Patterns(run=run, step=re.compile(_SEPARATOR + item))
+
+
+def _opens_sentence(text: str, position: int) -> bool:
+    before = text[:position].rstrip(" \t*_>#-")
+    if not before or before.endswith("\n"):
+        return True
+    return before[-1] in ".!?" and text[position - 1].isspace()
+
+
+def _plain_name(match: re.Match[str], text: str, step: re.Pattern[str]) -> str:
+    """What a run of other apps' names becomes: "another app", or "other apps" for several."""
+    separators = [found.group("sep") for found in step.finditer(match.group("more"))]
+    several = bool(separators) and not all(re.search(r"\bor\b", sep, re.I) for sep in separators)
+    if several:
+        name, possessive = OTHER_APPS, "'" if match.group("possessive") else ""
+    else:
+        name, possessive = OTHER_APP, match.group("possessive") or ""
+    if _opens_sentence(text, match.start()):
+        name = name[0].upper() + name[1:]
+    return name + possessive
+
+
+def scrub_other_platforms(text: str, platform: str | None) -> str:
+    """`text` with the other two chat apps' names replaced by "another app".
+
+    For text Daimon posts on `platform` that a model wrote: a person on one chat app must
+    never read Daimon name another. Never touches `platform`'s own name, and returns `text`
+    as it is for no platform (the CLI), so a caller need not branch.
+
+    - Discord is matched as a whole word in any case; Slack and Teams only capitalised
+      ("Slack", "Microsoft Teams", "Teams"), so the lowercase English "slack", "team" and
+      "teams" stay. A sentence that opens with "Slack" or "Teams" in its other sense is
+      replaced too, a false positive accepted over a leak.
+    - Links to another app's hosts (and `*.slack.com`, `teams.microsoft.com`, `discord.gg`),
+      bare or as `[text](url)`, `<url>` or Slack's `<url|text>`, become the same words.
+    - A run of names reads as one name: "Discord or Slack" is "another app", "Discord and
+      Slack" and "Discord, Slack" are "other apps". A leading "a" or "the" goes with it
+      ("a Slack channel" is "another app channel").
+    - Code is scrubbed too. A fenced block that names Discord is still a mention, and
+      skipping code would need a Markdown parser that a streamed, half-written reply
+      cannot give.
+
+    Idempotent, linear in the length of `text`, and the identity when nothing matches.
+    """
+    if platform not in CHAT_PLATFORMS:
+        return text
+    patterns = _patterns(platform)
+    return patterns.run.sub(lambda match: _plain_name(match, text, patterns.step), text)

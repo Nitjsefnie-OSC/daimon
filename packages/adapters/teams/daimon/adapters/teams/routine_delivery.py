@@ -76,7 +76,7 @@ def make_teams_routine_poster(
                 return DeliveryOutcome(status="skipped", note=reason)
             chat = await teams.open_chat(member)
             for chunk in split_fenced(
-                render_fallback_dm(row, reason), TEAMS_LIMIT, word_boundary=True
+                render_fallback_dm(row, reason, platform="teams"), TEAMS_LIMIT, word_boundary=True
             ):
                 await teams.post(chat, chunk)
         except TEAMS_SEND_ERRORS as err:
@@ -120,7 +120,7 @@ def make_teams_routine_poster(
                 "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
             )
             return await fallback("creator_cannot_post")
-        text = render_fallback_post(row)
+        text = render_fallback_post(row, platform="teams")
         conversation = teams_thread_id(target)
         try:
             ids = [

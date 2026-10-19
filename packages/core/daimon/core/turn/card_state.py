@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
+from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import format_draft, format_tool_lines, has_running_tool
 
@@ -53,6 +54,8 @@ class CardState:
     phase: TurnPhase = TurnPhase.THINKING
     tool_lines: tuple[str, ...] = ()
     agent_name: str = ""
+    platform: str | None = None
+    """The chat platform the card is on: the draft and tool lines never name another app."""
     header_customized: bool = False
     started_at: float = 0.0
     cost_str: str | None = None
@@ -78,7 +81,8 @@ def update(state: CardState, event: CardEvent) -> CardState:
     if event.kind == "message":
         if not event.label:
             return state
-        return dataclasses.replace(state, text_preview=format_draft(event.label))
+        draft = format_draft(scrub_other_platforms(event.label, state.platform))
+        return dataclasses.replace(state, text_preview=draft)
     if event.kind == "done":
         return dataclasses.replace(state, phase=TurnPhase.DONE)
     return dataclasses.replace(state, phase=TurnPhase.ERROR, error_reason=event.label or "error")
@@ -93,4 +97,5 @@ def update_activity(state: CardState, turn: TurnState) -> CardState:
         return state
     phase = TurnPhase.TOOL_RUNNING if has_running_tool(turn.content) else TurnPhase.THINKING
     lines = format_tool_lines(turn.content, finished_ids=turn.finished_tool_ids)
+    lines = tuple(scrub_other_platforms(line, state.platform) for line in lines)
     return dataclasses.replace(state, phase=phase, tool_lines=lines)
