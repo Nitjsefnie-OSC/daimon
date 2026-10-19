@@ -25,6 +25,8 @@ optional `routine_id`, notifier and resolver **user** IDs, pipeline, stage and
 optional deal-field mappings. `reconciliation_start` is a timezone-aware cutover
 checkpoint; choose the current time to start without historical import. Names,
 addresses, portal IDs and CRM field mappings are deployment-specific.
+`gmail_mailbox` is required: unclassified discoveries and scan coverage are kept
+per mailbox, so renaming the connection keeps them, with their expiry unchanged.
 
 An example configuration using synthetic identifiers:
 
@@ -112,7 +114,36 @@ remote result. An empty search alone never authorizes another create.
   selections, then resumes. Completed identities cannot be changed. An uncertain
   create must first be recovered; it cannot be replaced by selecting another ID.
 - `lead_intake_get`, `lead_intake_list` and `lead_intake_health` provide private
-  readback. List supports `after_id` pagination; health counts all records.
+  readback. List supports `after_id` pagination and omits leads the caller may
+  not read; health counts all records.
+
+## Who can read a lead
+
+A lead's readers are fixed when it is captured. The record keeps the guild and
+sales channel configured at that moment, in plaintext that survives erasure and
+expiry. Every read of the record then needs, live:
+
+- ordinary intake admission: live membership, invoker admission and the
+  configured agent (for a resolution, also the resolver grant);
+- native **View Channel** and **Read Message History** on that sales channel,
+  which must still hide from the default role;
+- once a dossier thread exists, or may exist after an uncertain creation, the
+  same on the thread, plus membership (or Manage Threads) for a private thread;
+- the tenant's channel rules for the sales channel and the thread, judged for
+  the executing agent and where it runs. An agent kept to its own channel reads
+  no lead from anywhere else, including an admin's DM. There is no admin bypass.
+
+One rule decides every reader: `lead_intake_get`, `lead_intake_list`,
+`lead_intake_resume`, `lead_intake_resolve`, the `/leads` queue and an approval
+card's Details. Changing the sales channel later never moves past records: they
+stay readable only by people who can read the original channel's history, and
+the new channel's members cannot read them. Live permission changes can still
+narrow access, exactly as for the channel's own history.
+
+An unclassified discovery stores no message content (only an encrypted message
+ID, a digest and timestamps), so `lead_intake_read_source` and
+`lead_intake_health` are read under the sales channel configured now. Submitting
+a discovery fixes the readers of the new record to that channel.
 
 All tool access requires the configured agent, tenant and live Discord
 membership, ordinary tenant invoker admission and access to the sales channel.
@@ -150,20 +181,23 @@ deletion using the recorded remote identities before erasing local content.
 Never claim provider copies were deleted based on a local purge. Lead content
 is not automatically ingested into memory, cards or public artifacts.
 
-Discord's `/leads` command shows an ephemeral pending queue to admitted members
-who can view the configured restricted sales channel. `/leads intake_id:UUID`
-shows private status and the dossier thread link. Review decisions continue in
-an authorized conversation through the same core resolution contract.
+Discord's `/leads` command shows an ephemeral queue of the configured sales
+channel's pending records that the member may read, as above.
+`/leads intake_id:UUID` shows private status and the dossier thread link, or a
+generic refusal. Review decisions continue in an authorized conversation through
+the same core resolution contract.
 
 For an uncertain Discord starter, an authorized resolver can select a verified
 Daimon message ID, or confirm absence after at least ten minutes and a successful
 candidate scan. Absence with remaining candidates cannot authorize a repost.
 
-After reviewing changed connection/destination configuration, a deployment
-operator can explicitly rebind unfinished work with
+After reviewing changed connection configuration, a deployment operator can
+explicitly rebind unfinished work with
 `daimon leads adopt-config TENANT_UUID INTAKE_UUID REVISION`. This records the
 old/new configuration in encrypted audit, performs no provider writes, and
-requires a separate authorized resume. Completed work cannot be rebound.
+requires a separate authorized resume. Completed work cannot be rebound. A
+revision with a different guild or sales channel is refused: such records keep
+their original readers and expire there.
 
 Connection/destination changes are refused while unfinished records have effect
 intents. Finish or reconcile that work with its original configuration first.
@@ -174,15 +208,18 @@ remote reconciliation: CRM unique-key creates, one thread per starter, label-set
 archive and association PUTs. Uncertain Discord message POSTs require history
 recovery or authorized starter resolution; they are never blindly reposted.
 
-Human resolution requires the requester's approval card showing the exact
-selected IDs and evidence, even when third-party tool safety is disabled.
-The handler verifies the live gated session before committing the resolution.
+Human resolution requires the requester's approval card, even when third-party
+tool safety is disabled. The card shows the intake ID, each selected company,
+contact, deal and starter ID and both confirmations in every state, so the
+approved selections stay visible after the answer; a selection too long to show
+denies the call. Evidence is behind Details, sent privately in pages, and only
+to someone who may read the lead. The resolver must also be able to read the
+lead. The handler verifies the live gated session before committing the resolution.
 Routine submit/resume does not acquire a resolution grant through that card.
 
 Dossier thread rules apply independently of the sales channel. Revoking thread
-write permission stops further chunks and resume effects. Get/list and the
-private queue check each actual thread’s visibility and OS read rule; parent
-access alone does not expose a restricted thread.
+write permission stops further chunks and resume effects. Effects run only while
+the configured sales channel is still the one the record was captured for.
 
 Interactive intake calls require an attended origin bound to the calling
 provider session’s signed execution grant. Other concurrent conversations grant

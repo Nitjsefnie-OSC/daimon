@@ -242,7 +242,7 @@ First-party lead intake tools; authority derives only from live server context.
 | --- | --- | --- |
 | `lead_intake_get` | Discord callers | Read one authorized tenant lead, its review state and durable effect progress. |
 | `lead_intake_health` | Discord callers | Read tenant lead counts, oldest pending age and mailbox coverage. |
-| `lead_intake_list` | Discord callers | Read up to 100 tenant leads in the restricted sales queue, oldest first. |
+| `lead_intake_list` | Discord callers | Read up to 100 tenant leads the caller may read, oldest first. |
 | `lead_intake_read_source` | Discord callers | Read attachment-free original Gmail text for an unexpired discovered message. |
 | `lead_intake_resolve` | Discord callers | Apply evidence-backed human CRM selections as a sales resolver or core-role member. |
 | `lead_intake_resume` | Discord callers | Recover lead effects and mailbox coverage without blindly retrying uncertain creates. |

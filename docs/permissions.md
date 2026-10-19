@@ -467,10 +467,17 @@ allowlist alone cannot approve selections.
 
 Lead intake rechecks the actual dossier thread, its parent and category before
 recovery and each write. Thread creation requires the caller’s native create
-and thread-send permissions. Readback applies each lead thread’s native view,
-history and private-thread membership checks plus its own OS readers rule;
-list results omit inaccessible records. Read-only tools do not require send
-permission.
+and thread-send permissions.
+
+Reading a lead follows its destination's history. A record keeps the sales
+channel it was captured for; every reader (MCP tools, `/leads`, an approval
+card's Details) needs native view and history on that channel and on its
+dossier thread, private-thread membership where it applies, and the channel
+rules for both, judged with the executing agent and its origin, so an agent
+kept to its own channel reads no lead elsewhere. Reconfiguring intake never
+widens who reads past records. Unclassified discoveries hold no message content
+and are read under the channel configured now. List results omit inaccessible
+records. Read-only tools do not require send permission.
 
 Lead tools use only the origin bound to the caller’s signed session grant and
 require attended provenance for human actions. Concurrent conversations of the

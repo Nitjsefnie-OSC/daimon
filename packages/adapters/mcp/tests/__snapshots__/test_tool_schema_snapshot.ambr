@@ -3220,7 +3220,12 @@
       }),
     }),
     'lead_intake_get': dict({
-      'description': 'Read one authorized tenant lead, its review state and durable effect progress.',
+      'description': '''
+        Read one authorized tenant lead, its review state and durable effect progress.
+        <blank line>
+        Readers are fixed when the lead is captured: those who can read the sales
+        channel it was captured for, and its dossier thread.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3236,7 +3241,11 @@
       }),
     }),
     'lead_intake_health': dict({
-      'description': 'Read tenant lead counts, oldest pending age and mailbox coverage.',
+      'description': '''
+        Read tenant lead counts, oldest pending age and mailbox coverage.
+        <blank line>
+        Readers are those of the sales channel configured now.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3245,7 +3254,12 @@
       }),
     }),
     'lead_intake_list': dict({
-      'description': 'Read up to 100 tenant leads in the restricted sales queue, oldest first.',
+      'description': '''
+        Read up to 100 tenant leads the caller may read, oldest first.
+        <blank line>
+        Leads the caller may not read are omitted; pass the last listed ID as
+        after_id for the next page.
+      ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -3272,6 +3286,7 @@
         Run resume to discover mail, read each source here, then classify and
         submit its immutable source ID. Uses the configured tenant mailbox;
         credentials never enter the result. Does not post, archive or change CRM.
+        Readers are those of the sales channel configured now.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3293,6 +3308,7 @@
         Show exact records and proposed writes before approval. Routines never
         resolve. Completed identities are immutable; uncertain creates must be
         recovered before selecting replacements. Server admin alone is no grant.
+        The resolver must also be able to read the lead.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -3302,6 +3318,7 @@
               'company_id': dict({
                 'anyOf': list([
                   dict({
+                    'maxLength': 20,
                     'pattern': '^\\d+$',
                     'type': 'string',
                   }),
@@ -3314,6 +3331,7 @@
               'contact_id': dict({
                 'anyOf': list([
                   dict({
+                    'maxLength': 20,
                     'pattern': '^\\d+$',
                     'type': 'string',
                   }),
@@ -3326,6 +3344,7 @@
               'deal_id': dict({
                 'anyOf': list([
                   dict({
+                    'maxLength': 20,
                     'pattern': '^\\d+$',
                     'type': 'string',
                   }),
@@ -3338,6 +3357,7 @@
               'discord_message_id': dict({
                 'anyOf': list([
                   dict({
+                    'maxLength': 20,
                     'pattern': '^\\d+$',
                     'type': 'string',
                   }),
@@ -3390,6 +3410,7 @@
         <blank line>
         Without an ID, resumes up to 25 pending records and scans archived mail
         from the operator checkpoint. Inspect scan errors and remaining work.
+        Records the caller may not read are omitted from the result.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3418,6 +3439,8 @@
         effects. The service posts a title and threaded dossier, writes only a
         draft reply, conservatively reuses/creates CRM records, then archives
         Gmail after dossier delivery. Replay the same immutable source on timeout.
+        The record keeps the sales channel configured now: only people who can
+        read that channel's history, and its dossier thread, can read it later.
       ''',
       'parameters': dict({
         '$defs': dict({

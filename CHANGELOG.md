@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   erasure prevents racing resolution audits from recreating personal data.
   Intake authority is bound to one attended session grant; routine provenance
   remains isolated through refresh and resolution is protected unattended.
+  A lead's readers are fixed to the sales channel it was captured for: every
+  reader, including `/leads` and approval-card Details, needs that channel's and
+  its dossier thread's history, and an agent kept to its own channel reads no
+  lead elsewhere. Resolve cards keep the approved IDs visible; adoption refuses
+  a channel change; discoveries survive a mailbox connection rename.
 
 
 - Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
