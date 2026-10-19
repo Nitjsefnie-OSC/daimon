@@ -7,6 +7,7 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, NoReturn, cast
+from unittest.mock import patch
 
 import discord
 import pytest
@@ -211,12 +212,24 @@ async def _bound(
         dm_policy=lambda _: DirectMessagePolicy(),
         membership_resolver=FixtureMembershipResolver("103"),
     )
+
+    class AdapterDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock.wall_time().astimezone(tz)
+
+    async def clocked_post(due: RoutineRow) -> DeliveryOutcome:
+        # The adapter rechecks the delivery lease against wall time too. Keep
+        # that read on the same clock as the real claim/finalize jobs.
+        with patch("daimon.adapters.discord.routine_delivery.datetime", AdapterDatetime):
+            return await post(due)
+
     jobs = ClockedRoutineJobs(
         sessionmaker=sm,
         clock=clock,
         caps=NoCaps(),
         fire=fire,
-        post=post,
+        post=clocked_post,
         gateway=harness.gateway,
         bindings=(RoutineBinding(row.tenant_id, row.id),),
     )
