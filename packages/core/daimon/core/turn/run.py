@@ -1019,9 +1019,7 @@ async def run_prepared_turn_impl(
                 },
                 token_for=agent_mcp_token_for(
                     deps.sessionmaker,
-                    # A caller from another organisation gets none of the
-                    # agent's shared tokens, so none is used on their behalf.
-                    fernet=None if prepared.admission.is_external else deps.fernet,
+                    fernet=deps.fernet,
                     tenant_id=tenant_id,
                     agent_id=(
                         prepared_source.agent_id
