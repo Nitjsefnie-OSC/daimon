@@ -60,6 +60,7 @@ from daimon.core.turn.approvals import (
     agent_rule_lookup,
     channel_for_tool_rules,
     chat_tool_confirmation,
+    unattended_decider,
 )
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
@@ -75,7 +76,7 @@ from daimon.core.turn.lifecycle import (
     acknowledge,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
-from daimon.core.turn.posture import Billed, BillingPosture, UsageRecorder
+from daimon.core.turn.posture import Billed, BillingPosture, PolicyApproval, UsageRecorder
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
     CreatedSession,
@@ -93,6 +94,7 @@ from daimon.core.turn.provider_actions import (
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn.unattended import protected_tools
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
 from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
 from mux.contracts.events import Event
@@ -948,11 +950,12 @@ async def run_prepared_turn_impl(
             and get_profile(revision.profile).support_for("tool_confirmation") not in SUPPORTED
         ):
             confirmed_tools = frozenset()
+    unattended = not (attended if attended is not None else origin != "routine")
     tool_confirmation = chat_tool_confirmation(
         deps.tool_safety,
         requester_platform_user_id=external_user_id,
         confirm=confirm_write,
-        attended=attended if attended is not None else origin != "routine",
+        attended=not unattended,
         trusted_servers=trusted_servers_for(deps.public_url),
         asks_before_publishing=prepared.admission.asks_before_publishing,
         confirmed_tools=confirmed_tools,
@@ -1008,6 +1011,30 @@ async def run_prepared_turn_impl(
             )
         ),
     )
+    if unattended:
+        # A fleet worker or a wake nobody asked for just now: the one
+        # unattended decider, policy on or off, with Daimon's card-only actions
+        # refused, never the chat posture's safety-off shortcuts.
+        tool_confirmation = PolicyApproval(
+            decide=unattended_decider(
+                deps.tool_safety,
+                trusted_servers=trusted_servers_for(deps.public_url),
+                confirmed_tools=confirmed_tools | protected_tools(deps.tool_safety),
+                daimon_rules=True,
+                rules_for=agent_rule_lookup(
+                    deps.sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_id=str(prepared.admission.agent.id),
+                    server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+                    also_urls=daimon_endpoint(deps.public_url),
+                    channel_id=channel_for_tool_rules(
+                        platform=platform,
+                        channel_id=prepared.admission.origin_channel_id,
+                        private_dm_id=prepared.admission.private_dm_id,
+                    ),
+                ),
+            )
+        )
 
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery

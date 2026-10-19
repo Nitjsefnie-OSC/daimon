@@ -3123,3 +3123,94 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
         ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
     )
     assert result.allow and len(prompts) == 1, "the adapter's card hook answered the write"
+
+
+@pytest.mark.parametrize("microsoft", [False, True], ids=["plain", "selected-tools"])
+async def test_an_unattended_prepared_turn_uses_the_unattended_decider_with_safety_off(
+    microsoft: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review B, finding 6: a fleet worker or wake (attended=False) on a session
+    still asking from an earlier policy gets the explicit off allow for an
+    ordinary call, and Daimon's card-only actions are still refused."""
+    from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-unattended",
+        ma_session_id="sess_unattended",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=False),
+        microsoft_send=microsoft,
+        public_url="https://daimon.example/mcp",
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_unattended",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    postures: list[object] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-unattended",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        attended=False,
+    )
+
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    ordinary = await posture.decide(
+        ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
+    )
+    assert ordinary.allow, "safety off allows an ordinary third-party call"
+    protected = await posture.decide(
+        ToolCall(
+            tool_use_id="tu2",
+            server_name="daimon-mcp",
+            tool_name="microsoft_send",
+            input={"action": "send_mail"},
+        )
+    )
+    assert not protected.allow and prompts == []
