@@ -990,6 +990,43 @@ async def test_no_annotations_are_trusted_without_the_lookup(
 # --- Review A2: confirmation gate, single attempts, worker ownership, gaps ---
 
 
+async def test_a_confirmation_is_gated_before_it_resumes_the_turn(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A config loosened (or a policy tightened) while the turn is paused reaches
+    its next call: the sender gates before it confirms (finding 1)."""
+    fake = FakeSession(script=[[("linear", "get_issue", {})], [("linear", "create_issue", {})]])
+    fake.honor_permissions = True
+    boundary = fake.pause()
+    # While paused, the frozen config allows everything again.
+    fake.tools = [_toolset("linear", "always_allow", "create_issue")]
+    runtime = _runtime(fake, factory, _ENABLED)
+    safety.watch_turn(runtime, _auth(), _SESSION, turn_event_id=boundary, rules_channel_id=None)
+    await _settle(runtime)
+    # Without the gate before the first confirmation, create_issue would have run.
+    assert "executed" not in fake.kinds()
+    assert fake.kinds() == ["update", "confirm", "confirm"]
+    assert [c["result"] for c in fake.confirmations] == ["allow", "deny"]
+
+
+async def test_a_failed_gate_before_a_confirmation_sends_nothing(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(frozen="always_allow")
+    await _record(factory, fake.pause())
+    fake.fail_update = True
+    runtime = _runtime(fake, factory, _ENABLED)
+    safety.watch_turn(
+        runtime,
+        _auth(),
+        _SESSION,
+        turn_event_id=fake.events[0]["id"],
+        rules_channel_id=None,
+    )
+    await _settle(runtime)
+    assert fake.calls == []
+
+
 async def test_a_worker_on_an_older_turn_neither_reads_as_running_nor_blocks_resume(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

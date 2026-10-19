@@ -261,6 +261,12 @@ async def _watch(
                     stop = turn.state.stop_reason
                     ids = pending_confirmation_ids(stop, confirmed=turn.confirmed | answered)
                     if ids:
+                        # The confirmation resumes the turn: gate it as a message
+                        # would be, and decide on the snapshot that gate left.
+                        await gate(runtime, auth, session)
+                        session = await retrieve_session(
+                            runtime.client, handle, scope=mcp_scope(auth)
+                        )
                         await _answer(runtime, auth, session, turn, ids, rules_channel_id)
                         answered.update(ids)
                     elif stop is not None and stop.type != "requires_action":
