@@ -40,6 +40,7 @@ from .conftest import (
     build_teams_runtime,
     make_card_action,
     make_invoke,
+    notice_text,
     post_activity,
     running_service,
 )
@@ -245,7 +246,7 @@ async def test_a_built_in_agent_is_refused(
 ) -> None:
     async with _running(db_session_factory, teams_api_fake, _Skills(), admin=True) as service:
         opened = await _dialog(service, "fetch", agent="daimon")
-    assert opened["task"]["value"] == add_skill.BUILT_IN
+    assert notice_text(opened) == add_skill.BUILT_IN
 
 
 async def test_a_member_is_refused_on_the_organisation_default(
@@ -266,7 +267,7 @@ async def test_a_member_is_refused_on_the_organisation_default(
         content_hash = bundle_from_markdown(SKILL_MD).preview.content_hash
         forced = await _dialog(service, "submit", agent="helper", skill=SKILL_MD, hash=content_hash)
 
-    assert opened["task"]["value"] == add_skill.needs_admin("helper"), "others depend on it"
+    assert notice_text(opened) == add_skill.needs_admin("helper"), "others depend on it"
     assert preview["task"]["value"] == add_skill.needs_admin("helper"), "no preview either"
     assert forced["task"]["value"] == add_skill.needs_admin("helper"), "decided again on add"
     assert skills.created == [], "nothing uploaded"
@@ -289,4 +290,4 @@ async def test_a_refusal_says_who_the_admins_are_when_the_admin_team_is_known(
     ) as service:
         shared = await _dialog(service, "fetch", agent="helper")
 
-    assert shared["task"]["value"] == add_skill.needs_admin("helper") + line
+    assert notice_text(shared) == add_skill.needs_admin("helper") + line

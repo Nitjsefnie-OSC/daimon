@@ -382,6 +382,17 @@ def assert_card_renders(content: dict[str, Any]) -> None:
     assert version <= (1, 5), f"Teams renders up to 1.5, not {content['version']}"
 
 
+def notice_text(response: Any) -> str:
+    """The text of the one-line dialog that answers a click opening a dialog.
+
+    Teams shows "Unable to reach app" for a bare `message` task there, so an open
+    that refuses answers with `continue` and a single text block.
+    """
+    assert response["task"]["type"] == "continue", response
+    [line] = response["task"]["value"]["card"]["content"]["body"]
+    return line["text"]
+
+
 def assert_teams_accepts(request: SentRequest) -> None:
     """One recorded activity as Teams takes it: renderable cards, under its size cap, and
     an edit naming the activity it replaces."""

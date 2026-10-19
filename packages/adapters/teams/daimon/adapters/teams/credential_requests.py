@@ -29,6 +29,7 @@ from daimon.adapters.teams.card_actions import (
     card_actor,
     dialog,
     dialog_message,
+    dialog_notice,
     error_text,
     submitted_fields,
 )
@@ -236,6 +237,8 @@ def _secret_input(kind: str) -> TextInput:
 
 
 def _title(row: CredentialRequestRow) -> str:
+    if row.kind == "mcp_oauth":
+        return f"Connect {row.target}"
     if row.kind == "env":
         return f"{row.target} for {row.target_name or 'the agent'}"
     if row.kind == "mcp":
@@ -278,17 +281,29 @@ def oauthdialog(row: CredentialRequestRow, url: str) -> TaskModuleResponse:
     text = invite_copy(server_name=row.target, agent_name=row.target_name or "the agent")
     link = OpenUrlAction(title=INVITE_BUTTON_LABEL, url=url)
     card = AdaptiveCard(body=[TextBlock(text=text, wrap=True)], actions=[link], fallback_text=text)
-    return dialog(f"Connect {row.target}", card)
+    return dialog(_title(row), card)
 
 
-async def _guarded(work: Awaitable[TaskModuleResponse]) -> TaskModuleResponse:
+_REQUEST_TITLE = "Credential request"
+
+
+def _notice(text: str, row: CredentialRequestRow | None = None) -> TaskModuleResponse:
+    """A refusal that answers the click opening the dialog, titled as the dialog would be."""
+    return dialog_notice(_REQUEST_TITLE if row is None else _title(row), text)
+
+
+async def _guarded(
+    work: Awaitable[TaskModuleResponse], failed: TaskModuleResponse
+) -> TaskModuleResponse:
     """Invoke boundary. The failing frames hold the submitted value, so only the
-    error's class name is recorded: no traceback, no Sentry event."""
+    error's class name is recorded: no traceback, no Sentry event.
+
+    `failed` is the answer to give: a notice for the open, a message for the submit."""
     try:
         return await work
     except SENDING_PANEL_ERRORS as err:
         log.error("teams.credential.failed", err_type=type(err).__name__)
-        return dialog_message(FAILED)
+        return failed
 
 
 class TeamsCredentialRequests:
@@ -305,12 +320,12 @@ class TeamsCredentialRequests:
     async def on_dialog_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._open(ctx.activity))
+        return await _guarded(self._open(ctx.activity), _notice(FAILED))
 
     async def on_dialog_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
-        return await _guarded(self._submit(ctx.activity))
+        return await _guarded(self._submit(ctx.activity), dialog_message(FAILED))
 
     async def _checked(
         self, activity: InvokeActivity, fields: Mapping[str, object]
@@ -336,14 +351,15 @@ class TeamsCredentialRequests:
     async def _open(self, activity: TaskFetchInvokeActivity) -> TaskModuleResponse:
         actor, row, reason = await self._checked(activity, submitted_fields(activity.value.data))
         if actor is None:
-            return dialog_message(DENIED)
+            return _notice(DENIED)
         if row is not None and reason == "expired":
             # The only sweep there is; it runs past the requester check, so a
             # stranger's click cannot change the requester's card.
             self._spawn(self._edit(row, "expired", activity.service_url), name="teams.cred.edit")
-            return dialog_message(card_text(card_for_request(row, state="expired")))
+            return _notice(card_text(card_for_request(row, state="expired")), row)
         if row is None or reason is not None:
-            return dialog_message(_MESSAGES[reason or "invalid"])
+            # Untitled by the row: a stranger's refusal must not name its target.
+            return _notice(_MESSAGES[reason or "invalid"])
         if row.kind == "mcp_oauth":
             return await self._start_oauth(row, activity.service_url)
         if row.kind == "repo":
@@ -353,9 +369,9 @@ class TeamsCredentialRequests:
                 self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
             )
             if agent is None:
-                return dialog_message(_AGENT_GONE)
+                return _notice(_AGENT_GONE, row)
             if await self._attachment_refused(row, agent, "repo_bind", is_admin=actor.is_admin):
-                return dialog_message(_SHARED_AGENT)
+                return _notice(_SHARED_AGENT, row)
         return credential_form(row)
 
     async def _start_oauth(
@@ -364,23 +380,23 @@ class TeamsCredentialRequests:
         mcp = self._runtime.settings.mcp
         root = mcp.app_root_url
         if root is None or mcp.jwt_secret is None or self._runtime.turn_deps.fernet is None:
-            return dialog_message(_UNCONFIGURED_OAUTH)
+            return _notice(_UNCONFIGURED_OAUTH, row)
         agent = await find_agent_by_derived_uuid(
             self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
         )
         async with self._runtime.sessionmaker() as session:
             pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
         if pin_refusal is not None:
-            return dialog_message(pin_refusal)
+            return _notice(pin_refusal, row)
         now = datetime.now(UTC)
         try:
             consumed, flow = await begin_oauth_submit(
                 self._runtime.sessionmaker, row=row, agent=agent, app_root_url=root, now=now
             )
         except FormPinRefused as refused:
-            return dialog_message(refused.refusal)
+            return _notice(refused.refusal, row)
         if consumed is None or flow is None:
-            return dialog_message(NO_LONGER_VALID_MESSAGE)
+            return _notice(NO_LONGER_VALID_MESSAGE, row)
         # The mcp process edits the card again once sign-in completes.
         self._spawn(self._edit(consumed, "received", service_url), name="teams.cred.edit")
         return oauthdialog(consumed, start_url(root, state=flow.state))
