@@ -77,6 +77,8 @@ class FullWire(Wire):
         self.agent = {}
         self.created = None
         self.posts = []
+        self.vault = None
+        self.vault_credential = None
         config = RECORDED_ENVIRONMENT["config"]
         self.template = {
             "id": "native-template",
@@ -105,6 +107,24 @@ class FullWire(Wire):
 
     def handle(self, request):
         path = request.url.path.removeprefix("/v1")
+        if path == "/vaults":
+            self.requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(200, json={"data": [], "has_more": False})
+            self.vault = {"id": "caller-session-vault", **json.loads(request.content)}
+            return httpx.Response(200, json=self.vault)
+        if path == "/vaults/caller-session-vault":
+            self.requests.append(request)
+            return httpx.Response(200, json=self.vault)
+        if path == "/vaults/caller-session-vault/credentials":
+            self.requests.append(request)
+            self.vault_credential = {
+                "id": "caller-mcp-credential",
+                "vault_id": "caller-session-vault",
+                "created_at": 0,
+                **json.loads(request.content),
+            }
+            return httpx.Response(200, json=self.vault_credential)
         if path.startswith("/skills"):
             self.requests.append(request)
             if request.method == "POST":
@@ -488,7 +508,11 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
     body = wire.posts[0]
     assert len(body["environment"]["skills"]) == 11
     mcp = body["agent"]["tools"][0]
-    assert mcp["transport"]["authorization"] == "Bearer " + token
+    assert "authorization" not in mcp["transport"]
+    assert body["vault_ids"] == ["caller-session-vault"]
+    assert mcp["credential_id"] == "caller-mcp-credential"
+    assert wire.vault_credential["auth"]["token"] == token
+    assert token not in json.dumps(body)
     assert mcp["allowed_tools"] == ["search_tools", "call_tool"]
     from daimon.testing.asgi import mcp_session
 
