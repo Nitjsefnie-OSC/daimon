@@ -451,9 +451,9 @@ async def tool_call_verdict(
 ) -> ToolVerdict:
     """Decide one attended or unattended call; both deciders come through here.
 
-    `annotations_for` must answer only for servers the operator trusts. A
-    lookup that fails leaves the name to decide, which never reads more
-    loosely than the hints would.
+    `needs_annotations` checks operator trust before invoking the callback,
+    even if that callback was built for an untrusted server. A missing or
+    failed catalogue leaves the name to decide.
     """
     hints = await _annotations(policy, call, trusted_servers, annotations_for)
     verdict = decide_tool_call(
