@@ -484,7 +484,12 @@ class TeamsTurnLifecycle(OutputGate):
             self.final_message_id = current
             if fresh:  # retire before the best-effort controls so a lost post can't strand it
                 await self._retire_card()
-            await self._post_controls(state, hold=self._hold_controls and _may_have_outputs(state))
+            await self._post_controls(
+                state,
+                hold=self._hold_controls
+                and self.output_authorization is None
+                and _may_have_outputs(state),
+            )
         except TEAMS_SEND_ERRORS as exc:
             log.error("teams.turn.answer_delivery_failed", exc_info=True)
             capture_exception_with_scope(exc)

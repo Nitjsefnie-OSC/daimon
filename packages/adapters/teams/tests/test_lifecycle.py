@@ -1022,3 +1022,22 @@ async def test_watch_revocation_between_chunks_rechecks_each_teams_write():
         await lifecycle.on_terminal_success(_answer("secret " * 4000))
     assert count() - before == 1
     assert guard.failed
+
+
+async def test_watch_posts_controls_before_its_output_grant_closes():
+    from daimon.core.turn.output import OutputAuthorization
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender, hold_controls=True)
+
+    async def authorize():
+        pass
+
+    guard = OutputAuthorization(authorize)
+    lifecycle.set_output_authorization(guard)
+    await lifecycle.on_terminal_success(_wrote("python plot.py > /mnt/session/outputs/a.png"))
+    assert _rated(sender.activities[-1])
+    count = len(sender.activities)
+    guard.close()
+    await lifecycle.release_controls()
+    assert len(sender.activities) == count

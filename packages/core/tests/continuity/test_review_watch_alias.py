@@ -24,7 +24,13 @@ async def test_review_management_alias_cannot_survive(query, monkeypatch):
                 {
                     "type": "mcp_toolset",
                     "mcp_server_name": "renamed",
-                    "configs": [],
+                    "configs": [
+                        {
+                            "name": "get_agent",
+                            "enabled": True,
+                            "permission_policy": {"type": "always_allow"},
+                        }
+                    ],
                     "default_config": {
                         "enabled": True,
                         "permission_policy": {"type": "always_allow"},
@@ -38,7 +44,6 @@ async def test_review_management_alias_cannot_survive(query, monkeypatch):
     )
     update = AsyncMock()
     monkeypatch.setattr(watch_turn, "update_session_record", update)
-    monkeypatch.setattr(watch_turn, "gate_session_snapshot", AsyncMock())
     await watch_turn.constrain_session(
         MagicMock(),
         snapshot,
@@ -58,3 +63,18 @@ async def test_review_management_alias_cannot_survive(query, monkeypatch):
     )
     assert verdict.allow, "probe must show the retained alias can pass its read decision"
     assert update.await_args.kwargs["agent"]["tools"] == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://daimon.invalid./mcp",
+        "https://daimon.invalid/mcp;params",
+        "https://daimon.invalid/MCP",
+    ],
+)
+def test_review_management_endpoint_aliases_are_excluded_without_becoming_trusted(url):
+    from daimon.core.mcp_server_url import same_mcp_endpoint, same_mcp_url
+
+    assert same_mcp_endpoint(url, "https://daimon.invalid/mcp")
+    assert not same_mcp_url(url, "https://daimon.invalid/mcp")

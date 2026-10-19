@@ -72,7 +72,13 @@ async def test_watch_gate_removes_shell_skills_and_builtin_server_before_send(
                 {
                     "type": "mcp_toolset",
                     "mcp_server_name": "linear",
-                    "configs": [],
+                    "configs": [
+                        {
+                            "name": "get_issue",
+                            "enabled": True,
+                            "permission_policy": {"type": "always_allow"},
+                        }
+                    ],
                     "default_config": {
                         "enabled": True,
                         "permission_policy": {"type": "always_allow"},
@@ -100,9 +106,7 @@ async def test_watch_gate_removes_shell_skills_and_builtin_server_before_send(
         )
     )
     update = AsyncMock()
-    gate = AsyncMock()
     monkeypatch.setattr(module, "update_session_record", update)
-    monkeypatch.setattr(module, "gate_session_snapshot", gate)
     await constrain_session(
         MagicMock(),
         snapshot,
@@ -121,8 +125,9 @@ async def test_watch_gate_removes_shell_skills_and_builtin_server_before_send(
     assert "skills" not in agent
     assert [t["mcp_server_name"] for t in agent["tools"]] == ["linear"]
     assert [s["name"] for s in agent["mcp_servers"]] == ["linear"]
-    gate.assert_awaited_once()
-    assert gate.await_args.args[2].enabled
+    update.assert_awaited_once()
+    assert agent["tools"][0]["default_config"]["enabled"] is False
+    assert agent["tools"][0]["configs"][0]["permission_policy"] == {"type": "always_ask"}
 
 
 async def test_watch_turn_requires_explicit_unattended_before_any_work():
@@ -260,3 +265,220 @@ async def test_watch_refuses_skill_session_before_any_provider_mutation(monkeypa
             tenant_id=uuid.uuid4(),
         )
     update.assert_not_awaited()
+
+
+async def test_watch_refuses_multiagent_session_whose_subagent_has_shell(monkeypatch):
+    from anthropic.types.beta.beta_managed_agents_session_multiagent_coordinator import (
+        BetaManagedAgentsSessionMultiagentCoordinator,
+    )
+    from daimon.core.continuity import watch_turn
+
+    SHELL = {
+        "type": "agent_toolset_20260401",
+        "configs": [],
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+    }
+    from daimon.core.turn.errors import AdmissionDenied
+
+    update = AsyncMock()
+    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    base = ma_session(agent=ma_agent())
+    sub = ma_session(agent=ma_agent(id="agent_sub", name="sub", tools=[SHELL])).agent
+    coordinator = BetaManagedAgentsSessionMultiagentCoordinator.model_validate(
+        {"type": "coordinator", "agents": [sub.model_dump(mode="json")]}
+    )
+    snapshot = base.model_copy(
+        update={"agent": base.agent.model_copy(update={"multiagent": coordinator})}
+    )
+    with pytest.raises(AdmissionDenied):
+        await constrain_session(
+            MagicMock(),
+            snapshot,
+            ToolSafetyPolicy(),
+            scope=Scope(
+                tenant_id=str(uuid.uuid4()),
+                account_id=str(uuid.uuid4()),
+                principal_id="watch-owner",
+                authorization_id="test-grant",
+            ),
+            public_url=None,
+            sessions=MagicMock(),
+            tenant_id=uuid.uuid4(),
+        )
+    # If we got here without raising, the update below proves the coordinator stayed.
+    update.assert_not_awaited()
+
+
+def _explicit_read_snapshot():
+    return ma_session(
+        agent=ma_agent(
+            tools=[
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "linear",
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": [
+                        {
+                            "name": name,
+                            "enabled": enabled,
+                            "permission_policy": {"type": "always_allow"},
+                        }
+                        for name, enabled in [
+                            ("get_issue", True),
+                            ("create_issue", True),
+                            ("get_secret", False),
+                            ("future_action", True),
+                        ]
+                    ],
+                }
+            ],
+            mcp_servers=[{"name": "linear", "type": "url", "url": "https://linear.invalid/mcp"}],
+        )
+    ).model_copy(deep=True)
+
+
+@pytest.mark.parametrize(
+    "level",
+    [
+        "session",
+        "agent",
+        "model",
+        "server",
+        "tool",
+        "default",
+        "config",
+        "policy",
+        "stats",
+        "usage",
+    ],
+)
+@pytest.mark.parametrize("value", [None, False, [], {"enabled": True}])
+async def test_watch_refuses_unknown_capability_fields_before_mutation(monkeypatch, level, value):
+    from daimon.core.continuity import watch_turn
+    from daimon.core.turn.errors import AdmissionDenied
+
+    snapshot = _explicit_read_snapshot()
+    targets = {
+        "stats": snapshot.stats,
+        "usage": snapshot.usage,
+        "session": snapshot,
+        "agent": snapshot.agent,
+        "model": snapshot.agent.model,
+        "server": snapshot.agent.mcp_servers[0],
+        "tool": snapshot.agent.tools[0],
+        "default": snapshot.agent.tools[0].default_config,
+        "config": snapshot.agent.tools[0].configs[0],
+        "policy": snapshot.agent.tools[0].configs[0].permission_policy,
+    }
+    # Simulate a new response field, including an empty value: unknown is never safe.
+    targets[level].__pydantic_extra__["future_execution_capability"] = value
+    update = AsyncMock()
+    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await constrain_session(
+            MagicMock(),
+            snapshot,
+            ToolSafetyPolicy(),
+            scope=Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="g"),
+            public_url=None,
+            sessions=MagicMock(),
+            tenant_id=uuid.uuid4(),
+        )
+    update.assert_not_awaited()
+
+
+def test_watch_refuses_capability_newly_recognized_by_sdk():
+    from daimon.core.continuity.watch_turn import validate_watch_snapshot
+    from daimon.core.turn.errors import AdmissionDenied
+    from pydantic import create_model
+
+    snapshot = ma_session()
+    agent_type = create_model(
+        "FutureAgent", __base__=type(snapshot.agent), future_execution_capability=(bool, True)
+    )
+    snapshot = snapshot.model_copy(
+        update={"agent": agent_type.model_validate(snapshot.agent.model_dump())}
+    )
+    with pytest.raises(AdmissionDenied):
+        validate_watch_snapshot(snapshot)
+
+
+async def test_watch_installs_only_explicit_read_configs_with_disabled_default(monkeypatch):
+    from daimon.core.continuity import watch_turn
+
+    update = AsyncMock()
+    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    await constrain_session(
+        MagicMock(),
+        _explicit_read_snapshot(),
+        ToolSafetyPolicy(enabled=False, unattended_writes=("*",)),
+        scope=Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="g"),
+        public_url=None,
+        sessions=MagicMock(),
+        tenant_id=uuid.uuid4(),
+    )
+    update.assert_awaited_once()
+    agent = update.await_args.kwargs["agent"]
+    assert agent["tools"] == [
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "linear",
+            "default_config": {"enabled": False, "permission_policy": {"type": "always_ask"}},
+            "configs": [
+                {"name": "get_issue", "enabled": True, "permission_policy": {"type": "always_ask"}}
+            ],
+        }
+    ]
+
+
+async def test_watch_does_not_expand_default_only_toolset(monkeypatch):
+    from daimon.core.continuity import watch_turn
+
+    snapshot = _explicit_read_snapshot()
+    snapshot.agent.tools[0].configs.clear()
+    update = AsyncMock()
+    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    await constrain_session(
+        MagicMock(),
+        snapshot,
+        ToolSafetyPolicy(),
+        scope=Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="g"),
+        public_url=None,
+        sessions=MagicMock(),
+        tenant_id=uuid.uuid4(),
+    )
+    assert update.await_args.kwargs["agent"] == {"tools": [], "mcp_servers": []}
+
+
+@pytest.mark.parametrize("name", ["get_*", "get_[issue]", "get_?", "get_issue;delete", "*"])
+async def test_watch_tool_allowlist_never_contains_patterns(monkeypatch, name):
+    from daimon.core.continuity import watch_turn
+
+    snapshot = _explicit_read_snapshot()
+    snapshot.agent.tools[0].configs = [
+        snapshot.agent.tools[0].configs[0].model_copy(update={"name": name})
+    ]
+    update = AsyncMock()
+    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    await constrain_session(
+        MagicMock(),
+        snapshot,
+        ToolSafetyPolicy(),
+        scope=Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="g"),
+        public_url=None,
+        sessions=MagicMock(),
+        tenant_id=uuid.uuid4(),
+    )
+    assert update.await_args.kwargs["agent"] == {"tools": [], "mcp_servers": []}
+
+
+def test_watch_accepts_sdk_request_id_as_diagnostic_metadata():
+    from anthropic._models import add_request_id
+    from daimon.core.continuity.watch_turn import validate_watch_snapshot
+
+    snapshot = _explicit_read_snapshot()
+    add_request_id(snapshot, "req_watch_validation")
+    validate_watch_snapshot(snapshot)

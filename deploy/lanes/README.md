@@ -89,7 +89,7 @@ Five-step parity procedure (run only after King's merge, setup and redeploy):
    the fixture is callable after approval.
 3. **Row 34, unlisted:** with safety enabled, trusted annotations configured,
    and `UNATTENDED_WRITES=[]`, create/run an owned disposable routine requesting
-   exactly one submission plus a read control. Verify S1's refusal in decision
+   exactly one submission plus a read control. Verify the approval refusal in decision
    logs and routine result, no human approval wait, no write received/executed,
    and the read executed. Repeat in a fresh MCP-origin agent turn (`ask` or the
    runner's supported MCP entrypoint), preserving origin evidence; it too must
@@ -100,7 +100,7 @@ Five-step parity procedure (run only after King's merge, setup and redeploy):
    preview services. Use fresh sessions/routines and new markers. Repeat the
    routine and MCP-origin cases: each must execute exactly once without an
    approval wait; confirm marker-specific executed events and write-count
-   deltas, along with S1/allow-list decisions and terminal results.
+   deltas, along with approval/allow-list decisions and terminal results.
 5. Save redacted catalogue, approval and decision evidence, routine/MCP results,
    and journal snapshots. Pause/delete fixture routines, cancel pending turns,
    detach the fixture, and have King restore the previous preview safety/profile
@@ -151,7 +151,7 @@ published TLS port. The proxy image is pinned by digest; the application uses
 origin-grant prerequisite and watch release are reviewed. Migration `0116_watches`
 follows `0115_origin_session_grants`. Every watch send requires its current
 unattended execution origin to hold the bound session grant; missing, attended or
-mismatched grants refuse dispatch. The S1 cleanup, driver gates and attendance
+mismatched grants refuse dispatch. The execution cleanup, driver gates and attendance
 changes do not automatically enable watches. A separate core-owned database
 `global` gate also defaults false. Operators must explicitly enable both after the
 release gate; the sidecar cannot edit that database control. Disabling either
@@ -204,6 +204,13 @@ requests already accepted by a provider cannot be undone. Re-enabling requires n
 events; cancelled work is never silently replayed. The migration retains delivery
 history and has no downgrade. Keep the compatible-reader rollback floor installed.
 Woken turns only read and report: safety is forced on, agent/deployment write
-allowances are ignored, and shell, built-ins and management tools are unavailable. Sessions carrying skills
-are refused because the provider cannot remove skills mid-session.
+allowances are ignored. Before any provider mutation, core validates an explicit
+snapshot-field allowlist and refuses skills, multiagent coordinators and unknown
+fields, including fields newly recognized by a provider SDK. A single update keeps
+only explicitly named, enabled third-party MCP read configs, disables toolset
+defaults and makes every retained tool ask the current read/report decision. Operators
+must enumerate read names in per-tool configs; default-only toolsets grant nothing.
+Shell, built-ins, custom tools, management endpoints and writes are unavailable.
+Mounted data and credential vaults remain attached but grant no native execution
+or delegation. Original tool arrays restore before the turn releases its session.
 No polling, MCP watch-management tools or live internal migration is included.

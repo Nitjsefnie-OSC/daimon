@@ -477,6 +477,11 @@ async def test_database_rate_and_row_quotas_are_independent_of_wake_coalescing(
         ("discord", "normal"),
         ("slack", "normal"),
         ("teams", "normal"),
+        *[
+            (platform, capability)
+            for platform in ("discord", "slack", "teams")
+            for capability in ("unknown_capability", "multiagent")
+        ],
         ("discord", "gate_error"),
         ("discord", "driver_error"),
         ("discord", "cancelled"),
@@ -567,6 +572,25 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
             mutable_fingerprint=fingerprint_mutable(cached),
         )
     prepared = replace(prepared, mapping_id=live.id)
+    unsupported = ending in ("unknown_capability", "multiagent")
+    if ending == "unknown_capability":
+        snapshot = snapshot.model_copy(update={"future_execution_capability": {"enabled": True}})
+    elif ending == "multiagent":
+        from anthropic.types.beta.beta_managed_agents_session_multiagent_coordinator import (
+            BetaManagedAgentsSessionMultiagentCoordinator,
+        )
+
+        snapshot = snapshot.model_copy(
+            update={
+                "agent": snapshot.agent.model_copy(
+                    update={
+                        "multiagent": BetaManagedAgentsSessionMultiagentCoordinator.model_validate(
+                            {"type": "coordinator", "agents": []}
+                        )
+                    }
+                )
+            }
+        )
     replacement = AsyncMock(
         side_effect=AssertionError("watch must not recreate an unbound session")
     )
@@ -695,7 +719,12 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
             outcome = await call
             assert not outcome.recovered
         else:
-            with pytest.raises(asyncio.CancelledError if ending == "cancelled" else RuntimeError):
+            expected = (
+                AdmissionDenied
+                if unsupported
+                else (asyncio.CancelledError if ending == "cancelled" else RuntimeError)
+            )
+            with pytest.raises(expected):
                 await call
         async with db_session_factory() as db:
             cleared = await get_active_origin(
@@ -707,6 +736,21 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
                 now=datetime.now(UTC),
             )
         assert cleared is not None and not cleared.attended and cleared.chat_session_id is None
+    if unsupported:
+        constrain.assert_not_awaited()
+        restore.assert_not_awaited()
+        replacement.assert_not_awaited()
+        async with db_session_factory() as db:
+            unchanged = await get_live_thread_session(
+                db,
+                tenant_id=registered.tenant_id,
+                platform=platform,
+                thread_id=registered.thread_id,
+                account_id=registered.owner_account_id,
+            )
+        assert unchanged.effective_config == cached
+        assert unchanged.mutable_fingerprint == fingerprint_mutable(cached)
+        return
     constrain.assert_awaited_once()
     restore.assert_awaited_once()
     replacement.assert_not_awaited()

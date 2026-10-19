@@ -140,7 +140,13 @@ async def test_review_actual_watch_removes_management_alias(db_session_factory, 
             {
                 "type": "mcp_toolset",
                 "mcp_server_name": "linear",
-                "configs": [],
+                "configs": [
+                    {
+                        "name": "get_issue",
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    }
+                ],
                 "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
             },
         ],

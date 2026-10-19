@@ -40,27 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Turns nobody watches (routines, timers and worker wakes, fleet workers, agent chat, `daimon run` and workspace checkpoints) refuse a session whose agent coordinates other agents, before anything is sent: its roster's agents could run tools and MCP writes the unattended gate cannot reach, and Managed Agents cannot remove the roster from a live session. Such a routine fails with `AdmissionDenied: backend_unsupported`, agent chat answers with a tool error, and a checkpoint carries only the conversation. A session carrying a field this release has not reviewed, at any level from the session and its resources down to a tool's permission policy, is refused the same way (including a field hidden inside a setting that should be a plain value), as is an unattended turn on a Managed Agents runtime that cannot read its session. Every MCP call in these sessions now pauses for the unattended decider, Daimon's own tools and calls with tool safety off included; the decider allows what it allowed before. Built-in sandbox tools (bash, file edits and the rest) and custom tools are disabled for every unattended entry point, including watches, with no opt-in. Routines and other unattended runs cannot generate files with sandbox tools, and workspace checkpoints cannot create sandbox archives.
 
 - A conversation can run on a model of its own: `/model` in a Discord thread shows it or switches it to Haiku, Sonnet or Opus (or back to the agent's default), and asking in words ("use opus", "think harder") switches it on any platform. The thread keeps the choice for every later reply, across restarts; other conversations and the stored agent are unchanged. Anyone who may start a turn there may change it; routines and other unattended runs can't. A choice that can no longer run falls back to the agent's own model, and the reply says so. Worker fleets ignore the choice: a fleet root and its workers always run the model the agent's owner approved, and `/model` says so on such a thread.
-- Recheck watch balance, member caps and channel budgets at every send and output write. Revocation or a failed check latches delivery off, including terminal cleanup, edits, chunks and attachments on all three chat adapters.
-
-- Watch startup audits resolve the real ingress namespace and refuse effective grants across application schemas, including misleading search paths and function identities.
-
-- Remove renamed management endpoints from watch turns even with extra or malformed query selectors and normalized path aliases.
 
 - Native OpenAI sessions install isolated MCP session grants before creation, bind them to each executing origin on reuse, and revoke origin authority when the turn ends. Child preparation cannot inherit a parent origin grant.
 
 - Agent chat and hub mutations require a session opened on that headless surface. Same-account platform sessions and legacy sessions without proven headless provenance cannot be continued, cancelled or archived through it. Unauthorized callers are refused before waiting on a session mutation fence.
-- Require execution-bound unattended session grants for page-watch sends; keep
-  watch producers default-off pending release review.
-
-- Restore ordinary session tools after page-watch turns, including cancellation,
-  and reconcile tools after interrupted restrictions without losing workspace metadata.
-- Keep fresh page events from being merged into expired watch wakes.
-
 - Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
 
 - Add default-off OS-signed page-event watches with atomic evidence and durable wakes,
   restricted database identities, replay/retention limits and an optional preview
-  sidecar. Account erasure removes owned watches, evidence and queued wakes. Woken turns explicitly use constrained unattended read-and-report authority.
+  sidecar. Account erasure removes owned watches, evidence and queued wakes. Woken
+  turns require an execution-bound unattended session grant, explicitly allowlisted
+  snapshot fields and named read tools; skills, multiagent coordinators and unknown
+  capabilities refuse before provider mutation. Original tools restore after each
+  turn, including cancellation. Fresh access and spend checks gate every send and
+  output write; a failed check latches delivery off through cleanup. Startup audits
+  resolve the real ingress schema and refuse unsafe effective database privileges.
+  Expired batches never absorb fresh events.
 
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
 

@@ -2454,7 +2454,7 @@ execute continuations. Old compatible readers ignore the new reason before batch
 so unrelated work stays readable during rollback.
 
 Migration `0116_watches` follows `0115_origin_session_grants`. A watch turn explicitly
-passes `attended=False`, uses core admission and S1's unattended decider, and
+passes `attended=False`, uses core admission and the shared unattended decider, and
 revalidates registration, stops, key generation and exact session before every
 driver send. Balance, member monthly caps and the attributed channel budget are
 read again before model and confirmation sends and before each report write.
@@ -2462,15 +2462,21 @@ Its current execution origin must be unattended and hold the exact
 bound session grant; missing or mismatched grants refuse the send. The common gate covers all three chat adapters,
 including confirmation sends. Watches require a gateable Managed Agents session;
 unsupported backends and implicit session replacement are refused. Deployment and
-agent unattended-write allowances cannot widen watch authority. Shell/custom tools,
-agent built-ins and the Daimon management proxy are removed from the frozen
-session before a send. Sessions carrying skills are refused because skills cannot
-be changed mid-session. Third-party reads are classified conservatively; writes are
-refused. Reports use only the registered destination; deleted threads never fall
+agent unattended-write allowances cannot widen watch authority. Watch admission
+validates an explicit snapshot-field allowlist before any provider mutation.
+Sessions carrying skills, multiagent coordinators or unreviewed fields are refused,
+including fields recognized by a newer provider SDK. Tools are rebuilt in one
+update: only explicitly named, enabled third-party MCP read configs are retained,
+all toolset defaults are disabled, and every retained tool requires the current
+read/report approval. Default-only toolsets grant no tools; operators must enumerate
+read tool names in the agent's per-tool configs. Shell/custom tools, agent built-ins,
+management endpoints and write configs are unavailable. Mounted data and credential
+vaults stay attached, with no native execution tools or delegation to use them outside
+the named read allowlist. Writes remain refused by the live posture. Reports use only the registered destination; deleted threads never fall
 back to a parent channel. Evidence is byte-bounded and escaped as untrusted text.
 The runner restores the original tool/server arrays before leaving the turn,
 including on errors and cancellation. Cached tool hashes are invalidated first so
-after interruption the next bind reapplies its ordinary tools. S1 revokes the
+after interruption the next bind reapplies its ordinary tools. Core revokes the
 origin session grant after this cleanup. Output authorization also gates each
 platform send/edit/upload, including terminal success, interrupted completion,
 errors and overflow chunks. A failed check latches delivery off for the rest of

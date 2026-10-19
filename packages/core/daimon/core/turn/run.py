@@ -1276,6 +1276,7 @@ async def run_prepared_turn_impl(
                             from daimon.core.continuity.watch_turn import (
                                 constrain_session,
                                 restore_session_tools,
+                                validate_watch_snapshot,
                             )
                             from daimon.core.session_ports_compat import retrieve_session_record
 
@@ -1301,6 +1302,7 @@ async def run_prepared_turn_impl(
                                     from daimon.core.turn.errors import AdmissionDenied
 
                                     raise AdmissionDenied(reason="invoker_not_allowed")
+                                validate_watch_snapshot(snapshot)
                                 if original_snapshot is None:
                                     from daimon.core.stores.thread_sessions import (
                                         invalidate_session_tools,

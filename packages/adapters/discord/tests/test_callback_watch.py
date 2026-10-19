@@ -129,7 +129,13 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
             {
                 "type": "mcp_toolset",
                 "mcp_server_name": "linear",
-                "configs": [],
+                "configs": [
+                    {
+                        "name": "get_issue",
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    }
+                ],
                 "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
             },
         ],
