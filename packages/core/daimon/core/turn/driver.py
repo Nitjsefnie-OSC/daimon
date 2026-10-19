@@ -234,13 +234,13 @@ async def _refuse_blocked(
     message: str,
     interrupt_unattended: bool = False,
 ) -> None:
-    """Interrupt gated unattended calls; otherwise send best-effort denials.
+    """Leave unattended calls paused on abort; attended cleanup sends denials.
 
-    Gated runs leave the calls paused: their normal cancel handler interrupts,
-    or cleanup interrupts here on an outside cancellation or failed gate.
-    Ungated runtimes retain the ordinary best-effort denial behavior.
+    Attendance is independent of gate capability. The normal Stop handler
+    interrupts, or cleanup interrupts here on outside cancellation or failure.
+    A denial resumes execution too, even on runtimes without session reads.
     """
-    if _UNATTENDED_GATE.get() is not None:
+    if _UNATTENDED.get():
         # A denial resumes execution too. Once cancellation or a gate failure
         # ends the decision boundary, leave calls paused and only interrupt.
         if interrupt_unattended:
@@ -268,17 +268,18 @@ async def _decide_or_refuse_on_cancel(
 
     The one place blocked calls are decided, for the live stream and the
     replay/eventless path alike. A cancel — before the decision, or landing
-    in the same tick as it — refuses every fresh id instead and raises
-    `_InterruptInConsume` for the normal interrupt path: a stop request never
+    in the same tick as it — leaves unattended calls paused (or refuses attended
+    calls) and raises `_InterruptInConsume` for the normal interrupt path:
+    a stop request never
     lets an `allow` out.
 
     This function owns the decide task and its cancel waiter. Whatever ends
     the wait — a decision, a cancel, or this coroutine itself being cancelled
     by the turn ceiling or a caller — the `finally` cancels and joins both, so
     a card hook never outlives the turn; the hooks retire their cards on that
-    cancellation. An outside cancellation also refuses the pending ids
-    (shielded, so the refusal lands even though this task is being torn down)
-    before it propagates.
+    cancellation. An outside cancellation also cleans up pending ids: unattended
+    calls stay paused and the session is interrupted; attended calls are refused.
+    Cleanup is shielded before cancellation propagates.
     """
     answered: dict[str, ToolConfirmationResult] = {}
     decide_task = asyncio.create_task(
@@ -287,7 +288,7 @@ async def _decide_or_refuse_on_cancel(
     cancel_task = asyncio.create_task(cancel.wait(), name="turn.decide_cancel_waiter")
     # Set once the wait ends on its own (a decision or the cancel event); if
     # the `finally` runs with it unset, this coroutine is being torn down from
-    # outside (the turn ceiling, a caller) and the pending ids are refused.
+    # outside (the turn ceiling, a caller) and pending ids need abort cleanup.
     settled = False
     ready = False
     try:
@@ -364,21 +365,28 @@ async def _decide_or_refuse_on_cancel(
 #: before the turn's message and before every confirmation batch, live or on a
 #: reconnect, so each send resumes the session under the policy now in force.
 #: A gate that raises stops that send.
+_UNATTENDED: ContextVar[bool] = ContextVar("turn_unattended", default=False)
 _UNATTENDED_GATE: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar(
     "turn_unattended_gate", default=None
 )
 
 
 @contextlib.contextmanager
-def unattended_sends(gate: Callable[[], Awaitable[None]]) -> Iterator[None]:
-    """Run the enclosed turn as unattended: `gate` before every send, and
-    every send a single attempt (no SDK retry after its gate and decision)."""
+def unattended_sends(gate: Callable[[], Awaitable[None]] | None) -> Iterator[None]:
+    """Run unattended, with an optional refresh gate before every send.
+
+    Every send is a single attempt. A missing gate is used only with a
+    refusal posture on runtimes without session reads; abort cleanup still
+    leaves pending calls unanswered and interrupts those runs.
+    """
+    unattended_token = _UNATTENDED.set(True)
     token = _UNATTENDED_GATE.set(gate)
     try:
         with single_attempt_mutation():
             yield
     finally:
         _UNATTENDED_GATE.reset(token)
+        _UNATTENDED.reset(unattended_token)
 
 
 async def _send_decision_batch(
@@ -422,7 +430,7 @@ async def _send_decision_batch(
             session_id=session_id,
         )
         if (
-            _UNATTENDED_GATE.get() is not None
+            _UNATTENDED.get()
             or cancel.is_set()
             or isinstance(err, asyncio.CancelledError | _InterruptInConsume)
         ):

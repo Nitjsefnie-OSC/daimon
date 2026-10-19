@@ -1171,9 +1171,12 @@ naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
 reserved name is gated like any other server. A pending card is owned by the
 turn: stopping the turn, a replayed pause, or the turn ceiling cancels the
 decision and retires the card, so an Approve that arrives after Stop never
-runs anything. Attended cleanup refuses pending calls. A gated unattended
+runs anything. Attended cleanup refuses pending calls. An unattended
 turn leaves them paused and interrupts instead: even a denial would resume
-execution without a successful gate. Cancellation during a confirmation
+execution. The driver tracks unattended cleanup independently of its optional
+confirmation gate, so Stop, cancellation and ceiling expiry also leave calls
+paused on runtimes without session reads. Normal decisions on those runtimes
+still refuse unattended confirmations. Cancellation during a confirmation
 gate cancels that gate before interrupting; a failed gate sends no confirmations. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.
