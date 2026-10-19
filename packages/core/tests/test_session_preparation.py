@@ -2940,7 +2940,9 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
     runtime = SimpleNamespace(
-        client=client, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=client,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     auth = AuthIdentity(
         account_id=first.admission.account_id,
@@ -3146,7 +3148,9 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     runtime = SimpleNamespace(
-        client=deps.anthropic, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=deps.anthropic,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     recheck = _admission_recheck(
         auth,
@@ -3304,7 +3308,9 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     runtime = SimpleNamespace(
-        client=deps.anthropic, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=deps.anthropic,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     recheck = _admission_recheck(
         auth,
