@@ -523,35 +523,40 @@ Prerequisites: read access and add-version access on those secrets, and
 ```bash
 export DAIMON_TEAMS_QA_CONFIG_SECRET=projects/<project>/secrets/<name>
 uv run python -m qa.live.teams status --persona admin
-uv run python -m qa.live.teams send --persona admin --to chat "routines"
-uv run python -m qa.live.teams wait --persona admin --after <message-id> --timeout 60
-uv run python -m qa.live.teams read --persona admin --from chat --since 5m
+uv run python -m qa.live.teams graph --persona admin /me/joinedTeams
+uv run python -m qa.live.teams graph --persona admin --method POST \
+  /teams/<qa-team-id>/channels --body '{"displayName": "qa-scratch"}'
 ```
 
-Each verb prints one JSON line. `send` posts once and never retries:
-`{"ok": true, "persona": "admin", "to": "chat", "message_id": "<id>", "posted_at": "<time>", "chat_id": "<chat-id>"}`.
-`read` and `wait` return the bot's messages with their text, card texts and
-card action titles:
-`{"ok": true, "persona": "admin", "source": "chat", "messages": [{"id": "<id>", "created": "<time>", "modified": "<time or null>", "text": "...", "card_texts": ["..."], "action_titles": ["Refresh"], "in_progress": false}]}`.
-Failures are `{"ok": false, "error": "<reason>", ...}` with a non-zero exit;
-`reauth_required` means a persona must sign in again with `login`, and
-`post_outcome_unknown` means the post may or may not exist, so check with
-`read` before posting again. `send` refuses a chat whose last persona post
-has no bot answer yet (`chat_not_quiet`).
+`graph` makes one Microsoft Graph call as the persona and prints one JSON
+line: `{"ok": true, "persona": "admin", "status": 200, "body": {...}}`. It
+handles the persona's token, which is never printed, and requests every
+delegated permission the QA app is consented for. A path may start with
+`/v1.0/` (the default), `/beta/` or the full `https://graph.microsoft.com`
+URL; `--body` takes JSON. Reads may go anywhere the persona can see. Writes
+are refused unless they target the configured QA team (`/teams/<team-id>/...`)
+or the persona's own 1:1 chat with the bot, and deleting or archiving the QA
+team itself is refused. Failures are `{"ok": false, "error": "<reason>", ...}`
+with a non-zero exit; `reauth_required` means a persona must sign in again
+with `login`. A write that fails in transit returns `post_outcome_unknown`:
+read before retrying.
 
-Send commands to the persona's 1:1 chat with the bot (`--to chat`). In a
-channel the bot answers commands privately, and Graph cannot read those
-answers. `--to channel` posts an @mention in the configured QA channel; free
-text there gets thread replies you can read with `--from thread:<message-id>`,
-and each one costs a model turn.
+To drive the bot, find the persona's 1:1 chat with it (a `oneOnOne` chat
+from `/me/chats` holding a message from the bot's app ID), post with
+`POST /chats/<chat-id>/messages`, and poll `GET /chats/<chat-id>/messages`.
+The bot first posts a "Working on it…" card with a Stop action and edits it
+in place, so a reply has settled once that action is gone and
+`lastModifiedDateTime` stops changing. In a channel the bot answers commands
+privately, where Graph cannot read them; free-text @mentions there get thread
+replies, and each costs a model turn.
 
 `refresh --all` silently redeems each persona's refresh token and writes the
 new cache back without posting anything. The `Teams QA token refresh`
 workflow runs it weekly on staging. If it reports `reauthentication
 required`, run the printed `login` command once for that persona.
 
-For exploratory sessions, stay on staging and post only in the configured QA
-channel and each persona's own 1:1 with the bot. Bare command words such as
-`routines` or `billing` are code-routed and take no model turn; any other text
-does. Card action titles are evidence only: never click them, and never print
-a token cache. `smoke --all` is the only fixed live check.
+For exploratory sessions, anything inside the QA team is fair game: its
+channels, settings and messages, and each persona's 1:1 with the staging bot.
+Stay out of other teams, never message or add real people, and never print a
+token cache. Bare command words such as `routines` or `billing` are
+code-routed and take no model turn; any other text does. `smoke --all` is the only fixed live check.
