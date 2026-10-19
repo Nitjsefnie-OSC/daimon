@@ -1063,7 +1063,21 @@ The driver-run ones go through one send boundary
 (`turn/driver.unattended_sends`): the session is gated
 (`unattended.session_gate`) right before the message and before every
 confirmation batch, live or on reconnect, and every send is a single
-attempt; a failed gate stops the send. For `run_prepared_turn` (fleet workers,
+attempt; a failed gate stops the send. The gate builds the session through
+`turn/unattended_capabilities.py` under the entry point's `CapabilityPolicy`
+(`ENTRY_POINT_POLICY`; `session_gate`, `gate_session_snapshot` and
+`unattended_posture` take an `entry_point`, and one that names none gets no
+built-ins and no skills). `require_allowed_capabilities` is a pure check on the
+snapshot that refuses a coordinator (`multiagent`), disallowed skills and any
+field, tool type or setting it does not know, before any update.
+`constrain_capabilities` computes the arrays to send (built-ins disabled when
+the policy says so, an optional `server/tool` allowlist, every MCP toolset
+gated); `apply_capabilities` clears the thread session's cached tool hashes
+before it sends them, and `restore_capabilities` puts the session's own arrays
+back, finishing through repeated cancellation. `capability_posture` makes the
+decider refuse what the session no longer carries. Prepared turns map their
+origin to an entry point (`unattended_entry_point`: `worker` is a fleet worker,
+`routine` a routine, anything else a wake). For `run_prepared_turn` (fleet workers,
 unattended wakes, and future watches or completion turns), this also covers
 dead-session recovery. Platform queue dispatchers explicitly mark timers and
 worker-completion wakes unattended. User-initiated handoffs and private-input

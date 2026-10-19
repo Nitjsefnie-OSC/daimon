@@ -1588,3 +1588,41 @@ async def test_a_checkpoint_follows_its_conversations_rules_not_its_budget_chann
         if event["type"] == "user.tool_confirmation"
     ]
     assert answers == [expected]
+
+
+async def test_a_coordinator_session_is_never_checkpointed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The checkpoint turn is unattended: a coordinator roster is refused before
+    its message, so only the conversation crosses and nothing is sent."""
+    from daimon.testing.ma_models import with_coordinator
+
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    state.sessions[old_session] = with_coordinator(state.sessions[old_session])
+    _seed_conversation(state, old_session, with_reply=True)
+    before = state.sessions[old_session].agent.tools
+
+    outcome = await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+        tool_safety=ToolSafetyPolicy(enabled=True),
+        public_url=None,
+        platform="discord",
+    )
+
+    assert isinstance(outcome, TranscriptOnly)
+    assert outcome.gap_reason == "checkpoint_failed"
+    assert state.sent_batches == []
+    assert state.sessions[old_session].agent.tools == before

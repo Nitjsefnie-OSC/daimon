@@ -259,7 +259,12 @@ not affected, apart from an agent's `ask` or `deny` rule on one
 (`daimon-mcp/<tool>`, with `DAIMON_TOOL_SAFETY__AGENT_RULES` on), which a
 routine refuses, and its card-only actions: a routine's session asks on a
 backend switch and Microsoft mail and invites, policy on or off, and on
-Microsoft file changes with it on, and the routine refuses them. See
+Microsoft file changes with it on, and the routine refuses them. A routine
+keeps its built-in sandbox tools, which a routine that writes files needs. A
+routine whose agent coordinates other agents (`multiagent`), or whose session
+carries a capability this release does not know, is refused before its
+message and records `AdmissionDenied: backend_unsupported`; see
+[permissions.md](permissions.md#what-an-unattended-session-may-carry). See
 [architecture.md](architecture.md). Stopping or cancelling a routine, or reaching
 its turn ceiling, leaves pending calls paused and interrupts without sending
 confirmations, including on runtimes without session reads. This also holds when

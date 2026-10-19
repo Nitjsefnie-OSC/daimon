@@ -3978,3 +3978,112 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
         released = await read_origin()
         assert released is not None and released.chat_session_id is None
     assert seen == [origin.id]
+
+
+@pytest.mark.parametrize(("origin", "entry_point"), [("chat", "wake"), ("worker", "fleet_worker")])
+async def test_unattended_prepared_turn_refuses_a_coordinator_and_keeps_builtins_by_policy(
+    origin: Any,
+    entry_point: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wakes and fleet workers gate through their own entry point's capability policy.
+
+    The gate the driver runs before the message refuses a coordinator session
+    before any update; the decider answers built-in calls by the policy.
+    """
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn import driver
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.posture import PolicyApproval
+    from daimon.core.turn.unattended import session_gate
+    from daimon.core.turn.unattended_capabilities import ENTRY_POINT_POLICY
+    from daimon.testing.ma_models import ma_session, with_coordinator
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-coordinator",
+        ma_session_id="sess_coordinator",
+    )
+    await db_session.commit()
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    snapshot = with_coordinator(ma_session(id="sess_coordinator", agent=agent))
+    updates: list[object] = []
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_coordinator$",
+        lambda _r, _m: httpx.Response(200, json=snapshot.model_dump(mode="json")),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/sess_coordinator$",
+        lambda r, _m: updates.append(r) or httpx.Response(500),
+    )
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id, agent=agent, env=ma_environment(id="env_1", tenant_id=tenant.id)
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_coordinator",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    gates: list[object] = []
+    monkeypatch.setattr(
+        run_module,
+        "session_gate",
+        lambda *args, **kwargs: (
+            gates.append(kwargs["entry_point"]) or session_gate(*args, **kwargs)
+        ),
+    )
+    postures: list[object] = []
+    refusals: list[BaseException] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        gate = driver._UNATTENDED_GATE.get()  # pyright: ignore[reportPrivateUsage]
+        assert gate is not None
+        try:
+            await gate()
+        except AdmissionDenied as err:
+            refusals.append(err)
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-coordinator",
+        external_user_id="user-1",
+        user_message="wake up",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        attended=False,
+        origin=origin,
+    )
+
+    assert gates == [entry_point]
+    assert [getattr(e, "reason", None) for e in refusals] == ["backend_unsupported"]
+    assert updates == []
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    bash = await posture.decide(ToolCall(tool_use_id="tu", server_name=None, tool_name="bash"))
+    assert bash.allow is ENTRY_POINT_POLICY[entry_point].allow_builtins

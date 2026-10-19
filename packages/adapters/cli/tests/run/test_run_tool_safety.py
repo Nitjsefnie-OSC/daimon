@@ -21,8 +21,9 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings,
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, sse_response
-from daimon.testing.ma_models import ma_agent, ma_session
+from daimon.testing.ma_models import ma_agent, ma_session, with_coordinator
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -76,14 +77,18 @@ class _Session:
         self.servers = servers
         self.metadata: dict[str, str] = {}
         self.wire: list[tuple[str, Any]] = []
+        self.coordinator = False
 
     def model(self) -> dict[str, Any]:
-        return ma_session(
+        snapshot = ma_session(
             id=_SESSION,
             agent=ma_agent(id="ag_cli", tools=self.tools, mcp_servers=self.servers),
             status="idle",
             metadata=self.metadata,
-        ).model_dump(mode="json")
+        )
+        return (with_coordinator(snapshot) if self.coordinator else snapshot).model_dump(
+            mode="json"
+        )
 
     def router(self, events: list[dict[str, Any]]) -> MARouter:
         router = MARouter()
@@ -394,3 +399,43 @@ async def test_cli_uses_only_trusted_session_annotations(
     )
     assert _confirmations(session) == [expected]
     assert catalogues == ([str(_LINEAR["url"])] if trusted else [])
+
+
+async def test_an_operator_run_on_a_coordinator_session_is_refused_before_anything_is_sent(
+    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The roster's children could write unasked; MA cannot remove it mid-session."""
+    session = _Session([_toolset("linear")], [_LINEAR])
+    session.coordinator = True
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await _run(
+            monkeypatch,
+            db_session_factory,
+            session,
+            _events("linear", "create_issue"),
+            ToolSafetyPolicy(enabled=True),
+        )
+    assert session.wire == []
+
+
+async def test_an_operator_run_keeps_its_sandbox_by_the_entry_point_policy(
+    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """`daimon run` keeps today's built-ins: a paused bash call is allowed."""
+    builtins = {
+        "type": "agent_toolset_20260401",
+        "configs": [],
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_ask"}},
+    }
+    session = _Session([builtins, _toolset("linear")], [_LINEAR])
+    events = _events("linear", "create_issue")
+    events[0] = {
+        "id": "evt_tu",
+        "type": "agent.tool_use",
+        "name": "bash",
+        "input": {"command": "ls"},
+        "evaluated_permission": "ask",
+    }
+    await _run(monkeypatch, db_session_factory, session, events, ToolSafetyPolicy(enabled=True))
+    assert session.tools[0]["default_config"]["enabled"] is True
+    assert _confirmations(session) == ["allow"]

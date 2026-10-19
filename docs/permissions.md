@@ -140,6 +140,44 @@ Microsoft mail or invites are refused with tool safety on or off; Microsoft
 file changes, which ask in chat only with tool safety on, are refused only
 with it on.
 
+## What an unattended session may carry
+
+Every turn nobody watches builds its session through one helper,
+`daimon.core.turn.unattended_capabilities`, before its message and before
+each confirmation batch. It refuses the turn, before anything is sent or
+changed, when the session:
+
+- belongs to an agent that coordinates other agents (`multiagent`). The
+  roster's agents carry their own tools and MCP servers, which the gate cannot
+  rewrite, and Managed Agents cannot remove a roster from a live session or
+  override it when one is created.
+- carries an agent field, tool type, or tool or server setting this release
+  does not know.
+- carries skills on an entry point that does not allow them.
+
+Every MCP server the session keeps, Daimon's own included, then goes through
+the unattended decider as described above. Built-in sandbox tools (bash, file
+reads and edits, web fetch and the rest) and custom tools follow a policy set
+per entry point:
+
+| Entry point | Built-in tools | Skills |
+| --- | --- | --- |
+| Scheduled routines | on | allowed |
+| Timers and worker-finished wakes | on | allowed |
+| Fleet workers | on | allowed |
+| Agent chat | on | allowed |
+| `daimon run` | on | allowed |
+| Workspace checkpoints | on | allowed |
+
+When an entry point's built-ins are off, the session's built-in toolset is
+disabled (every tool `enabled: false`), custom tools are removed, and the
+decider refuses any built-in call that still pauses.
+
+A refused routine records `AdmissionDenied: backend_unsupported` as its
+result. Agent chat answers with a tool error, `daimon run` exits with the
+same error, and a workspace checkpoint carries only the conversation to the
+new session.
+
 In-process unattended runs leave pending calls paused and interrupt the session
 when a decision is cancelled, its turn ceiling expires, or its confirmation
 gate fails. Stop, cancellation and ceiling cleanup send no confirmations, including

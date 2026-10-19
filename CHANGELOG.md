@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Turns nobody watches (routines, timers and worker wakes, fleet workers, agent chat, `daimon run` and workspace checkpoints) refuse a session whose agent coordinates other agents, before anything is sent: its roster's agents could run tools and MCP writes the unattended gate cannot reach, and Managed Agents cannot remove the roster from a live session. Such a routine fails with `AdmissionDenied: backend_unsupported`, agent chat answers with a tool error, and a checkpoint carries only the conversation. A session carrying an agent field, tool type or tool setting this release does not know is refused the same way. Built-in sandbox tools (bash, file edits and the rest) keep today's behaviour on each of these entry points, set in one per-entry-point policy.
+
 - Native OpenAI sessions install isolated MCP session grants before creation, bind them to each executing origin on reuse, and revoke origin authority when the turn ends. Child preparation cannot inherit a parent origin grant.
 
 - Agent chat and hub mutations require a session opened on that headless surface. Same-account platform sessions and legacy sessions without proven headless provenance cannot be continued, cancelled or archived through it. Unauthorized callers are refused before waiting on a session mutation fence.
