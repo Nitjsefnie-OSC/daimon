@@ -651,6 +651,7 @@ async def leased_poll(
         or not await is_watch_enabled(session, watch)
     ):
         return None
+    account = await session.get(Account, watch.owner_account_id)
     tenant = await get_tenant(session, watch.tenant_id)
     principal = await find_platform_principal(
         session,
@@ -666,7 +667,9 @@ async def leased_poll(
         account_id=watch.owner_account_id,
     )
     if (
-        tenant is None
+        account is None
+        or account.tenant_id != watch.tenant_id
+        or tenant is None
         or tenant.archived_at is not None
         or tenant.provision_status != "ready"
         or principal is None

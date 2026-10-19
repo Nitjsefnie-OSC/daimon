@@ -377,3 +377,19 @@ async def test_invalid_initial_rule_shape_backs_off_without_poisoning_baseline(r
     async with runtime.session_factory() as db:
         row = await watches.get_watch(db, watch.id)
         assert row.baseline == {} and row.consecutive_errors == 1
+
+
+async def test_owner_account_tenant_change_stops_poll_before_read(runtime_watch):
+    runtime, watch, _ = runtime_watch
+    token = await lease(runtime, watch)
+    async with runtime.session_factory.begin() as db:
+        other = await make_tenant(db)
+        await db.execute(
+            text("UPDATE accounts SET tenant_id=:tenant WHERE id=:owner"),
+            {"tenant": other.id, "owner": watch.owner_account_id},
+        )
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", AsyncMock()) as source:
+        assert not await run_poll(runtime, watch.id, token)
+        source.assert_not_called()
+    async with runtime.session_factory() as db:
+        assert (await watches.get_watch(db, watch.id)).status == "paused"

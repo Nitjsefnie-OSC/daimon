@@ -106,7 +106,12 @@ async def authorize_poll(
     async with runtime.session_factory() as db:
         tenant = await get_tenant(db, watch.tenant_id)
         account = await get_account(db, watch.owner_account_id)
-    if tenant is None or account is None or runtime.membership_resolver is None:
+    if (
+        tenant is None
+        or account is None
+        or account.tenant_id != watch.tenant_id
+        or runtime.membership_resolver is None
+    ):
         raise PollAccessRevoked("Watch owner unavailable")
     subject = await resolve_subject(
         runtime.session_factory,

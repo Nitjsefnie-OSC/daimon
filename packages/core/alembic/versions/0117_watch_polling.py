@@ -40,13 +40,6 @@ BEGIN
         RAISE EXCEPTION 'poll evidence bounds' USING ERRCODE='22023'; END IF;
     p_event := p_lease::uuid;
     SELECT 0 AS generation INTO c;
-    IF p_payload IS NULL THEN
-        UPDATE {schema}.watches SET baseline=jsonb_build_object('value',p_value),
-          lease_owner=NULL,lease_expires_at=NULL,consecutive_errors=0,backoff_until=NULL,
-          next_check_at=t+make_interval(secs=>(source_state->>'interval')::int)
-          WHERE id=w.id;
-        RETURN NULL;
-    END IF;
     IF (w.max_fires IS NOT NULL AND w.fire_count >= w.max_fires) OR
        NOT EXISTS (SELECT 1 FROM {schema}.accounts a JOIN {schema}.tenants g
           ON g.id=a.tenant_id WHERE a.id=w.owner_account_id AND a.tenant_id=w.tenant_id
@@ -59,6 +52,13 @@ BEGIN
           AND s.thread_id=w.thread_id AND s.channel_id=w.parent_channel_id
           AND s.ma_agent_id=w.agent_id AND s.ma_session_id=w.session_id AND s.status='live') THEN
         RAISE EXCEPTION 'poll binding refused' USING ERRCODE='42501';
+    END IF;
+    IF p_payload IS NULL THEN
+        UPDATE {schema}.watches SET baseline=jsonb_build_object('value',p_value),
+          lease_owner=NULL,lease_expires_at=NULL,consecutive_errors=0,backoff_until=NULL,
+          next_check_at=t+make_interval(secs=>(source_state->>'interval')::int)
+          WHERE id=w.id;
+        RETURN NULL;
     END IF;
     -- Rows and payloads expire after seven days; freshness prevents replay after deletion.
     DELETE FROM {schema}.watch_inbox WHERE accepted_at < t-interval '7 days';

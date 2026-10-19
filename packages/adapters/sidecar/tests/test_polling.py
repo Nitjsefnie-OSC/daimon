@@ -334,3 +334,17 @@ async def test_max_fires_stops_new_polls_but_final_queued_wake_still_runs(
         assert row.next_check_at is None
         queued = await get_continuation(db, idempotency_key=key)
         assert await watches.watch_seed(db, queued, now=datetime.now(UTC))
+
+
+async def test_baseline_commit_rejects_revoked_owner_binding(db_session_factory, poll_watch):
+    watch, _ = poll_watch
+    token = await claim(db_session_factory, watch.id)
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            text("DELETE FROM platform_principals WHERE account_id=:owner"),
+            {"owner": watch.owner_account_id},
+        )
+    with pytest.raises(DBAPIError):
+        await result(db_session_factory, watch, token, 1)
+    async with db_session_factory() as db:
+        assert (await watches.get_watch(db, watch.id)).baseline == {}
