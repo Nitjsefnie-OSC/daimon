@@ -617,9 +617,11 @@ jobs:
             # scheduler reconciles only on a resolver miss at fire time.
             for svc in discord slack teams; do
               case $svc in
-                # Spawns one reconcile per guild from on_ready and logs no
-                # event when they are all done: no completion signal.
-                discord) done_events=""; failure_events="" ;;
+                # One event per process once every reconcile the first
+                # on_ready started (and any seed already in flight) is done.
+                discord)
+                  done_events="discord.boot_reconcile_complete"
+                  failure_events="discord.boot_reconcile_failed" ;;
                 slack)
                   done_events="slack.boot_sweep_complete slack.boot_sweep_skipped"
                   failure_events="slack.boot_sweep_crashed slack.boot_sweep_tenant_failed slack.boot_sweep_reconcile_failed_ready_tenant slack.boot_sweep_status_flip_failed" ;;

@@ -147,13 +147,33 @@ def test_teams_ready_and_skipped_sweep_count_as_complete(tmp_path: Path) -> None
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_discord_has_no_completion_event_so_it_keeps_the_fixed_wait(tmp_path: Path) -> None:
+_DISCORD_DONE = _container(logs=(_event("discord.boot_reconcile_complete"),))
+
+
+def test_discord_completion_ends_the_wait_with_the_others(tmp_path: Path) -> None:
     result = _run_remote(
-        tmp_path,
-        {"discord": [_container()], "slack": [_SLACK_DONE], "teams": [_TEAMS_DISABLED]},
+        tmp_path, {"discord": [_DISCORD_DONE], "slack": [_SLACK_DONE], "teams": [_TEAMS_DISABLED]}
     )
-    assert result.returncode == 3
-    assert "discord logs no completion event" in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _clock(tmp_path) == _START
+
+
+@pytest.mark.parametrize(
+    "logs",
+    [
+        (),  # an image from before the event: never logged
+        ("discord.boot_reconcile_failed",),
+        ("discord.boot_reconcile_complete", "discord.boot_reconcile_failed"),
+    ],
+)
+def test_discord_without_a_clean_completion_keeps_the_fixed_wait(
+    tmp_path: Path, logs: tuple[str, ...]
+) -> None:
+    discord = _container(logs=tuple(_event(name) for name in logs))
+    result = _run_remote(
+        tmp_path, {"discord": [discord], "slack": [_SLACK_DONE], "teams": [_TEAMS_DISABLED]}
+    )
+    assert result.returncode == 3, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
