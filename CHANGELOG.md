@@ -30,14 +30,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Fleet workers and unattended wakes re-gate Managed Agents sessions before every
+  confirmation batch. Runtimes without session reads refuse unattended
+  confirmations with a plain reason, including when tool safety is off.
 - Agent-chat turns (`start_turn`, `continue_turn` and `ask`, with an agent key or on the hub) now follow tool safety. Before every message the session's tool settings are set again from the current policy, and each tool call is decided by the unattended rules when it is made: reads run, and a third-party write is refused unless the operator allowed it in unattended runs. These turns used to run every tool without asking. With tool safety off, calls the session still asks about are allowed.
 - Agent-chat turns apply agent tool rules for their channel (a channel-bound key's channel, or the conversation's), and refuse Daimon's card-only actions: a backend switch and Microsoft mail and invites with tool safety on or off, and Microsoft file changes with it on, as in chat.
 - Reading a session never answers its tool calls. An agent-chat turn left waiting on a tool call by a restart reads as `paused` from `get_session` and `get_my_session`, with a hint; only the session's owner resumes it with `continue_turn`, whose `message` is now optional for that case, and the current policy decides the waiting calls. `continue_turn` never answers a confirmation card from a chat turn.
 - An MCP tool hint that marks a tool both read-only and destructive now counts as a write.
+- `daimon run` treats its turn as unattended: before the message it sets the session's tool settings from the current policy, even for a session created while tool safety was off, and decides each paused call by the unattended rules (`DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`, not chat-only grants).
+- Every unattended turn (agent chat, `daimon run`, routines and other headless runs, workspace checkpoints) sets the session's tool settings from the current policy right before its message and before each batch of tool confirmations, and sends each once, without automatic retries; a failed update stops that send. Fleet workers and unattended wakes decide their paused calls by the same unattended rules, with tool safety on or off.
+- `daimon run` on an existing session applies that session's own tenant and channel tool rules (a Slack thread's parent channel, never a DM's source channel); only a session stamped for no tenant uses the local CLI tenant. A checkpoint turn applies its conversation's channel rules, not those of the channel it is billed to.
+- A workspace transfer's checkpoint turn no longer auto-approves tool calls: its old session is gated right before the checkpoint message, and paused calls are decided by the unattended rules.
+- Routines and other headless runs answer tool confirmations with the same unattended decider as agent-chat turns, never auto-approving: with tool safety off, ordinary third-party calls are still allowed, but Daimon's card-only actions (backend switch, Microsoft mail and invites; file changes with tool safety on) now ask in the routine's session and are refused.
 
 - An agent-wide `deny` tool rule on one of Daimon's own tools (`daimon-mcp/<tool>`) now stops the call. The MCP server refuses it, directly or through `call_tool`, when that agent's chat or routine session makes it and tool rules are enabled. The rule used to be saved but never enforced for Daimon's own tools. An agent-wide `deny` on `daimon-mcp/*` denies all of Daimon's own tools for that agent, tools added later included, and `search_tools` and `call_tool` too; wildcards are recognised only for `daimon-mcp`, agent-wide and `deny`. The turn driver applies `ask` and channel rules on them (see Fixed).
 
 ### Fixed
+
+- Continuing a routine session through the CLI, MCP or a checkpoint retains its conversation channel rules; its private transcript stamp no longer makes it execute as a DM.
+
+- Cancelling an unattended decision or reaching its turn ceiling leaves pending calls paused and interrupts the session; cleanup never sends confirmations after a failed or cancelled safety gate.
+
+- Handoffs created by unattended wakes retain unattended tool safety on Discord, Slack and Teams; queueing a handoff no longer grants human approval surfaces.
 
 - OpenAI agents with native web search and host-bound MCP now accept the provider's echoed default search fields and empty credential carriers during readback. Nondefault search controls and nonempty native credentials remain refused.
 

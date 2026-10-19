@@ -189,6 +189,7 @@ async def _hand_off_task_impl(
             target_name=destination_name,
             requested_work=queued_work,
             reason="task_handoff",
+            attended=origin.attended,
             idempotency_key=uuid.uuid4(),
         )
     )
@@ -273,6 +274,7 @@ async def _hand_off_task_impl(
                     target_ma_agent_id=request.target_ma_agent_id,
                     target_name=request.target_name,
                     reason=request.reason,
+                    attended=request.attended,
                     idempotency_key=request.idempotency_key,
                     requested_work=request.requested_work,
                 )

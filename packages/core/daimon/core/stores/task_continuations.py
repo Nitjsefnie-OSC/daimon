@@ -57,6 +57,7 @@ async def record_continuation(
     idempotency_key: _uuid.UUID,
     requested_work: str | None = None,
     available_at: datetime | None = None,
+    attended: bool = False,
 ) -> TaskContinuationRow:
     """Queue a continuation as `pending`. Writing it dispatches nothing.
 
@@ -77,6 +78,7 @@ async def record_continuation(
         target_name=target_name,
         requested_work=requested_work,
         reason=reason,
+        attended=attended,
         idempotency_key=idempotency_key,
         available_at=available_at,
     )

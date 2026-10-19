@@ -3236,3 +3236,381 @@ async def test_a_chat_turn_reads_trusted_server_annotations_with_the_agent_token
     assert result.allow and prompts == [], "readOnlyHint ran the read without a card"
     assert tokens == ["agent-wide"]
     assert credential_reads == [derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_1")]
+
+
+@pytest.mark.parametrize("microsoft", [False, True], ids=["plain", "selected-tools"])
+async def test_an_unattended_prepared_turn_uses_the_unattended_decider_with_safety_off(
+    microsoft: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review B, finding 6: a fleet worker or wake (attended=False) on a session
+    still asking from an earlier policy gets the explicit off allow for an
+    ordinary call, and Daimon's card-only actions are still refused."""
+    from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-unattended",
+        ma_session_id="sess_unattended",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=False),
+        microsoft_send=microsoft,
+        public_url="https://daimon.example/mcp",
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id,
+            agent=ma_agent(id="ag_1", tenant_id=tenant.id),
+            env=ma_environment(id="env_1", tenant_id=tenant.id),
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_unattended",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    postures: list[object] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "approved"
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-unattended",
+        external_user_id="user-1",
+        user_message="hello",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        attended=False,
+    )
+
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    ordinary = await posture.decide(
+        ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
+    )
+    assert ordinary.allow, "safety off allows an ordinary third-party call"
+    protected = await posture.decide(
+        ToolCall(
+            tool_use_id="tu2",
+            server_name="daimon-mcp",
+            tool_name="microsoft_send",
+            input={"action": "send_mail"},
+        )
+    )
+    assert not protected.allow and prompts == []
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize(
+    ("runtime", "failed_batch"),
+    [
+        ("legacy", None),
+        ("legacy", 1),
+        ("legacy", 2),
+        ("mux", None),
+        ("mux", 1),
+        ("mux-with-read", None),
+        ("mux-without-read", None),
+        ("non-anthropic", None),
+    ],
+)
+async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_read(
+    platform: str,
+    runtime: str,
+    failed_batch: int | None,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.mux_backend import managed_agents, resource_ref
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+    from daimon.core.turn.prepare import admitted_session_scope
+    from daimon.testing.ma_models import ma_session
+    from mux.contracts.config import ConfigRevision, ResolvedBackend
+    from mux.contracts.ids import ChannelRef, ResourceRef
+    from mux.errors import UnsupportedCapability
+
+    from .conftest import make_end_turn, make_mcp_tool_use, make_requires_action
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    gateable = runtime in ("legacy", "mux", "mux-with-read")
+    agent = ma_agent(
+        id="ag_wake",
+        tenant_id=tenant.id,
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        ],
+        mcp_servers=[{"type": "url", "name": "linear", "url": "https://linear.example/mcp"}],
+    )
+    snapshot = ma_session(id="sess_wake_gate", agent=agent)
+    order: list[str] = []
+    confirmations: list[dict[str, Any]] = []
+    events = []
+    for i in (1, 2):
+        events.extend(
+            [
+                make_mcp_tool_use(event_id=f"call_{i}", name="get_issue", mcp_server_name="linear"),
+                make_status_idle(
+                    event_id=f"pause_{i}", stop_reason=make_requires_action(event_ids=[f"call_{i}"])
+                ),
+            ]
+        )
+    events.append(make_status_idle(event_id="end", stop_reason=make_end_turn()))
+    wire_events = [event.model_dump(mode="json") for event in events]
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_wake_gate",
+        lambda r, m: httpx.Response(200, json=snapshot.model_dump(mode="json")),
+    )
+    router.add(
+        "GET", r"/v1/sessions/sess_wake_gate/events/stream", lambda r, m: sse_response(wire_events)
+    )
+    router.add(
+        "GET", r"/v1/sessions/sess_wake_gate/events", lambda r, m: list_response(wire_events)
+    )
+    updates = 0
+
+    def update(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        nonlocal updates
+        updates += 1
+        body = json.loads(request.content)
+        assert body["agent"]["tools"][0]["default_config"]["permission_policy"] == {
+            "type": "always_ask"
+        }
+        if failed_batch is not None and updates == failed_batch + 1:
+            order.append("update refused")
+            return httpx.Response(
+                400,
+                json={
+                    "type": "error",
+                    "error": {"type": "invalid_request_error", "message": "gate refused"},
+                },
+            )
+        order.append("update")
+        return httpx.Response(200, json=snapshot.model_dump(mode="json"))
+
+    def send(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        for event in json.loads(request.content)["events"]:
+            if event["type"] == "user.tool_confirmation":
+                confirmations.append(event)
+                order.append(event["result"])
+            elif event["type"] == "user.message":
+                order.append("message")
+        return send_events_response()
+
+    router.add("POST", r"/v1/sessions/sess_wake_gate", update)
+    router.add("POST", r"/v1/sessions/sess_wake_gate/events", send)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        turn_path="legacy" if runtime == "legacy" else "mux",
+        tool_safety=ToolSafetyPolicy(enabled=gateable),
+    )
+    # A timer's genuine chat origin can call MCP hand_off_task. Queueing that
+    # tool's continuation must retain attendance through the destination run.
+    from daimon.adapters.mcp.auth.resolver import AuthIdentity
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.adapters.mcp.tools.task_continuity import (
+        _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.config import DatabaseSettings, Settings
+    from daimon.core.continuity.continuation import continuation_attended
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.task_continuations import list_pending_continuations
+    from daimon.core.turn_origin import turn_origin
+    from pydantic import PostgresDsn
+
+    router.add("GET", r"/v1/agents", lambda r, m: list_response([agent.model_dump(mode="json")]))
+    handoff_runtime = McpRuntime(
+        session_factory=db_session_factory,
+        client=deps.anthropic,
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test"))
+        ),
+        deployment_default=DeploymentDefault(agent_name=agent.name),
+    )
+    async with turn_origin(
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform=platform,
+        parent_channel_id="C1",
+        thread_id="wake-gate",
+        responder_ma_agent_id="ag_timer",
+        responder_name="timer-agent",
+        role=Role.USER,
+        attended=False,
+    ) as origin:
+        await _hand_off_task_impl(
+            handoff_runtime,
+            AuthIdentity(
+                tenant_id=tenant.id,
+                account_id=account.id,
+                role=Role.USER,
+                platform=platform,
+                platform_user_id="user-1",
+            ),
+            origin_context_id=str(origin.id),
+            agent_id=agent.id,
+            continuation="continue the timer's work",
+        )
+    async with db_session_factory() as session:
+        [queued] = await list_pending_continuations(
+            session, tenant_id=tenant.id, platform=platform, thread_id="wake-gate"
+        )
+    assert queued.reason == "task_handoff" and not queued.attended
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform=platform,
+        thread_id="wake-gate",
+        ma_session_id="sess_wake_gate",
+    )
+    await db_session.commit()
+    admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id=row.ma_session_id,
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    if runtime in ("mux-with-read", "mux-without-read"):
+        scope = admitted_session_scope(admission, tenant_id=tenant.id, session_id=row.ma_session_id)
+        backend = managed_agents(
+            deps.anthropic, scope=scope, resources=frozenset({("session", row.ma_session_id)})
+        )
+
+        def no_read(port: object, *, namespace: str, version: int) -> Any:
+            raise UnsupportedCapability((namespace,), "anthropic.managed_agents")
+
+        if runtime == "mux-without-read":
+            monkeypatch.setattr(backend, "extension", no_read)
+        prepared = dataclasses.replace(
+            prepared,
+            backend=backend,
+            session_ref=resource_ref(backend, "session", row.ma_session_id, scope=scope),
+        )
+    elif runtime == "non-anthropic":
+        revision = ConfigRevision.create(
+            ChannelRef(tenant_id=str(tenant.id), platform=platform, channel_id="C1"),
+            1,
+            ResolvedBackend(
+                backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna"
+            ),
+        )
+        prepared = dataclasses.replace(
+            prepared,
+            admission=dataclasses.replace(
+                admission, backend_revision=revision, backend_revision_origin="channel"
+            ),
+            session_ref=ResourceRef(
+                id=row.ma_session_id,
+                kind="session",
+                provider="openai",
+                account_scope_id="workspace",
+                tenant_id=str(tenant.id),
+                account_id=str(account.id),
+            ),
+        )
+
+        class NativePersistence:
+            def activate(self) -> contextlib.AbstractContextManager[None]:
+                return contextlib.nullcontext()
+
+        async def native_persistence(*args: Any, **kwargs: Any) -> NativePersistence:
+            return NativePersistence()
+
+        monkeypatch.setattr(run_module, "prepared_persistence", native_persistence)
+
+        async def native_turn(**kwargs: Any) -> TurnState:
+            assert "provider_actions" not in kwargs
+            posture = kwargs["tool_confirmation"]
+            assert isinstance(posture, PolicyApproval)
+            decision = await posture.decide(
+                ToolCall(tool_use_id="native-call", server_name="linear", tool_name="get_issue")
+            )
+            assert not decision.allow and decision.deny_message is not None
+            assert "cannot refresh the session's tool safety gate" in decision.deny_message
+            order.append("native denied")
+            return TurnState()
+
+        monkeypatch.setattr(run_module, "run_turn", native_turn)
+
+    async def unused_provider_action(prompt: Any) -> None:
+        raise AssertionError("unattended turns must never invoke a human provider-action hook")
+
+    outcome = await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform=platform,
+        thread_id="wake-gate",
+        external_user_id="user-1",
+        user_message="wake up",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        origin="chat",
+        attended=continuation_attended(queued),
+        provider_action=unused_provider_action,
+        render_interval_s=0.001,
+    )
+    if runtime == "non-anthropic":
+        assert order == ["native denied"]
+    elif not gateable:
+        assert order == ["message", "deny", "deny"]
+        assert all(
+            "cannot refresh the session's tool safety gate" in event["deny_message"]
+            for event in confirmations
+        )
+    elif failed_batch is None:
+        assert outcome.state.error is None
+        assert order == ["update", "message", "update", "allow", "update", "allow"]
+    else:
+        assert outcome.state.error is not None
+        assert order == ["update", "message"] + ["update", "allow"] * (failed_batch - 1) + [
+            "update refused"
+        ]
+        assert len(confirmations) == failed_batch - 1

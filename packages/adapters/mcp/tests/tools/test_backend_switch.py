@@ -10,6 +10,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agents import _request_agent_backend_switch_impl
 from daimon.core.stores.domain import Role
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.db import db_nullpool_engine  # noqa: F401
 from fastmcp.exceptions import ToolError
 
@@ -401,6 +402,7 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
         confirmed_tools=frozenset({"request_agent_backend_switch"})
         if recorded_gate
         else frozenset(),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     async with runtime.session_factory.begin() as session:
         await record_snapshot(

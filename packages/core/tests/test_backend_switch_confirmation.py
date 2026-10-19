@@ -6,6 +6,7 @@ import pytest
 from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
+    OPEN_TOOL_SAFETY,
     ToolCall,
     ToolSafetyPolicy,
     decide_tool_call,
@@ -669,6 +670,7 @@ async def test_real_sdk_create_and_desired_snapshot_use_the_same_opt_in_tools(se
             environment=ma_environment(),
             mcp_settings=settings,
             confirmed_tools=confirmed,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
         if not selected:
             trace.queue(
@@ -683,6 +685,7 @@ async def test_real_sdk_create_and_desired_snapshot_use_the_same_opt_in_tools(se
                 agent=native,
                 environment=ma_environment(),
                 mcp_settings=settings,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
             assert trace.requests[0].body == trace.requests[1].body
     sent = trace.requests[0].json()
@@ -711,6 +714,7 @@ async def test_real_sdk_create_and_desired_snapshot_use_the_same_opt_in_tools(se
         vault_id=None,
         public_url=str(settings.public_url),
         confirmed_tools=confirmed,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     assert snapshot.tools_sha256 == hash_tools(tools)
     assert snapshot.mcp_servers_sha256 == hash_mcp_servers(servers)
@@ -779,6 +783,7 @@ async def test_real_sdk_refresh_preserves_default_bytes_and_the_selected_gate(ow
         memory_store_id=None,
         vault_id=None,
         public_url=str(settings.public_url),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     selected = frozenset({"request_agent_backend_switch"})
     bodies = []

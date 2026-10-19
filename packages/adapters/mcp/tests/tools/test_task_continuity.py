@@ -179,7 +179,11 @@ async def test_handoff_binds_the_thread_and_writes_no_channel_or_workspace_routi
     assert pending == [], "no continuation is queued when none was asked for"
 
 
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize("attended", [False, True])
 async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
+    platform: str,
+    attended: bool,
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -191,7 +195,7 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
         account_id=caller.id,
         tenant_id=tenant.id,
         role=Role.USER,
-        platform="discord",
+        platform=platform,
         platform_user_id="42",
     )
     long_request = "finish the churn writeup " * 40
@@ -200,12 +204,13 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
         committing_sessionmaker,
         tenant_id=tenant.id,
         account_id=caller.id,
-        platform="discord",
+        platform=platform,
         parent_channel_id="C_PARENT",
         thread_id="T_THREAD",
         responder_ma_agent_id=_RESPONDER_ID,
         responder_name="daimon",
         role=Role.USER,
+        attended=attended,
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,
@@ -218,7 +223,7 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
     assert result.continuation_recorded is True, "work was queued for the destination"
     async with committing_sessionmaker() as session:
         pending = await list_pending_continuations(
-            session, tenant_id=tenant.id, platform="discord", thread_id="T_THREAD"
+            session, tenant_id=tenant.id, platform=platform, thread_id="T_THREAD"
         )
     assert len(pending) == 1, "exactly one continuation is queued per handoff"
     queued = pending[0]
@@ -230,6 +235,11 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
         "the person's words are bounded before they reach a turn"
     )
     assert queued.requested_work == long_request[:500], "and otherwise preserved verbatim"
+
+    from daimon.core.continuity.continuation import continuation_attended
+
+    assert queued.attended is attended
+    assert continuation_attended(queued) is attended
 
 
 @pytest.mark.parametrize(

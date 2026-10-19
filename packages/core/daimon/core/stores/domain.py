@@ -341,6 +341,7 @@ class TaskContinuationRow(BaseModel):
 
     id: uuid.UUID
     tenant_id: uuid.UUID
+    attended: bool = False
     platform: str
     thread_id: str
     parent_channel_id: str
@@ -1111,6 +1112,7 @@ class TurnOriginRow(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
     account_id: uuid.UUID
+    attended: bool = False
     platform: str
     parent_channel_id: str
     thread_id: str

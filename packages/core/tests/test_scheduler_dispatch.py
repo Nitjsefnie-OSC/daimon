@@ -8,6 +8,7 @@ import pytest
 from daimon.core.scheduler import RoutineDispatcher, run_one_tick
 from daimon.core.stores.domain import CatchUpPolicy, RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, update_routine
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -411,6 +412,7 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
                 trigger_message=row.trigger_message,
                 tenant_id=row.tenant_id,
                 session_factory=db_session_factory,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
 
         dispatcher = await run_one_tick(

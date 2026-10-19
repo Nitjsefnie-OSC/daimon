@@ -5,6 +5,7 @@ import uuid
 import httpx
 import pytest
 from daimon.core import headless_runner
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.state import TurnState
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
@@ -57,6 +58,7 @@ async def test_headless_resource_requests_match_direct_sdk(
                 environment_id=environment.id,
                 tenant_id=tenant_id,
                 trigger_message="headless",
+                tool_safety=OPEN_TOOL_SAFETY,
             )
             == ""
         )

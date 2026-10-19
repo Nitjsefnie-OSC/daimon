@@ -87,7 +87,10 @@ class FakeSession:
     turn; answering every pending call moves to the next batch, and after the
     last one the turn ends. `calls` is the wire order of every mutating
     request. `page_size` pages event lists; `fail_update` / `fail_confirm`
-    refuse those requests.
+    refuse those requests; `throttle` answers the next N sends of a kind
+    (`message`, `confirm`) with a retryable 429, and `attempts` counts every
+    send. With `honor_permissions`, a call the session's current config does
+    not ask on runs at once (`executed`) instead of pausing, as MA does.
     """
 
     def __init__(
@@ -108,6 +111,9 @@ class FakeSession:
         self.fail_update = False
         self.fail_confirm = False
         self.on_confirm: Callable[[], None] | None = None
+        self.honor_permissions = False
+        self.throttle: dict[str, int] = {}
+        self.attempts: dict[str, int] = {}
         self._remaining: list[list[Call]] = []
         self._ids = 0
 
@@ -119,6 +125,42 @@ class FakeSession:
     def _id(self, prefix: str) -> str:
         self._ids += 1
         return f"{prefix}_{self._ids:03d}"
+
+    def _asks(self, server: str, name: str) -> bool:
+        toolset = next((t for t in self.tools if t.get("mcp_server_name") == server), None)
+        if toolset is None:
+            return True
+        config = next((c for c in toolset.get("configs") or [] if c["name"] == name), None)
+        chosen = config or toolset["default_config"]
+        return chosen["permission_policy"]["type"] == "always_ask"
+
+    def _run(self, batch: list[Call]) -> None:
+        """A turn reaching `batch`: unasked calls run, asked ones pause."""
+        if self.honor_permissions:
+            for server, name, _input in batch:
+                if not self._asks(server, name):
+                    self.calls.append(("executed", f"{server}/{name}"))
+            batch = [c for c in batch if self._asks(c[0], c[1])]
+        if batch:
+            self._pause_on(batch)
+        elif self._remaining:
+            self._run(self._remaining.pop(0))
+        else:
+            self._end()
+
+    def _end(self) -> None:
+        self.events += [
+            {
+                "id": self._id("evt_msg"),
+                "type": "agent.message",
+                "content": [{"type": "text", "text": "done"}],
+            },
+            {
+                "id": self._id("evt_idle"),
+                "type": "session.status_idle",
+                "stop_reason": {"type": "end_turn"},
+            },
+        ]
 
     def _pause_on(self, batch: list[Call]) -> None:
         ids: list[str] = []
@@ -145,12 +187,16 @@ class FakeSession:
 
     def pause(self) -> str:
         """Append a turn paused on the script's first batch; returns its boundary."""
+        boundary = self._start_turn()
+        self._pause_on(self._remaining.pop(0))
+        return boundary
+
+    def _start_turn(self) -> str:
         boundary = self._id("evt_user")
         self.events.append(
             {"id": boundary, "type": "user.message", "content": [{"type": "text", "text": "hi"}]}
         )
         self._remaining = list(self.script)
-        self._pause_on(self._remaining.pop(0))
         return boundary
 
     @property
@@ -209,6 +255,15 @@ class FakeSession:
 
     def _send(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         body = json_body(request)["events"]
+        kind = "confirm" if body[0]["type"] == "user.tool_confirmation" else "message"
+        self.attempts[kind] = self.attempts.get(kind, 0) + 1
+        if self.throttle.get(kind):
+            self.throttle[kind] -= 1
+            return httpx.Response(
+                429,
+                headers={"retry-after": "0"},
+                json={"type": "error", "error": {"type": "rate_limit_error"}},
+            )
         if self.fail_confirm and any(e["type"] == "user.tool_confirmation" for e in body):
             return httpx.Response(
                 400, json={"type": "error", "error": {"type": "invalid_request_error"}}
@@ -217,7 +272,9 @@ class FakeSession:
         for event in body:
             if event["type"] == "user.message":
                 self.calls.append(("message", event))
-                echoed.append({**event, "id": self.pause()})
+                boundary = self._start_turn()
+                echoed.append({**event, "id": boundary})
+                self._run(self._remaining.pop(0))
             elif event["type"] == "user.tool_confirmation":
                 self.calls.append(("confirm", event))
                 self.events.append({**event, "id": self._id("evt_confirm")})
@@ -225,20 +282,9 @@ class FakeSession:
             if self.on_confirm is not None:
                 self.on_confirm()
             if self._remaining:
-                self._pause_on(self._remaining.pop(0))
+                self._run(self._remaining.pop(0))
             else:
-                self.events += [
-                    {
-                        "id": self._id("evt_msg"),
-                        "type": "agent.message",
-                        "content": [{"type": "text", "text": "done"}],
-                    },
-                    {
-                        "id": self._id("evt_idle"),
-                        "type": "session.status_idle",
-                        "stop_reason": {"type": "end_turn"},
-                    },
-                ]
+                self._end()
         return send_events_response(data=echoed)
 
     def _pending(self) -> set[str]:
@@ -289,13 +335,13 @@ async def _settle(runtime: McpRuntime) -> None:
     """Wait for this runtime's confirmation worker, if one is running."""
     worker = safety._workers.get((id(runtime), _SESSION))  # pyright: ignore[reportPrivateUsage]
     if worker is not None:
-        await asyncio.wait_for(worker, timeout=5)
+        await asyncio.wait_for(worker.task, timeout=5)
 
 
 def _restart() -> None:
     """A new process: no worker survives."""
     for worker in safety._workers.values():  # pyright: ignore[reportPrivateUsage]
-        worker.cancel()
+        worker.task.cancel()
     safety._workers.clear()  # pyright: ignore[reportPrivateUsage]
 
 
@@ -864,6 +910,22 @@ async def test_channel_tool_rules_reach_agent_chat_turns(
     assert [c["result"] for c in fake.confirmations] == [expected]
 
 
+@pytest.mark.parametrize("channel", ["C1", "C1:1234.5678"])
+async def test_a_routine_privacy_stamp_keeps_its_channel_rules(factory, channel):
+    from dataclasses import replace
+
+    await _deny_in_channel(factory, "C1")
+    fake = FakeSession(tool="get_issue")
+    fake.metadata[MA_METADATA_KEY_CHANNEL] = channel
+    fake.metadata[MA_METADATA_KEY_PRIVATE_DM] = "routine:job"
+    auth = replace(_auth(), platform="slack")
+    assert safety.rules_channel(auth, fake.model) == "C1"
+    runtime = _runtime(fake, factory, _RULES)
+    await _continue_turn_impl(runtime, auth, _SESSION, "continue the routine")
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+
+
 async def test_a_dm_never_inherits_its_source_channels_rules(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1033,3 +1095,195 @@ def test_annotation_credentials_use_the_sessions_agent(
         factory, fernet=runtime.fernet, tenant_id=_TENANT_ID, agent_id=_AGENT_UUID
     )
     assert lookup_builder.call_args.kwargs["server_urls"] == {"linear": _LINEAR_URL}
+
+
+# --- Review A2: confirmation gate, single attempts, worker ownership, gaps ---
+
+
+async def test_a_confirmation_is_gated_before_it_resumes_the_turn(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A config loosened (or a policy tightened) while the turn is paused reaches
+    its next call: the sender gates before it confirms (finding 1)."""
+    fake = FakeSession(script=[[("linear", "get_issue", {})], [("linear", "create_issue", {})]])
+    fake.honor_permissions = True
+    boundary = fake.pause()
+    # While paused, the frozen config allows everything again.
+    fake.tools = [_toolset("linear", "always_allow", "create_issue")]
+    runtime = _runtime(fake, factory, _ENABLED)
+    safety.watch_turn(runtime, _auth(), _SESSION, turn_event_id=boundary, rules_channel_id=None)
+    await _settle(runtime)
+    # Without the gate before the first confirmation, create_issue would have run.
+    assert "executed" not in fake.kinds()
+    assert fake.kinds() == ["update", "confirm", "confirm"]
+    assert [c["result"] for c in fake.confirmations] == ["allow", "deny"]
+
+
+async def test_a_failed_gate_before_a_confirmation_sends_nothing(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(frozen="always_allow")
+    await _record(factory, fake.pause())
+    fake.fail_update = True
+    runtime = _runtime(fake, factory, _ENABLED)
+    safety.watch_turn(
+        runtime,
+        _auth(),
+        _SESSION,
+        turn_event_id=fake.events[0]["id"],
+        rules_channel_id=None,
+    )
+    await _settle(runtime)
+    assert fake.calls == []
+
+
+async def test_a_throttled_message_is_not_resent_by_the_sdk(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Finding 2: one attempt; a retry is a new, fully checked call."""
+    fake = FakeSession()
+    fake.throttle = {"message": 1}
+    runtime = _runtime(fake, factory, _ENABLED)
+    with pytest.raises(Exception):  # noqa: B017 - the provider's 429
+        await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+    assert fake.attempts == {"message": 1}
+    assert "message" not in fake.kinds()
+    assert _no_workers()
+
+
+async def test_a_throttled_confirmation_is_decided_again_on_resume(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The allow built before a rule change is never replayed by the SDK."""
+    fake = FakeSession(frozen="always_ask", tool="get_issue")
+    boundary = fake.pause()
+    await _record(factory, boundary)
+    fake.throttle = {"confirm": 1}
+    runtime = _runtime(fake, factory, _RULES)
+    await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    await _settle(runtime)
+    assert fake.attempts == {"confirm": 1} and fake.confirmations == []
+    await _deny_in_channel(factory, "C1")
+    async with factory.begin() as db:
+        await session_settle_state.record_unattended_turn(
+            db, managed_session_id=_SESSION, turn_event_id=boundary, rules_channel_id="C1"
+        )
+    await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+
+
+async def test_a_worker_on_an_older_turn_neither_reads_as_running_nor_blocks_resume(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Finding 3: the worker's own boundary decides running and reuse."""
+    fake = FakeSession(frozen="always_ask")
+    runtime = _runtime(fake, factory, _ENABLED)
+    stale = safety.watch_turn(
+        runtime, _auth(), _SESSION, turn_event_id="evt_older_turn", rules_channel_id=None
+    )
+    newer = fake.pause()
+    await _record(factory, newer)
+    info = await _get_session_impl(runtime, _auth(), _SESSION)
+    assert (info.status, info.hint) == ("paused", safety.PAUSED_HINT)
+    started = await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    await _settle(runtime)
+    assert started["turn_event_id"] == newer
+    assert stale.cancelled()
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+
+
+async def test_a_worker_on_an_older_turn_does_not_hide_a_newer_card(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(frozen="always_ask")
+    runtime = _runtime(fake, factory, _ENABLED)
+    stale = safety.watch_turn(
+        runtime, _auth(), _SESSION, turn_event_id="evt_older_turn", rules_channel_id=None
+    )
+    try:
+        fake.pause()
+        info = await _get_session_impl(runtime, _auth(), _SESSION)
+        assert (info.status, info.hint) == ("paused", safety.AWAITING_CARD_HINT)
+    finally:
+        stale.cancel()
+    assert fake.calls == []
+
+
+async def test_a_lost_turn_record_leaves_the_pause_unresumable(
+    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write fails after an accepted send: the sender still answers; after a
+    restart nobody does (fail closed)."""
+
+    async def refuse(*_a: object, **_k: object) -> None:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(session_settle_state, "record_unattended_turn", refuse)
+    fake = FakeSession(frozen="always_ask")
+    runtime = _runtime(fake, factory, _ENABLED)
+    # The sender's worker is stopped before it answers: the process died.
+    with patch.object(safety, "_answer", AsyncMock(side_effect=RuntimeError("crash"))):
+        await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+        await _settle(runtime)
+    _restart()
+    with pytest.raises(ToolError, match="approval in the chat"):
+        await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    assert fake.confirmations == []
+
+
+async def test_another_sessions_record_does_not_authorize_this_one(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(frozen="always_ask")
+    boundary = fake.pause()
+    async with factory.begin() as db:
+        await session_settle_state.record_unattended_turn(
+            db, managed_session_id="ses_elsewhere", turn_event_id=boundary, rules_channel_id=None
+        )
+    runtime = _runtime(fake, factory, _DISABLED)
+    with pytest.raises(ToolError, match="approval in the chat"):
+        await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    assert fake.confirmations == []
+
+
+async def test_a_resume_by_a_key_bound_elsewhere_keeps_the_turns_channel(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _deny_in_channel(factory, "C1")
+    fake = FakeSession(tool="get_issue")
+    await _record(factory, fake.pause(), channel="C1")
+    runtime = _runtime(fake, factory, _RULES)
+    _restart()
+    await _continue_turn_impl(runtime, _auth(bound="C2", platform="discord"), _SESSION, None)
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+
+
+async def test_a_channel_ask_beats_an_agent_wide_allow_for_routines(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory.begin() as db:
+        await make_tenant(db, id=_TENANT_ID)
+    admin = Subject(is_admin=True, platform_user_id="UA")
+    for channel, rule, scope in ((None, "allow", "chat_and_routines"), ("C1", "ask", "chat")):
+        async with factory.begin() as db:
+            await agent_tool_rules.set_rule(
+                db,
+                tenant_id=_TENANT_ID,
+                agent_id=_MA_AGENT_ID,
+                agent_name="safety",
+                tool_key="linear/create_issue",
+                channel_id=channel,
+                server_url=_LINEAR_URL,
+                rule=rule,
+                scope=scope,
+                set_by="admin",
+                actor=admin,
+            )
+    for auth, expected in ((_auth(), "allow"), (_auth(bound="C1", platform="discord"), "deny")):
+        fake = FakeSession()
+        runtime = _runtime(fake, factory, _RULES)
+        await _continue_turn_impl(runtime, auth, _SESSION, "hi")
+        await _settle(runtime)
+        assert [c["result"] for c in fake.confirmations] == [expected]

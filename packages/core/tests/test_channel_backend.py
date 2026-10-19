@@ -22,6 +22,7 @@ from daimon.core.config import McpSettings, TurnSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import TenantRow
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
@@ -167,6 +168,7 @@ def _deps(
         github_app_private_key=None,
         public_url=None,
         channel_backends=channel_backends,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 

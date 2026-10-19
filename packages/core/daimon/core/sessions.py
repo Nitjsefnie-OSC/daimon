@@ -122,7 +122,7 @@ from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.tool_safety import ToolSafetyPolicy
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
 from mux.drivers.anthropic.resources.agents import UNCLASSIFIED_SOURCE_NAMESPACE, agent_record
@@ -262,7 +262,7 @@ async def project_session_resources(
     memory_read_only: bool,
     fernet: MultiFernet | None = None,
     channel_skills: Sequence[MaSkill] = (),
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     asks_before_publishing: bool = False,
     mcp_settings: McpSettings | None = None,
     agent_github_app: GithubAppSettings | None = None,
@@ -530,7 +530,7 @@ async def create_session(
     billing_exempt: ExemptReason | None = None,
     memory_read_only: bool = False,
     personal_memory: bool = False,
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),

@@ -22,6 +22,7 @@ from uuid import UUID
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsMCPServerURLDefinition
 from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
     BetaManagedAgentsAgentMessageEvent,
 )
@@ -50,6 +51,7 @@ from daimon.core.checkpoint_prompt import (
 )
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.workspace_transfer import (
     CHECKPOINT_REASON_CONFIGURATION_CHANGE,
     CHECKPOINT_REASON_HANDOFF,
@@ -236,6 +238,9 @@ async def test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff), f"expected a full handoff, got {outcome!r}"
@@ -291,6 +296,9 @@ async def test_transfer_records_a_repository_commit_it_could_not_prevent(
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff)
@@ -328,6 +336,9 @@ async def test_checkpoint_prompt_names_every_excluded_path(
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     sent_session, batch = state.sent_batches[0]
@@ -389,6 +400,9 @@ async def test_transfer_bills_the_checkpoint_at_the_old_model_as_a_checkpoint_de
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff)
@@ -430,6 +444,9 @@ async def test_transfer_skips_the_billed_turn_when_the_session_never_answered(
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly), f"expected the transcript rung, got {outcome!r}"
@@ -462,6 +479,9 @@ async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -509,6 +529,9 @@ async def test_transfer_degrades_to_transcript_when_the_session_vanishes_mid_tra
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -542,6 +565,9 @@ async def test_transfer_degrades_to_transcript_when_the_bundle_is_oversize(
         max_bundle_bytes=len(TARBALL) - 1,
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -578,6 +604,9 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_wrote_no_arch
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -629,6 +658,9 @@ async def test_transfer_degrades_to_transcript_when_the_re_upload_fails(
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -665,6 +697,9 @@ async def test_transfer_returns_history_only_when_the_session_log_is_gone(
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert outcome == HistoryOnly(gap_reason="events_unavailable")
@@ -806,6 +841,9 @@ async def test_transfer_leaves_uncommitted_work_behind_and_names_it_when_asked_t
         unsaved_work="leave",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     prompt = _checkpoint_instruction(state)
@@ -842,6 +880,9 @@ async def test_transfer_captures_uncommitted_work_when_the_answer_is_copy(
         unsaved_work="copy",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     prompt = _checkpoint_instruction(state)
@@ -884,6 +925,9 @@ async def test_a_partial_archive_crosses_and_names_the_files_it_left_out(
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff), f"a partial archive still crosses, got {outcome!r}"
@@ -931,6 +975,9 @@ async def test_a_left_out_listing_does_not_rescue_an_archive_still_over_the_cap(
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly), f"expected a transcript rung, got {outcome!r}"
@@ -989,6 +1036,9 @@ async def test_checkpoint_rides_the_system_channel_on_a_model_that_takes_one(
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff), f"expected a full handoff, got {outcome!r}"
@@ -1048,6 +1098,9 @@ async def test_checkpoint_stays_a_user_message_on_a_model_without_system_support
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff), f"expected a full handoff, got {outcome!r}"
@@ -1089,6 +1142,9 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_rejects_its_o
         from_agent_name="analysis-bot",
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly), f"expected a transcript rung, got {outcome!r}"
@@ -1167,6 +1223,9 @@ async def test_the_checkpoint_controls_carry_the_reason_they_were_given(
         reason=CHECKPOINT_REASON_HANDOFF,
         sleep=_no_sleep,
         now=_now,
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff), f"expected a full handoff, got {outcome!r}"
@@ -1257,6 +1316,9 @@ async def test_full_transfer_accepts_partial_upload_reply_and_enqueues_cleanup(
             from_agent_name="analysis-bot",
             sleep=_no_sleep,
             now=_now,
+            tool_safety=OPEN_TOOL_SAFETY,
+            public_url=None,
+            platform="discord",
         )
     assert isinstance(outcome, FullHandoff)
     assert outcome.mount_path == HANDOFF_MOUNT_PATH
@@ -1271,3 +1333,203 @@ async def test_full_transfer_accepts_partial_upload_reply_and_enqueues_cleanup(
     due = await list_due_pending_file_deletes(db_session, now=NOW + timedelta(days=8))
     assert [row.file_id for row in due] == [outcome.transfer_file_id]
     assert due[0].delete_after == NOW + timedelta(days=7)
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [(ToolSafetyPolicy(enabled=True), "deny"), (OPEN_TOOL_SAFETY, "allow")],
+    ids=["on", "off"],
+)
+async def test_a_checkpoint_turn_is_decided_by_the_unattended_rules(
+    policy: ToolSafetyPolicy,
+    expected: str,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Design test 7: a third-party write pending in the checkpoint turn is
+    refused with tool safety on, never auto-approved."""
+    from anthropic.types.beta.sessions import BetaManagedAgentsAgentMCPToolUseEvent
+    from anthropic.types.beta.sessions.beta_managed_agents_session_requires_action import (
+        BetaManagedAgentsSessionRequiresAction,
+    )
+
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    _seed_conversation(state, old_session, with_reply=True)
+    state.stream_scripts[old_session] = [
+        session_turn_sse(
+            BetaManagedAgentsAgentMCPToolUseEvent(
+                id="sevt_write",
+                type="agent.mcp_tool_use",
+                mcp_server_name="linear",
+                name="create_issue",
+                input={},
+                evaluated_permission="ask",
+                processed_at=NOW,
+            ),
+            BetaManagedAgentsSessionStatusIdleEvent(
+                id="sevt_pause",
+                type="session.status_idle",
+                stop_reason=BetaManagedAgentsSessionRequiresAction(
+                    type="requires_action", event_ids=["sevt_write"]
+                ),
+                processed_at=NOW,
+            ),
+            BetaManagedAgentsAgentMessageEvent(
+                id="sevt_checkpoint",
+                type="agent.message",
+                content=[BetaManagedAgentsTextBlock(type="text", text="ok")],
+                processed_at=NOW,
+            ),
+            BetaManagedAgentsSessionStatusIdleEvent(
+                id="sevt_idle",
+                type="session.status_idle",
+                stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
+                processed_at=NOW,
+            ),
+        )
+    ]
+
+    await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+        tool_safety=policy,
+        public_url=None,
+        platform="discord",
+    )
+
+    answers = [
+        event["result"]
+        for _sid, batch in state.sent_batches
+        for event in batch
+        if event["type"] == "user.tool_confirmation"
+    ]
+    assert answers == [expected]
+
+
+@pytest.mark.parametrize(
+    ("stamp", "expected"),
+    [
+        ({"daimon_channel": "B"}, "deny"),
+        ({"daimon_channel": "B", "daimon_private_dm": "dm-1"}, "allow"),
+        ({"daimon_channel": "B", "daimon_private_dm": "routine:job"}, "deny"),
+    ],
+    ids=["conversation-channel", "dm-excluded", "routine-private"],
+)
+async def test_a_checkpoint_follows_its_conversations_rules_not_its_budget_channel(
+    stamp: dict[str, str],
+    expected: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Review B, finding 4: billed to channel A, the conversation is in B."""
+    from datetime import UTC, datetime, timedelta
+
+    from anthropic.types.beta.sessions import BetaManagedAgentsAgentMCPToolUseEvent
+    from anthropic.types.beta.sessions.beta_managed_agents_session_requires_action import (
+        BetaManagedAgentsSessionRequiresAction,
+    )
+    from daimon.core.authz import Subject
+    from daimon.core.stores import agent_tool_rules
+    from daimon.core.workspace_transfer import WorkspaceTransferRunner
+
+    tenant = await make_tenant(db_session, workspace_id="guild-rules")
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    session = state.sessions[old_session]
+    state.sessions[old_session] = session.model_copy(
+        update={"metadata": {**(session.metadata or {}), **stamp}}
+    )
+    await agent_tool_rules.set_rule(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=session.agent.id,
+        agent_name="analysis-bot",
+        tool_key="linear/get_issue",
+        channel_id="B",
+        server_url="https://mcp.linear.app/mcp",
+        rule="deny",
+        set_by="admin",
+        actor=Subject(is_admin=True, platform_user_id="UA"),
+    )
+    await db_session.commit()
+    state.sessions[old_session] = state.sessions[old_session].model_copy(
+        update={
+            "agent": session.agent.model_copy(
+                update={
+                    "mcp_servers": [
+                        BetaManagedAgentsMCPServerURLDefinition(
+                            name="linear", type="url", url="https://mcp.linear.app/mcp"
+                        )
+                    ]
+                }
+            )
+        }
+    )
+    _seed_conversation(state, old_session, with_reply=True)
+    state.stream_scripts[old_session] = [
+        session_turn_sse(
+            BetaManagedAgentsAgentMCPToolUseEvent(
+                id="sevt_read",
+                type="agent.mcp_tool_use",
+                mcp_server_name="linear",
+                name="get_issue",
+                input={},
+                evaluated_permission="ask",
+                processed_at=NOW,
+            ),
+            BetaManagedAgentsSessionStatusIdleEvent(
+                id="sevt_pause",
+                type="session.status_idle",
+                stop_reason=BetaManagedAgentsSessionRequiresAction(
+                    type="requires_action", event_ids=["sevt_read"]
+                ),
+                processed_at=NOW,
+            ),
+            BetaManagedAgentsSessionStatusIdleEvent(
+                id="sevt_idle",
+                type="session.status_idle",
+                stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
+                processed_at=NOW,
+            ),
+        )
+    ]
+    runner = WorkspaceTransferRunner(
+        anthropic=client,
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        external_user_id="U123",
+        markup=Decimal("1.0"),
+        tool_safety=ToolSafetyPolicy(enabled=True, agent_rules=True),
+        public_url=None,
+        platform="discord",
+        channel_id="A",
+    )
+    await runner(
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        transfer_id=TRANSFER_ID,
+        # The runner reads the real clock.
+        deadline=datetime.now(UTC) + timedelta(minutes=5),
+        destination_model_id="claude-sonnet-5",
+        destination_agent_name="analysis-bot",
+        requested_work=None,
+    )
+    answers = [
+        event["result"]
+        for _sid, batch in state.sent_batches
+        for event in batch
+        if event["type"] == "user.tool_confirmation"
+    ]
+    assert answers == [expected]
