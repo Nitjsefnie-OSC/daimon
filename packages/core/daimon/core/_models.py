@@ -4005,3 +4005,55 @@ class LeadIntakeExecution(Base):
         UUID(as_uuid=True), ForeignKey("routines.id", ondelete="CASCADE"), nullable=False
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LeadOpportunityRecord(Base):
+    __tablename__ = "lead_opportunities"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "intake_id"],
+            ["lead_intakes.tenant_id", "lead_intakes.id"],
+            ondelete="CASCADE",
+        ),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    identity_digest: Mapped[str] = mapped_column(Text, primary_key=True)
+    intake_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    encrypted_mapping: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class LeadMailboxScanRecord(Base):
+    __tablename__ = "lead_mailbox_scans"
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    connection_id: Mapped[str] = mapped_column(Text, nullable=False)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    discovered_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(Text)
+
+
+class LeadMailboxMessageRecord(Base):
+    __tablename__ = "lead_mailbox_messages"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "intake_id"],
+            ["lead_intakes.tenant_id", "lead_intakes.id"],
+            ondelete="CASCADE",
+        ),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    source_digest: Mapped[str] = mapped_column(Text, primary_key=True)
+    connection_id: Mapped[str] = mapped_column(Text, nullable=False)
+    encrypted_message_id: Mapped[bytes | None] = mapped_column(LargeBinary)
+    disposition: Mapped[str] = mapped_column(Text, nullable=False)
+    intake_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

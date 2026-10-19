@@ -162,3 +162,8 @@ requires a separate authorized resume. Completed work cannot be rebound.
 Connection/destination changes are refused while unfinished records have effect
 intents. Finish or reconcile that work with its original configuration first.
 Configuration adoption applies only to work whose effects have not started.
+
+Recovery may replay only operations with native duplicate prevention after
+remote reconciliation: CRM unique-key creates, one thread per starter, label-set
+archive and association PUTs. Uncertain Discord message POSTs require history
+recovery or authorized starter resolution; they are never blindly reposted.

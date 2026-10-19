@@ -39,6 +39,25 @@ def upgrade() -> None:
             encrypted_resolution BYTEA NOT NULL, created_at TIMESTAMPTZ NOT NULL,
             FOREIGN KEY (tenant_id, intake_id) REFERENCES lead_intakes(tenant_id, id)
             ON DELETE CASCADE);
+        CREATE TABLE lead_opportunities (
+            tenant_id UUID NOT NULL, identity_digest TEXT NOT NULL, intake_id UUID NOT NULL,
+            encrypted_mapping BYTEA NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, identity_digest),
+            FOREIGN KEY (tenant_id, intake_id) REFERENCES lead_intakes(tenant_id, id)
+            ON DELETE CASCADE);
+        CREATE TABLE lead_mailbox_scans (
+            tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, id UUID NOT NULL,
+            connection_id TEXT NOT NULL, window_start TIMESTAMPTZ NOT NULL,
+            window_end TIMESTAMPTZ NOT NULL, state TEXT NOT NULL, discovered_count INTEGER NOT NULL,
+            started_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ, error_code TEXT,
+            PRIMARY KEY (tenant_id, id));
+        CREATE TABLE lead_mailbox_messages (
+            tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, source_digest TEXT NOT NULL,
+            connection_id TEXT NOT NULL, encrypted_message_id BYTEA, disposition TEXT NOT NULL,
+            intake_id UUID, expires_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, source_digest),
+            FOREIGN KEY (tenant_id, intake_id) REFERENCES lead_intakes(tenant_id, id)
+            ON DELETE CASCADE);
         CREATE TABLE lead_intake_executions (
             tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
             id UUID NOT NULL, routine_id UUID NOT NULL REFERENCES routines(id) ON DELETE CASCADE,

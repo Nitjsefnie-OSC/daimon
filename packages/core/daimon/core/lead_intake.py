@@ -432,8 +432,11 @@ class IntakeRecord(BaseModel):
     status: str
     submission: LeadSubmission | None
     progress: LeadProgress = Field(default_factory=LeadProgress)
-    effects: list[LeadEffectState] = Field(default_factory=list)
+    effects: list[LeadEffectState] = Field(default_factory=lambda: list[LeadEffectState]())
     actor_id: str | None = None
+    agent_id: UUID | None = None
+    routine_id: UUID | None = None
+    execution_id: UUID | None = None
     config_revision: int
     error_code: str | None = None
     created_at: datetime

@@ -53,6 +53,9 @@ class FakePorts:
     async def recover(self, config: IntakeConfig, effect: EffectRequest) -> str | None:
         return self.remote.get(effect.key)
 
+    def replay_safe(self, effect: EffectRequest) -> bool:
+        return False
+
     async def write(self, config: IntakeConfig, effect: EffectRequest) -> str:
         if self.fail_before and self.fail_step == effect.step:
             raise TimeoutError("synthetic response loss")

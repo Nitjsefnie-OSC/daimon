@@ -273,6 +273,9 @@ class HttpIntakePorts:
                 raise ReviewRequired("duplicate_discord_effect")
             return str(matches[0]["id"]) if matches else None
         if step == "archive":
+            profile = await self.request("gmail", "GET", "profile")
+            if str(profile["emailAddress"]).casefold() != config.gmail_mailbox.casefold():
+                raise ReviewRequired("configured_mailbox_mismatch")
             message = await self.request(
                 "gmail", "GET", f"messages/{p['message']}", params={"format": "minimal"}
             )
@@ -298,12 +301,17 @@ class HttpIntakePorts:
             "hubspot",
             "GET",
             f"crm/v3/objects/{kind}/{quote(value, safe='')}",
-            params={"idProperty": prop},
+            params={"idProperty": prop, "properties": "hs_is_closed"}
+            if step == "deal"
+            else {"idProperty": prop},
             missing=True,
         )
         if record:
-            if record.get("archived"):
-                raise ReviewRequired("archived_crm_record")
+            if record.get("archived") or (
+                step == "deal"
+                and str(record.get("properties", {}).get("hs_is_closed")).lower() == "true"
+            ):
+                raise ReviewRequired("closed_or_archived_crm_record")
             return str(record["id"])
         if p.get("selected"):
             record = await self.request(
@@ -373,6 +381,18 @@ class HttpIntakePorts:
             return match.deal_id
         return None
 
+    def replay_safe(self, effect: EffectRequest) -> bool:
+        # Called only after recover validated portal/schema and read remote state.
+        # CRM unique properties/contact email, one thread per starter, label sets
+        # and association PUTs provide provider-enforced duplicate prevention.
+        return effect.step in {
+            "company",
+            "contact",
+            "deal",
+            "thread",
+            "archive",
+        } or effect.step.startswith("association:")
+
     async def write(self, config: IntakeConfig, effect: EffectRequest) -> str:
         step, p = effect.step, effect.payload
         if step == "starter" or step.startswith("dossier:"):
@@ -400,6 +420,9 @@ class HttpIntakePorts:
             )
             return str(response["id"])
         if step == "archive":
+            profile = await self.request("gmail", "GET", "profile")
+            if str(profile["emailAddress"]).casefold() != config.gmail_mailbox.casefold():
+                raise ReviewRequired("configured_mailbox_mismatch")
             await self.request(
                 "gmail", "POST", f"messages/{p['message']}/modify", {"removeLabelIds": ["INBOX"]}
             )

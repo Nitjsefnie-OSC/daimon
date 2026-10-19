@@ -2261,3 +2261,9 @@ erases expired evidence independently of intake activity.
 The Discord `/leads` entry point reads that same core tenant store and admission
 contract for an ephemeral queue/review status; decisions continue through the
 first-party resolver tool. It imports no MCP adapter implementation.
+
+Opportunity reservations retain tenant/CRM/portal-scoped normalized project
+identities. Separate mailbox scan history and message dispositions preserve
+page discoveries and failed coverage independently of the accepted intake queue.
+Sensitive opportunity mappings and discovered message IDs are encrypted and
+expire with the retention policy.

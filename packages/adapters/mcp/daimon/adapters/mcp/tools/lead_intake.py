@@ -35,7 +35,7 @@ from daimon.core.lead_intake import (
     authorize_intake_actor,
 )
 from daimon.core.lead_intake_service import IntakeService
-from daimon.core.permissions import any_own_readers, home_of
+from daimon.core.permissions import home_of
 from daimon.core.stores.accounts import account_exists
 from daimon.core.stores.lead_intake import IntakeStore, execution_is_active
 from daimon.core.stores.routines import get_routine
@@ -72,7 +72,7 @@ async def service(
 
     async def reauthorize(source_ref: LeadSource | None = None) -> None:
         async with runtime.session_factory() as session:
-            if not await account_exists(session, auth.account_id):
+            if not await account_exists(session, account_id=auth.account_id):
                 raise ToolError("actor_account_revoked")
         policy = await load_channel_policy(runtime, auth)
         resolver = runtime.membership_resolver
@@ -82,6 +82,7 @@ async def service(
             auth.tenant_id, config.guild_id, auth.platform_user_id or "", require_fresh=True
         )
         active = False
+        row = None
         routine = auth.routine_id is not None or auth.execution_id is not None
         if routine:
             async with runtime.session_factory() as session:
@@ -104,11 +105,13 @@ async def service(
                 or row.created_by_user_id != auth.platform_user_id
                 or config.routine_id != auth.routine_id
                 or resolve
-                or (draft is not None and draft.source.kind != "gmail")
+                or (source_ref is not None and source_ref.kind != "gmail")
             ):
                 raise ToolError("routine_not_authorized")
             # Sealed sources cannot be exported to a CRM by a scheduled agent.
-            if any_own_readers(policy) and (row.source_channel_id in policy.channel_rules):
+            if home_of(
+                policy, row.source_thread_id or row.source_channel_id, row.source_channel_id
+            ):
                 raise ToolError("isolated_source_export_denied")
         try:
             authorize_intake_actor(
@@ -128,6 +131,19 @@ async def service(
             raise ToolError("interactive_origin_required")
         if any(home_of(policy, o.parent_channel_id, o.thread_id) for o in origins):
             raise ToolError("isolated_source_export_denied")
+        origin_ids = {value for o in origins for value in (o.parent_channel_id, o.thread_id)}
+        if routine and row is not None:
+            origin_ids.update(
+                value for value in (row.source_channel_id, row.source_thread_id) if value
+            )
+        if not authorize(
+            policy,
+            subject=Subject(),
+            action=Action.READ_CHANNEL,
+            place=Place(channel_id=config.channel_id),
+            origin_channel_ids=frozenset(origin_ids),
+        ):
+            raise ToolError("sales_queue_read_denied")
         # Native permissions and category/agent policy are re-read before every effect.
         async with rest_client(token) as client:
             _, member = await _resolve_member(client, config.guild_id, auth.platform_user_id or "")
@@ -186,7 +202,10 @@ async def service(
             discord_token=token,
             gmail_refresh_credentials=refresh,
         )
-        yield IntakeService(store, ports, reauthorize)
+        provenance = (
+            (auth.routine_id, auth.execution_id) if auth.routine_id and auth.execution_id else None
+        )
+        yield IntakeService(store, ports, reauthorize, provenance=provenance)
 
 
 def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:

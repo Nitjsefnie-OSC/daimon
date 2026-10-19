@@ -45,6 +45,9 @@ TABLES = {
     "lead_resolution_audit",
     "lead_mailbox_states",
     "lead_intake_executions",
+    "lead_opportunities",
+    "lead_mailbox_scans",
+    "lead_mailbox_messages",
 }
 
 

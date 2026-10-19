@@ -14,7 +14,10 @@ from daimon.core._models import (
     LeadIntakeConfig,
     LeadIntakeEffect,
     LeadIntakeRecord,
+    LeadMailboxMessageRecord,
+    LeadMailboxScanRecord,
     LeadMailboxState,
+    LeadOpportunityRecord,
     LeadResolutionAudit,
 )
 from daimon.core.github_credentials import decrypt_token, encrypt_token
@@ -120,7 +123,11 @@ class IntakeStore:
             yield
 
     async def accept(
-        self, config: IntakeConfig, submission: LeadSubmission, actor_id: str | None
+        self,
+        config: IntakeConfig,
+        submission: LeadSubmission,
+        actor_id: str | None,
+        provenance: tuple[UUID, UUID] | None = None,
     ) -> IntakeRecord:
         digest = hashlib.sha256(
             f"{self.tenant_id}:{config.source_connection_id}:{submission.source.key}".encode()
@@ -136,6 +143,9 @@ class IntakeStore:
             status="rejected" if submission.classification == "other" else "pending",
             submission=submission,
             actor_id=actor_id,
+            agent_id=config.agent_id,
+            routine_id=provenance[0] if provenance else None,
+            execution_id=provenance[1] if provenance else None,
             config_revision=config.revision,
             created_at=now,
             expires_at=now + timedelta(days=config.retention_days),
@@ -166,10 +176,18 @@ class IntakeStore:
                     )
                 )
             ).scalar_one()
+            await session.execute(
+                update(LeadMailboxMessageRecord)
+                .where(
+                    LeadMailboxMessageRecord.tenant_id == self.tenant_id,
+                    LeadMailboxMessageRecord.source_digest == digest,
+                )
+                .values(intake_id=row.id, disposition=row.status, encrypted_message_id=None)
+            )
             return self._record(row)
 
     def _record(self, row: LeadIntakeRecord) -> IntakeRecord:
-        if row.encrypted_payload is not None:
+        if row.encrypted_payload is not None and row.expires_at > datetime.now(UTC):
             return IntakeRecord.model_validate_json(self.open(row.encrypted_payload))
         return IntakeRecord(
             id=row.id,
@@ -182,6 +200,12 @@ class IntakeStore:
             expires_at=row.expires_at,
             raw_expires_at=row.raw_expires_at,
         )
+
+    def source_digest(self, config: IntakeConfig, message_id: str) -> str:
+        key = f"gmail:{config.gmail_mailbox.strip().lower()}:{message_id}"
+        return hashlib.sha256(
+            f"{self.tenant_id}:{config.source_connection_id}:{key}".encode()
+        ).hexdigest()
 
     async def seen_source(self, config: IntakeConfig, message_id: str) -> bool:
         key = f"gmail:{config.gmail_mailbox.strip().lower()}:{message_id}"
@@ -250,7 +274,8 @@ class IntakeStore:
                     )
                 )
             ).scalars()
-            return [self._record(row) for row in rows]
+            identities = [row.id for row in rows]
+        return [await self.get(identity) for identity in identities]
 
     async def health(self) -> dict[str, object]:
         async with self.sessions() as session:
@@ -265,7 +290,26 @@ class IntakeStore:
                     LeadIntakeRecord.status.in_(("pending", "review")),
                 )
             )
-            return {"status_counts": dict(counts.tuples().all()), "oldest_pending_at": oldest}
+            last_scan = await session.scalar(
+                select(func.max(LeadMailboxScanRecord.completed_at)).where(
+                    LeadMailboxScanRecord.tenant_id == self.tenant_id,
+                    LeadMailboxScanRecord.state == "completed",
+                )
+            )
+            unclassified = await session.scalar(
+                select(func.count())
+                .select_from(LeadMailboxMessageRecord)
+                .where(
+                    LeadMailboxMessageRecord.tenant_id == self.tenant_id,
+                    LeadMailboxMessageRecord.disposition == "discovered",
+                )
+            )
+            return {
+                "status_counts": dict(counts.tuples().all()),
+                "oldest_pending_at": oldest,
+                "last_successful_scan_at": last_scan,
+                "unclassified_count": unclassified,
+            }
 
     async def save(self, record: IntakeRecord) -> None:
         if record.tenant_id != self.tenant_id:
@@ -323,7 +367,15 @@ class IntakeStore:
                 .values(state="completed", remote_id=remote_id)
             )
 
-    async def audit(self, record: IntakeRecord, actor_id: str, before: str, after: str) -> None:
+    async def audit(
+        self,
+        record: IntakeRecord,
+        actor_id: str,
+        before: str,
+        after: str,
+        *,
+        effect_resolution: tuple[str, str | None] | None = None,
+    ) -> None:
         if record.tenant_id != self.tenant_id:
             raise ValueError("tenant_mismatch")
         async with self.sessions() as session, session.begin():
@@ -336,6 +388,22 @@ class IntakeStore:
                 )
                 .values(status=record.status, encrypted_payload=self.seal(record.model_dump_json()))
             )
+            if effect_resolution is not None:
+                step, remote_id = effect_resolution
+                conditions = (
+                    LeadIntakeEffect.tenant_id == self.tenant_id,
+                    LeadIntakeEffect.intake_id == record.id,
+                    LeadIntakeEffect.step == step,
+                    LeadIntakeEffect.state == "uncertain",
+                )
+                if remote_id is None:
+                    await session.execute(delete(LeadIntakeEffect).where(*conditions))
+                else:
+                    await session.execute(
+                        update(LeadIntakeEffect)
+                        .where(*conditions)
+                        .values(state="completed", remote_id=remote_id)
+                    )
             session.add(
                 LeadResolutionAudit(
                     id=uuid4(),
@@ -371,13 +439,132 @@ class IntakeStore:
                 )
             )
 
+    async def opportunity(
+        self, config: IntakeConfig, record: IntakeRecord, company_id: str, description: str
+    ) -> str:
+        import re
+
+        normalized = " ".join(re.findall(r"[\w]+", description.casefold()))
+        choice = (
+            f"selected:{record.progress.selected_deal_id}"
+            if record.progress.selected_deal_id
+            else str(record.id)
+            if record.progress.separate_opportunity_confirmed
+            else f"{company_id}:{normalized}"
+        )
+        key = hashlib.sha256(
+            f"{self.tenant_id}:{config.crm_connection_id}:{config.portal_id}:{choice}".encode()
+        ).hexdigest()
+        async with self.sessions() as session, session.begin():
+            await session.execute(
+                insert(LeadOpportunityRecord)
+                .values(
+                    tenant_id=self.tenant_id,
+                    identity_digest=key,
+                    intake_id=record.id,
+                    encrypted_mapping=self.seal(
+                        json.dumps(
+                            dict(company_id=company_id, description=description, deal_id=None)
+                        )
+                    ),
+                    expires_at=record.expires_at,
+                )
+                .on_conflict_do_nothing()
+            )
+        return key
+
+    async def finish_opportunity(
+        self, key: str, company_id: str, description: str, deal_id: str
+    ) -> None:
+        async with self.sessions() as session, session.begin():
+            await session.execute(
+                update(LeadOpportunityRecord)
+                .where(
+                    LeadOpportunityRecord.tenant_id == self.tenant_id,
+                    LeadOpportunityRecord.identity_digest == key,
+                )
+                .values(
+                    encrypted_mapping=self.seal(
+                        json.dumps(
+                            dict(company_id=company_id, description=description, deal_id=deal_id)
+                        )
+                    )
+                )
+            )
+
+    async def start_scan(self, config: IntakeConfig, start: datetime, end: datetime) -> UUID:
+        identity = uuid4()
+        async with self.sessions() as session, session.begin():
+            session.add(
+                LeadMailboxScanRecord(
+                    tenant_id=self.tenant_id,
+                    id=identity,
+                    connection_id=config.source_connection_id,
+                    window_start=start,
+                    window_end=end,
+                    state="running",
+                    discovered_count=0,
+                    started_at=datetime.now(UTC),
+                )
+            )
+        return identity
+
+    async def record_discovered(
+        self, config: IntakeConfig, message_ids: list[str], scan_id: UUID
+    ) -> None:
+        async with self.sessions() as session, session.begin():
+            for message in message_ids:
+                await session.execute(
+                    insert(LeadMailboxMessageRecord)
+                    .values(
+                        tenant_id=self.tenant_id,
+                        source_digest=self.source_digest(config, message),
+                        connection_id=config.source_connection_id,
+                        encrypted_message_id=self.seal(message),
+                        disposition="discovered",
+                        expires_at=datetime.now(UTC) + timedelta(days=config.retention_days),
+                    )
+                    .on_conflict_do_nothing()
+                )
+
+            await session.execute(
+                update(LeadMailboxScanRecord)
+                .where(
+                    LeadMailboxScanRecord.tenant_id == self.tenant_id,
+                    LeadMailboxScanRecord.id == scan_id,
+                )
+                .values(discovered_count=LeadMailboxScanRecord.discovered_count + len(message_ids))
+            )
+
+    async def finish_scan(self, scan_id: UUID, count: int, error: str | None) -> None:
+        async with self.sessions() as session, session.begin():
+            await session.execute(
+                update(LeadMailboxScanRecord)
+                .where(
+                    LeadMailboxScanRecord.tenant_id == self.tenant_id,
+                    LeadMailboxScanRecord.id == scan_id,
+                )
+                .values(
+                    state="failed" if error else "completed",
+                    discovered_count=count,
+                    completed_at=datetime.now(UTC),
+                    error_code=error,
+                )
+            )
+
     async def purge(self, now: datetime) -> None:
         """Erase all lead content/effects/audit, keeping only the source tombstone."""
         async with self.sessions() as session, session.begin():
+            await purge_auxiliary(session, now, self.tenant_id)
             expired = select(LeadIntakeRecord.id).where(
                 LeadIntakeRecord.tenant_id == self.tenant_id, LeadIntakeRecord.expires_at <= now
             )
-            for model in (LeadIntakeEffect, LeadResolutionAudit):
+            for model in (
+                LeadIntakeEffect,
+                LeadResolutionAudit,
+                LeadOpportunityRecord,
+                LeadMailboxMessageRecord,
+            ):
                 await session.execute(
                     delete(model).where(
                         model.tenant_id == self.tenant_id, model.intake_id.in_(expired)
@@ -451,10 +638,16 @@ async def execution_is_active(
 
 async def purge_expired(session: AsyncSession, now: datetime) -> None:
     """Scheduler maintenance uses only ciphertext expiry; no decryption key needed."""
+    await purge_auxiliary(session, now)
     expired = select(LeadIntakeRecord.tenant_id, LeadIntakeRecord.id).where(
         LeadIntakeRecord.expires_at <= now
     )
-    for model in (LeadIntakeEffect, LeadResolutionAudit):
+    for model in (
+        LeadIntakeEffect,
+        LeadResolutionAudit,
+        LeadOpportunityRecord,
+        LeadMailboxMessageRecord,
+    ):
         await session.execute(
             delete(model).where(tuple_(model.tenant_id, model.intake_id).in_(expired))
         )
@@ -482,7 +675,12 @@ async def erase_actor(session: AsyncSession, tenant_id: UUID, actor_id: str) -> 
         LeadIntakeRecord.encrypted_payload.is_not(None),
     )
     identities = list(await session.scalars(ids))
-    for model in (LeadIntakeEffect, LeadResolutionAudit):
+    for model in (
+        LeadIntakeEffect,
+        LeadResolutionAudit,
+        LeadOpportunityRecord,
+        LeadMailboxMessageRecord,
+    ):
         await session.execute(
             delete(model).where(model.tenant_id == tenant_id, model.intake_id.in_(identities))
         )
@@ -509,18 +707,6 @@ async def count_actor(session: AsyncSession, tenant_id: UUID, actor_id: str) -> 
     )
 
 
-async def clear_effect(store: IntakeStore, intake_id: UUID, step: str) -> None:
-    """Called only after authorized provider absence reconciliation under source claim."""
-    async with store.sessions() as session, session.begin():
-        await session.execute(
-            delete(LeadIntakeEffect).where(
-                LeadIntakeEffect.tenant_id == store.tenant_id,
-                LeadIntakeEffect.intake_id == intake_id,
-                LeadIntakeEffect.step == step,
-            )
-        )
-
-
 async def configured_routines(
     session: AsyncSession, tenant_ids: set[UUID]
 ) -> set[tuple[UUID, UUID]]:
@@ -534,3 +720,19 @@ async def configured_routines(
         for tenant, payload in rows
         if (config := IntakeConfig.model_validate(payload)).routine_id is not None
     }
+
+
+async def purge_auxiliary(
+    session: AsyncSession, now: datetime, tenant_id: UUID | None = None
+) -> None:
+    for model in (LeadMailboxMessageRecord, LeadOpportunityRecord):
+        query = delete(model).where(model.expires_at <= now)
+        if tenant_id is not None:
+            query = query.where(model.tenant_id == tenant_id)
+        await session.execute(query)
+    query = delete(LeadMailboxScanRecord).where(
+        LeadMailboxScanRecord.started_at <= now - timedelta(days=90)
+    )
+    if tenant_id is not None:
+        query = query.where(LeadMailboxScanRecord.tenant_id == tenant_id)
+    await session.execute(query)

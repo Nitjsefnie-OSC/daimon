@@ -19,7 +19,7 @@ from daimon.core.lead_intake import (
     LeadSubmission,
     verify_lead_evidence,
 )
-from daimon.core.stores.lead_intake import IntakeStore, clear_effect
+from daimon.core.stores.lead_intake import IntakeStore
 from pydantic import BaseModel
 
 
@@ -42,6 +42,8 @@ class EffectRequest(BaseModel):
 
 
 class IntakePorts(Protocol):
+    def replay_safe(self, effect: EffectRequest) -> bool: ...
+
     async def source(
         self, config: IntakeConfig, source: LeadSource, actor_id: str | None
     ) -> VerifiedSource: ...
@@ -56,8 +58,16 @@ type Reauthorize = Callable[[LeadSource | None], Awaitable[None]]
 
 
 class IntakeService:
-    def __init__(self, store: IntakeStore, ports: IntakePorts, reauthorize: Reauthorize) -> None:
+    def __init__(
+        self,
+        store: IntakeStore,
+        ports: IntakePorts,
+        reauthorize: Reauthorize,
+        *,
+        provenance: tuple[UUID, UUID] | None = None,
+    ) -> None:
         self.store, self.ports, self.reauthorize = store, ports, reauthorize
+        self.provenance = provenance
 
     async def submit(self, draft: LeadDraft, actor_id: str | None) -> IntakeRecord:
         await self.reauthorize(draft.source)
@@ -97,7 +107,7 @@ class IntakeService:
             thread_title=evidence.company_name or evidence.enquirer_name or draft.thread_title,
             thread_content=draft.thread_content,
         )
-        record = await self.store.accept(config, submission, actor_id)
+        record = await self.store.accept(config, submission, actor_id, self.provenance)
         async with self.store.claim(f"mailbox:{config.source_connection_id}"):
             state = await self.store.mailbox(config.source_connection_id)
             state.discovered = [x for x in state.discovered if x != draft.source.message_id]
@@ -134,8 +144,8 @@ class IntakeService:
             await self.store.intent(record.id, step, key)
             await self.store.finish(record.id, step, recovered)
             return recovered
-        if saved:
-            # An empty search is not proof a timed-out create did not happen.
+        if saved and (saved.stable_key != key or not self.ports.replay_safe(request)):
+            # Empty history is not proof a non-idempotent POST did not happen.
             raise ReviewRequired("uncertain_write")
         await self.store.intent(record.id, step, key)
         remote_id = await self.ports.write(config, request)
@@ -163,6 +173,13 @@ class IntakeService:
                 return record
             submission = record.submission
             if submission is None:
+                return record
+            if (
+                submission.source.kind == "gmail"
+                and (submission.source.mailbox or "").casefold() != config.gmail_mailbox.casefold()
+            ):
+                record.error_code = "configured_mailbox_mismatch"
+                await self.store.save(record)
                 return record
             p = record.progress
             try:
@@ -226,11 +243,8 @@ class IntakeService:
                             },
                             e.enquirer_email,
                         )
-                        project = " ".join(submission.opportunity_description.casefold().split())
-                        deal_identity = (
-                            str(record.id)
-                            if p.separate_opportunity_confirmed
-                            else f"{p.company_id}:{project}"
+                        deal_identity = await self.store.opportunity(
+                            config, record, p.company_id, submission.opportunity_description
                         )
                         p.deal_id = await self._effect(
                             config,
@@ -250,6 +264,12 @@ class IntakeService:
                                 "thread_url": f"https://discord.com/channels/{config.guild_id}/{p.discord_thread_id}",
                             },
                             deal_identity,
+                        )
+                        await self.store.finish_opportunity(
+                            deal_identity,
+                            p.company_id,
+                            submission.opportunity_description,
+                            p.deal_id,
                         )
                         for kind, remote in (
                             ("companies", p.company_id),
@@ -281,7 +301,9 @@ class IntakeService:
             if record.status not in {"pending", "review"}:
                 raise ValueError("intake_not_resolvable")
             p = record.progress
+            await self.reauthorize(record.submission.source if record.submission else None)
             before = p.model_dump_json()
+            starter_resolution: tuple[str, str | None] | None = None
             if resolution.deal_id and resolution.separate_opportunity_confirmed:
                 raise ValueError("conflicting_resolution")
             if resolution.discord_message_id or resolution.discord_post_absence_confirmed:
@@ -305,14 +327,14 @@ class IntakeService:
                 if resolution.discord_message_id:
                     if recovered is None or recovered != resolution.discord_message_id:
                         raise ValueError("invalid_starter_selection")
-                    await self.store.finish(intake_id, "starter", recovered)
+                    starter_resolution = ("starter", recovered)
                     p.discord_message_id = recovered
                 else:
                     if datetime.now(UTC) - intent.created_at < timedelta(minutes=10):
                         raise ValueError("absence_requires_ten_minutes")
                     if recovered != "absent":
                         raise ValueError("starter_candidates_require_selection")
-                    await clear_effect(self.store, intake_id, "starter")
+                    starter_resolution = ("starter", None)
             for step in ("company", "contact", "deal"):
                 selected = getattr(resolution, f"{step}_id")
                 effect = await self.store.effect(intake_id, step)
@@ -330,7 +352,9 @@ class IntakeService:
             p.separate_opportunity_confirmed = resolution.separate_opportunity_confirmed
             p.resolved_by, p.resolution_evidence = actor_id, resolution.evidence
             p.review_reason, record.error_code = None, None
-            await self.store.audit(record, actor_id, before, p.model_dump_json())
+            await self.store.audit(
+                record, actor_id, before, p.model_dump_json(), effect_resolution=starter_resolution
+            )
         return await self.resume(intake_id)
 
     async def scan(self) -> dict[str, object]:
@@ -342,6 +366,8 @@ class IntakeService:
             now = datetime.now(UTC)
             end = min(now, anchor + timedelta(days=7))
             start = max(config.reconciliation_start, anchor - timedelta(days=2))
+            scan_id = await self.store.start_scan(config, start, end)
+            discovered_count = 0
             cursor: str | None = None
             seen: set[str] = set()
             try:
@@ -352,6 +378,8 @@ class IntakeService:
                         for message in ids
                         if not await self.store.seen_source(config, message)
                     ]
+                    await self.store.record_discovered(config, new_ids, scan_id)
+                    discovered_count += len(new_ids)
                     state.discovered = list(dict.fromkeys([*state.discovered, *new_ids]))
                     await self.store.save_mailbox(config.source_connection_id, state)
                     if not cursor:
@@ -362,6 +390,7 @@ class IntakeService:
                 state.checkpoint, state.error_code = end, None
             except Exception:
                 state.error_code = "mailbox_scan_failed"
+            await self.store.finish_scan(scan_id, discovered_count, state.error_code)
             await self.store.save_mailbox(config.source_connection_id, state)
             return dict(
                 checkpoint=state.checkpoint,

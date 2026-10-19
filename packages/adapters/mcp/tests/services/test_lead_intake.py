@@ -130,6 +130,9 @@ class ProviderReplay:
         kind = parts[4]
         if method == "POST":
             assert self.archived, "CRM follows delivery and archive"
+            if self.lose_response == f"before_{kind}":
+                self.lose_response = ""
+                raise httpx.ReadTimeout("synthetic pre-create failure", request=request)
             self.next_id += 1
             record = {
                 "id": str(self.next_id),
@@ -161,7 +164,9 @@ async def noop(source: LeadSource | None) -> None:
     pass
 
 
-@pytest.mark.parametrize("lost", ["", "starter", "dossier", "companies", "contacts", "deals"])
+@pytest.mark.parametrize(
+    "lost", ["", "starter", "dossier", "companies", "contacts", "deals", "before_companies"]
+)
 async def test_full_active_http_replay_without_duplicate_effects(
     db_nullpool_engine: AsyncEngine, db_clean: None, lost: str
 ) -> None:
@@ -231,3 +236,42 @@ async def test_crm_portal_and_schema_fail_closed(portal: str, unique: bool, reas
                 ),
             )
     assert replay.events == []
+
+
+@pytest.mark.parametrize(
+    "author,bot,content,guild,accepted",
+    [
+        ("7", False, "Please register this lead: Synthetic", "1", True),
+        ("8", False, "Please register this lead: Synthetic", "1", False),
+        ("7", True, "Please register this lead: Synthetic", "1", False),
+        ("7", False, "Ordinary project chatter", "1", False),
+        ("7", False, "Please register this lead: Synthetic", "other", False),
+    ],
+)
+async def test_manual_source_is_verified_from_provider(
+    author: str, bot: bool, content: str, guild: str, accepted: bool
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET", "Source verification has no provider effects"
+        if "/messages/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "600",
+                    "channel_id": "500",
+                    "author": {"id": author, "bot": bot},
+                    "content": content,
+                },
+            )
+        return httpx.Response(200, json={"id": "500", "guild_id": guild})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        ports = HttpIntakePorts(
+            client, gmail_token="synthetic", hubspot_token="synthetic", discord_token="synthetic"
+        )
+        source = LeadSource(kind="manual", channel_id="500", message_id="600")
+        if accepted:
+            assert (await ports.source(config(), source, "7")).text == content
+        else:
+            with pytest.raises(ValueError):
+                await ports.source(config(), source, "7")
