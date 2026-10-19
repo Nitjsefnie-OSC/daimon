@@ -743,8 +743,9 @@ async def _drive_lifecycle(answer: str, *, render_tables: bool) -> list[tuple[st
     return calls
 
 
-# Every call a lifecycle run sends, in order. `_lifecycle_calls` fails when a run sends a
-# different sequence, so a new or reordered call cannot go unvalidated unnoticed.
+# Every call a lifecycle run sends, grouped by method (aioresponses records requests per
+# method and URL, so this is not the order they were sent). `_lifecycle_calls` fails when a
+# run sends a different set of calls, so a new or dropped call cannot go unvalidated.
 _LIFECYCLE_RUNS: dict[str, tuple[str, bool, tuple[str, ...]]] = {
     "answer": (_ANSWER, False, ("chat.postMessage", "chat.update")),
     "table_answer": (
