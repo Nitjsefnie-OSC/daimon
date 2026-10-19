@@ -554,7 +554,15 @@ class TeamsDriver:
         task = await self._card_invoke(
             sessionmaker, router, "task/fetch", data, workspace_id, channel_id, user_id
         )
-        return None if task.get("type") == "continue" else str(task.get("value"))
+        if task.get("type") != "continue":
+            return str(task.get("value"))
+        # A refusal is a one-line dialog (Teams rejects a message answering the open);
+        # the form itself carries inputs or actions.
+        card = cast(dict[str, Any], task["value"]["card"]["content"])
+        body = cast(list[dict[str, Any]], card.get("body") or [])
+        if card.get("actions") or len(body) != 1 or body[0].get("type") != "TextBlock":
+            return None
+        return str(body[0]["text"])
 
     async def submit_private_input(
         self,
