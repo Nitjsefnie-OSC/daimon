@@ -413,7 +413,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         auth = await _auth(ctx)
         if auth.platform == "slack":
             raise _slack_unsupported("rename_thread")
-        return await _rename_thread_impl(runtime, auth, thread_id=thread_id, name=name)
+        return await _rename_thread_impl(
+            runtime, auth, thread_id=thread_id, name=scrub_other_platforms(name, auth.platform)
+        )
 
     @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
     async def set_display_identity(  # pyright: ignore[reportUnusedFunction]
@@ -443,7 +445,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         return await _set_display_identity_impl(
             runtime,
             auth,
-            display_name=display_name or None,
+            display_name=scrub_other_platforms(display_name, auth.platform)
+            if display_name
+            else None,
             avatar_url=avatar_url or None,
             origin_context_id=origin_context_id or None,
         )

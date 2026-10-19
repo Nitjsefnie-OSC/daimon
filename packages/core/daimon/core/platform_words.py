@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from types import MappingProxyType
 from typing import Literal
+from urllib.parse import urlsplit
 
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
 
@@ -318,44 +319,75 @@ _NAMES: Mapping[ChatPlatform, str] = MappingProxyType(
 _NOT_AFTER_WORD = r"(?<![^\W_])"
 _NOT_BEFORE_WORD = r"(?![^\W_])"
 _URL_TAIL = r"(?::\d+)?(?:/(?:[^\s<>()\[\]]*[^\s<>()\[\].,;:!?'\"*_`~])?)?"
+# The host ends here: "discord.com@github.com" and "discord.com.example" are other hosts.
+_URL_END = r"(?![\w@-]|\.\w)"
 _SEPARATOR = r"(?P<sep>\s*,\s*(?:(?i:and|or)\s+)?|\s+(?i:and|or)\s+|\s*[/&]\s*)"
+# Labels forbid brackets and are bounded, so a stray "[" costs a bounded look, never a rescan.
+_LABEL = r"[^\[\]\n]{0,500}"
+_TITLE = r"[^)\n]{0,200}"
+#: A URL anywhere (bare, a Markdown target, Slack's `<url|label>`): opaque to the name matcher.
+_OPAQUE_URL = (
+    rf"(?P<markdown>!?\[(?P<markdown_label>{_LABEL})\]"
+    rf"\(\s*<?(?P<markdown_url>https?://[^\s<>)]+)>?{_TITLE}\))"
+    r"|(?P<angle><(?P<angle_url>https?://[^\s<>|]+)(?:\|(?P<angle_label>[^>\n]{0,500}))?>)"
+    r"|(?P<bare>https?://[^\s<>()\[\]]*[^\s<>()\[\].,;:!?'\"*_`~])"
+)
 
 
 def _item_pattern(platform: ChatPlatform) -> str:
-    """One mention of `platform`: a link to it, a bare URL, or its name."""
-    url = rf"(?<![\w./-])(?i:(?:https?://)?(?:[a-z0-9-]+\.)*{_HOSTS[platform]}){_URL_TAIL}"
-    markdown_link = rf"!?\[[^\]\n]*\]\(\s*<?{url}[^)\n]*\)"
-    angle_link = rf"<{url}(?:\|[^>\n]*)?>"
+    """One mention of `platform`: a link to its host, a bare URL on it, or its name."""
+    url = (
+        rf"(?<![\w./-])(?i:(?:https?://)?(?:[a-z0-9-]+\.)*{_HOSTS[platform]}){_URL_TAIL}{_URL_END}"
+    )
+    markdown_link = rf"!?\[{_LABEL}\]\(\s*<?{url}(?:\s{_TITLE})?\)"
+    angle_link = rf"<{url}(?:\|[^>\n]{{0,500}})?>"
     name = rf"{_NOT_AFTER_WORD}{_NAMES[platform]}{_NOT_BEFORE_WORD}"
     return f"(?:{markdown_link}|{angle_link}|{url}|{name})"
 
 
 @dataclass(frozen=True, slots=True)
 class _Patterns:
-    run: re.Pattern[str]
-    """A run of the other apps' names: the whole of what gets replaced."""
+    text: re.Pattern[str]
+    """Either a run of the other apps' names (what gets replaced) or another URL (kept)."""
     step: re.Pattern[str]
     """One separator and the name after it, to read the separators out of a run."""
+    host: re.Pattern[str]
+    """A host name that belongs to one of the other apps."""
 
 
 @cache
 def _patterns(platform: ChatPlatform) -> _Patterns:
-    item = "|".join(_item_pattern(other) for other in CHAT_PLATFORMS if other != platform)
-    item = f"(?:{item})"
-    run = re.compile(
+    others: list[ChatPlatform] = [other for other in CHAT_PLATFORMS if other != platform]
+    item = "(?:" + "|".join(_item_pattern(other) for other in others) + ")"
+    hosts = "|".join(_HOSTS[other] for other in others)
+    text = re.compile(
         rf"(?P<article>{_NOT_AFTER_WORD}(?i:an?|the)\s+)?"
         rf"(?P<first>{item})"
         rf"(?P<more>(?:{_SEPARATOR}{item})*)"
-        r"(?P<possessive>['\u2019]s\b)?"
+        r"(?P<possessive>['’]s\b)?"
+        rf"|{_OPAQUE_URL}"
     )
-    return _Patterns(run=run, step=re.compile(_SEPARATOR + item))
+    return _Patterns(
+        text=text,
+        step=re.compile(_SEPARATOR + item),
+        host=re.compile(rf"(?:^|\.)(?:{hosts})$", re.IGNORECASE),
+    )
+
+
+#: How far back a name looks for the end of the sentence before it.
+_LOOKBACK = 8
 
 
 def _opens_sentence(text: str, position: int) -> bool:
-    before = text[:position].rstrip(" \t*_>#-")
-    if not before or before.endswith("\n"):
-        return True
-    return before[-1] in ".!?" and text[position - 1].isspace()
+    window = text[max(0, position - _LOOKBACK) : position]
+    before = window.rstrip(" \t*_>#-")
+    if not before:
+        return position <= _LOOKBACK  # only the start of the text has nothing before it
+    return before.endswith("\n") or (before[-1] in ".!?" and window[-1].isspace())
+
+
+def _opening(name: str, text: str, position: int) -> str:
+    return name[0].upper() + name[1:] if _opens_sentence(text, position) else name
 
 
 def _plain_name(match: re.Match[str], text: str, step: re.Pattern[str]) -> str:
@@ -366,9 +398,42 @@ def _plain_name(match: re.Match[str], text: str, step: re.Pattern[str]) -> str:
         name, possessive = OTHER_APPS, "'" if match.group("possessive") else ""
     else:
         name, possessive = OTHER_APP, match.group("possessive") or ""
-    if _opens_sentence(text, match.start()):
-        name = name[0].upper() + name[1:]
-    return name + possessive
+    return _opening(name, text, match.start()) + possessive
+
+
+def _is_other_app_url(url: str, patterns: _Patterns) -> bool:
+    return patterns.host.search(urlsplit(url).hostname or "") is not None
+
+
+def _other_url(match: re.Match[str], text: str, patterns: _Patterns) -> str:
+    """A URL token: replaced whole if its host is another app's, else kept byte for byte.
+
+    A kept link still has its visible label scrubbed."""
+    for group, url, label in (
+        ("markdown", "markdown_url", "markdown_label"),
+        ("angle", "angle_url", "angle_label"),
+        ("bare", "bare", None),
+    ):
+        if match.group(group) is None:
+            continue
+        if _is_other_app_url(match.group(url), patterns):
+            return _opening(OTHER_APP, text, match.start())
+        if label is None or match.group(label) is None:
+            return match.group(0)
+        whole, start = match.group(0), match.start()
+        label_start, label_end = match.span(label)
+        shown = _scrub(match.group(label), patterns)
+        return whole[: label_start - start] + shown + whole[label_end - start :]
+    raise AssertionError("an opaque URL matched no form")  # pragma: no cover
+
+
+def _scrub(text: str, patterns: _Patterns) -> str:
+    def replace(match: re.Match[str]) -> str:
+        if match.group("first") is not None:
+            return _plain_name(match, text, patterns.step)
+        return _other_url(match, text, patterns)
+
+    return patterns.text.sub(replace, text)
 
 
 def scrub_other_platforms(text: str, platform: str | None) -> str:
@@ -382,8 +447,12 @@ def scrub_other_platforms(text: str, platform: str | None) -> str:
       ("Slack", "Microsoft Teams", "Teams"), so the lowercase English "slack", "team" and
       "teams" stay. A sentence that opens with "Slack" or "Teams" in its other sense is
       replaced too, a false positive accepted over a leak.
-    - Links to another app's hosts (and `*.slack.com`, `teams.microsoft.com`, `discord.gg`),
-      bare or as `[text](url)`, `<url>` or Slack's `<url|text>`, become the same words.
+    - A URL is opaque: the name matcher never runs inside one, so a working link is never
+      corrupted. A URL or link whose host is another app's (`discord.com`, `discord.gg`,
+      `slack.com`, `*.slack.com`, `teams.microsoft.com`), bare or as `[text](url)`, `<url>`
+      or Slack's `<url|text>`, is replaced whole. Any other URL is kept byte for byte and
+      only a link's visible label is scrubbed. Accepted residual: a bare URL on another
+      host whose path names an app (`github.com/discord/...`) stays as written.
     - A run of names reads as one name: "Discord or Slack" is "another app", "Discord and
       Slack" and "Discord, Slack" are "other apps". A leading "a" or "the" goes with it
       ("a Slack channel" is "another app channel").
@@ -391,9 +460,9 @@ def scrub_other_platforms(text: str, platform: str | None) -> str:
       skipping code would need a Markdown parser that a streamed, half-written reply
       cannot give.
 
-    Idempotent, linear in the length of `text`, and the identity when nothing matches.
+    Idempotent, linear in the length of `text` (labels, titles and the sentence look-back
+    are bounded), and the identity when nothing matches.
     """
     if platform not in CHAT_PLATFORMS:
         return text
-    patterns = _patterns(platform)
-    return patterns.run.sub(lambda match: _plain_name(match, text, patterns.step), text)
+    return _scrub(text, _patterns(platform))

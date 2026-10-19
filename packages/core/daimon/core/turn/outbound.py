@@ -22,19 +22,30 @@ from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLif
 from daimon.core.turn.state import ContentBlock, TextBlock, TurnState
 
 
-def scrub_turn_state(state: TurnState, platform: str | None) -> TurnState:
+def scrub_turn_state(
+    state: TurnState, platform: str | None, *, known: dict[str, str] | None = None
+) -> TurnState:
     """`state` with the model's text scrubbed for `platform`; `state` itself when nothing changes.
 
-    Tool-call blocks are left alone: their names and results are not posted as written."""
+    Tool-call blocks are left alone: their names and results are not posted as written.
+    `known` maps text already scrubbed to its result, so a render tick re-scrubs only the
+    block still growing; it is replaced by this state's texts, which bounds its size."""
     changed = False
     content: list[ContentBlock] = []
+    seen: dict[str, str] = {}
     for block in state.content:
         if isinstance(block, TextBlock):
-            text = scrub_other_platforms(block.text, platform)
+            text = known.get(block.text) if known is not None else None
+            if text is None:
+                text = scrub_other_platforms(block.text, platform)
+            seen[block.text] = text
             if text != block.text:
                 block = dataclasses.replace(block, text=text)
                 changed = True
         content.append(block)
+    if known is not None:
+        known.clear()
+        known.update(seen)
     return dataclasses.replace(state, content=content) if changed else state
 
 
@@ -47,18 +58,23 @@ class OtherAppsScrubbedLifecycle:
     def __init__(self, inner: TurnLifecycle, platform: str) -> None:
         self._inner = inner
         self._platform = platform
+        self._scrubbed: dict[str, str] = {}
+
+    def _for_adapter(self, state: TurnState) -> TurnState:
+        # The render loop hands over the whole state every ~2 s: scrub what grew, not all of it.
+        return scrub_turn_state(state, self._platform, known=self._scrubbed)
 
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401
         return getattr(self._inner, name)
 
     async def on_render(self, state: TurnState) -> None:
-        await self._inner.on_render(scrub_turn_state(state, self._platform))
+        await self._inner.on_render(self._for_adapter(state))
 
     async def on_terminal_success(self, state: TurnState) -> None:
-        await self._inner.on_terminal_success(scrub_turn_state(state, self._platform))
+        await self._inner.on_terminal_success(self._for_adapter(state))
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
-        await self._inner.on_terminal_failure(scrub_turn_state(state, self._platform), err)
+        await self._inner.on_terminal_failure(self._for_adapter(state), err)
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         await self._inner.on_sse_event(event)

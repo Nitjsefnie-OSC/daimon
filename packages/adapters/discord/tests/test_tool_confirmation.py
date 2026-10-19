@@ -809,3 +809,24 @@ async def test_complete_backend_loss_list_survives_native_card_rendering(state):
     )
     rendered = "\n".join(_texts(build_confirmation_view(card, prompt)))
     assert (losses in rendered.replace(r"\_", "_")) == (state in {"pending", "approved"})
+
+
+def test_an_approval_card_shows_the_call_exactly_even_when_it_names_another_app() -> None:
+    """The one text left unscrubbed: the card must show what will run, not a reworded copy.
+
+    A scrubbed card over an unscrubbed call would misstate what the person approves."""
+    call = ToolCall(
+        tool_use_id="tu_1",
+        server_name="linear",
+        tool_name="create_issue",
+        input={"title": "Move the Slack bot to Teams", "description": "Not Discord"},
+    )
+    prompt = prompt_for_tool_call(call, requester_platform_user_id="111", now=datetime.now(UTC))
+    card = build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
+    view = build_confirmation_view(card, prompt)
+
+    assert 'Create issue "Move the Slack bot to Teams"?' in _texts(view)[0]
+    assert card.detail_lines == (
+        "Title: Move the Slack bot to Teams",
+        "Description: Not Discord",
+    )

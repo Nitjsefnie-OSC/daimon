@@ -25,6 +25,7 @@ from daimon.adapters.mcp.tools.teams._send import (
     _post_teams_app_install_link_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.github_app_auth import build_app_install_url
+from daimon.core.platform_words import scrub_other_platforms
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict
@@ -97,9 +98,10 @@ def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         tell whether installation happened. Installing alone neither verifies this
         tenant's access nor binds a working repo; use ``github_connect`` and
         verify access through the requested operation afterwards."""
+        auth = await _auth(ctx)
         return await _post_app_install_link_impl(
             runtime,
-            await _auth(ctx),
+            auth,
             channel_id=channel_id,
-            purpose=purpose,
+            purpose=scrub_other_platforms(purpose, auth.platform),
         )

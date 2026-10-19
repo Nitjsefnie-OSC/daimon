@@ -169,3 +169,58 @@ def test_a_wizard_form_scrubs_what_a_person_reads_and_keeps_answer_values() -> N
         "Not another app",
     )
     assert scrubbed.key == step.key, "the key was derived before the scrub"
+
+
+async def test_rename_thread_scrubs_the_title(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = await _token(db_session, sessionmaker, "discord")
+    renamed = _record(monkeypatch, f"{_CHANNELS}._rename_thread_impl")
+    await _call_tool(
+        _make_app(sessionmaker),
+        token=token,
+        tool_name="rename_thread",
+        arguments={"thread_id": "1", "name": "Slack migration"},
+    )
+    assert renamed.await_args is not None
+    assert renamed.await_args.kwargs["name"] == "Another app migration"
+
+
+async def test_set_display_identity_scrubs_the_nickname(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = await _token(db_session, sessionmaker, "discord")
+    set_identity = _record(monkeypatch, f"{_CHANNELS}._set_display_identity_impl")
+    await _call_tool(
+        _make_app(sessionmaker),
+        token=token,
+        tool_name="set_display_identity",
+        arguments={"display_name": "Slack Helper", "origin_context_id": "ctx"},
+    )
+    assert set_identity.await_args is not None
+    assert set_identity.await_args.kwargs["display_name"] == "Another app Helper"
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_the_github_install_link_card_scrubs_its_purpose(
+    platform: str,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = await _token(db_session, sessionmaker, platform)
+    posted = _record(
+        monkeypatch, "daimon.adapters.mcp.tools.github_app._post_app_install_link_impl"
+    )
+    await _call_tool(
+        _make_app(sessionmaker),
+        token=token,
+        tool_name="post_github_app_install_link",
+        arguments={"channel_id": "C1", "purpose": _SAID},
+    )
+    assert posted.await_args is not None
+    assert posted.await_args.kwargs["purpose"] == _READ[platform]

@@ -952,6 +952,8 @@ async def run_prepared_turn_impl(
     """
     if origin in _CHAT_RENDERED_ORIGINS:
         # A worker's lifecycle hands its result back to a model, not to a person.
+        # `confirm_write` is deliberately not wrapped: an approval card shows exactly what
+        # will be sent or run, so a scrubbed card over the original call would misstate it.
         lifecycle, recovery_lifecycle = scrubbed_for(platform, lifecycle, recovery_lifecycle)
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
     confirmed_tools: frozenset[str] = confirmed_tools_for_turn(deps)

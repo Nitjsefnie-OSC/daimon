@@ -106,7 +106,7 @@ def test_the_live_staging_failure_is_scrubbed() -> None:
         ("discord", "See ![shot](https://files.slack.com/a.png)", "See another app"),
         ("discord", "See <https://acme.slack.com/archives/C1|the thread>", "See another app"),
         ("discord", "See <https://acme.slack.com/archives/C1>", "See another app"),
-        ("discord", "[Slack](https://example.com/page)", "[another app](https://example.com/page)"),
+        ("discord", "[Slack](https://example.com/page)", "[Another app](https://example.com/page)"),
         (
             "discord",
             "[docs](https://example.com/slack.com-guide)",
@@ -160,10 +160,111 @@ def test_no_other_name_survives(platform: str) -> None:
         assert "microsoft" not in out.lower()
 
 
-def test_scrubbing_is_fast_on_a_long_reply() -> None:
-    text = ("A long paragraph about releases and slack time, with Slack once. " * 40 + "\n") * 40
-    scrub_other_platforms(text, "teams")
-    started = time.perf_counter()
-    for _ in range(20):
+@pytest.mark.parametrize(
+    ("platform", "text"),
+    [
+        # Another host: the URL is kept byte for byte, whatever its path names.
+        ("slack", "<https://github.com/discord/discord-api-docs|API docs>"),
+        ("slack", "<https://github.com/discord/discord-api-docs>"),
+        ("teams", "[docs](https://github.com/discord/x)"),
+        ("teams", "[docs](https://github.com/discord/x 'Discord docs')"),
+        ("teams", "![logo](https://cdn.example.com/Slack/logo.png)"),
+        ("teams", "see https://github.com/discord/discord-api-docs/blob/main/README.md"),
+        ("discord", "see https://example.com/Slack/Teams?next=https://slack.example/Teams#Slack"),
+        ("discord", "Visit (https://github.com/Teams/x) today"),
+        ("teams", "https://github.com/discord/x."),
+    ],
+)
+def test_a_url_on_another_host_is_kept_byte_for_byte(platform: str, text: str) -> None:
+    assert scrub_other_platforms(text, platform) == text
+
+
+@pytest.mark.parametrize(
+    ("platform", "text", "expected"),
+    [
+        (
+            "slack",
+            "See <https://github.com/discord/x|the Discord docs> now",
+            "See <https://github.com/discord/x|Another app docs> now",
+        ),
+        (
+            "teams",
+            "See [the Slack docs](https://github.com/slack/x) now",
+            "See [Another app docs](https://github.com/slack/x) now",
+        ),
+        (
+            "teams",
+            "See [https://github.com/discord/x](https://github.com/discord/x)",
+            "See [https://github.com/discord/x](https://github.com/discord/x)",
+        ),
+        (
+            "slack",
+            "Discord is at https://github.com/discord/x, Teams at <https://teams.microsoft.com/l>.",
+            "Another app is at https://github.com/discord/x, another app at another app.",
+        ),
+    ],
+)
+def test_only_the_visible_label_of_a_kept_link_is_scrubbed(
+    platform: str, text: str, expected: str
+) -> None:
+    assert scrub_other_platforms(text, platform) == expected
+
+
+def test_a_link_on_another_apps_host_is_replaced_even_with_userinfo_tricks() -> None:
+    assert scrub_other_platforms("[x](https://discord.com@github.com/a)", "teams") == (
+        "[x](https://discord.com@github.com/a)"
+    ), "the host is github.com"
+    assert scrub_other_platforms("[x](https://github.com@discord.com/a)", "teams") == "Another app"
+
+
+_ADVERSARIAL = (
+    "[" * 100_000,
+    "[Discord or Slack](" * 3_000,
+    "Discord or Slack or Teams, " * 6_000,
+    "Discord" + " " * 50_000 + "x",
+    "a " * 25_000 + "Discord",
+    "https://" + "a." * 20_000 + "z",
+    "x" * 100_000,
+    "< " * 20_000 + "<https://",
+    "![" + "a" * 100_000,
+)
+
+
+def _seconds(text: str) -> float:
+    best = float("inf")
+    for _ in range(3):
+        started = time.perf_counter()
         scrub_other_platforms(text, "teams")
-    assert (time.perf_counter() - started) / 20 < 0.05
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
+@pytest.mark.parametrize("text", _ADVERSARIAL, ids=range(len(_ADVERSARIAL)))
+def test_adversarial_input_scales_linearly(text: str) -> None:
+    """Four times the input takes about four times as long, not sixteen."""
+    small, large = text[: len(text) // 4], text
+    scrub_other_platforms(small, "teams")  # build the patterns outside the timing
+    ratio = _seconds(large) / max(_seconds(small), 1e-4)
+    assert ratio < 10, f"{ratio:.1f}x for 4x the input"
+    assert _seconds(large) < 1.0
+
+
+def test_two_hundred_kilobytes_of_everything_is_scrubbed_quickly() -> None:
+    text = "".join(piece[:22_000] for piece in _ADVERSARIAL)
+    assert len(text) > 150_000
+    assert _seconds(text) < 1.0
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Hi. Slack", "Hi. Another app"),
+        ("Hi, Slack", "Hi, another app"),
+        ("Hi.Slack", "Hi.another app"),
+        ("a\n\n  - Slack", "a\n\n  - Another app"),
+        ("x" * 50 + "\n" + "-" * 30 + " Slack", "x" * 50 + "\n" + "-" * 30 + " another app"),
+        ("x" * 50 + ". Slack", "x" * 50 + ". Another app"),
+    ],
+)
+def test_a_sentence_start_is_read_from_a_bounded_look_back(text: str, expected: str) -> None:
+    assert scrub_other_platforms(text, "teams") == expected

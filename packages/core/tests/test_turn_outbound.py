@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
 from daimon.core.turn.card_state import CardEvent, CardState, update, update_activity
 from daimon.core.turn.lifecycle import TurnLifecycle, acknowledge, stop_rendering
 from daimon.core.turn.outbound import (
@@ -144,3 +145,32 @@ def test_a_shared_card_scrubs_its_draft_and_tool_lines() -> None:
     # With no platform on the card nothing is scrubbed.
     bare = update(CardState(), CardEvent(kind="message", label="Asking Discord"))
     assert bare.text_preview == "Asking Discord"
+
+
+async def test_a_render_tick_scrubs_only_the_block_that_grew(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daimon.core.turn.outbound as outbound
+
+    calls: list[str] = []
+    real = outbound.scrub_other_platforms
+
+    def spy(text: str, platform: str | None) -> str:
+        calls.append(text)
+        return real(text, platform)
+
+    monkeypatch.setattr(outbound, "scrub_other_platforms", spy)
+    inner = _Recorder()
+    lifecycle = OtherAppsScrubbedLifecycle(inner, "teams")
+    sealed = "A sealed answer about Slack. " * 50
+    tool = _tool("bash")
+
+    await lifecycle.on_render(TurnState(content=[_text(sealed), tool, _text("Dis")]))
+    await lifecycle.on_render(TurnState(content=[_text(sealed), tool, _text("Discord is")]))
+    await lifecycle.on_terminal_success(
+        TurnState(content=[_text(sealed), tool, _text("Discord is done")])
+    )
+
+    assert calls == [sealed, "Dis", "Discord is", "Discord is done"]
+    assert inner.succeeded[0].content[2] == _text("Another app is done")
+    assert inner.rendered[1].content[0].text.count("another app") == 50  # type: ignore[union-attr]
