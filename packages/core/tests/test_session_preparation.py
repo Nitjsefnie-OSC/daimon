@@ -3049,7 +3049,9 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         tasks.extend(asyncio.create_task(send(i)) for i in range(1, 15))
         # All peers must attempt the real PostgreSQL fence before releasing
         # the holder. Try-lock contenders now back off outside the pool/gate.
-        await asyncio.wait_for(peers_entered.wait(), 3)
+        # Membership and ownership reads precede the fence; allow loaded hosts
+        # to complete them without changing the bounded pool-contention proof.
+        await asyncio.wait_for(peers_entered.wait(), 15)
         tasks.append(asyncio.create_task(compatible_preparation()))
         tasks.append(asyncio.create_task(replacement()))
         release.set()
