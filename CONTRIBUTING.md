@@ -94,6 +94,21 @@ source: re-run the generator without `--check` and commit the result, rather
 than editing the page. `CLAUDE.md` has the table of which change means which
 generator, and which pages are maintained by hand.
 
+CI splits the Postgres-backed pytest run into parallel jobs, and the two largest
+suites (`core`, `mcp`) into shards by test file with
+`-p daimon.testing.ci_shard --ci-shard-by=file --ci-shard-suite=S --ci-shard-index=N --ci-shard-count=M`.
+Files are placed longest-first on the least-loaded shard using the per-file
+seconds in `packages/testing/daimon/testing/ci_durations.json`; a file missing
+from it still runs, on the shard its path hashes to. Refresh the table from a
+run's junit artifacts with `uv run python scripts/generate_ci_durations.py --run <run-id>`.
+Each job runs `-n 4 --dist worksteal` (the four vCPUs of a hosted runner), so a
+failure names the failing area in the job list. Add a shard by adding a leg to
+the `pytest-db` matrix in `.github/workflows/ci.yml`. The `shard-check` job
+runs `uv run python scripts/check_ci_shards.py`, which collects each split suite
+once (`--collect-only`, no database), places its files the way CI will, and
+fails if a shard is empty or the shards omit or repeat a test, so a new test
+file lands in exactly one shard without any edit.
+
 The pre-commit hooks from the setup above run the linters and the generator
 checks on `git commit`; `pytest` stays a manual step.
 
