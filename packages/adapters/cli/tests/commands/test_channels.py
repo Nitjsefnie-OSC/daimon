@@ -494,7 +494,9 @@ async def test_rule_set_keeps_a_thread_rule_to_the_thread_flag(
     thread = "C01AB:1700000000.000200"
     with pytest.raises(typer.BadParameter, match="--thread takes only --readers inside or any"):
         await channels_rule_set(**args, channel_id=thread, readers="own", thread=True)
-    with pytest.raises(typer.BadParameter, match="not a thread id of the form channel_id:thread_ts"):
+    with pytest.raises(
+        typer.BadParameter, match="not a thread id of the form channel_id:thread_ts"
+    ):
         await channels_rule_set(**args, channel_id="C01AB", readers="inside", thread=True)
     await channels_rule_set(**args, channel_id=thread, readers="inside", thread=True)
     await channels_rule_set(**args, channel_id="C02CD:1700000000.000300", writers="none")
