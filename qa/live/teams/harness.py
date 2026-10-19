@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 
@@ -40,9 +42,28 @@ def _graph_path(path: str) -> tuple[str, str]:
     for prefix in ("/v1.0/", "/beta/"):
         if path.startswith(prefix):
             version, path = prefix.strip("/"), path[len(prefix) - 1 :]
-    if not path.startswith("/") or "://" in path or ".." in path.split("?", 1)[0]:
+    if not path.startswith("/") or "://" in path or "#" in path or _escapes(path.split("?", 1)[0]):
         raise ValueError("invalid_path")
     return version, path
+
+
+def _escapes(bare: str) -> bool:
+    """Whether a path climbs or hides a separator, even percent-encoded (``%2e%2e``, ``%2f``)."""
+    decoded = bare
+    while (once := unquote(decoded)) != decoded:
+        decoded = once
+    hidden_separator = decoded.count("/") != bare.count("/")
+    return ".." in decoded or "\\" in decoded or hidden_separator
+
+
+def _team_upload(path: str, team_id: str) -> bool:
+    """Whether ``path`` puts one file's content into the QA team's library, and nothing else.
+
+    Only content uploads: sharing (``invite``, ``createLink``, ``permissions``) and
+    ``copy`` live under the same drive and could reach people or other drives.
+    """
+    drive = re.escape(f"/groups/{team_id}/drive".casefold())
+    return re.fullmatch(drive + r"/(root:/[^:]+:|items/[^/]+)/content", path) is not None
 
 
 def _within(path: str, root: str) -> bool:
@@ -57,8 +78,15 @@ async def graph(
     method: str,
     path: str,
     body: str | None = None,
+    *,
+    upload: tuple[bytes, str] | None = None,
 ) -> dict[str, Any]:
-    """Make one Graph call as a persona; writes stay in the QA team or its bot chat."""
+    """Make one Graph call as a persona; writes stay in the QA team, its files or its bot chat.
+
+    ``upload`` sends raw bytes with their content type instead of a JSON body. It is
+    only a ``PUT`` of one file's content into the QA team's document library
+    (``/groups/<team>/drive/root:/<path>:/content`` or ``.../items/<id>/content``).
+    """
     try:
         _persona(driver, persona)
         method = method.upper()
@@ -66,6 +94,8 @@ async def graph(
             raise ValueError("invalid_method")
         version, bare = _graph_path(path)
         payload: object = None
+        if upload is not None and (body is not None or method != "PUT"):
+            raise ValueError("invalid_body")
         if body is not None:
             try:
                 payload = json.loads(body)
@@ -77,17 +107,24 @@ async def graph(
             f"{team}/archive".casefold()
         ):
             raise ValueError("qa_team_protected")
-        if method != "GET" and not _within(bare, team):
+        uploading = upload is not None
+        if uploading and not _team_upload(bare_path, driver.config.team_id):
+            raise ValueError("write_outside_qa_team")
+        if method != "GET" and not (uploading or _within(bare, team)):
             chat_id, _ = await driver.bot_chat(persona)
             if not _within(bare, f"/chats/{chat_id}"):
                 raise ValueError("write_outside_qa_team")
         token = driver.tokens.acquire(persona, GRAPH_DEFAULT)
+        headers = {"Authorization": f"Bearer {token.value}"}
+        if upload is not None:
+            headers["Content-Type"] = upload[1]
         try:
             response = await driver.http.request(
                 method,
                 f"{GRAPH_ROOT}/{version}{bare}",
-                headers={"Authorization": f"Bearer {token.value}"},
+                headers=headers,
                 json=payload,
+                content=None if upload is None else upload[0],
                 timeout=30,
             )
         except httpx.RequestError:
