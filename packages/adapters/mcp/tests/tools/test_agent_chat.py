@@ -2418,6 +2418,12 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
     )
 
+    router.add(
+        "GET",
+        r"/v1/sessions/ses_test001",
+        lambda request, match: httpx.Response(200, json=fake_session.model_dump(mode="json")),
+    )
+
     with patch(
         "daimon.adapters.mcp.tools.agent_chat.create_session",
         new=AsyncMock(return_value=fake_session),
