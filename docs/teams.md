@@ -674,21 +674,28 @@ text is stored only until its turn starts or it is answered, and the
 content-free receipt is deleted after 24 hours.
 
 Teams does not resend a message posted in the seconds between the old process
-stopping and the new one serving. So after each boot the adapter reads back,
+stopping and the new one serving. So once the new one serves, it reads back,
 through Graph, the standard channels (replies included) and group chats where
 a message was admitted in the last 24 hours, newest first, at most 50 of them,
-one page each. A message from a person under 10 minutes old runs through the
-same admission as any other, in order: an @mention, a reply in a followed
-thread, or a group chat mention. One already admitted, whether Bot Framework
-delivered it or an earlier boot read it, is skipped, so nothing runs twice. This
-needs the same per-team permissions as channel history (`ChannelMessage.Read.Group`,
+one page each. A message from a person that is under 10 minutes old and was
+posted before the service began serving runs through the same admission as any
+other, in order: an @mention, a reply in a followed thread, a group chat
+mention, or a typed "@<bot name>" while that switch is on. Later ones are
+Bot Framework's own. One already admitted, whether Bot Framework delivered it
+or an earlier boot read it, is skipped, so nothing runs twice; a message
+within a second or so of the start of serving can be missed. This needs the
+same per-team permissions as channel history (`ChannelMessage.Read.Group`,
 `ChatMessage.Read.Chat`), not the setting for private channels. A conversation
 Graph refuses is logged (`teams.restart_catch_up.read_failed`) and skipped; it
 never holds up boot. Private and shared channels are read through their
 subscription (above), so they are caught up only with
 `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED` on. A 1:1 chat cannot be read back
 through Graph, so a message sent there in the gap is lost and must be sent again.
-A typed "@<bot name>" with no real mention is not read back.
+The bot's name for a typed "@<bot name>" comes from a private-channel
+subscription or the bot's own earlier message in what was read; with neither,
+only a real mention is read back. Deleting your data in `privacy` clears you
+and your words from your receipts but keeps each receipt until the 24 hours are
+up, so a message you deleted is not run again by a restart's read.
 
 Handoffs, work waiting on a private input and timers are durable wake-queue
 rows, and a wake poller opens every chat with due work. They survive a

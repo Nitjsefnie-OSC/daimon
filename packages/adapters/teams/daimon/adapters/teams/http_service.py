@@ -197,6 +197,8 @@ def create_teams_http_service(
         # delay readiness. Turns wait for the sweep on their own.
         turns.start()
         ready.set()
+        # The socket binds right after startup: from here Bot Framework's activities are its own.
+        turns.begin_serving()
         try:
             yield
         finally:
@@ -370,6 +372,9 @@ def create_teams_http_service(
         list_teams=installed_teams,
         standard_channels=channel_names,
         deliver=catch_up_messages,
+        serving_from=lambda: turns.serving_from(),  # Built below.
+        bot_app_id=settings.client_id,
+        should_stop=lambda: turns.draining,
         service_url=SERVICE_URL,
     )
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))

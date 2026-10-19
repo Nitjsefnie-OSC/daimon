@@ -423,6 +423,9 @@ class TeamsApp:
         # Not durable: a retry landing after a restart runs a second turn.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._recovery: asyncio.Task[None] | None = None
+        # When the HTTP service began accepting activities: what a restart's catch-up stops at.
+        self._serving_from: datetime | None = None
+        self._serving = asyncio.Event()
         self._wake_poller: asyncio.Task[None] | None = None
         self._delivery_poller: asyncio.Task[None] | None = None
         # When each busy conversation last got a message: a newer one supersedes
@@ -489,6 +492,19 @@ class TeamsApp:
                         self._subscriptions.run(), name="teams.channel-subscriptions"
                     )
         return self._recovery
+
+    def begin_serving(self) -> None:
+        """The service is about to accept Bot Framework activities: what it posted before
+        is Graph's to read back (`RestartCatchUp`), what comes after is its own."""
+        if self._serving_from is None:
+            self._serving_from = datetime.now(UTC)
+            self._serving.set()
+
+    async def serving_from(self) -> datetime:
+        """When `begin_serving` was called, waiting for it."""
+        await self._serving.wait()
+        assert self._serving_from is not None
+        return self._serving_from
 
     async def _open_wake_thread(self, wake: WakeThread) -> bool:
         """The wake poller's hook: run a chat's due wakes via `dispatch_after_input`.
@@ -891,15 +907,21 @@ class TeamsApp:
         draining; the next boot reads again.
         """
         fresh: list[TeamsInbound] = []
-        for message in messages:
-            if self.draining:
-                return
-            parsed = self._parse_graph(message, source, mentions=True)
-            if isinstance(parsed, Refusal):
-                await self._refuse_graph(parsed, message, source)
-            elif not self._ignored_unprompted(parsed) and await self._claim(parsed):
-                fresh.append(parsed)
-        self._replay(fresh)
+        try:
+            for message in messages:
+                if self.draining:
+                    break
+                try:
+                    parsed = self._parse_graph(message, source, mentions=True)
+                    if isinstance(parsed, Refusal):
+                        await self._refuse_graph(parsed, message, source)
+                    elif not self._ignored_unprompted(parsed) and await self._claim(parsed):
+                        fresh.append(parsed)
+                except Exception:
+                    # One message must not strand the rows already claimed for replay.
+                    log.exception("teams.restart_catch_up.message_failed")
+        finally:
+            self._replay(fresh)
 
     def _parse_graph(
         self, message: GraphMessage, source: GraphSource, *, mentions: bool

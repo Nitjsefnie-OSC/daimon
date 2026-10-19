@@ -269,14 +269,22 @@ async def prune_teams_messages(
     return cast(CursorResult[Any], result).rowcount
 
 
-async def delete_teams_messages_for_user(
+async def forget_teams_messages_for_user(
     session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
 ) -> int:
-    """Forget one person's admitted messages in one tenant. Idempotent."""
+    """Forget one person in one tenant's admission rows. Idempotent.
+
+    The row stays as a content-free receipt (handled, no words, no sender) until
+    the 24 h prune: it is the key that keeps a catch-up or a redelivery from
+    running the same message again, which would write the erased words back.
+    An unhandled message of theirs is dropped, not replayed.
+    """
     result = await session.execute(
-        delete(TeamsMessageAdmission).where(
+        update(TeamsMessageAdmission)
+        .where(
             TeamsMessageAdmission.tenant_id == tenant_id, TeamsMessageAdmission.user_id == user_id
         )
+        .values(user_id=None, message=None, handled=True)
     )
     await session.flush()
     return cast(CursorResult[Any], result).rowcount
@@ -285,7 +293,7 @@ async def delete_teams_messages_for_user(
 async def count_teams_messages_for_user(
     session: AsyncSession, *, tenant_id: uuid.UUID, user_id: str
 ) -> int:
-    """How many rows `delete_teams_messages_for_user` would delete."""
+    """How many rows `forget_teams_messages_for_user` would clear."""
     stmt = (
         select(func.count())
         .select_from(TeamsMessageAdmission)

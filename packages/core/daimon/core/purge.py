@@ -373,8 +373,9 @@ async def _purge_principal_in_session(
             platform_user_id=principal.external_id,
         )
         if principal.platform == "teams":
-            # Their message receipts, and the words of any not yet handled.
-            teams_messages_count = await teams_admissions_store.delete_teams_messages_for_user(
+            # Their message receipts lose the person and any unhandled words but stay as the
+            # duplicate guard: deleted, a later catch-up would run the message again.
+            teams_messages_count = await teams_admissions_store.forget_teams_messages_for_user(
                 session, tenant_id=principal.tenant_id, user_id=principal.external_id
             )
             # Their Connect Microsoft refresh token; sign-in links cascade with the account.

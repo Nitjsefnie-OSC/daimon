@@ -25,6 +25,8 @@ from daimon.adapters.teams.restart_catch_up import CATCH_UP_WINDOW, RestartCatch
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import TeamsInstallationRow
 from daimon.core.stores.teams_channel_subscriptions import insert_teams_channel_subscription
+from daimon.core.stores.teams_message_admissions import forget_teams_messages_for_user
+from daimon.core.stores.tenants import set_plain_text_mentions
 from daimon.core.teams_graph import GraphClient, GraphMessage
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from microsoft_teams.api import MessageActivity
@@ -149,7 +151,10 @@ class Boot:
         sender: FakeSender | None = None,
         standard: dict[str, str | None] | None = None,
         fence: bool = True,
+        serving_at: datetime | None = None,
     ) -> None:
+        # When the service began accepting activities: the catch-up reads up to it.
+        self.serving_at = serving_at or datetime.now(UTC)
         # Whether a turn starting marks its message handled; off, it is left held for a replay.
         self._fence = fence
         self.factory = factory
@@ -171,6 +176,9 @@ class Boot:
         async def deliver(source: GraphSource, messages: list[GraphMessage]) -> None:
             await self.app.catch_up_graph_messages(source, messages)
 
+        async def serving_from() -> datetime:
+            return self.serving_at
+
         self.app = TeamsApp(
             runtime=build_teams_runtime(factory),
             sender=sender or FakeSender(),
@@ -185,6 +193,9 @@ class Boot:
                 list_teams=teams,
                 standard_channels=standard_channels,
                 deliver=deliver,
+                serving_from=serving_from,
+                bot_app_id=BOT_CLIENT_ID,
+                should_stop=lambda: self.app.draining,
                 service_url=SERVICE_URL,
             ),
         )
@@ -464,7 +475,9 @@ async def test_nothing_is_admitted_once_the_process_drains(
     draining = Boot(db_session_factory, graph)
     draining.app.draining = True
     await draining.boot()
-    assert draining.paths == [], "a draining process admits nothing"
+    assert draining.paths == [] and graph.requests == [], (
+        "a draining process reads and admits nothing"
+    )
 
     successor = Boot(db_session_factory, graph)
     await successor.boot()
@@ -487,3 +500,143 @@ async def test_a_refused_mention_is_answered_once(
     assert [(c, a.text) for c, a, _ in sender.sent] == [(GROUP_CHAT_ID, DENIED)], (
         "answered in the chat, and not again by the next boot"
     )
+
+
+async def test_a_message_after_the_service_began_serving_is_left_to_bot_framework(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Bot Framework delivers it live, with its full parse; Graph's must not claim first."""
+    graph = FakeGraph()
+    graph.channels[CHANNEL_ID] = [
+        _mention("1700000000012", 1),
+        _mention("1700000000011", 3),
+    ]
+    await _admitted_before(db_session_factory, CHANNEL_ID)
+
+    boot = Boot(db_session_factory, graph, serving_at=datetime.now(UTC) - timedelta(minutes=2))
+    await boot.boot()
+    assert boot.ran(CHANNEL_ID) == [("turn", "1700000000011")], "only what came before serving"
+    await boot.bot_framework(
+        make_channel_activity(
+            conversation_id=f"{CHANNEL_ID};messageid=1700000000012", activity_id="1700000000012"
+        )
+    )
+    assert boot.ran(CHANNEL_ID)[-1] == ("turn", "1700000000012"), "and the live one still runs"
+
+
+async def test_a_typed_bot_name_in_the_gap_is_a_mention_when_the_switch_is_on(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The bot's name comes from its own earlier message in what was read."""
+    async with db_session_factory.begin() as session:
+        await set_plain_text_mentions(session, tenant_id=TENANT, enabled=True)
+    graph = FakeGraph()
+    thread = _graph("1700000000001", 30, "<p>planning</p>")
+    thread["replies"] = [
+        _graph("1700000000002", 25, "<p>Noted</p>", reply_to=thread["id"], sender=BOT),
+        _graph("1700000000003", 1, "<p>@Daimon what changed?</p>", reply_to=thread["id"]),
+    ]
+    graph.channels[CHANNEL_ID] = [
+        _graph("1700000000004", 2, "<p>@Daimon summarise the week</p>"),
+        thread,
+    ]
+    await _admitted_before(db_session_factory, CHANNEL_ID)
+
+    boot = Boot(db_session_factory, graph)
+    await boot.boot()
+    # Different threads run side by side: only each thread's own order is kept.
+    assert sorted(boot.ran(CHANNEL_ID)) == [("turn", "1700000000003"), ("turn", "1700000000004")], (
+        "a root post and a thread reply that name the bot run as mentions"
+    )
+    assert sorted(i.text for _, i in boot.paths) == ["summarise the week", "what changed?"]
+
+
+async def test_a_typed_bot_name_is_not_known_when_nothing_read_names_the_bot(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        await set_plain_text_mentions(session, tenant_id=TENANT, enabled=True)
+    graph = FakeGraph()
+    graph.channels[CHANNEL_ID] = [_graph("1700000000004", 2, "<p>@Daimon summarise</p>")]
+    await _admitted_before(db_session_factory, CHANNEL_ID)
+
+    boot = Boot(db_session_factory, graph)
+    await boot.boot()
+    assert boot.paths == [], "without the bot's name a typed one is just chatter"
+
+
+async def test_a_channel_of_an_older_team_is_caught_up(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    old = "19:old-channel@thread.skype"
+    graph = FakeGraph()
+    graph.channels[old] = [_mention("1700000000010", 3)]
+    await _admitted_before(db_session_factory, old)
+
+    boot = Boot(db_session_factory, graph, standard={old: "Legacy"})
+    await boot.boot()
+    assert boot.ran(old) == [("turn", "1700000000010")]
+
+
+async def test_one_conversations_unexpected_failure_leaves_the_others_and_claimed_rows(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    graph = FakeGraph()
+    graph.channels[CHANNEL_ID] = [_mention("1700000000010", 3), _mention("1700000000011", 2)]
+    graph.channels[OTHER_CHANNEL] = [_mention("1700000000060", 3)]
+    graph.chats[GROUP_CHAT_ID] = [_mention("1700000000030", 1)]
+    for conversation in (CHANNEL_ID, OTHER_CHANNEL, GROUP_CHAT_ID):
+        await _admitted_before(db_session_factory, conversation)
+
+    boot = Boot(db_session_factory, graph)
+    admit = TeamsApp.catch_up_graph_messages
+    parse = TeamsApp._parse_graph  # pyright: ignore[reportPrivateUsage]
+
+    async def failing_channel(self: TeamsApp, source: GraphSource, messages: list[Any]) -> None:
+        if source.channel_id == OTHER_CHANNEL:
+            raise RuntimeError("boom")
+        await admit(self, source, messages)
+
+    def failing_message(self: TeamsApp, message: GraphMessage, *args: Any, **kwargs: Any) -> Any:
+        if message.id == "1700000000010":
+            raise RuntimeError("boom")
+        return parse(self, message, *args, **kwargs)
+
+    with (
+        patch.object(TeamsApp, "catch_up_graph_messages", failing_channel),
+        patch.object(TeamsApp, "_parse_graph", failing_message),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await boot.boot()
+    assert sorted(i.activity_id for _, i in boot.paths) == ["1700000000011", "1700000000030"], (
+        "a failing conversation and a failing message leave the rest running"
+    )
+    events = [e["event"] for e in logs]
+    assert "teams.restart_catch_up.deliver_failed" in events
+    assert "teams.restart_catch_up.message_failed" in events
+
+
+async def test_a_privacy_delete_keeps_the_guard_so_the_gap_read_runs_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Ada's mention is answered, she deletes her data, a restart follows: the erased words
+    must not come back through a catch-up of that same message."""
+    graph = FakeGraph()
+    graph.channels[CHANNEL_ID] = [_mention("1700000000010", 3)]
+    first = Boot(db_session_factory, graph)
+    await first.bot_framework(
+        make_channel_activity(
+            conversation_id=f"{CHANNEL_ID};messageid=1700000000010", activity_id="1700000000010"
+        )
+    )
+    assert [p for p, _ in first.paths] == ["turn"], "answered"
+    async with db_session_factory.begin() as session:
+        forgotten = await forget_teams_messages_for_user(
+            session, tenant_id=TENANT, user_id=AAD_OBJECT_ID
+        )
+    assert forgotten == 1
+
+    successor = Boot(db_session_factory, graph)
+    await successor.boot()
+    assert graph.read(CHANNEL_ID), "the channel was read back"
+    assert successor.paths == [], "and the mention is still known as answered"
