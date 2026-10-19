@@ -1125,6 +1125,7 @@ async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
         external_user_id="user-1",
         channel_id="chan-1",
         is_dm=is_dm,
+        verified_membership=True,
         now=_NOW,
     )
 
