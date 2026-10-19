@@ -10,15 +10,23 @@ from uuid import uuid4
 
 import pytest
 from cryptography.fernet import Fernet
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.lead_intake import IntakeConfig, IntakeResolution, LeadDraft, LeadSource
+from daimon.core.lead_intake_access import (
+    LeadReadDenied,
+    LeadReader,
+    LeadReadTarget,
+    NativeChannel,
+    authorize_lead_read,
+)
 from daimon.core.lead_intake_service import (
     EffectRequest,
     IntakeAccess,
     IntakeService,
     VerifiedSource,
 )
-from daimon.core.lead_intake_access import LeadReadTarget
+from daimon.core.membership import Membership
 from daimon.core.stores.lead_intake import IntakeStore
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
@@ -631,3 +639,164 @@ async def test_thread_write_revocation_between_dossier_chunks_stops_resume(
     with pytest.raises(PermissionError, match="thread_writers_none"):
         await service.resume(result.id)
     assert ports.writes == ["starter", "thread", "dossier:0"]
+
+
+def _member_of(*readable: str) -> FakeChannels:
+    return FakeChannels(frozenset(readable))
+
+
+class FakeChannels:
+    """Native facts where only `readable` channels grant view and history."""
+
+    def __init__(self, readable: frozenset[str]) -> None:
+        self.readable = readable
+
+    async def channel(self, channel_id: str) -> NativeChannel | None:
+        return NativeChannel(
+            id=channel_id,
+            guild_id="1",
+            parent_id=None,
+            category_id=None,
+            is_text=True,
+            is_thread=False,
+            private_thread=False,
+            everyone_can_view=False,
+            can_view=channel_id in self.readable,
+            can_read_history=channel_id in self.readable,
+            in_thread_or_manages=True,
+        )
+
+
+def _as_reader(
+    store: IntakeStore, service: IntakeService, native: FakeChannels, *, user: str = "7"
+) -> IntakeService:
+    """The same service, reading as `user` through the real read rule."""
+
+    async def authorize_read(target: LeadReadTarget) -> None:
+        config, _ = await store.configuration()
+        reader = LeadReader(
+            tenant_id=store.tenant_id,
+            platform_user_id=user,
+            facts=Membership(is_member=True, role_ids=("42",)),
+            policy=TenantAccessPolicy(invoker_role_ids=("42",)),
+            config=config,
+            agent_id=config.agent_id,
+        )
+        await authorize_lead_read(target, reader, native)
+
+    return IntakeService(store, service.ports, noop, authorize_read=authorize_read)
+
+
+async def test_reconfiguring_the_sales_channel_never_moves_old_readers(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, _ = await setup(lead_sessions)
+    record = await service.submit(draft(), "7")
+    assert record.destination is not None and record.destination.channel_id == "2"
+    config, credentials = await store.configuration()
+    await store.configure(config.model_copy(update={"revision": 2, "channel_id": "B"}), credentials)
+    assert (await store.get(record.id)).destination == record.destination
+    a_only = _as_reader(store, service, _member_of("2"))
+    b_only = _as_reader(store, service, _member_of("B"))
+    assert (await a_only.get(record.id)).submission == record.submission
+    assert (await a_only.resume(record.id)).id == record.id
+    for read in (b_only.get, b_only.resume):
+        with pytest.raises(LeadReadDenied, match="sales_channel_history_required"):
+            await read(record.id)
+    # New captures snapshot the channel configured when they are accepted.
+    newer = await service.submit(draft(message="immutable-2"), "7")
+    assert newer.destination is not None and newer.destination.channel_id == "B"
+    assert [r.id for r in await store.list(destination_channel_id="2")] == [record.id]
+    # Erased or expired, the stub keeps its readers.
+    await store.purge(datetime.now(UTC) + timedelta(days=91))
+    stub = await store.get(record.id)
+    assert stub.submission is None and stub.destination == record.destination
+    with pytest.raises(LeadReadDenied):
+        await b_only.get(record.id)
+    assert (await a_only.get(record.id)).status == "expired"
+
+
+async def test_adoption_never_moves_a_lead_to_another_channel(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, _ = await setup(lead_sessions)
+    record = await service.submit(draft(), "7")
+    config, credentials = await store.configuration()
+    moved = config.model_copy(update={"revision": 2, "channel_id": "B"})
+    await store.configure(moved, credentials)
+    with pytest.raises(ValueError, match="destination_change_not_adoptable"):
+        await store.adopt(record.id, 2)
+    assert (await store.get(record.id)).config_revision == 1
+    await store.configure(
+        moved.model_copy(update={"revision": 3, "channel_id": "2", "portal_id": "9"}), credentials
+    )
+    await store.adopt(record.id, 3)
+    assert (await store.get(record.id)).config_revision == 3
+
+
+async def test_a_resolver_added_later_cannot_read_or_resolve_without_history(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, ports = await setup(lead_sessions)
+    record = await service.submit(draft(), "7")
+    config, credentials = await store.configuration()
+    await store.configure(
+        config.model_copy(update={"revision": 2, "resolver_user_ids": ("9",)}), credentials
+    )
+    late = _as_reader(store, service, _member_of(), user="9")
+    with pytest.raises(LeadReadDenied):
+        await late.get(record.id)
+    with pytest.raises(LeadReadDenied):
+        await late.resolve(
+            record.id,
+            IntakeResolution(company_id="200", evidence="Verified company selection by sales."),
+            "9",
+        )
+    assert ports.writes == []
+    assert (await store.get(record.id)).progress.selected_company_id is None
+
+
+class ManyMessages(FakePorts):
+    async def scan(
+        self, config: IntakeConfig, start: datetime, end: datetime, cursor: str | None
+    ) -> tuple[list[str], str | None]:
+        page = int(cursor or 0)
+        ids = [f"m-{n:03}" for n in range(page * 60, min(page * 60 + 60, 150))]
+        return ids, (str(page + 1) if page < 2 else None)
+
+
+async def test_renaming_the_connection_strands_no_discovery(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, _, _ = await setup(lead_sessions)
+    ports = ManyMessages("Genuine project enquiry")
+    service = IntakeService(store, ports, noop, authorize_read=readable)
+    first = await service.scan()
+    assert first["has_more_discovered"] is True and len(first["discovered"]) == 100
+    accepted = await service.submit(
+        draft().model_copy(
+            update={
+                "source": LeadSource(kind="gmail", mailbox="owner@example.test", message_id="m-000")
+            }
+        ),
+        "7",
+    )
+    expiry = "SELECT source_digest, expires_at FROM lead_mailbox_messages WHERE tenant_id=:t"
+    async with lead_sessions() as session:
+        before = dict((await session.execute(text(expiry), {"t": store.tenant_id})).tuples().all())
+    config, credentials = await store.configuration()
+    renamed = config.model_copy(update={"revision": 2, "source_connection_id": "gmail-renamed"})
+    await store.configure(renamed, credentials)
+    again = await service.scan()
+    pending = (await store.mailbox(renamed)).discovered
+    assert sorted(pending) == [f"m-{n:03}" for n in range(1, 150)]
+    assert again["discovered"] == pending[:100] and again["has_more_discovered"] is True
+    assert (await store.health())["unclassified_count"] == 149
+    async with lead_sessions() as session:
+        after = dict((await session.execute(text(expiry), {"t": store.tenant_id})).tuples().all())
+    assert after == before, "a rename extends no discovery's lifetime"
+    replay = await service.submit(
+        draft().model_copy(update={"source": accepted.submission.source}),  # type: ignore[union-attr]
+        "7",
+    )
+    assert replay.id == accepted.id
