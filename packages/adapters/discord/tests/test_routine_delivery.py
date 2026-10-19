@@ -1078,3 +1078,99 @@ async def test_destination_change_between_text_and_file_cancels_payload(
         after = await get_routine(session, row.id, tenant_id=row.tenant_id)
     assert after.destination_id == "777"
     assert after.delivery_payload is None
+
+
+@pytest.mark.parametrize(
+    "revocation", ["dm_disabled", "isolation", "dm_policy", "recipient", "signed_error"]
+)
+async def test_fallback_files_recheck_privacy_after_download(
+    db_session, db_session_factory, monkeypatch, revocation
+):
+    from datetime import UTC, datetime
+
+    from anthropic import AsyncAnthropic
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.routine_delivery import poll_deliveries_once
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+    from daimon.core.stores.direct_messages import set_dm_enabled
+    from daimon.core.stores.routines import get_routine
+    from structlog.testing import capture_logs
+
+    row = await _routine(db_session, destination_kind="thread")
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="Report",
+            files=[
+                RoutineFile(
+                    file_id="file_report", filename="report.csv", mime_type="text/csv", size_bytes=4
+                )
+            ],
+        ).model_dump_json()
+    )
+    async with db_session_factory.begin() as session:
+        await record_result(
+            session, row.id, tail="Report", error=None, delivery="pending", delivery_payload=payload
+        )
+    thread = _uncached_thread(parent_id=444)
+    parent = _text_channel(perms=_perms(send=False))
+    dm = MagicMock(spec=discord.DMChannel)
+    dm.guild = None
+    dm.send = AsyncMock()
+    eligible = True
+    policy = DirectMessagePolicy(mode="members")
+    downloads = []
+    completed = []
+    sentinel = "https://upload.invalid/signed?token=secret-sentinel"
+
+    async def download(*args, **kwargs):
+        nonlocal eligible, policy
+        downloads.append(True)
+        async with db_session_factory.begin() as session:
+            if revocation == "dm_disabled":
+                await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=False)
+            elif revocation == "isolation":
+                # The outbox does not store this resolved thread parent.
+                await set_access_policy(
+                    session,
+                    tenant_id=row.tenant_id,
+                    policy=TenantAccessPolicy(
+                        channel_rules={"444": ChannelRule(readers="own", writers="own")}
+                    ),
+                )
+        if revocation == "dm_policy":
+            policy = DirectMessagePolicy(mode="disabled")
+        if revocation == "recipient":
+            eligible = False
+        if revocation == "signed_error":
+            raise discord.HTTPException(MagicMock(status=500, reason="failed"), sentinel)
+        completed.append(True)
+        return b"data"
+
+    async def membership(*args):
+        return Membership(is_member=eligible)
+
+    async def fetch(channel_id):
+        return thread if channel_id == 555 else parent
+
+    monkeypatch.setattr("daimon.core.routine_files.download_output_file", download)
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=fetch,
+        open_dm=AsyncMock(return_value=dm),
+        dm_policy=lambda _: policy,
+        membership_resolver=CachedMembershipResolver(membership),
+        output_client=AsyncAnthropic(api_key="sk-test"),
+    )
+    with capture_logs() as logs:
+        await poll_deliveries_once(
+            db_session_factory, platform="discord", post=poster, now=datetime.now(UTC)
+        )
+    assert downloads == [True], "the first guard must pass before revocation during download"
+    assert all("file" not in call.kwargs for call in dm.send.await_args_list)
+    assert completed == ([] if revocation == "signed_error" else [True])
+    assert sentinel not in str(logs)
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert after.delivery_status == "skipped"

@@ -258,8 +258,14 @@ def make_discord_routine_poster(
             )
         return None
 
-    async def attach(row: RoutineRow, destination: discord.abc.Messageable) -> None:
+    async def attach(
+        row: RoutineRow,
+        destination: discord.abc.Messageable,
+        fallback_guard: Callable[[], Awaitable[bool]] | None = None,
+    ) -> None:
         async def may_post() -> bool:
+            if fallback_guard is not None and not await fallback_guard():
+                return False
             if await creator_still_cleared(row) is not None:
                 return False
             if isinstance(destination, discord.TextChannel | discord.Thread):
@@ -307,7 +313,12 @@ def make_discord_routine_poster(
                 may_post=may_post,
             )
 
-    async def _dm_fallback(row: RoutineRow, reason: str, guild_id: str) -> DeliveryOutcome:
+    async def _dm_fallback(
+        row: RoutineRow,
+        reason: str,
+        guild_id: str,
+        may_post: Callable[[], Awaitable[bool]],
+    ) -> DeliveryOutcome:
         async with sessionmaker() as session:
             if not await dm_enabled(session, tenant_id=row.tenant_id):
                 return DeliveryOutcome(
@@ -322,6 +333,8 @@ def make_discord_routine_poster(
         ):
             return DeliveryOutcome(status="skipped", note=reason)
         try:
+            if not await may_post():
+                return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
             dm = await open_dm(int(guild_id), int(creator))
             for chunk in split_fenced(
                 render_fallback_dm(row, reason), _DISCORD_MAX_CHARS, word_boundary=True
@@ -333,10 +346,14 @@ def make_discord_routine_poster(
                         )
                 if (refused := await creator_still_cleared(row)) is not None:
                     return refused
+                if not await may_post():
+                    return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
                 await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
-            await attach(row, dm)
+            await attach(row, dm, fallback_guard=may_post)
         except (discord.HTTPException, LookupError) as err:
-            log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=str(err))
+            log.info(
+                "routine.delivery_dm_failed", routine_id=str(row.id), error_type=type(err).__name__
+            )
             return DeliveryOutcome(status="skipped", note=reason)
         return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
@@ -356,11 +373,34 @@ def make_discord_routine_poster(
             return refusal(row, cleared)
         policy = cleared
         keep_inside = keeps_routine_inside(policy, row)
+        parent_channel_id: str | None = None
+
+        async def fallback_guard() -> bool:
+            if await creator_still_cleared(row) is not None:
+                return False
+            async with sessionmaker() as session:
+                tenant_now = await get_tenant(session, row.tenant_id)
+                if (
+                    tenant_now is None
+                    or tenant_now.archived_at is not None
+                    or tenant_now.external_id != tenant.external_id
+                    or not await dm_enabled(session, tenant_id=row.tenant_id)
+                ):
+                    return False
+            creator = row.created_by_user_id
+            if creator is None or not dm_policy(row).allows(creator):
+                return False
+            current_policy = await clear_creator(
+                sessionmaker, row, platform="discord", membership_resolver=membership_resolver
+            )
+            return isinstance(current_policy, TenantAccessPolicy) and not keeps_routine_inside(
+                current_policy, row, parent_channel_id=parent_channel_id
+            )
 
         async def fallback(reason: str) -> DeliveryOutcome:
             if keep_inside:  # an isolated channel's result never leaves it, not even by DM
                 return DeliveryOutcome(status="skipped", note=reason)
-            return await _dm_fallback(row, reason, tenant.external_id)
+            return await _dm_fallback(row, reason, tenant.external_id, fallback_guard)
 
         if row.destination_kind == "dm":
             if row.destination_id is None or row.destination_id != row.created_by_user_id:
@@ -379,7 +419,11 @@ def make_discord_routine_poster(
                     await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
                 await attach(row, dm)
             except (discord.HTTPException, LookupError, ValueError, TypeError) as err:
-                log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=str(err))
+                log.info(
+                    "routine.delivery_dm_failed",
+                    routine_id=str(row.id),
+                    error_type=type(err).__name__,
+                )
                 return DeliveryOutcome(
                     status="skipped", note="The DM could not be delivered; it will not be retried."
                 )

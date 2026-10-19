@@ -20,7 +20,8 @@ things follow from it, and nothing changes for a routine without one:
    allowed to invoke the agent, settles the row `skipped` instead.
 
 Delivery is at most once: claim (with a lease) → post → settle; a claim whose
-lease ran out is settled `skipped/interrupted`, never re-posted.
+lease ran out is settled `skipped/interrupted`, never replayed by another poll.
+Platform SDKs may retry a single send after a server error or connection reset.
 """
 
 from __future__ import annotations
@@ -703,7 +704,9 @@ async def poll_deliveries_once(
                 # Named boundary: the poster is adapter code talking to a chat
                 # API. Settling `skipped` (not back to pending) keeps delivery
                 # at most once — a failure may have landed after the post.
-                log.warning("routine.delivery_failed", routine_id=str(row.id), error=str(err))
+                log.warning(
+                    "routine.delivery_failed", routine_id=str(row.id), error_type=type(err).__name__
+                )
                 outcome = DeliveryOutcome(
                     status="skipped",
                     note=(

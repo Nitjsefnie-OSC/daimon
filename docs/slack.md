@@ -394,4 +394,7 @@ Scheduled routine deliveries use the same file uploader as interactive turns,
 including thread destinations and creator fallback DMs. Each delivery includes
 up to ten generated files, with a 200 MB per-file limit; skipped files are
 reported in text. File uploads share the routine result's at-most-once claim,
-so partial or uncertain delivery is not automatically retried.
+so partial or uncertain delivery is not replayed across polls. The Slack SDK
+may retry a single send after a server error or connection reset. Fallback-DM
+files recheck tenant DM controls, recipient eligibility and channel isolation
+before each file and after download.

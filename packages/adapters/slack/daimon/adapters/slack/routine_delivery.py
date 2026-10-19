@@ -44,6 +44,7 @@ from daimon.core.routine_delivery import (
 )
 from daimon.core.routine_files import deliver_routine_files, payload_for
 from daimon.core.rule_views import keeps_routine_inside
+from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenants import get_tenant
@@ -75,6 +76,8 @@ async def _dm_fallback(
     if creator is None or not policy.allows(creator):
         return DeliveryOutcome(status="skipped", note=reason)
     try:
+        if not await may_post():
+            return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
         info = await client.users_info(user=creator)  # pyright: ignore[reportUnknownMemberType]
         user = cast("dict[str, object]", info["user"])
         if (
@@ -88,6 +91,8 @@ async def _dm_fallback(
         channel = cast("dict[str, str]", opened["channel"])["id"]
         text = escape_mrkdwn_preserving_mentions(render_fallback_dm(row, reason))
         for chunk in split_fenced(text, 11800, word_boundary=True):
+            if not await may_post():
+                return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
             await client.chat_postMessage(channel=channel, text=chunk)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
 
         async def notice(text: str) -> None:
@@ -102,7 +107,9 @@ async def _dm_fallback(
             may_post=may_post,
         )
     except SlackApiError as err:
-        log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=str(err))
+        log.info(
+            "routine.delivery_dm_failed", routine_id=str(row.id), error_type=type(err).__name__
+        )
         return DeliveryOutcome(status="skipped", note=reason)
     return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
@@ -218,6 +225,38 @@ def make_slack_routine_poster(
                 await clear_creator(runtime.sessionmaker, row, platform="slack"), TenantAccessPolicy
             )
 
+        async def fallback_guard() -> bool:
+            if not await creator_current():
+                return False
+            async with runtime.sessionmaker() as session:
+                tenant_now = await get_tenant(session, row.tenant_id)
+                if (
+                    tenant_now is None
+                    or tenant_now.archived_at is not None
+                    or tenant_now.external_id != tenant.external_id
+                    or not await dm_enabled(session, tenant_id=row.tenant_id)
+                ):
+                    return False
+            creator = row.created_by_user_id
+            current_dm_policy = runtime.settings.direct_message_policies.get(
+                row.tenant_id, DirectMessagePolicy()
+            )
+            if creator is None or not current_dm_policy.allows(creator):
+                return False
+            current_policy = await clear_creator(runtime.sessionmaker, row, platform="slack")
+            if not isinstance(current_policy, TenantAccessPolicy) or keeps_routine_inside(
+                current_policy, row
+            ):
+                return False
+            info = await client.users_info(user=creator)  # pyright: ignore[reportUnknownMemberType]
+            user = cast("dict[str, object]", info["user"])
+            return (
+                user.get("team_id") == tenant.external_id
+                and not user.get("deleted")
+                and not user.get("is_bot")
+                and not user.get("is_stranger")
+            )
+
         async def fallback(reason: str) -> DeliveryOutcome:
             if keep_inside:  # an isolated channel's result never leaves it, not even by DM
                 return DeliveryOutcome(status="skipped", note=reason)
@@ -228,7 +267,7 @@ def make_slack_routine_poster(
                 team_id=tenant.external_id,
                 policy=dm_policy,
                 output_client=runtime.anthropic,
-                may_post=creator_current,
+                may_post=fallback_guard,
             )
 
         target = delivery_target(row, platform="slack")

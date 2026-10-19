@@ -302,9 +302,11 @@ the tenant's platform: Discord, Slack and Teams each run `run_delivery_poller`
 next to their wake poller (Teams for its one organisation). Each poll claims `pending` rows for its platform
 (`FOR UPDATE SKIP LOCKED`, with a two-minute lease), posts, and settles:
 
-- **At most once.** A claim whose lease runs out is settled
-  `skipped/interrupted`, never posted again: the poster may have posted before
-  it died. A poster that raises is settled `skipped/post_failed`, not retried.
+- **No outbox replay across polls.** A claim whose lease runs out is settled
+  `skipped/interrupted`, never claimed again: the poster may have posted before
+  it died. A poster that raises is settled `skipped/post_failed`, not requeued.
+  This is an outbox guarantee: a platform SDK may retry a single send after
+  a server error or connection reset, including an uncertain response.
 - **The newest result only.** A new fire replaces whatever is still in the
   outbox, so a backlog never posts a run of stale results.
 - **Creator first.** Before resolving or sending anything, the poster reads
@@ -632,8 +634,11 @@ beyond the count limit are reported too. Internal workspace handoff bundles
 and empty files are excluded. Provider copies remain subject to normal
 workspace retention; an unavailable reference stops delivery with a failure.
 
-Files share the result's at-most-once outbox claim. A partial or uncertain
-send is not retried automatically. Changing the destination cancels pending
+Files share the result's at-most-once outbox claim: a partial or uncertain
+send is not replayed by a later poll. The platform SDK may retry a single send
+after a server error or connection reset. Changing the destination cancels pending
 payloads, including their files. Each file send rechecks the saved destination
-and live owner access; owner DM delivery retains the same privacy and
+and live owner access. Creator fallback DMs also recheck current DM controls,
+recipient eligibility and isolation, including a resolved Discord thread parent,
+before each file and after download. Owner DM delivery retains the same privacy and
 no-personal-memory rules as text. Run-failure notices never carry files.
