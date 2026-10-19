@@ -2220,11 +2220,14 @@ the owner as a cold DM with the routine's agent (`admit`, `is_dm`, `cold_dm`,
 runs it with `run_prepared_turn(origin="routine", attended=False)` through the
 same helper live DM replies use (`_run_admitted_dm_turn`). The session is gated
 with `gate_session_snapshot` and its pauses answered by `unattended_posture`.
-A recovery's replacement session is reported through `run_prepared_turn`'s
-`on_session` hook, gated before anything is sent into it, and tracked, so a
-failed, timed-out or cancelled run interrupts the session actually running
-(`_stop_routine_session`). Only Managed Agents agents run; another provider is
-refused before a session exists. The owner's selected DM conversation, its
+Every allocation, including a recovery replacement, has a committed
+`routine_sessions` intent before provider creation. `RoutineSessionSupervisor`
+owns completion and bounded, confirmed stopping outside the fire task; startup
+and tick recovery retry pending stops. `on_session` gates each replacement
+before its first message. Each intent ends as `completed`, `stopped`, or
+`stop_unresolved`; an unresolved stop remains visible independently of later
+results and triggers a policy-checked owner-DM notice. Only Managed Agents
+agents run; another provider is refused before a session exists. The owner's selected DM conversation, its
 history and its session are never read or changed. The final text goes to the owner-DM outbox. The run has the
 owner's ordinary DM tool authority while nobody watches it, so a mistaken send
 or publish call could expose personal content before the final DM arrives.
@@ -2240,8 +2243,7 @@ provenance never becomes known during an edit. Private-scope origins resolve
 only the caller's current tenant-bound conversation and verify its saved guild
 source; source-free cold conversations require no guild-channel lookup.
 
-The scheduler runs a read-only headless turn and queues its final answer in
-the routine outbox. The Discord host checks live membership, tenant DM
+The scheduler queues successful final answers in the routine outbox. The Discord host checks live membership, tenant DM
 enablement, recipient policy and source restrictions before opening the
 owner's DM and before each chunk. Recipient IDs are never channel targets or
 budget sources. Notifications do not alter the selected cold-DM conversation
