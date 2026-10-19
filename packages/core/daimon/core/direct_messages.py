@@ -852,22 +852,37 @@ async def run_dm_routine(
         async def sealed() -> None:
             raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
 
-        text, session_id = await _run_admitted_dm_turn(
-            deps,
-            prepared,
-            tenant_id=tenant_id,
-            platform="discord",
-            parent_channel_id=scope_id,
-            scope_id=scope_id,
-            external_user_id=owner_user_id,
-            role=Role.ADMIN if grant.subject.is_admin else Role.USER,
-            prompt=prompt,
-            deadline=deadline,
-            on_sealed=sealed,
-            origin="routine",
-            attended=False,
-            tool_confirmation=await _unattended_gate(deps, prepared, tenant_id=tenant_id),
-        )
+        try:
+            text, session_id = await _run_admitted_dm_turn(
+                deps,
+                prepared,
+                tenant_id=tenant_id,
+                platform="discord",
+                parent_channel_id=scope_id,
+                scope_id=scope_id,
+                external_user_id=owner_user_id,
+                role=Role.ADMIN if grant.subject.is_admin else Role.USER,
+                prompt=prompt,
+                deadline=deadline,
+                on_sealed=sealed,
+                origin="routine",
+                attended=False,
+                tool_confirmation=await _unattended_gate(deps, prepared, tenant_id=tenant_id),
+            )
+        except asyncio.CancelledError:
+            # A scheduler shutdown: nothing reads this private session again.
+            with suppress(Exception):
+                await interrupt_orphaned_session(
+                    deps.anthropic,
+                    session_id=prepared.ma_session_id,
+                    scope=resource_scope(
+                        tenant_id=str(tenant_id),
+                        account_id=str(prepared.session_account_id),
+                        authorization_id="dm-routine-shutdown",
+                    ),
+                    timeout_s=_SHUTDOWN_INTERRUPT_TIMEOUT_S,
+                )
+            raise
     except DmSourceSealedError as error:
         raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE) from error
     except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:

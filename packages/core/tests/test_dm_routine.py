@@ -475,3 +475,51 @@ async def test_a_public_send_in_the_run_is_decided_by_the_unattended_gate(
     assert result.allow is allowed
     if not allowed:
         assert result.deny_message
+
+
+async def test_a_cancelled_routine_run_interrupts_its_private_session(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    tenant, deps, client = await _seed(db_session_factory)
+    interrupted: list[str] = []
+
+    async def bind(deps_: object, admission_: Any, **kwargs: Any) -> PreparedTurn:
+        return PreparedTurn(
+            admission=admission_,
+            ma_session_id="routine_session",
+            mapping_id=None,
+            watermark=None,
+            reused=False,
+            session_account_id=kwargs["session_account_id"],
+            _record=None,  # type: ignore[arg-type]
+        )
+
+    async def run(*args: object, **kwargs: object) -> RunOutcome:
+        raise asyncio.CancelledError
+
+    async def interrupt(_client: object, *, session_id: str, **kwargs: object) -> bool:
+        interrupted.append(session_id)
+        return True
+
+    async def no_gate(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(direct_messages, "bind_session", bind)
+    monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
+    monkeypatch.setattr(direct_messages, "_unattended_gate", no_gate)
+    monkeypatch.setattr(direct_messages, "interrupt_orphaned_session", interrupt)
+    with pytest.raises(asyncio.CancelledError):
+        await run_dm_routine(
+            deps,
+            tenant_id=tenant.id,
+            owner_user_id=OWNER,
+            agent_name="private",
+            prompt="p",
+            source=None,
+            budget_channel_id=None,
+        )
+    await client.close()
+    assert interrupted == ["routine_session"]
