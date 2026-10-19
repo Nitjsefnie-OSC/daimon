@@ -113,6 +113,14 @@ class OpenAIVaults:
             seen.add(cursor)
         if found is not None:
             return found
+        return await self.create(scope, name, key=key)
+
+    @owned
+    async def create(self, scope: Scope, name: str, *, key: str) -> Vault:
+        self._c.authorize(scope, "vault")
+        name = name.strip()
+        if not 1 <= len(name.encode()) <= 256:
+            raise ValueError("invalid vault name")
         body: Object = {
             "name": name,
             "metadata": {"mux_tenant": scope.tenant_id, "mux_account": scope.account_id or ""},

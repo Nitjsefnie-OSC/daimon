@@ -1108,12 +1108,14 @@ async def test_mcp_vault_rejection_cleanup_does_not_revoke_an_uncertain_session(
         driver = wire.driver(sdk)
         agent = await driver.agents.create(SCOPE, spec(), key="agent")
         wire.fail = failure
-        with pytest.raises(ProviderError):
+        with pytest.raises(ProviderError) as refused:
             await driver.sessions.create(
                 SCOPE,
                 SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
                 key="session",
             )
+    if not cleaned:
+        assert any("manual provider cleanup" in note for note in refused.value.__notes__)
     assert bool(wire.vaults) is not cleaned
     assert bool(wire.credentials) is not cleaned
     assert (
@@ -1141,3 +1143,156 @@ async def test_raw_session_vault_ids_cannot_authorize_foreign_vault_cleanup() ->
         with pytest.raises(ContinuityLost):
             await driver.sessions.delete(SCOPE, session.ref, key="delete")
     assert not any(r.method == "DELETE" for r in wire.requests)
+
+
+@pytest.mark.parametrize("secret", ["opaque-user-token", "eyJpartial.jwt-fragment"])
+@pytest.mark.parametrize("phase", ["credential", "session"])
+async def test_mcp_errors_suppress_cross_request_credentials(secret: str, phase: str) -> None:
+    class EchoWire(Wire):
+        def handle(self, request: httpx.Request) -> httpx.Response:
+            failure = (
+                request.url.path.endswith("/credentials")
+                if phase == "credential"
+                else request.url.path == "/v1/agents/sessions"
+            )
+            if failure and request.method == "POST":
+                self.requests.append(request)
+                return httpx.Response(
+                    403, json={"error": {"message": secret, "code": secret, "param": secret}}
+                )
+            return super().handle(request)
+
+    wire = EchoWire()
+    wire.secret = secret
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = wire.driver(sdk)
+        agent = await driver.agents.create(SCOPE, spec(), key="agent")
+        with pytest.raises(ProviderError) as refused:
+            await driver.sessions.create(
+                SCOPE,
+                SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
+                key="session",
+            )
+    error = refused.value
+    assert error.category == "permission" and error.native_code == "403"
+    assert error.native_message is error.native_error_code is error.native_param is None
+    assert not wire.vaults
+    assert not any(r.method == "GET" and r.url.path == "/v1/vaults" for r in wire.requests)
+    for request in wire.requests:
+        if request.url.path == "/v1/agents/sessions":
+            assert secret not in request.content.decode()
+
+
+@pytest.mark.parametrize("phase", ["credential", "session"])
+async def test_mcp_cleanup_failure_preserves_original_error(phase: str) -> None:
+    class CleanupFails(Wire):
+        def handle(self, request: httpx.Request) -> httpx.Response:
+            failure = (
+                request.url.path.endswith("/credentials")
+                if phase == "credential"
+                else request.url.path == "/v1/agents/sessions"
+            )
+            if failure and request.method == "POST":
+                return httpx.Response(400, json={"error": {"message": self.secret}})
+            if request.method == "DELETE" and request.url.path.startswith("/v1/vaults/"):
+                return httpx.Response(503, json={"error": {"message": self.secret}})
+            return super().handle(request)
+
+    wire = CleanupFails()
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = wire.driver(sdk)
+        agent = await driver.agents.create(SCOPE, spec(), key="agent")
+        with pytest.raises(ProviderError) as refused:
+            await driver.sessions.create(
+                SCOPE,
+                SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
+                key="session",
+            )
+    error = refused.value
+    assert error.category == "invalid_request" and error.native_code == "400"
+    assert error.native_message is error.native_error_code is error.native_param is None
+    assert any(
+        "cleanup failed (ProviderError)" in note and "vault-1" in note for note in error.__notes__
+    )
+    assert wire.secret not in str(error.__notes__)
+    assert wire.vaults
+
+
+async def test_malformed_session_ack_reports_manual_vault_cleanup() -> None:
+    class Malformed(Wire):
+        def handle(self, request: httpx.Request) -> httpx.Response:
+            response = super().handle(request)
+            if request.method == "POST" and request.url.path == "/v1/agents/sessions":
+                return httpx.Response(200, json={"id": "s"})
+            return response
+
+    wire = Malformed()
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = wire.driver(sdk)
+        agent = await driver.agents.create(SCOPE, spec(), key="agent")
+        with pytest.raises(ProviderError) as refused:
+            await driver.sessions.create(
+                SCOPE,
+                SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
+                key="session",
+            )
+    assert refused.value.native_code == "malformed_response"
+    assert any(
+        "vault-1" in note and "manual provider cleanup" in note for note in refused.value.__notes__
+    )
+    assert wire.vaults and wire.sessions
+
+
+async def test_owned_mcp_session_cleanup_suppresses_credential_echo() -> None:
+    class DeleteEcho(Wire):
+        echo = False
+
+        def handle(self, request: httpx.Request) -> httpx.Response:
+            if self.echo and request.url.path == "/v1/agents/sessions/s":
+                return httpx.Response(
+                    403,
+                    json={
+                        "error": {
+                            "message": self.secret,
+                            "code": self.secret,
+                            "param": self.secret,
+                        }
+                    },
+                )
+            return super().handle(request)
+
+    wire = DeleteEcho()
+    async with build_async_openai(
+        transport=httpx.MockTransport(wire.handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = wire.driver(sdk)
+        agent = await driver.agents.create(SCOPE, spec(), key="agent")
+        session = await driver.sessions.create(
+            SCOPE,
+            SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
+            key="session",
+        )
+        wire.echo = True
+        with pytest.raises(ProviderError) as refused:
+            await driver.sessions.delete(SCOPE, session.ref, key="delete")
+    assert refused.value.native_code == "403"
+    assert (
+        refused.value.native_message
+        is refused.value.native_error_code
+        is refused.value.native_param
+        is None
+    )

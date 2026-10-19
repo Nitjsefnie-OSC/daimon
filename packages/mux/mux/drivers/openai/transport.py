@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
+from contextlib import contextmanager
 from typing import IO, Literal, Protocol, cast
 from urllib.parse import quote
 
@@ -149,6 +150,23 @@ def _native_error_details(error: APIStatusError) -> dict[str, str | None]:
         "native_error_code": safe(raw.get("code"), identifier=True),
         "native_param": safe(raw.get("param"), identifier=True),
     }
+
+
+@contextmanager
+def suppress_mcp_error_details(enabled: bool = True) -> Iterator[None]:
+    """MCP errors can echo credentials from an earlier vault request.
+
+    No pattern can safely identify an opaque bearer or partial credential. Keep
+    only the normalized category/status in this flow, including cleanup errors.
+    """
+    try:
+        yield
+    except ProviderError as error:
+        if enabled:
+            error.native_message = None
+            error.native_error_code = None
+            error.native_param = None
+        raise
 
 
 def provider_error(error: APIError | httpx.HTTPError) -> ProviderError:

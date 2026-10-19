@@ -11,7 +11,7 @@ from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import CredentialBinding, ProviderBinding
 from mux.drivers.openai._common import Context, objects, text
 from mux.drivers.openai.mcp_auth import MCPSecretResolver, decode, non_mcp_tool, tool
-from mux.drivers.openai.transport import Object
+from mux.drivers.openai.transport import Object, suppress_mcp_error_details
 from mux.drivers.openai.vaults import OpenAIVaults, SecretResolver
 from mux.errors import ProviderError, ScopeViolation
 
@@ -35,10 +35,29 @@ class SessionMCPVault:
 
     async def delete(self, context: Context, scope: Scope, *, key: str) -> None:
         port = _port(context, scope, {self.vault.id})
-        actual = await port.retrieve(scope, self.vault)
-        if actual.name != self.name:
-            raise ScopeViolation(self.vault.id, "session MCP vault identity changed")
-        await port.delete(scope, self.vault, key=key)
+        with suppress_mcp_error_details():
+            actual = await port.retrieve(scope, self.vault)
+            if actual.name != self.name:
+                raise ScopeViolation(self.vault.id, "session MCP vault identity changed")
+            await port.delete(scope, self.vault, key=key)
+
+    async def cleanup_after(
+        self, context: Context, scope: Scope, error: BaseException, *, key: str
+    ) -> None:
+        try:
+            await self.delete(context, scope, key=key)
+        except BaseException as cleanup:
+            # Do not replace the triggering failure or attach a provider body.
+            error.add_note(
+                f"MCP vault cleanup failed ({type(cleanup).__name__}); "
+                f"manual cleanup required for owned vault {self.vault.id}"
+            )
+
+    def retained(self, error: BaseException) -> None:
+        error.add_note(
+            f"Owned MCP vault {self.vault.id} remains allocated; manual provider cleanup "
+            "is required after resolving the session outcome. No automatic reconciler exists."
+        )
 
 
 def _port(
@@ -125,27 +144,34 @@ async def prepare(
     port = _port(context, scope, owned, resolve)
     digest = hashlib.sha256(f"{scope.tenant_id}\0{scope.account_id}\0{key}".encode()).hexdigest()
     name = "mux-session-mcp-" + digest
-    vault = await port.ensure(scope, name, key=key + ":mcp-vault")
-    owned.add(vault.ref.id)
-    managed = SessionMCPVault(vault.ref, name)
-    try:
-        credential = await port.put(
-            scope,
-            vault.ref,
-            CredentialBinding(
-                name=connection.name,
-                kind="static_bearer",
-                credential_ref=reference,
-                mcp_server_url=connection.url,
-            ),
-            expected=None,
-            key=key + ":mcp-credential",
-        )
-    except BaseException:
-        # The ACK-owned vault is private to this request, including a credential
-        # whose PUT outcome was uncertain. Deleting it revokes that whole child.
-        await managed.delete(context, scope, key=key + ":mcp-cleanup")
-        raise
-    managed = SessionMCPVault(vault.ref, name, credential.id)
-    tools.append({**expected, "credential_id": credential.id, "connection_origin": "service"})
-    return tools, managed
+    with suppress_mcp_error_details():
+        try:
+            vault = await port.create(scope, name, key=key + ":mcp-vault")
+        except BaseException as error:
+            error.add_note(
+                f"MCP vault creation has no usable ACK; verify native inventory for {name} "
+                "before retrying. No automatic allocation reconciler exists."
+            )
+            raise
+        owned.add(vault.ref.id)
+        managed = SessionMCPVault(vault.ref, name)
+        try:
+            credential = await port.put(
+                scope,
+                vault.ref,
+                CredentialBinding(
+                    name=connection.name,
+                    kind="static_bearer",
+                    credential_ref=reference,
+                    mcp_server_url=connection.url,
+                ),
+                expected=None,
+                key=key + ":mcp-credential",
+            )
+        except BaseException as error:
+            # No session request has been sent, so deleting the child is safe.
+            await managed.cleanup_after(context, scope, error, key=key + ":mcp-cleanup")
+            raise
+        managed = SessionMCPVault(vault.ref, name, credential.id)
+        tools.append({**expected, "credential_id": credential.id, "connection_origin": "service"})
+        return tools, managed

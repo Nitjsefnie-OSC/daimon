@@ -3359,10 +3359,18 @@ Agent metadata, session bindings and runtime manifests contain references,
 never bearer values. The binding retains the owned vault identity so deleting
 the session also deletes its vault and credentials after a process restart;
 independently supplied vaults remain retained. A definite session-create
-rejection cleans the new vault; an uncertain native creation retains it for
-reconciliation, since accepted work may still need it. A newly authorized
-credential remains required after caller-token expiry; this adds no automatic
-refresh or broader MCP permissions.
+rejection cleans the new vault. An uncertain native creation or malformed create
+ACK keeps the vault because accepted work may still need it. The raised error
+notes its owned vault ID and requires manual provider cleanup after resolving
+the session outcome; there is no automatic reconciler. A process crash between
+vault creation and persisting the session binding can also leave an untracked
+vault that requires operator recovery from native inventory/creation receipts.
+Cleanup failures preserve the original error and add a safe failure-type/owned-ID
+note. Provider message, code and parameter diagnostics are suppressed throughout
+the MCP authentication flow because they may echo credentials from earlier
+requests; normalized categories and HTTP status remain available.
+A newly authorized credential remains required after caller-token expiry; this
+adds no automatic refresh or broader MCP permissions.
 
 Memory has no native preservation mapping in this profile and remains an
 explicit preview/consent loss. Model controls, repositories and any other source
