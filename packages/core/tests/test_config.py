@@ -14,6 +14,8 @@ from daimon.core.config import (
     DatabaseSettings,
     DiscordSettings,
     HubSettings,
+    McpOAuthClientSettings,
+    McpOAuthSettings,
     McpSettings,
     Settings,
     SlackSettings,
@@ -284,6 +286,112 @@ def test_mcp_settings_parsed_from_nested_env(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.mcp.jwt_secret is not None
     assert settings.mcp.jwt_secret.get_secret_value() == "a" * 32
     assert str(settings.mcp.public_url) == "https://mcp.example.com/mcp"
+
+
+def test_mcp_oauth_clients_are_empty_unless_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_MCP_OAUTH__CLIENTS", raising=False)
+    assert load_settings(_env_file=None).mcp_oauth.clients == [], (
+        "with no client configured every sign-in registers dynamically"
+    )
+
+
+def test_mcp_oauth_clients_parse_from_a_top_level_json_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv(
+        "DAIMON_MCP_OAUTH__CLIENTS",
+        '[{"authorization_server_host": "Login.Example.com.", '
+        '"mcp_servers": ["HTTPS://MCP.Example.com:443/Mcp/"], "client_id": "cid", '
+        '"client_secret": "sec", "token_endpoint": "https://login.example.com/t1/token", '
+        '"scope": "  mcp.read   mcp.write ", "send_resource": false}]',
+    )
+    (client,) = load_settings(_env_file=None).mcp_oauth.clients
+    assert client.authorization_server_host == "login.example.com", "the host is normalised"
+    assert client.mcp_servers == ["https://mcp.example.com/Mcp"], (
+        "server URLs are stored in the canonical form sign-ins are compared in"
+    )
+    assert client.client_secret.get_secret_value() == "sec", "the secret is read as given"
+    assert client.token_endpoint_auth_method == "client_secret_post", "post is the default"
+    assert client.token_endpoint == "https://login.example.com/t1/token", "override kept"
+    assert client.scope == "mcp.read mcp.write", "scope whitespace is collapsed"
+    assert client.authorization_endpoint is None and client.send_resource is False, (
+        "unset override stays unset, send_resource is read as given"
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ({"authorization_server_host": "https://login.example.com"}, "bare host name"),
+        ({"authorization_server_host": "login.example.com:8443"}, "bare host name"),
+        ({"mcp_servers": []}, "at least 1 item"),
+        ({"mcp_servers": ["http://mcp.example.com/mcp"]}, "must be https"),
+        ({"mcp_servers": ["https://10.0.0.1/mcp"]}, "non-public address"),
+        ({"authorization_endpoint": "http://login.example.com/authorize"}, "must be https"),
+        ({"token_endpoint": "https://10.0.0.1/token"}, "non-public address"),
+        ({"client_secret": None}, "client_secret"),
+        ({"token_endpoint_auth_method": "none"}, "token_endpoint_auth_method"),
+        ({"scope": "   "}, "at least one scope"),
+    ],
+)
+def test_mcp_oauth_client_rejects_an_unusable_entry(entry: dict[str, object], message: str) -> None:
+    base: dict[str, object] = {
+        "authorization_server_host": "login.example.com",
+        "mcp_servers": ["https://mcp.example.com/mcp"],
+        "client_id": "cid",
+        "client_secret": "sec",
+    }
+    with pytest.raises(ValidationError, match=message):
+        McpOAuthClientSettings.model_validate(base | entry)
+
+
+def test_mcp_oauth_client_requires_an_mcp_server_allowlist() -> None:
+    with pytest.raises(ValidationError, match="mcp_servers"):
+        McpOAuthClientSettings.model_validate(
+            {"authorization_server_host": "login.example.com", "client_id": "cid"}
+            | {"client_secret": "sec"}
+        )
+
+
+def test_mcp_oauth_settings_refuse_one_server_under_two_clients() -> None:
+    entry: dict[str, object] = {
+        "authorization_server_host": "login.example.com",
+        "mcp_servers": ["https://mcp.example.com/mcp"],
+        "client_id": "cid",
+        "client_secret": "sec",
+    }
+    other = entry | {"client_id": "other", "mcp_servers": ["https://MCP.example.com/mcp/"]}
+    with pytest.raises(ValidationError, match="https://mcp.example.com/mcp is listed under more"):
+        McpOAuthSettings.model_validate({"clients": [entry, other]})
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "[]"], ids=["empty", "blank", "empty-list"])
+def test_mcp_oauth_clients_treat_a_blank_env_as_none(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_MCP_OAUTH__CLIENTS", raw)
+    assert load_settings(_env_file=None).mcp_oauth.clients == [], (
+        "a compose file passing the variable through empty must not stop the deployment"
+    )
+
+
+def test_mcp_oauth_clients_name_the_variable_on_bad_json_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_MCP_OAUTH__CLIENTS", '[{"client_secret": "s3cr3t-value"')
+    with pytest.raises(ValidationError) as caught:
+        load_settings(_env_file=None)
+    message = str(caught.value)
+    assert "DAIMON_MCP_OAUTH__CLIENTS is not valid JSON" in message, message
+    assert "s3cr3t-value" not in message, "the error must not quote the secret"
 
 
 def test_mcp_app_root_url_strips_mcp_suffix() -> None:
@@ -1080,3 +1188,53 @@ def test_mcp_legacy_window_is_explicit_bounded_and_expired_windows_boot_strict()
     assert McpSettings(
         allow_legacy_tokens=True, legacy_token_cutoff=datetime.now(UTC) - timedelta(minutes=1)
     )
+
+
+def _microsoft_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    for name, value in values.items():
+        monkeypatch.setenv(f"DAIMON_MICROSOFT_ACCOUNTS__{name}", value)
+
+
+def test_blank_microsoft_accounts_variables_leave_the_feature_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose files often pass unset variables through as empty strings."""
+    _microsoft_env(monkeypatch, CLIENT_ID="", CLIENT_SECRET="", TENANT_ID="")
+    settings = load_settings(_env_file=None)
+    assert not settings.microsoft_accounts.configured, "blank values must read as unset"
+    assert settings.microsoft_accounts_missing() == (), "an unused feature must not warn"
+    assert not settings.microsoft_accounts_enabled, "an unused feature must stay off"
+
+
+def test_blank_microsoft_authority_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _microsoft_env(monkeypatch, AUTHORITY="")
+    settings = load_settings(_env_file=None)
+    assert str(settings.microsoft_accounts.authority) == "https://login.microsoftonline.com/", (
+        "a blank authority must read as unset, not stop the service from starting"
+    )
+
+
+def test_partial_microsoft_accounts_setup_names_what_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _microsoft_env(monkeypatch, CLIENT_ID="app-1")
+    settings = load_settings(_env_file=None)
+    assert settings.microsoft_accounts_missing() == (
+        "DAIMON_MICROSOFT_ACCOUNTS__CLIENT_SECRET",
+        "DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID",
+        "DAIMON_CRYPTO__KEYS",
+        "DAIMON_MCP__PUBLIC_URL",
+    ), "a partial setup must name every missing setting"
+    assert not settings.microsoft_accounts_enabled, "a partial setup must leave the feature off"
+
+
+def test_malformed_microsoft_tenant_id_names_the_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _microsoft_env(monkeypatch, TENANT_ID="contoso.onmicrosoft.com")
+    with pytest.raises(ValidationError, match="DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID"):
+        load_settings(_env_file=None)

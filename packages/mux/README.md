@@ -1,5 +1,9 @@
 # mux
 
+Source loss consent can name the unsupported native URL-fetch capability as
+`builtin_tool:web_fetch`. This does not waive other builtin tools or authorize
+shell-based emulation of the missing native tool.
+
 MCP source permissions can be resolved per tool with `mcp_permissions` without
 relaxing native toolset projection. Declared losses can name one unavailable
 MCP tool as `mcp_tool:<server>:<tool>`; this does not waive sibling capabilities
@@ -908,6 +912,10 @@ native cancel/EOF occupancy, ambiguous-delivery recovery, all fenced store
 boundaries and monotonic terminal settlement. Historical certificates and
 standard pending declarations are unchanged; see
 [money and scenario boundaries](../testing/docs/drivers/gemini/LIVE-ROUND.md).
+
+Offline Gemini round fixtures stamp workspace creation and activity from current
+UTC time. Stale-response cases use relative offsets so the intended seven-day
+workspace expiry does not make the fixtures expire as the calendar advances.
 
 
 Explicit native credential offers share one profile-bound host adapter and MCP grant

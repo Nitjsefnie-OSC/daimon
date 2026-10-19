@@ -68,10 +68,11 @@ _DIRECT_FILES_HINT = (
 @dataclass(frozen=True)
 class Attached:
     """What replayed messages carry beyond text: the images inlined (count by message
-    id) and download URLs of shared files (by SharePoint URL)."""
+    id), and download URLs and versions (eTags) of shared files (by SharePoint URL)."""
 
     images: Mapping[str, int] = field(default_factory=dict[str, int])
     downloads: Mapping[str, str] = field(default_factory=dict[str, str])
+    versions: Mapping[str, str] = field(default_factory=dict[str, str])
 
 
 NOTHING_ATTACHED = Attached()
@@ -237,7 +238,7 @@ def _render(
         attrs += f' images_attached="{images}"'
     if not files:
         return [f"<message{attrs}>{escape(text)}</message>"]
-    shared = [_attachment(f, attached.downloads) for f in files]
+    shared = [_attachment(f, attached) for f in files]
     return [
         f"<message{attrs}>",
         escape(text),
@@ -248,11 +249,18 @@ def _render(
     ]
 
 
-def _attachment(file: SharedFile, downloads: Mapping[str, str]) -> str:
+def _attachment(file: SharedFile, attached: Attached) -> str:
     name = quoteattr(file.name)
-    if url := downloads.get(file.content_url or ""):
-        hint = quoteattr("short-lived download URL: fetch it now (curl to disk, then read it)")
-        return f"<attachment name={name} url={quoteattr(url)} hint={hint}/>"
+    if url := attached.downloads.get(file.content_url or ""):
+        hint = "short-lived download URL: fetch it now (curl to disk, then read it)"
+        version = attached.versions.get(file.content_url or "")
+        if not (file.content_url and version):
+            return f"<attachment name={name} url={quoteattr(url)} hint={quoteattr(hint)}/>"
+        hint += "; to save an edited file over it, pass link and version to replace_channel_file"
+        return (
+            f"<attachment name={name} url={quoteattr(url)} link={quoteattr(file.content_url)}"
+            f" version={quoteattr(version)} hint={quoteattr(hint)}/>"
+        )
     return f'<attachment name={name} fetchable="false"/>'
 
 
@@ -460,7 +468,7 @@ def render_user_message(
     does not, `files_hint` says an admin must grant the permission. In a 1:1
     chat `files_hint` says how to picture a document inline.
     `unprompted="true"` marks a message nobody addressed to the bot (organic
-    thread participation); `external="true"` a sender from another organisation.
+    thread participation).
     """
     hint = quoteattr(_DIRECT_FILES_HINT)
     context = [f'<channel platform="teams" id={quoteattr(inbound.channel_id)} files_hint={hint}/>']
@@ -496,7 +504,6 @@ def render_user_message(
     query = (
         f"<user_query{author} author_id={quoteattr(inbound.user_id)}{sent} "
         f'is_admin="{str(is_admin).lower()}"'
-        + (' external="true"' if inbound.is_external else "")
         + (' unprompted="true"' if inbound.unprompted else "")
         + f">{escape(inbound.text)}</user_query>"
     )

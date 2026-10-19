@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+import re
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, NamedTuple
 
+import structlog
 from daimon.core._models import AgentToolRuleHistoryRecord, AgentToolRuleRecord, Tenant
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
-from daimon.core.tool_safety import ResolvedAgentToolRule, stricter_agent_tool_rule
+from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
+    WILDCARD_TOOL,
+    ResolvedAgentToolRule,
+    stricter_agent_tool_rule,
+)
 from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+_log = structlog.get_logger(__name__)
 
 Rule = Literal["allow", "ask", "deny"]
 Scope = Literal["chat", "chat_and_routines"]
@@ -132,6 +142,104 @@ async def get_for_call(
     return resolved
 
 
+async def deny_rules_for_trusted_tool(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    tool_keys: Sequence[str],
+) -> list[AgentToolRule]:
+    """Every agent-wide `deny` row for any of `tool_keys` in a tenant, whichever agent holds it.
+
+    The MCP server cannot turn a chat credential's derived agent uuid back into
+    the Managed Agents id the rows are keyed by, so it reads the tenant's few
+    deny rows for these keys (the tool's own and the `daimon-mcp/*` wildcard)
+    and compares each by `derive_agent_uuid`. One query on
+    `uq_agent_tool_rules_global` (leading `tenant_id`). Channel rules are left
+    out: the server does not know the channel. Tombstones (`rule IS NULL`),
+    `allow` and `ask` rows are left out too. A deny holds in every scope, so
+    scope is not read.
+    """
+    rows = (
+        await session.scalars(
+            select(AgentToolRuleRecord).where(
+                AgentToolRuleRecord.tenant_id == tenant_id,
+                AgentToolRuleRecord.tool_key.in_(list(tool_keys)),
+                AgentToolRuleRecord.channel_id.is_(None),
+                AgentToolRuleRecord.rule == "deny",
+            )
+        )
+    ).all()
+    return [_view(row) for row in rows]
+
+
+class DaimonRuleSet(NamedTuple):
+    """What an agent's rules on daimon's own tools ask of a session."""
+
+    #: Tool names the session must ask on (`WILDCARD_TOOL` stands for the
+    #: agent-wide deny-all). Empty when the agent has no applicable rule.
+    tools: frozenset[str]
+    #: Some rule only the turn driver can apply: any `ask`, or a channel `deny`.
+    #: An agent-wide `deny` (a tool's own or `*`) is also enforced by the MCP
+    #: server, so a backend with no approval pause still honours it.
+    needs_driver: bool
+
+
+#: A tool name MA accepts in a toolset config, and a daimon tool name in practice.
+_TOOL_NAME = re.compile(r"[A-Za-z0-9_.-]{1,128}")
+
+
+def valid_tool_name(name: str) -> bool:
+    """A plain tool name, or `*` (only meaningful as `daimon-mcp/*`)."""
+    return name == WILDCARD_TOOL or _TOOL_NAME.fullmatch(name) is not None
+
+
+async def daimon_rule_set(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str
+) -> DaimonRuleSet:
+    """The daimon tools this agent has a non-null ask or deny rule on.
+
+    Any scope, agent-wide or channel, any channel: a chat session names no
+    channel until a call arrives, so the session asks on every tool any channel
+    could restrict and the driver applies the rule that fits the call. One
+    indexed read per bind. A row whose key is not `daimon-mcp/<tool>` is not
+    daimon's and is not counted. `*` appears only for an agent-wide `deny` of
+    `daimon-mcp/*` (`WILDCARD_TOOL`), the one wildcard that means something;
+    any other `*` row is ignored. A name that is not a plain tool name becomes
+    a toolset config MA would refuse, so it is logged and skipped.
+    """
+    prefix = f"{DAIMON_SERVER_NAME}/"
+    rows = await session.execute(
+        select(
+            AgentToolRuleRecord.tool_key, AgentToolRuleRecord.channel_id, AgentToolRuleRecord.rule
+        ).where(
+            AgentToolRuleRecord.tenant_id == tenant_id,
+            AgentToolRuleRecord.agent_id == agent_id,
+            AgentToolRuleRecord.rule.in_(("ask", "deny")),
+            AgentToolRuleRecord.tool_key.startswith(prefix),
+        )
+    )
+    names: set[str] = set()
+    needs_driver = False
+    for key, channel_id, rule in rows:
+        name = key.removeprefix(prefix)
+        if name == WILDCARD_TOOL:
+            if rule != "deny" or channel_id is not None:
+                continue
+        elif not valid_tool_name(name):
+            _log.warning("tool_safety.rule_name_skipped", tool=key[:160])
+            continue
+        names.add(name)
+        needs_driver = needs_driver or rule == "ask" or channel_id is not None
+    return DaimonRuleSet(frozenset(names), needs_driver)
+
+
+async def daimon_rule_tools(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str
+) -> frozenset[str]:
+    """`daimon_rule_set(...).tools`: the names a session must ask on."""
+    return (await daimon_rule_set(session, tenant_id=tenant_id, agent_id=agent_id)).tools
+
+
 async def set_rule(
     session: AsyncSession,
     *,
@@ -165,7 +273,16 @@ async def set_rule(
     if channel_id is not None and not channel_id:
         raise ValueError("channel_id must name a parent channel")
     server, separator, tool = tool_key.partition("/")
-    if not separator or not server or not tool or "/" in tool or not server_url:
+    if (
+        not separator
+        or not server
+        or not tool
+        or "/" in tool
+        or not server_url
+        # Only daimon's own names become tool settings in a session; a third
+        # party's keep the shape-only check.
+        or (server == DAIMON_SERVER_NAME and not valid_tool_name(tool))
+    ):
         raise ValueError("tool_key must be exactly server/tool with a server URL")
     if rule not in (None, "allow", "ask", "deny") or scope not in ("chat", "chat_and_routines"):
         raise ValueError("invalid agent tool rule or scope")

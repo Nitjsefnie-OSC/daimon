@@ -10,6 +10,10 @@ modules.
 
 from __future__ import annotations
 
+import os
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
+
 import pytest
 from daimon.testing.db import db_clean as db_clean
 from daimon.testing.db import db_engine as db_engine
@@ -30,6 +34,9 @@ from .drivers.protocol import PlatformDriver
 from .drivers.slack_driver import SlackDriver
 from .drivers.teams_driver import TeamsDriver
 
+if TYPE_CHECKING:
+    from daimon.testing.qa_mcp_host import SharedQaHost
+
 __all__ = ["build_turn_router", "turn_events", "AGENT_TEXT", "AGENT_ID", "ENV_ID", "MODEL_ID"]
 
 
@@ -45,3 +52,42 @@ def driver(request: pytest.FixtureRequest) -> PlatformDriver:
     if request.param == "slack":
         return SlackDriver()
     return TeamsDriver()
+
+
+@pytest.fixture(autouse=True)
+def _instant_sdk_retries(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction]
+    """Keep the Anthropic SDK's retries but not its sleeps.
+
+    `build_fake_anthropic` leaves `max_retries=2`, so a faked 5xx or 429 really
+    waited 0.4-1 s per retry. Retries still happen and still count; only the
+    backoff is zero.
+    """
+    from anthropic._base_client import BaseClient
+
+    def no_wait(self: object, *args: object, **kwargs: object) -> float:
+        return 0.0
+
+    monkeypatch.setattr(BaseClient, "_calculate_retry_timeout", no_wait)
+
+
+@pytest.fixture(scope="session")
+async def qa_shared_host(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> AsyncIterator[SharedQaHost]:
+    """One QA host schema, tenant and account per xdist worker.
+
+    Building the `qa_mcp_<run>` schema costs ~1 s and dropping it ~0.5 s, so
+    tests take a run on it (`build_run`) instead of building their own host.
+    A test that asserts cleanup drops the schema builds its own with `build_host`.
+    """
+    from daimon.testing.qa_mcp_host import build_shared_host, cleanup
+
+    database_url = os.environ.get("DAIMON_DATABASE__TEST_URL")
+    assert database_url, "the parity lane must provide its own isolated database"
+    root = tmp_path_factory.mktemp("qa-shared-host")
+    shared = await build_shared_host(database_url=database_url, port=0, root=root)
+    try:
+        yield shared
+    finally:
+        await shared.engine.dispose()
+        await cleanup(shared.manifest.path(root), database_url=database_url)

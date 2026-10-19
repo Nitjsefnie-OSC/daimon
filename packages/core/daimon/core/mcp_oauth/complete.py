@@ -29,7 +29,7 @@ from daimon.core.mcp_attach import (
     attach_mcp_server_to_agent,
     decide_mcp_connect,
 )
-from daimon.core.mcp_oauth.flow import exchange_authorization_code
+from daimon.core.mcp_oauth.flow import exchange_authorization_code, refresh_scope
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenEndpointAuthMethod
 from daimon.core.mcp_oauth.vault import put_mcp_oauth_credential
 from daimon.core.mcp_vault import ensure_agent_mcp_vault, hold_agent_vault_lock
@@ -95,6 +95,7 @@ async def complete_mcp_oauth_flow(
     session_factory: async_sessionmaker[AsyncSession],
     default: DeploymentDefault,
     may_write: Callable[[], Awaitable[bool]] | None = None,
+    configured_client: bool = False,
 ) -> McpOAuthCompletion:
     """Exchange, store in the requester's vault, attach the server to the agent.
 
@@ -113,6 +114,11 @@ async def complete_mcp_oauth_flow(
     browser callback carries no live platform identity): stored admin role. A
     refused replacement raises `McpServerReplaceRefusedError` with the agent
     unchanged.
+
+    ``configured_client`` marks a flow signed in with a client from
+    `DAIMON_MCP_OAUTH__CLIENTS`; only then is the `offline_access` its sign-in
+    asked for kept in the refresh scope, so a dynamically registered client's
+    stored grant is exactly what the server returned.
     """
     client = registered_client(flow, fernet=fernet)
     assert flow.token_endpoint is not None  # narrowed by registered_client
@@ -125,6 +131,8 @@ async def complete_mcp_oauth_flow(
         redirect_uri=flow.redirect_uri,
         resource=flow.resource,
     )
+    if configured_client:
+        tokens = tokens.model_copy(update={"scope": refresh_scope(tokens.scope, flow.scope)})
 
     async def still_allowed() -> None:
         if may_write is not None and not await may_write():

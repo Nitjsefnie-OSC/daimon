@@ -83,6 +83,9 @@ _ADMISSION_FACTS = {
     not in ("agent", "environment", "observation", "backend_counterpart", "backend_agent_revision")
 }
 
+#: Admission facts a root retained before they existed read as their default.
+_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools", "daimon_rules_need_driver"})
+
 log = structlog.get_logger(__name__)
 
 
@@ -241,7 +244,6 @@ async def _root_context(
                     execution_origin
                     and (
                         execution is None
-                        or execution.is_external
                         or execution.is_setup
                         or execution.responder_ma_agent_id != parent.source_agents[0].id
                         or execution.parent_channel_id != facts.root.channel.channel_id
@@ -271,9 +273,7 @@ async def _root_context(
         or origin.responder_ma_agent_id != source_id
         or origin.parent_channel_id != binding.thread.channel.channel_id
         or origin.thread_id != binding.thread.thread_id
-        or origin.is_external
         or (account.tenant_id, account.platform) != (origin.tenant_id, origin.platform)
-        or account.is_external
         or intent.tenant_id != origin.tenant_id
         or intent.platform != origin.platform
         or intent.channel_id != origin.parent_channel_id
@@ -418,7 +418,6 @@ async def prepare_controlled_root(
         if (
             origin is None
             or origin.is_setup
-            or origin.is_external
             or (origin.responder_ma_agent_id, origin.parent_channel_id, origin.thread_id)
             != (request.admission.agent.id, grant.channel_id, request.thread_id)
         ):
@@ -1083,8 +1082,10 @@ async def read_frozen_preparation(
         try:
             facts = root.preparation
             admission_facts = facts["admission"]
-            if not isinstance(admission_facts, dict) or set(admission_facts) != set(
-                _ADMISSION_FACTS
+            if not isinstance(admission_facts, dict) or not (
+                set(_ADMISSION_FACTS) - _LEGACY_ADMISSION_FACTS
+                <= set(admission_facts)
+                <= set(_ADMISSION_FACTS)
             ):
                 raise WorkerSpecRefused("origin", "unbound")
             retained_source = Agent.model_validate_json(json.dumps(facts["source"]))
@@ -1103,6 +1104,7 @@ async def read_frozen_preparation(
                 **{
                     name: adapter.validate_json(json.dumps(admission_facts[name]))
                     for name, adapter in _ADMISSION_FACTS.items()
+                    if name in admission_facts
                 },
             )
             request = ProviderPreparationRequest(
@@ -1388,7 +1390,6 @@ async def capture_preparation_source(
         asks_before_publishing=request.admission.asks_before_publishing,
         mcp_settings=request.deps.mcp,
         agent_github_app=request.deps.agent_github_app,
-        is_external=request.admission.is_external,
         hide_personal_for=request.admission.shared_owner,
         slack_turn_context_id=request.admission.slack_turn_context_id,
         private_dm_id=request.admission.private_dm_id,
@@ -1586,8 +1587,27 @@ async def _capture_source_capabilities(
                 raise ValueError("source has no enabled daimon-mcp toolset")
             if not any(permission == "auto" for permission in permissions.values()):
                 raise ValueError("source has no automatically executable MCP tools")
+            # URL fetching has no native hosted-Agents tool. Keep the exact
+            # source capability visible as a consented loss instead of silently
+            # treating shell HTTP execution as the provider's fetch tool.
+            unavailable_builtin_tools = (
+                ("builtin_tool:web_fetch",)
+                if profile.provider == "openai"
+                and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
+                else ()
+            )
             mapped_tools = represented_execution_tools(
-                profile, tuple(tool for tool in tools if tool.kind != "mcp_toolset")
+                profile,
+                tuple(
+                    tool
+                    for tool in tools
+                    if tool.kind != "mcp_toolset"
+                    and not (
+                        unavailable_builtin_tools
+                        and tool.kind == "builtin"
+                        and tool.name == "web_fetch"
+                    )
+                ),
             )
             if any(
                 tool.kind == "mcp_toolset"
@@ -1644,9 +1664,12 @@ async def _capture_source_capabilities(
                     },
                 }
             )
-            if {item.source.id for item in inputs.skills} != {s.id for s in spec.skills or ()}:
+            # The provider's built-in skills (docx, pptx, ...) have no bytes to
+            # carry and run only there: another backend goes without them.
+            portable = tuple(s for s in spec.skills or () if s.source in (None, "custom"))
+            if {item.source.id for item in inputs.skills} != {s.id for s in portable}:
                 raise ValueError("skill representation is incomplete")
-            unresolved = tuple(s for s in spec.skills or () if s.version in (None, "latest"))
+            unresolved = tuple(s for s in portable if s.version in (None, "latest"))
             latest: dict[str, str] = {}
             if unresolved:
                 # Grant reads only for ids captured from this actual source.
@@ -1727,6 +1750,7 @@ async def _capture_source_capabilities(
                     target=target,
                     credential_refs=(reference,),
                     unavailable_mcp_tools=unavailable_mcp_tools,
+                    unavailable_builtin_tools=unavailable_builtin_tools,
                     environment=inputs.environment,
                 )
             )
@@ -1958,6 +1982,7 @@ def classify_source_obligations(
     missing: set[str] = set()
     if represented is not None:
         missing.update(set(represented.unavailable_mcp_tools) - set(drops))
+        missing.update(set(represented.unavailable_builtin_tools) - set(drops))
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
     source_tools = tuple(spec.tools or ())

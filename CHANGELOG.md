@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
+
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
 
 - Discord routines can deliver privately to their owner through MCP, the routines panel, or `daimon routines create --destination dm`. Delivery rechecks live access, respects tenant DM controls, and exposes failures without public fallback or outbox replay across polls. Platform SDKs may retry a single send after a server error or connection reset. DM routine runs mount no personal memory; tenant memory stays read-only and tool authority stays the same as for channel routines. Creation-time source channels, threads and provenance status are immutable across retargeting, clearing and DM conversion. Legacy unknown-source routines retain ordinary edits and firing, but must be recreated from their source to get DM delivery. Routines created from a private conversation verify its saved guild source; cold conversations remain source-free, and unknown provenance refuses DM delivery. CLI source IDs are verified against the selected tenant's guild, including in dry-run.
@@ -21,7 +23,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Access policies that keep the default admin bypass remain readable by older deployments during rolling upgrades.
+
 - Discord private conversations retain operational and billing notices while access denials stay silent. Discovery failures after membership and invoker checks show a generic notice without server or agent names.
+
+
+### Security
+
+- Agent-chat turns (`start_turn`, `continue_turn` and `ask`, with an agent key or on the hub) now follow tool safety. Before every message the session's tool settings are set again from the current policy, and each tool call is decided by the unattended rules when it is made: reads run, and a third-party write is refused unless the operator allowed it in unattended runs. These turns used to run every tool without asking. With tool safety off, calls the session still asks about are allowed.
+- Agent-chat turns apply agent tool rules for their channel (a channel-bound key's channel, or the conversation's), and refuse Daimon's card-only actions: a backend switch and Microsoft mail and invites with tool safety on or off, and Microsoft file changes with it on, as in chat.
+- Reading a session never answers its tool calls. An agent-chat turn left waiting on a tool call by a restart reads as `paused` from `get_session` and `get_my_session`, with a hint; only the session's owner resumes it with `continue_turn`, whose `message` is now optional for that case, and the current policy decides the waiting calls. `continue_turn` never answers a confirmation card from a chat turn.
+- An MCP tool hint that marks a tool both read-only and destructive now counts as a write.
+
+- An agent-wide `deny` tool rule on one of Daimon's own tools (`daimon-mcp/<tool>`) now stops the call. The MCP server refuses it, directly or through `call_tool`, when that agent's chat or routine session makes it and tool rules are enabled. The rule used to be saved but never enforced for Daimon's own tools. An agent-wide `deny` on `daimon-mcp/*` denies all of Daimon's own tools for that agent, tools added later included, and `search_tools` and `call_tool` too; wildcards are recognised only for `daimon-mcp`, agent-wide and `deny`. The turn driver applies `ask` and channel rules on them (see Fixed).
+
+### Fixed
+
+- OpenAI agents with native web search and host-bound MCP now accept the provider's echoed default search fields and empty credential carriers during readback. Nondefault search controls and nonempty native credentials remain refused.
+
+- Fleet workers get distinct names, so later mentions keep reaching the original agent. Defaults updates leave live workers alone.
+- OpenAI agent switching names unsupported URL fetching as an explicit consented loss while preserving other source tools and skills.
+- Discord turns cap answer output at five messages, combine excess prose into an attachment, and suppress repeated blocks and pure tool-call markup.
+
+- GitHub's `pull_request_read` and `issue_read` tools now count as reads for tool safety, so reading a pull request no longer waits for an approval card. GitHub's write tools (`pull_request_review_write`, `merge_pull_request`, `mark_all_notifications_read` and the rest) still ask.
+
+- **Tool rules on Daimon's own tools are enforced.** An `ask` or `deny` rule
+  on `daimon-mcp/<tool>` was saved but never applied, because Daimon's own
+  server was exempt from rule lookups. A chat or routine session whose agent
+  has such a rule now pauses on `call_tool` and on the tools a rule names;
+  the driver reads the tool inside the call, refuses a `deny`, asks on a card
+  for an `ask` (refused in a routine), and lets every other call run without a
+  card. A rule added or cleared takes effect on the agent's next turn. An
+  agent `deny` also wins over `add_skill` and publish confirmations; no rule
+  loosens a confirmation or the operator's deny list. Applies when
+  `DAIMON_TOOL_SAFETY__ENABLED` and `DAIMON_TOOL_SAFETY__AGENT_RULES` are on.
+  An agent-wide `deny` on `daimon-mcp/*` also makes the driver refuse every
+  proxied call. Gemini and OpenAI turns for an agent with an `ask` rule or a
+  channel `deny` on a Daimon tool are refused rather than run unasked; an
+  agent-wide `deny` is enforced by the server and does not block them. A
+  tool that waits for Approve (`add_skill`, publish tools) sent through
+  `call_tool` is refused at once with a note to call it directly. `daimon-mcp/`
+  rule names outside `[A-Za-z0-9_.-]{1,128}` are no longer accepted.
 
 - Switching providers preserves supported MCP tools when a sibling needs confirmation; unavailable tools require explicit consent and remain blocked.
 
@@ -43,16 +85,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decides as before. The list is empty by default: an unlisted server's
   annotations are never fetched and its tools are classified by name only.
 - The GitHub repo editor now refuses saves over 256 KiB, gives up listing your GitHub repos after 60 seconds, and keeps your ticked repos when Try again follows a GitHub error.
-- **People from another organisation get none of the agent's credentials.**
-  A Teams external participant or guest answered in a `readers: own`
-  channel used to get the agent's keys as a mounted `.env` and its shared
-  MCP tokens in their vault, though their tool calls were already
-  restricted. Their sessions now carry neither: a server only a shared
-  token reaches is left off unless they sign in to it themselves, and their
-  own sign-ins still work. A session that may hold those credentials is
-  replaced, not reused, the next time such a person is answered in it,
-  without carrying its work.
-
 - A Teams channel command whose "answered in your 1:1 chat" notice Teams refuses is still answered in the 1:1 chat. Failed sends now log Teams' error code.
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
 - Revoked GitHub token records are now deleted 7 days after they expire and unused ones 1 hour after, while live tokens and the security audit log are kept.
@@ -67,8 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DAIMON_TEAMS__ADMIN_TEAM_ID` to the team's Entra group ID and add the app
   to that team; its owners, read live and cached for a minute, are Daimon's
   admins, so adding one needs no redeploy, and a removed one loses admin
-  within about a minute, routines and tools included. Guests and people from
-  another organisation never are. A failed owner read falls back to the last
+  within about a minute, routines and tools included. A failed owner read falls back to the last
   good one for up to an hour and demotes no one; once no owner list has been
   read within an hour, nobody is an admin until the next good read.
   Support requests and channel budget notices for the admins reach these
@@ -109,6 +140,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teams people can connect their own Microsoft 365.** With
+  `DAIMON_MICROSOFT_ACCOUNTS__*` set, `connect_microsoft` sends a private
+  sign-in card, and `microsoft_search`, `microsoft_get`, `microsoft_write`
+  and `microsoft_send` then work on their files, Excel workbooks, mail,
+  calendar and OneNote as them. Mail, calendar and notes stay in their 1:1
+  chat, every email or invite waits for their Approve (so does every write
+  with tool safety on), and `privacy` → Disconnect Microsoft removes the
+  saved account. Teams sessions of the default agent add a `microsoft-365`
+  skill, leaving room for 5 channel skills instead of 6. Unset, and on Slack
+  and Discord, sessions are unchanged.
+  See [Teams](docs/teams.md#microsoft-account-optional).
+- **Agents edit Office files and update Teams channel files in place.** On
+  Teams, the default agent's sessions add Anthropic's built-in `docx`, `pptx`
+  and `xlsx` skills; other backends run without them, and Slack and Discord
+  are unchanged. They count toward the 20-skill session limit, so a Teams
+  channel answered by the default agent now adds at most 6 skills of its own,
+  down from 9; adding a seventh is refused, and extras added earlier are
+  left out of its turns, logged once rather than on every turn. Live Teams
+  sessions of the default agent are replaced once after upgrading, since
+  their skills change.
+  On Teams, the new `replace_channel_file` tool saves an edited file over one
+  in the channel's Files folder as a new version, so "update the deck" no
+  longer leaves `deck 1.pptx` behind. It writes only at the version the agent
+  read and only in the channel the turn runs in, and says whether a failed
+  write may have saved. Shared and replayed channel files carry the link and
+  version it takes. No new permission is needed.
+
+- **MCP sign-in works with authorization servers that offer no dynamic
+  client registration**, such as Microsoft Entra ID. List clients registered
+  by hand in `DAIMON_MCP_OAUTH__CLIENTS`; each names its authorization server
+  host and the MCP servers it may be used for, and a sign-in uses it only
+  when both match. An entry can override the authorization and token
+  endpoints, set the scope to request and leave the RFC 8707 `resource`
+  parameter out, and it asks for `offline_access` when the authorization
+  server offers it so the connection keeps refreshing. Every other server
+  still registers a client dynamically, as before. See docs/self-hosting.md.
+
 - **Self-host on OpenAI, with no Anthropic account at all.** `DAIMON_ANTHROPIC__API_KEY`
   is now optional; `docker compose up` and `daimon defaults apply` succeed
   without it. `daimon openai init` creates (or reuses) a project-scoped
@@ -123,6 +191,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory, no Daimon model knobs).
 
 ### Removed
+
+- **Teams treats people from another organisation as members.** A shared
+  channel's external participants and Entra guests are answered wherever a
+  member is, with the same commands, cards, tools, credentials and sessions,
+  as everyone in a Discord server already is. Group chats are answered
+  whoever is in them, and a guest owner of the admin team is an admin. Teams
+  still opens no 1:1 chat across organisations, so one naming another tenant
+  is refused, and a command answered there tells them so instead of pointing
+  them to it. `DAIMON_TEAMS__RESTRICT_GUESTS`,
+  `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS` and `daimon tenants
+  access-policy --add-member-guest` are gone. Slack Connect is unchanged.
 
 - **`DAIMON_TEAMS__ADMIN_USER_IDS` is no longer read.** Make those admins
   owners of the admin team; a leftover value is ignored, and anyone not an
@@ -961,12 +1040,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Teams: leftover `DAIMON_TEAMS__RESTRICT_*` values and stored member guest lists are ignored. Uploading the rebuilt app package (0.6.1) is optional; it only drops the unused `ChannelMember.Read.Group` permission. The `is_external` columns are no longer read or written and are dropped in a later release.
 - Teams Ask a person: a deployment that put a Teams channel (`19:…`) in `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` moves it to `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`; until then Teams offers no Ask a person, and Discord ignores the Teams id.
 - Building the image needs Docker 23 or later: the Dockerfile uses BuildKit instructions the legacy builder rejects.
-- Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.
+- Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying.
 - Isolated channels' agents no longer read other channels, nor sessions with no channel stamp: setups that relied on it stop working.
-- Teams guests in standard and private channels and 1:1 chats are no longer answered outside isolated channels unless listed with `daimon tenants access-policy --add-member-guest`, or unless `DAIMON_TEAMS__RESTRICT_GUESTS=false`.
-- Teams: rebuild the app package (version 0.4.1) and upload it again for the new `ChannelMember.Read.Group` permission, which tells guests and external participants apart in channels; a team owner accepts it. Until then, a sender the roster can't place in a shared channel is held as external.
 - Deployments that set `DAIMON_DISCORD__PER_CALLER_THREAD_SESSIONS=false`: each caller in an existing thread starts a fresh session of their own at their next message; the shared session is not carried over.
 - Notebook links change once: after the notebook host upgrades, links shared earlier (scratch notebooks and blogs) stop working. Blogs get a token on their first respawn; `list_notebooks` returns the new links. Upgrade the notebook host before the bot. A host with a non-localhost `DAIMON_NOTEBOOK__PUBLIC_HOST` and no `https://` `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` no longer boots; set one, or `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS=true` on a trusted private network. Editors need `DAIMON_NOTEBOOK__ALLOW_EDITABLE=true` on both the bot and the host. A public notebook host without `DAIMON_NOTEBOOK__ORIGIN_BASE` refuses every upload until `DAIMON_NOTEBOOK__TENANTS` lists the tenant UUIDs it may serve (comma-separated or a JSON array; `daimon tenants list --json` shows them, and each refusal names the id), and refuses tokens that name no tenant, so upgrade the bot with it. Set `ORIGIN_BASE` (wildcard DNS `*.<domain>` and a wildcard certificate) to serve any tenant in isolation. A `tenant.json` left in the data directory by a pre-release build is ignored and can be deleted.
 - Set `DAIMON_CRYPTO__KEYS` before upgrading: keyless deployments still start and read existing values, but refuse new agent key writes unless `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true`, including the agent's own `self_write_file` notes (the tool error names `DAIMON_CRYPTO__KEYS`). `DAIMON_CRYPTO__KEYS` now also accepts the raw `Fernet.generate_key()` output or a comma-separated list; before this, only a JSON list parsed and a bare key stopped every service at boot. After setting keys and restarting **every** process with them, run `daimon crypto encrypt-plaintext`, then `daimon crypto verify`. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
@@ -985,22 +1063,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tier1` (package version 0.4.1). Adding the app to a team does not add it to
   these channels: each one's owner adds it from the channel. Rebuild the
   package and upload it again to use them.
-- **People from another organisation in Teams.** A shared channel's external
-  participants (B2B direct connect) and guests (Entra B2B guest accounts, in
-  any channel or 1:1 chat) are answered only inside an isolated channel, and
-  never in its setup thread. They run as members, never admins or channel
-  admins (whatever team ownership or a grant says), commands
-  reach the agent as plain text, and their tool calls get only the
-  conversation's tools; any other tool, including ones added later, returns
-  an error the agent relays. A sender is placed by the activity's tenant,
-  their roster entry and the channel's Graph member list; one nothing places
-  is held as external for that turn in a channel not known to be standard or
-  private, and nothing is stored. `daimon tenants access-policy
-  --add-member-guest` lists guests to treat as members.
-  `DAIMON_TEAMS__RESTRICT_GUESTS` and
-  `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS` (both on) switch the rules
-  off per kind. Setup is in `docs/self-hosting.md`, behaviour in
-  `docs/teams.md`.
 - **Operator tokens from the setup panels.** Server admins on Discord, Slack
   and Teams mint, list and revoke operator tokens from Who answers where:
   `tenant:read`, `channels:write`, `agents:archive` and `promo:redeem` only

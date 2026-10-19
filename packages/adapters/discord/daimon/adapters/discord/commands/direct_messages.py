@@ -75,7 +75,6 @@ _ACCESS_DENIALS: frozenset[AdmissionDenialReason] = frozenset(
         "writers_none",
         "runs_elsewhere",
         "own_agents_only",
-        "external_participant",
     }
 )
 _DISCOVERY_FAILURE_NOTICE = "Couldn't open a private conversation. Please retry or ask an admin."

@@ -779,15 +779,27 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
 
 
 @pytest.mark.parametrize("composed", ["postgres"], indirect=True)
-@pytest.mark.parametrize("policy", ["memory_read_only", "source_sealed", "asks_before_publishing"])
-async def test_unimplemented_restricted_policy_refuses_before_transport(composed, policy):
+@pytest.mark.parametrize(
+    ("policy", "value"),
+    [
+        ("memory_read_only", True),
+        ("source_sealed", True),
+        ("asks_before_publishing", True),
+        ("daimon_rules_need_driver", True),
+    ],
+)
+async def test_unimplemented_restricted_policy_refuses_before_transport(composed, policy, value):
     from daimon.core.turn.errors import AdmissionDenied
+    from mux.errors import UnsupportedCapability
 
     request, wire, _, _, _ = composed
-    request = replace(request, admission=replace(request.admission, **{policy: True}))
+    request = replace(request, admission=replace(request.admission, **{policy: value}))
     with pytest.raises(AdmissionDenied) as refused:
         await prepare_openai(request)
     assert refused.value.reason == "backend_unsupported"
+    if policy == "daimon_rules_need_driver":
+        assert isinstance(refused.value.__cause__, UnsupportedCapability)
+        assert refused.value.__cause__.missing == ("daimon_tool_rules",)
     assert wire.requests == []
 
 

@@ -19,6 +19,67 @@ key, or an agent acting in a conversation on an admin's behalf, is refused. They
 are inactive until both `DAIMON_TOOL_SAFETY__ENABLED` and
 `DAIMON_TOOL_SAFETY__AGENT_RULES` are true.
 
+Daimon's own tools take rules too, under the key `daimon-mcp/<tool>` (the
+tool's own name, not `call_tool`). Two layers enforce them.
+
+The MCP server enforces an agent-wide `deny`. When a chat or routine session of
+that agent calls the tool, directly or through `call_tool`, the server refuses
+it before the tool runs, whatever the rule's scope. An agent-wide `deny` on
+`daimon-mcp/*` denies all of Daimon's tools for that agent, including tools
+added later: the server refuses every call from the agent's session,
+`search_tools` and `call_tool` included. Wildcards are recognised only for
+`daimon-mcp`, and only as an agent-wide `deny`; `allow`, `ask` and
+channel-scoped `*` rules, and `*` on other servers, do nothing. A rule must
+name the agent's own Daimon endpoint; a server that merely carries the name
+`daimon-mcp` at another URL is not matched. If the server cannot read the
+rules, it refuses the call. Operator tokens and agent keys are not affected.
+
+The turn driver applies `ask`, `deny` and channel rules, which the server cannot
+(it has no card and does not know the channel). Most chat sessions reach Daimon's
+tools through the `call_tool` proxy, so a session whose agent has any `ask` or
+`deny` rule on a Daimon tool, agent-wide or in any channel, asks before every
+`call_tool` call and before each tool a rule names; the driver then reads the
+tool inside the call and the rule that fits the channel. `deny` refuses the
+call, `ask` waits for a card in chat and refuses in a routine, and a call with
+no rule or an `allow` rule runs with no card. An agent-wide `daimon-mcp/*`
+`deny` also makes the driver refuse every proxied call, with the same message as
+any other deny. An agent with no rule on a Daimon tool gets no extra lookup and
+no new card.
+
+The tool part of a `daimon-mcp/` rule's key is limited to letters, digits, `_`, `.` and `-`
+(up to 128 characters), or `*` for the `daimon-mcp/*` deny-all. Other names are
+refused when such a rule is saved (a third-party key keeps the plain `server/tool` check), and a stored row with one is ignored and logged
+(`tool_safety.rule_name_skipped`), because the name becomes a tool setting in
+the session.
+
+The rule set is read when a turn starts and again whenever the turn's admission
+is re-decided (a session built or reused, a fleet worker prepared), so a rule
+added or cleared reaches the driver at once. The session's own tool settings
+follow it at the next bind. A rule never loosens a gate Daimon already has:
+`add_skill` with a reviewed preview and the publish tools of an agent that asks
+before publishing still wait for their card, and the operator's deny list still
+comes first. An agent `deny` wins over those cards. These cards do not offer
+**Always allow**.
+
+A rule on a publish tool turns the publish card on for the agent everywhere. The
+session asks on a tool named by a rule in every channel, so a rule on
+`publish_report`, `create_notebook_upload_url` or `create_attachment_upload_url`,
+in any one channel, makes that tool card in every channel and refuse in
+routines, even for an agent that is otherwise allowed to publish. Channels the
+rule does not name still run the tool once the person approves. (`add_skill`
+with a reviewed preview and `request_agent_backend_switch` already card
+wherever tool safety applies, so a rule on them adds nothing.) A tool that waits
+for a person's Approve is called by its own name; sent through `call_tool` it is
+refused at once and the model is told to call it directly.
+
+Gemini and OpenAI cannot pause for a card. A turn for an agent on one of them is
+refused when the agent has an `ask` rule or a channel-scoped `deny` on a Daimon
+tool, the rules only the driver applies. An agent-wide `deny`, a tool's own or
+`*`, is enforced by the server, so those agents keep working there. The person
+sees the same "this agent can't run here" notice as for any backend the agent
+can't use; the cause (`daimon_tool_rules`) is in the operator log under
+`turn.backend_unsupported`. Nothing runs before the refusal.
+
 With both settings on, a card for a third-party MCP write classified as needing
 approval also has **Always allow**. A current workspace admin can press it to
 save an agent-wide `allow` rule for chat.
@@ -42,6 +103,43 @@ any rule exists, or where, asks the model (`any_own_readers`,
 `any_readers_limited`, `home_of`, `ruled_agents` and the like), never the
 stored rules. Tests check the model against `authorize` over combinations of
 rules on two channels, a thread, a category and two agents with rules.
+
+## Agent-chat turns
+
+A turn started through agent chat (`start_turn`, `continue_turn` and `ask`,
+with an agent key or on the hub) has nobody to press Approve, so it runs
+under the same tool-safety rules as a routine: reads run, a third-party write
+is refused unless `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES` lists it (or an
+agent `allow` rule with `chat_and_routines` covers it), and `deny` always
+refuses. Agent tool rules for the turn's channel apply as well as agent-wide
+ones: the channel of a key minted in a channel, otherwise the channel the
+conversation belongs to (a Slack thread's parent channel; never the source
+channel of a DM). Before every message the session's tool settings are set
+again from the current policy, so a session created before tool safety was
+on, or one whose agent allowed a tool outright, still asks. The process that
+sent the turn answers its tool calls, deciding each one when it is made.
+With `DAIMON_TOOL_SAFETY__ENABLED` off, ordinary third-party calls the
+session still asks about are allowed.
+
+Daimon's own actions that wait for a person's card in chat ask in these
+sessions and are refused there. Switching an agent's backend and sending
+Microsoft mail or invites are refused with tool safety on or off; Microsoft
+file changes, which ask in chat only with tool safety on, are refused only
+with it on.
+
+Reading a session never answers a tool call. If the service restarts while an
+agent-chat turn waits on one, the turn stays paused, and `get_session` and
+`get_my_session` report `status: paused` with the hint "paused: call
+continue_turn to resume". Only the session's own account can resume it, by
+calling `continue_turn`, with or without a message; the waiting calls are then
+decided by the policy in force at that moment, under the channel rules of the
+message that started the turn, and the session is checked and its tools set
+again before any new message. An admin who can read another member's channel
+conversation on the hub cannot resume it. A turn that agent chat did not
+start, such as a chat turn waiting on someone's confirmation card, reads as
+paused with the hint "paused: waiting for approval where it was asked", and
+`continue_turn` refuses it: only that card answers it. The list tools report
+the provider's own status, so a paused turn lists as `idle`.
 
 ## Channel rules
 
@@ -96,7 +194,6 @@ channel's and its category's rule.
 | Sessions read and continued by | turns inside | own agents inside | anyone allowed | `session_homes` |
 | Memory writable | no | own agents only | yes | `memory_writable` |
 | Content kept inside | no | yes | no | `keeps_content`, `held_to` |
-| People from another organisation answered | no | yes | no | `answers_external` |
 | Agents listed there | all | own only | all | `listed_at` |
 | Default agent | any | own only; never cleared | any | `binding_refusal`, `clear_refusal` |
 | Charged to its budget | its turns | its turns and its own agents' calls | its turns | `budget_channel` |
@@ -117,10 +214,6 @@ Daimon's server-wide name or avatar there. See [publishing](#publishing).
 
 **Listed** covers agents, their skills, environments, routines, timers and
 defaults. From outside, a channel's own agents are hidden everywhere.
-
-**People from another organisation** (a Teams guest the tenant doesn't list
-as a member) are answered only in a channel with `readers: own` or its
-threads, never in its setup thread or a DM.
 
 A thread whose channel is unknown fails closed while any channel's readers
 are `own`, since it may lie in one (`home_unknown`).
@@ -249,7 +342,7 @@ error and prints no set.
 isolated channels and channel pins) reads as the same rules and is rewritten
 in the new shape on its next change, so no migration runs.
 
-The invoker allowlist, the Teams guests counted as members, read-only DM
+The invoker allowlist, read-only DM
 memory, environments, budgets and operator tokens are not
 channel or agent rules. They say who may act and who may change the rules.
 

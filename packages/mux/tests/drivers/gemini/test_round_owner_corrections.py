@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, localcontext
 from pathlib import Path
 
@@ -223,9 +224,12 @@ def test_stale_higher_category_stays_floor_only_and_cannot_release_hold(
         tenant_id=SCOPE.tenant_id,
         account_id=SCOPE.account_id,
     )
-    book.accept(snapshot("2026-10-12T01:00:00Z"), session, "0" * 64)
-    book.observe("owned-input", snapshot("2026-10-12T00:59:00Z", **{category: 10000}))
-    book.observe("owned-input", snapshot("2026-10-12T01:01:00Z"), final=True)
+    start = datetime.now(UTC)
+    book.accept(snapshot(start.isoformat()), session, "0" * 64)
+    book.observe(
+        "owned-input", snapshot((start - timedelta(minutes=1)).isoformat(), **{category: 10000})
+    )
+    book.observe("owned-input", snapshot((start + timedelta(minutes=1)).isoformat()), final=True)
     actual, bounds = book.amounts(attempts=1)
     assert not actual.usage_complete and book.native["owned-input"].uncertain
     assert book.native["owned-input"].maxima[category] == 10000
@@ -262,10 +266,11 @@ def test_absent_or_conflicting_model_without_accepted_post_proof_is_unknown(
         tenant_id=SCOPE.tenant_id,
         account_id=SCOPE.account_id,
     )
-    raw = snapshot("2026-10-12T01:00:00Z")
+    start = datetime.now(UTC)
+    raw = snapshot(start.isoformat())
     raw["model"] = model
     book.accept(raw, session, "0" * 64)
-    raw["updated"] = "2026-10-12T01:01:00Z"
+    raw["updated"] = (start + timedelta(minutes=1)).isoformat()
     book.observe("owned-input", raw, final=True)
     actual, _ = book.amounts(attempts=1)
     assert not actual.usage_complete

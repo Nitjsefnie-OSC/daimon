@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -47,7 +48,7 @@ class FaultyFinal(NativeWire):
                 elif self.mode == "foreign-model":
                     raw["model"] = "gemini-3.5-pro"
                 elif self.mode == "stale":
-                    raw["updated"] = "2026-10-11T00:00:00Z"
+                    raw["updated"] = (self.created - timedelta(days=1)).isoformat()
                 return httpx.Response(200, json=raw)
         return response
 

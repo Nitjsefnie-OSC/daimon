@@ -22,6 +22,14 @@ credential.
 Everything a run creates is listed in its manifest; `cleanup` revokes first
 (the bearer, then the Daimon token), then drops only the manifest's schema.
 Exposing the gate beyond loopback (a temporary tunnel) is a separate follow-up.
+
+`build_host` builds both halves for one throwaway run. A test suite that runs
+many short hosts splits them: `build_shared_host` makes the schema, tenant,
+account and signing secret once per worker, and `build_run` adds, per test, a
+fresh agent token, run bearer, gate and manifest on top of it (`end_run` revokes
+them). The app itself is built per run: its lifespan drains the audit queue and
+closes its HTTP clients, so one instance cannot be served twice. Only
+`cleanup`, called on the shared host's manifest, drops the schema.
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from anthropic import AsyncAnthropic
+from daimon.core._models import Base
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_agent_mcp_token
@@ -62,7 +71,7 @@ from daimon.testing.qa_mcp_gate import RunBearer as RunBearer
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 # The F1 default-capability contract's MCP pair, so the host cannot drift from it.
 ALLOWED_TOOLS: tuple[str, ...] = tuple(sorted(MCP_TOOLS))
@@ -241,6 +250,25 @@ def synthetic_anthropic(
 
 
 @dataclass
+class SharedQaHost:
+    """The part of a host that outlives a run: schema, tenant, account and signing secret.
+
+    Its `manifest` owns the schema, so `cleanup(shared.manifest.path(root), ...)`
+    is what drops it; a per-run manifest names the same schema but cannot.
+    """
+
+    manifest: Manifest
+    root: Path
+    host: str
+    database_url: str
+    engine: AsyncEngine
+    sessions: async_sessionmaker[AsyncSession]
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    secret_text: str
+
+
+@dataclass
 class QaHost:
     """A built host: the gate to serve, its bearer and manifest, and its engine."""
 
@@ -250,6 +278,73 @@ class QaHost:
     root: Path
     engine: AsyncEngine
     tool_names: tuple[str, ...]
+    # Set when the run sits on a shared host: `end_run` then revokes but never drops.
+    shared: SharedQaHost | None = None
+
+
+def _check_run_arguments(host: str, ttl: dt.timedelta, run_id: str) -> None:
+    check_loopback(host)
+    if ttl > dt.timedelta(hours=2):
+        raise QaHostError("a QA bearer lives at most two hours")
+    if not _RUN_ID.fullmatch(run_id):
+        raise QaHostError(f"run id {run_id!r} must be 1-32 of [a-z0-9_]")
+
+
+async def build_shared_host(
+    *,
+    database_url: str,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    ttl: dt.timedelta = dt.timedelta(minutes=30),
+    root: Path = DEFAULT_ROOT,
+    run_id: str | None = None,
+    now: dt.datetime | None = None,
+) -> SharedQaHost:
+    """Create the run's schema and seed its tenant and account. Nothing is built or served."""
+    check_database(database_url)
+    now = now or dt.datetime.now(dt.UTC)
+    run_id = run_id or uuid.uuid4().hex[:12]
+    _check_run_arguments(host, ttl, run_id)
+    tenant_id = uuid.uuid5(uuid.NAMESPACE_URL, f"daimon-qa-mcp:{run_id}")
+    manifest = Manifest(
+        run_id=run_id,
+        created_at=now.isoformat(),
+        expires_at=(now + ttl).isoformat(),
+        host=host,
+        port=port,
+        database=_sanitized(database_url),
+        schema=f"qa_mcp_{run_id}",
+        tenant_id=str(tenant_id),
+    )
+    manifest.save(root)
+
+    engine = build_test_engine(database_url, manifest.schema)
+    try:
+        # Inside the cleanup scope: a create that fails halfway leaves nothing.
+        await _create_schema_with_tables(engine, manifest.schema)
+        manifest.status = "schema"
+        manifest.save(root)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with sessions() as session, session.begin():
+            tenant = await make_tenant(session, id=tenant_id, workspace_id=f"qa-mcp-{run_id}")
+            account = await make_account(session, tenant=tenant)
+        return SharedQaHost(
+            manifest=manifest,
+            root=root,
+            host=host,
+            database_url=database_url,
+            engine=engine,
+            sessions=sessions,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            # The verifier signs with the setting's string value, as bytes.
+            secret_text=secrets.token_urlsafe(48),
+        )
+    except BaseException:
+        # A half-built run leaves nothing behind.
+        await engine.dispose()
+        await cleanup(manifest.path(root), database_url=database_url)
+        raise
 
 
 async def build_host(
@@ -263,72 +358,113 @@ async def build_host(
     now: dt.datetime | None = None,
 ) -> QaHost:
     """Create the run's schema, seed it, and build the gated app. Nothing is served yet."""
-    check_database(database_url)
-    check_loopback(host)
-    if ttl > dt.timedelta(hours=2):
-        raise QaHostError("a QA bearer lives at most two hours")
     now = now or dt.datetime.now(dt.UTC)
+    shared = await build_shared_host(
+        database_url=database_url,
+        host=host,
+        port=port,
+        ttl=ttl,
+        root=root,
+        run_id=run_id,
+        now=now,
+    )
+    try:
+        # The run owns the schema here: it shares the shared host's manifest.
+        return await _build_run(shared, shared.manifest, ttl, now)
+    except BaseException:
+        await shared.engine.dispose()
+        await cleanup(shared.manifest.path(root), database_url=database_url)
+        raise
+
+
+async def build_run(
+    shared: SharedQaHost,
+    *,
+    port: int = 8765,
+    ttl: dt.timedelta = dt.timedelta(minutes=30),
+    root: Path | None = None,
+    run_id: str | None = None,
+    now: dt.datetime | None = None,
+) -> QaHost:
+    """Add one run to a shared host: its own token, bearer, gate and manifest.
+
+    Rows an earlier run left in the schema are deleted first (everything but the
+    shared tenant and account), so a run starts from the state a fresh host
+    would. The run's manifest names the shared schema but does not own it:
+    `cleanup` refuses it, and `end_run` only revokes.
+    """
+    now = now or dt.datetime.now(dt.UTC)
+    root = root or shared.root
     run_id = run_id or uuid.uuid4().hex[:12]
-    if not _RUN_ID.fullmatch(run_id):
-        raise QaHostError(f"run id {run_id!r} must be 1-32 of [a-z0-9_]")
-    schema = f"qa_mcp_{run_id}"
-    tenant_id = uuid.uuid5(uuid.NAMESPACE_URL, f"daimon-qa-mcp:{run_id}")
+    _check_run_arguments(shared.host, ttl, run_id)
     manifest = Manifest(
         run_id=run_id,
         created_at=now.isoformat(),
         expires_at=(now + ttl).isoformat(),
-        host=host,
+        host=shared.host,
         port=port,
-        database=_sanitized(database_url),
-        schema=schema,
-        tenant_id=str(tenant_id),
+        database=shared.manifest.database,
+        schema=shared.manifest.schema,
+        tenant_id=shared.manifest.tenant_id,
     )
     manifest.save(root)
-
-    engine = build_test_engine(database_url, schema)
-    try:
-        # Inside the cleanup scope: a create that fails halfway leaves nothing.
-        await _create_schema_with_tables(engine, schema)
-        manifest.status = "schema"
-        manifest.save(root)
-        return await _seed_and_build(engine, manifest, database_url, host, port, ttl, root, now)
-    except BaseException:
-        # A half-built run leaves nothing behind.
-        await engine.dispose()
-        await cleanup(manifest.path(root), database_url=database_url)
-        raise
+    async with shared.engine.begin() as conn:
+        await conn.execute(text(_wipe_run_rows_sql(shared.manifest.schema)))
+    qa = await _build_run(shared, manifest, ttl, now, root=root)
+    qa.shared = shared
+    return qa
 
 
-async def _seed_and_build(
-    engine: AsyncEngine,
+def _wipe_run_rows_sql(schema: str) -> str:
+    """Child-first DELETEs over every ORM table except the shared tenant and account."""
+    keep = {"tenants", "accounts"}
+    deletes = " ".join(
+        f'DELETE FROM "{schema}"."{table.name}";'
+        for table in reversed(Base.metadata.sorted_tables)
+        if table.name not in keep
+    )
+    return f"DO $$ BEGIN {deletes} END $$"
+
+
+async def end_run(qa: QaHost) -> Manifest:
+    """Revoke a shared-host run's bearer, then its Daimon token. The schema stays. Idempotent."""
+    shared = qa.shared
+    if shared is None:
+        raise QaHostError("end_run is for runs on a shared host; use cleanup for build_host")
+    manifest = qa.manifest
+    qa.bearer.revoke()
+    if manifest.token_jti is not None:
+        async with shared.sessions() as session, session.begin():
+            await revoke_mcp_token(
+                session, jti=uuid.UUID(manifest.token_jti), now=dt.datetime.now(dt.UTC)
+            )
+    manifest.status = "cleaned"
+    manifest.save(qa.root)
+    return manifest
+
+
+async def _build_run(
+    shared: SharedQaHost,
     manifest: Manifest,
-    database_url: str,
-    host: str,
-    port: int,
     ttl: dt.timedelta,
-    root: Path,
     now: dt.datetime,
+    *,
+    root: Path | None = None,
 ) -> QaHost:
     from daimon.adapters.mcp.server import create_mcp_app
     from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
     from pydantic import HttpUrl, PostgresDsn, SecretStr
 
+    root = root or shared.root
     run_id = manifest.run_id
-    tenant_id = uuid.UUID(manifest.tenant_id)
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    # The verifier signs with the setting's string value, as bytes.
-    secret_text = secrets.token_urlsafe(48)
-    secret = secret_text.encode()
-    async with sessions() as session, session.begin():
-        tenant = await make_tenant(session, id=tenant_id, workspace_id=f"qa-mcp-{run_id}")
-        account = await make_account(session, tenant=tenant)
+    async with shared.sessions() as session, session.begin():
         daimon_token = await mint_agent_mcp_token(
             session,
-            account_id=account.id,
-            tenant_id=tenant.id,
-            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=QA_AGENT_ID),
+            account_id=shared.account_id,
+            tenant_id=shared.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=shared.tenant_id, ma_agent_id=QA_AGENT_ID),
             label=f"qa-mcp-{run_id}",
-            secret=secret,
+            secret=shared.secret_text.encode(),
             now=now,
             ttl_days=1,
         )
@@ -337,17 +473,19 @@ async def _seed_and_build(
     with scrubbed_environment():
         settings = Settings(
             _env_file=None,  # pyright: ignore[reportCallIssue]
-            database=DatabaseSettings(url=PostgresDsn(database_url)),
+            database=DatabaseSettings(url=PostgresDsn(shared.database_url)),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-qa-synthetic-no-egress")),
             mcp=McpSettings(
-                jwt_secret=SecretStr(secret_text),
-                public_url=HttpUrl(f"http://{host}:{port}/mcp"),
+                jwt_secret=SecretStr(shared.secret_text),
+                public_url=HttpUrl(f"http://{manifest.host}:{manifest.port}/mcp"),
             ),
         )
         app = create_mcp_app(
             settings=settings,
-            sessionmaker=sessions,
-            anthropic=synthetic_anthropic(tenant.id, account.id, manifest.refused_egress),
+            sessionmaker=shared.sessions,
+            anthropic=synthetic_anthropic(
+                shared.tenant_id, shared.account_id, manifest.refused_egress
+            ),
             billing_config=None,
         )
     manifest.public_url_host = urlsplit(str(settings.mcp.public_url)).hostname
@@ -366,7 +504,12 @@ async def _seed_and_build(
     manifest.save(root)
     gate = McpGate(app, bearer=bearer, daimon_token=daimon_token, allowed_tools=ALLOWED_TOOLS)
     return QaHost(
-        gate=gate, bearer=bearer, manifest=manifest, root=root, engine=engine, tool_names=remaining
+        gate=gate,
+        bearer=bearer,
+        manifest=manifest,
+        root=root,
+        engine=shared.engine,
+        tool_names=remaining,
     )
 
 

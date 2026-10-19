@@ -23,7 +23,11 @@ from typing import Any, cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
+from anthropic.types.beta import (
+    BetaManagedAgentsAgent,
+    BetaManagedAgentsAnthropicSkill,
+    BetaManagedAgentsCustomSkill,
+)
 from anthropic.types.beta.beta_managed_agents_custom_tool import BetaManagedAgentsCustomTool
 from anthropic.types.beta.beta_managed_agents_custom_tool_input_schema import (
     BetaManagedAgentsCustomToolInputSchema,
@@ -98,6 +102,7 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from daimon.testing.membership import FixtureMembershipResolver
 from sqlalchemy import Connection, event, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -106,6 +111,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import QueuePool
+from structlog.testing import capture_logs
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 _AGENT_ID = "ag_prep"
@@ -172,6 +178,8 @@ class _Transport:
         self.updates: list[dict[str, Any]] = []
         self.fail_session_create = False
         self.fail_message = "boom"
+        # A skill id the provider refuses to resolve on any create that sends it.
+        self.refuse_skill: str | None = None
         self.fail_shared_memory_create = False
         self.retrieve_error: int | None = None
         _register(self.state, _agent())
@@ -217,6 +225,21 @@ class _Transport:
                         "error": {"type": "invalid_request_error", "message": "outage"},
                     },
                 )
+            if self.refuse_skill is not None and (request.method, path) == ("POST", "/v1/sessions"):
+                agent = json.loads(request.content)["agent"]
+                sent = agent.get("skills", []) if isinstance(agent, dict) else []
+                if any(skill["skill_id"] == self.refuse_skill for skill in sent):
+                    return httpx.Response(
+                        400,
+                        json={
+                            "type": "error",
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": "Could not resolve one or more skills: "
+                                f'skill "{self.refuse_skill}"',
+                            },
+                        },
+                    )
             if self.fail_session_create and (request.method, request.url.path) == (
                 "POST",
                 "/v1/sessions",
@@ -260,6 +283,7 @@ async def _settle_every_session(
 
 def _deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport) -> TurnDeps:
     return TurnDeps(
+        membership_resolver=FixtureMembershipResolver("user-1"),
         anthropic=transport.client(),
         sessionmaker=sessionmaker,
         deployment_default=DeploymentDefault(),
@@ -1216,19 +1240,29 @@ async def test_a_channels_skills_are_added_at_create_and_read_as_current_on_the_
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Create and the drift check build the same skill list; dropping one replaces the session."""
+    """Create and the drift check build the same skill list; dropping one replaces the session.
+
+    The list leads with a platform's built-in (Teams' Office skills), which
+    rides the same override at its latest version.
+    """
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     transport = _Transport()
     deps = _deps(db_session_factory, transport)
-    extra = (BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7"),)
+    extra = (
+        BetaManagedAgentsAnthropicSkill(type="anthropic", skill_id="docx", version="latest"),
+        BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7"),
+    )
     with_skill = replace(_admission(account=account), channel_skills=extra)
 
     first = await _prepare(deps, with_skill, tenant=tenant, account=account)
     assert isinstance(first, PreparedTurn)
     frozen = transport.state.sessions[first.ma_session_id].agent.skills
-    assert [(s.skill_id, s.version) for s in frozen] == [("skill_team", "v7")]
+    assert [(s.type, s.skill_id, s.version) for s in frozen] == [
+        ("anthropic", "docx", "latest"),
+        ("custom", "skill_team", "v7"),
+    ], "the session runs the platform's skills, then the channel's"
 
     second = await _prepare(deps, with_skill, tenant=tenant, account=account)
     assert isinstance(second, PreparedTurn)
@@ -1573,6 +1607,50 @@ async def test_a_replacement_for_a_deleted_channel_skill_names_it_instead_of_ret
     assert "Ask again to retry" not in message
     still_live = await _live_row(db_session_factory, tenant=tenant, account=account)
     assert still_live is not None and still_live.ma_session_id == first.ma_session_id
+
+
+async def test_a_refused_platform_skill_is_left_out_without_a_message_or_a_replacement(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A built-in a platform adds that the provider refuses never fails the turn.
+
+    The create is retried without it and the user sees nothing about channel
+    skills; it stays out of new sessions for a while, so the next turn, whose
+    admission leaves it out, reuses the session instead of replacing it.
+    """
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    transport.refuse_skill = "docx"
+    deps = _deps(db_session_factory, transport)
+    team = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="v7")
+    docx = BetaManagedAgentsAnthropicSkill(type="anthropic", skill_id="docx", version="latest")
+    admission = replace(
+        _admission(account=account),
+        channel_skills=(docx, team),
+        platform_skill_ids=frozenset({"docx"}),
+    )
+
+    with capture_logs() as logs:
+        first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn), "the turn runs"
+    frozen = transport.state.sessions[first.ma_session_id].agent.skills
+    assert [s.skill_id for s in frozen] == ["skill_team"], "it runs without the refused skill"
+    assert transport.creates == 2, "one retry"
+    assert [
+        log["skill_id"] for log in logs if log["event"] == "session.platform_skill_refused"
+    ] == ["docx"], "the operator is told once"
+    assert deps.platform_skill_memory.is_refused(tenant.id, "docx", now=datetime.now(UTC)), (
+        "admission leaves it out for a while"
+    )
+
+    without = replace(admission, channel_skills=(team,), platform_skill_ids=frozenset())
+    second = await _prepare(deps, without, tenant=tenant, account=account)
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id == first.ma_session_id, "no replacement on the next turn"
+    assert transport.creates == 2
 
 
 async def test_the_missing_skill_message_holds_through_the_replacement_backoff(
@@ -2251,86 +2329,6 @@ async def test_tightening_memory_access_never_runs_the_writable_session(
         assert third.ma_session_id == second.ma_session_id
 
 
-@pytest.mark.parametrize("budget_change", [False, True], ids=["same-channel", "new-channel"])
-@pytest.mark.parametrize("active", [False, True], ids=["idle", "active"])
-async def test_an_external_caller_never_runs_or_carries_a_members_session(
-    active: bool,
-    budget_change: bool,
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A member's session may hold the agent's keys, mounted or copied into its
-    workspace. Whatever else changed with it, someone from another
-    organisation never runs on it nor inherits its work."""
-    tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
-    await db_session.commit()
-    transport = _Transport()
-    deps = _deps(db_session_factory, transport)
-    member = replace(_admission(account=account), budget_channel_id="channel-a")
-    first = await _prepare(deps, member, tenant=tenant, account=account)
-    assert isinstance(first, PreparedTurn) and first.mapping_id is not None
-    if active:
-        async with db_session_factory.begin() as session:
-            await mark_turn_active(
-                session, id=first.mapping_id, active_turn_message_id="in-flight", now=_NOW
-            )
-
-    async def forbidden_checkpoint(**kwargs: Any) -> Any:
-        pytest.fail("a member's workspace must not be carried to an external caller")
-
-    external = replace(
-        member,
-        is_external=True,
-        budget_channel_id="channel-b" if budget_change else "channel-a",
-    )
-    second = await _prepare(
-        deps, external, tenant=tenant, account=account, transfer=forbidden_checkpoint
-    )
-
-    if active:
-        assert isinstance(second, PreparationBusy), "the busy member session is waited out"
-        assert transport.creates == 1, "and nothing is created meanwhile"
-        return
-    assert isinstance(second, PreparedTurn)
-    assert second.ma_session_id != first.ma_session_id, "the member session is replaced"
-    current = await _live_row(db_session_factory, tenant=tenant, account=account)
-    assert current is not None and current.effective_config is not None
-    assert current.effective_config.is_external, "the successor records its external caller"
-    third = await _prepare(deps, external, tenant=tenant, account=account)
-    assert isinstance(third, PreparedTurn)
-    assert third.ma_session_id == second.ma_session_id, "and is reused for them after"
-
-
-async def test_a_member_after_an_external_caller_keeps_the_sessions_work(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """An external caller's session holds none of the agent's keys: a member
-    answered next gets a session with them, carrying its work over."""
-    tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
-    await db_session.commit()
-    transport = _Transport()
-    deps = _deps(db_session_factory, transport)
-    member = _admission(account=account)
-    first = await _prepare(deps, replace(member, is_external=True), tenant=tenant, account=account)
-    assert isinstance(first, PreparedTurn)
-    carried: list[str] = []
-
-    async def _transfer(**kwargs: Any) -> PreparedReplacement:
-        carried.append(kwargs["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="history", user_prefix=""
-        )
-
-    second = await _prepare(deps, member, tenant=tenant, account=account, transfer=_transfer)
-
-    assert isinstance(second, PreparedTurn)
-    assert second.ma_session_id != first.ma_session_id, "the member gets a session of their own"
-    assert carried == [first.ma_session_id], "carrying the external session's work"
-
-
 @pytest.mark.parametrize(
     ("sealed", "is_dm", "dm_read_only", "expected"),
     [
@@ -2942,7 +2940,9 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
     runtime = SimpleNamespace(
-        client=client, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=client,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     auth = AuthIdentity(
         account_id=first.admission.account_id,
@@ -2953,7 +2953,11 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     real_recheck = _admission_recheck(
-        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -3043,7 +3047,9 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         tasks.extend(asyncio.create_task(send(i)) for i in range(1, 15))
         # All peers must attempt the real PostgreSQL fence before releasing
         # the holder. Try-lock contenders now back off outside the pool/gate.
-        await asyncio.wait_for(peers_entered.wait(), 3)
+        # Membership and ownership reads precede the fence; allow loaded hosts
+        # to complete them without changing the bounded pool-contention proof.
+        await asyncio.wait_for(peers_entered.wait(), 15)
         tasks.append(asyncio.create_task(compatible_preparation()))
         tasks.append(asyncio.create_task(replacement()))
         release.set()
@@ -3142,10 +3148,16 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     runtime = SimpleNamespace(
-        client=deps.anthropic, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=deps.anthropic,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     recheck = _admission_recheck(
-        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
 
     async def send(index, phase):
@@ -3296,10 +3308,16 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     runtime = SimpleNamespace(
-        client=deps.anthropic, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=deps.anthropic,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     recheck = _admission_recheck(
-        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
 
     async def send(index, phase, retired=False):
@@ -3882,7 +3900,11 @@ async def test_old_session_cannot_be_written_after_successor_exists(db_session, 
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     recheck = _admission_recheck(
-        auth, sessionmaker=db_session_factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=db_session_factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
     before = len(transport.state.events.get(first.ma_session_id, []))
     from daimon.core.session_mutation import SessionRetired
@@ -4123,7 +4145,9 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
     runtime = SimpleNamespace(
-        client=client, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=client,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     auth = AuthIdentity(
         account_id=account.id,
@@ -4150,8 +4174,14 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         _continue_turn_impl(runtime, auth, first.ma_session_id, "in flight")
     )
     replacing = None
+    entered_wait = asyncio.create_task(entered.wait())
     try:
-        await asyncio.wait_for(entered.wait(), 5)
+        done, _ = await asyncio.wait(
+            {entered_wait, sending}, timeout=5, return_when=asyncio.FIRST_COMPLETED
+        )
+        if sending in done:
+            await sending  # Surface an early send failure rather than timing out on entered.
+        assert entered_wait in done, "the send must enter while holding its mutation fence"
         replacing = asyncio.create_task(
             _prepare(
                 deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
@@ -4168,8 +4198,12 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         assert await _count_live_rows(factory, tenant=tenant, account=account) == 1
     finally:
         release.set()
+        entered_wait.cancel()
         await asyncio.gather(
-            sending, *([replacing] if replacing is not None else []), return_exceptions=True
+            entered_wait,
+            sending,
+            *([replacing] if replacing is not None else []),
+            return_exceptions=True,
         )
 
 

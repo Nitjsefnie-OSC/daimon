@@ -136,6 +136,12 @@ def hub_session_access(subject: Subject, mode: Literal["read", "continue"]) -> I
         _HUB_ACCESS.reset(token)
 
 
+def hub_access_mode() -> Literal["read", "continue"] | None:
+    """The hub call in progress (`hub_session_access`), or None off the hub."""
+    access = _HUB_ACCESS.get()
+    return access.mode if access is not None else None
+
+
 async def admin_readable_legacy_sessions(
     runtime: McpRuntime, auth: AuthIdentity, sessions: Sequence[BetaManagedAgentsSession]
 ) -> set[str]:

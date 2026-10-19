@@ -8,6 +8,7 @@ keep a caller on a stale session forever.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -793,9 +794,9 @@ def test_a_snapshot_without_a_personal_store_keeps_its_recorded_fingerprint() ->
     assert fingerprint_identity(with_personal) != fingerprint_identity(snapshot)
 
 
-def test_a_members_snapshot_keeps_its_recorded_fingerprint_and_json() -> None:
-    """Rows recorded before the external flag existed must not look changed:
-    only a session made for someone from another organisation records it."""
+def test_a_snapshot_recorded_with_the_external_flag_still_parses() -> None:
+    """Earlier builds recorded `is_external` for someone from another organisation:
+    such a row reads as anyone's, so their session is kept and upgraded in place."""
     snapshot = desired_snapshot(
         _agent(),
         hidden_mcp_server_names=frozenset(),
@@ -806,14 +807,13 @@ def test_a_members_snapshot_keeps_its_recorded_fingerprint_and_json() -> None:
         memory_store_id=None,
         vault_id=None,
     )
-    external = snapshot.model_copy(update={"is_external": True})
+    stored = json.loads(snapshot.model_dump_json()) | {"is_external": True}
 
-    assert "is_external" not in snapshot.model_dump_json(), "a member's row omits the flag"
-    assert SessionSnapshot.model_validate_json(external.model_dump_json()) == external, (
-        "an external caller's flag survives the JSONB round trip"
-    )
-    assert fingerprint_identity(external) != fingerprint_identity(snapshot), (
-        "the flag is session identity: flipping it replaces the session"
+    parsed = SessionSnapshot.model_validate_json(json.dumps(stored))
+
+    assert parsed == snapshot, "the old flag is ignored"
+    assert fingerprint_identity(parsed) == fingerprint_identity(snapshot), (
+        "the old flag no longer counts as session identity"
     )
 
 
@@ -903,3 +903,90 @@ def test_native_fast_model_is_in_session_identity_and_pricing():
     assert fast.pricing_id == "claude-opus-5-5-fast"
     assert identity_change_reasons(standard, fast) == ("model",)
     assert fingerprint_identity(fast) != fingerprint_identity(standard)
+
+
+def test_a_daimon_rule_changes_the_tools_hash_and_clearing_it_restores_the_hash() -> None:
+    """The bind-time drift check sees a rule added or cleared since the session was made."""
+    from daimon.core.session_compat import (
+        DEFAULT_MA_CAPABILITIES,
+        ReuseAsIs,
+        UpdateInPlace,
+        decide_session_compatibility,
+    )
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.testing.ma_models import ma_agent
+
+    agent = ma_agent(
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "daimon-mcp",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            },
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            },
+        ],
+        mcp_servers=[
+            {"name": "daimon-mcp", "type": "url", "url": "https://mcp.example/mcp"},
+            {"name": "linear", "type": "url", "url": "https://linear.example/mcp"},
+        ],
+    )
+    policy = ToolSafetyPolicy(enabled=True, agent_rules=True)
+
+    def desired(rule_tools: frozenset[str] = frozenset()) -> SessionSnapshot:
+        return desired_snapshot(
+            agent,
+            hidden_mcp_server_names=frozenset(),
+            environment_id="env",
+            env_sha256=None,
+            repo_url=None,
+            repo_branch=None,
+            memory_store_id=None,
+            vault_id=None,
+            tool_safety=policy,
+            public_url="https://mcp.example/mcp",
+            daimon_rule_tools=rule_tools,
+        )
+
+    base = desired()
+    assert desired(frozenset()).tools_sha256 == base.tools_sha256
+    asking = desired(frozenset({"hubspot_update_objects"}))
+    assert asking.tools_sha256 != base.tools_sha256
+    assert desired(frozenset({"hubspot_update_objects"})).tools_sha256 == asking.tools_sha256
+    assert desired(frozenset({"get_session"})).tools_sha256 != asking.tools_sha256
+    assert asking.mcp_servers_sha256 == base.mcp_servers_sha256
+
+    added = decide_session_compatibility(
+        recorded=base, desired=asking, capabilities=DEFAULT_MA_CAPABILITIES, now=_NOW
+    )
+    assert isinstance(added, UpdateInPlace) and added.reasons == ("tools",)
+    cleared = decide_session_compatibility(
+        recorded=asking, desired=desired(), capabilities=DEFAULT_MA_CAPABILITIES, now=_NOW
+    )
+    assert isinstance(cleared, UpdateInPlace) and cleared.reasons == ("tools",)
+    assert isinstance(
+        decide_session_compatibility(
+            recorded=desired(), desired=desired(), capabilities=DEFAULT_MA_CAPABILITIES, now=_NOW
+        ),
+        ReuseAsIs,
+    )
+    # Rules switched off: the same rows leave the hash alone.
+    off = desired_snapshot(
+        agent,
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+        tool_safety=ToolSafetyPolicy(enabled=True),
+        public_url="https://mcp.example/mcp",
+        daimon_rule_tools=frozenset({"hubspot_update_objects"}),
+    )
+    assert off.tools_sha256 == base.tools_sha256

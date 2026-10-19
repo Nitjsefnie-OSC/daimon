@@ -5,7 +5,7 @@
       {
         "channel_id": "source",
         "delta_usd": "-0.001050",
-        "id": "<id:16>",
+        "id": "<id:18>",
         "idempotency_key": "turn:<id:5>:<id:7>",
         "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
@@ -16,8 +16,8 @@
       {
         "channel_id": "source",
         "delta_usd": "-0.001050",
-        "id": "<id:17>",
-        "idempotency_key": "turn:<id:5>:<id:11>",
+        "id": "<id:19>",
+        "idempotency_key": "turn:<id:5>:<id:12>",
         "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
         "payment_intent": null,
@@ -27,7 +27,7 @@
       {
         "channel_id": null,
         "delta_usd": "100.000000",
-        "id": "<id:18>",
+        "id": "<id:20>",
         "idempotency_key": "test-00000000-0000-0000-0000-000000000001",
         "occurred_at": "<time:epoch+0s>",
         "payment_event_id": null,
@@ -75,7 +75,7 @@
         },
         "fresh_start_requested_at": null,
         "github_key_restart_notice": false,
-        "id": "<id:21>",
+        "id": "<id:23>",
         "identity_fingerprint": "4e5624180540ca86426da3bbcc3bf53f015c99826e3a130b46311229bfc28637",
         "ma_agent_id": "<id:1>",
         "ma_session_id": "<id:5>",
@@ -106,7 +106,7 @@
         "duration_ms": 0,
         "ended_at": "<time:epoch+0s>",
         "error_class": null,
-        "id": "<id:19>",
+        "id": "<id:21>",
         "input_tokens": 100,
         "model_calls": 1,
         "model_ids": [
@@ -141,7 +141,7 @@
         "duration_ms": 0,
         "ended_at": "<time:epoch+0s>",
         "error_class": null,
-        "id": "<id:20>",
+        "id": "<id:22>",
         "input_tokens": 100,
         "model_calls": 1,
         "model_ids": [
@@ -160,7 +160,7 @@
         "unpriced_calls": 0,
         "usage_refs": [
           {
-            "event_id": "<id:11>",
+            "event_id": "<id:12>",
             "session_id": "<id:5>"
           }
         ]
@@ -172,7 +172,7 @@
         "cache_read_input_tokens": 0,
         "channel_id": "source",
         "event_id": "<id:7>",
-        "id": "<id:14>",
+        "id": "<id:16>",
         "input_tokens": 100,
         "managed_session_id": "<id:5>",
         "model": "claude-sonnet-4-6",
@@ -185,8 +185,8 @@
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "channel_id": "source",
-        "event_id": "<id:11>",
-        "id": "<id:15>",
+        "event_id": "<id:12>",
+        "id": "<id:17>",
         "input_tokens": 100,
         "managed_session_id": "<id:5>",
         "model": "claude-sonnet-4-6",
@@ -865,7 +865,21 @@
         "kwargs": {
           "allowed_mentions": {
             "parse": []
-          }
+          },
+          "view": [
+            {
+              "components": [
+                {
+                  "custom_id": "<id:10>",
+                  "disabled": false,
+                  "label": "Switch server",
+                  "style": 2,
+                  "type": 2
+                }
+              ],
+              "type": 1
+            }
+          ]
         },
         "receiver": {
           "id": "dm-42"
@@ -950,7 +964,7 @@
       },
       "platform": "ma_http",
       "result": {
-        "body": "event: agent.message\ndata: {\"id\": \"<id:10>\", \"content\": [{\"text\": \"Hello from the agent!\", \"type\": \"text\"}], \"processed_at\": \"2026-10-09T00:00:00Z\", \"type\": \"agent.message\"}\n\nevent: span.model_request_end\ndata: {\"id\": \"<id:11>\", \"is_error\": false, \"model_request_start_id\": \"<id:12>\", \"model_usage\": {\"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"input_tokens\": 100, \"output_tokens\": 50, \"speed\": null}, \"processed_at\": \"2026-10-09T00:00:00Z\", \"type\": \"span.model_request_end\"}\n\nevent: session.status_idle\ndata: {\"id\": \"<id:13>\", \"processed_at\": \"2026-10-09T00:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
+        "body": "event: agent.message\ndata: {\"id\": \"<id:11>\", \"content\": [{\"text\": \"Hello from the agent!\", \"type\": \"text\"}], \"processed_at\": \"2026-10-09T00:00:00Z\", \"type\": \"agent.message\"}\n\nevent: span.model_request_end\ndata: {\"id\": \"<id:12>\", \"is_error\": false, \"model_request_start_id\": \"<id:13>\", \"model_usage\": {\"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"input_tokens\": 100, \"output_tokens\": 50, \"speed\": null}, \"processed_at\": \"2026-10-09T00:00:00Z\", \"type\": \"span.model_request_end\"}\n\nevent: session.status_idle\ndata: {\"id\": \"<id:14>\", \"processed_at\": \"2026-10-09T00:00:00Z\", \"stop_reason\": {\"type\": \"end_turn\"}, \"type\": \"session.status_idle\"}\n\n",
         "status": 200
       }
     },
@@ -1055,9 +1069,9 @@
               "type": "span.model_request_end"
             },
             {
-              "id": "<id:11>",
+              "id": "<id:12>",
               "is_error": false,
-              "model_request_start_id": "<id:12>",
+              "model_request_start_id": "<id:13>",
               "model_usage": {
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
@@ -1083,7 +1097,21 @@
         "kwargs": {
           "allowed_mentions": {
             "parse": []
-          }
+          },
+          "view": [
+            {
+              "components": [
+                {
+                  "custom_id": "<id:15>",
+                  "disabled": false,
+                  "label": "Switch server",
+                  "style": 2,
+                  "type": 2
+                }
+              ],
+              "type": 1
+            }
+          ]
         },
         "receiver": {
           "id": "dm-42"

@@ -17,6 +17,7 @@ from anthropic.types.beta.session_create_params import Resource
 from daimon.core.session_ports_compat import create_session_record, session_scope
 from daimon.core.session_seal import inherited_seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.actions import UserMessage
@@ -170,6 +171,7 @@ async def test_session_create_matches_legacy_wire_request(
                 tenant_id=tenant,
                 account_id=account,
                 resources=resources,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
         else:
             old = await old_client.beta.sessions.create(

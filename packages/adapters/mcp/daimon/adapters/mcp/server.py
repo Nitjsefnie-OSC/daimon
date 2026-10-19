@@ -41,6 +41,7 @@ from daimon.adapters.mcp.middleware.session_header import StripSessionIdMiddlewa
 from daimon.adapters.mcp.oauth_github import build_oauth_github_routes
 from daimon.adapters.mcp.oauth_github_personal import build_personal_link_routes
 from daimon.adapters.mcp.oauth_mcp import build_oauth_mcp_routes
+from daimon.adapters.mcp.oauth_microsoft import build_oauth_microsoft_routes
 from daimon.adapters.mcp.oauth_slack import build_oauth_slack_routes
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
@@ -73,6 +74,8 @@ from daimon.adapters.mcp.tools.github_requests import register_github_request_to
 from daimon.adapters.mcp.tools.github_working_repo import register_github_working_repo_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
+from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
+from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
 from daimon.adapters.mcp.tools.plain_text_mentions import register_plain_text_mentions_tools
 from daimon.adapters.mcp.tools.promo_codes import register_promo_code_tools
@@ -311,6 +314,17 @@ def create_mcp_app(
         else None
     )
     slack_http = SlackHttpSession()
+    # Teams members' own Microsoft 365: the Entra app, the crypto keys its
+    # refresh tokens are stored under, and the public root its callback uses.
+    microsoft = (
+        MicrosoftGraph(
+            config=effective_settings.microsoft_accounts,
+            fernet=fernet,
+            session_factory=effective_sessionmaker,
+        )
+        if effective_settings.microsoft_accounts_enabled and fernet is not None
+        else None
+    )
 
     effective_auth = auth
     if effective_auth is None:
@@ -366,6 +380,12 @@ def create_mcp_app(
         operator_rate_limiter=RateLimiter(
             max_requests=effective_settings.mcp.operator_calls_per_minute,
             window=timedelta(minutes=1),
+        ),
+        tool_safety=effective_settings.tool_safety,
+        public_url=(
+            str(effective_settings.mcp.public_url)
+            if effective_settings.mcp.public_url is not None
+            else None
         ),
     )
 
@@ -457,6 +477,7 @@ def create_mcp_app(
         artifact_store=artifact_store,
         teams_client=teams_client,
         slack_http=slack_http,
+        microsoft=microsoft,
     )
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
@@ -518,6 +539,11 @@ def create_mcp_app(
         register_fleet_tools(mcp, runtime, enabled=True, service=fleet_service)
     register_github_app_tools(mcp, runtime)
     register_github_connect_tools(mcp, runtime)
+    if microsoft is not None:
+        register_microsoft_tools(mcp, runtime)
+    elif missing := effective_settings.microsoft_accounts_missing():
+        # Partly set up: the feature stays off rather than failing the server.
+        log.warning("microsoft_accounts.disabled", missing=list(missing))
     register_github_request_tools(mcp, runtime)
     register_github_working_repo_tools(mcp, runtime)
     register_github_remove_repo_tools(mcp, runtime)
@@ -687,6 +713,13 @@ def create_mcp_app(
         app.add_route("/oauth/mcp/callback", mcp_oauth_callback, methods=["GET"])
     else:
         log.info("mcp oauth disabled", reason="no crypto keys or public url")
+
+    if microsoft is not None and effective_settings.mcp.app_root_url is not None:
+        microsoft_start, microsoft_callback = build_oauth_microsoft_routes(
+            graph=microsoft, app_root_url=str(effective_settings.mcp.app_root_url)
+        )
+        app.add_route("/oauth/microsoft/start", microsoft_start, methods=["GET"])
+        app.add_route("/oauth/microsoft/callback", microsoft_callback, methods=["GET"])
 
     github_connect_cfg = effective_settings.github_app
     if (

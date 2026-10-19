@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -72,12 +73,29 @@ def category(path: Path) -> Category:
     return "production"
 
 
-def scan(root: Path = ROOT) -> Inventory:
-    """Return stable records; surface parse errors instead of silently omitting calls."""
+def scan(
+    root: Path = ROOT,
+    *,
+    categories: AbstractSet[Category] | None = None,
+    prefilter: bool = False,
+) -> Inventory:
+    """Return stable records; surface parse errors instead of silently omitting calls.
+
+    ``categories`` keeps only files of those categories, decided from the path
+    before a file is read. ``prefilter`` parses only files whose text contains
+    ``beta``: every call this scan records spells ``.beta.<resource>``, so a
+    file without it holds none, and a file that does mention it is still parsed
+    (and its syntax error reported). Together they make the ratchet's
+    production-only scan parse a fraction of the tree. The default scan, which
+    regenerates the baseline, parses everything; a prefiltered scan's ``imports``
+    and ``files_scanned`` are partial.
+    """
     files: list[Path] = []
     for directory, subdirs, names in root.walk():
         subdirs[:] = sorted(name for name in subdirs if name not in _SKIP_DIRS)
         files.extend(directory / name for name in names if name.endswith(".py"))
+    if categories is not None:
+        files = [file for file in files if category(file.relative_to(root)) in categories]
     inventory: Inventory = {
         "files_scanned": len(files),
         "parse_errors": [],
@@ -87,8 +105,11 @@ def scan(root: Path = ROOT) -> Inventory:
     for file in sorted(files):
         path = file.relative_to(root)
         filename = path.as_posix()
+        source = file.read_text(encoding="utf-8")
+        if prefilter and "beta" not in source:
+            continue
         try:
-            tree = ast.parse(file.read_text(encoding="utf-8"), filename=filename)
+            tree = ast.parse(source, filename=filename)
         except SyntaxError as error:
             inventory["parse_errors"].append([filename, str(error)])
             continue

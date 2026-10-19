@@ -62,6 +62,10 @@ from .test_gemini_runtime_transport import clients_for
 
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
+# Anthropic's built-in skills have no bytes to represent: Gemini runs without them.
+# A platform-limited custom skill (microsoft-365) is not on the seeded agent.
+CUSTOM = [s for s in DEFAULT["skills"] if s["type"] == "custom" and "platforms" not in s]
+BUILT_IN = [s for s in DEFAULT["skills"] if s["type"] == "anthropic"]
 PARAMS = {
     "backend": "gemini",
     "caller_mcp": True,
@@ -82,12 +86,36 @@ PARAMS = {
         },
     ],
     "skills": [
-        {"type": "custom", "skill_id": f"source-{s['skill_id']}", "version": "1"}
-        for s in DEFAULT["skills"]
+        *(
+            {"type": "custom", "skill_id": f"source-{s['skill_id']}", "version": "1"}
+            for s in CUSTOM
+        ),
+        *({"type": "anthropic", "skill_id": s["skill_id"], "version": "1"} for s in BUILT_IN),
     ],
 }
 
 LATEST_PARAMS = {**PARAMS, "skills": [{**skill, "version": "latest"} for skill in PARAMS["skills"]]}
+
+GATED_CATALOGUE = (
+    "add_skill",
+    "call_tool",
+    "create_attachment_upload_url",
+    "create_notebook_upload_url",
+    "publish_report",
+    "search_tools",
+)
+GATED_PARAMS = {
+    **PARAMS,
+    "tools": [
+        PARAMS["tools"][0],
+        {
+            **PARAMS["tools"][1],
+            "configs": [
+                {"name": "add_skill", "enabled": True, "permission_policy": {"type": "always_ask"}}
+            ],
+        },
+    ],
+}
 
 # The recorded F2 source explicitly disables web tools and enumerates its MCP
 # tools; the recorded root above instead enables both builtin defaults.
@@ -174,7 +202,8 @@ async def source_mcp(consent_request):
 
 
 @pytest.fixture
-async def full(consent_request, source_mcp, monkeypatch, tmp_path):
+async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
+    gated = getattr(request, "param", False)
     request, service, source, actor, accepted, router, source_reads, *_ = consent_request
     from daimon.core.scope import DeploymentDefault
 
@@ -203,7 +232,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
         ),
     )
     bundles, archives, deployments = [], [], []
-    for item in DEFAULT["skills"]:
+    for item in CUSTOM:
         name = item["skill_id"]
         directory = ROOT / "defaults/skills" / name
         files = {
@@ -248,7 +277,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
         pytest.fail("Source attachment resolution must not enumerate other custom skills")
 
     router.add("GET", r"/v1/skills", no_catalogue)
-    for item in DEFAULT["skills"]:
+    for item in CUSTOM:
         skill_id = f"source-{item['skill_id']}"
         router.add(
             "GET",
@@ -312,7 +341,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
         pass
 
     readback_calls = []
-    catalogue_state = {"names": None}
+    catalogue_state = {"names": list(GATED_CATALOGUE) if gated else None}
     storage = {}
     for deployment, bundle in zip(deployments, bundles, strict=True):
         prefix = deployment.source.split("owned-offline/", 1)[1]
@@ -404,7 +433,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
         skill_bundle_publisher=RetainedSkillDeployments(tuple(deployments)),
     )
     mappings = []
-    for item, bundle, path in zip(DEFAULT["skills"], bundles, archives, strict=True):
+    for item, bundle, path in zip(CUSTOM, bundles, archives, strict=True):
         skill = await backend.skills.create(scope, bundle, key=item["skill_id"])
         version = skill.latest_version.version
         mappings.append(
@@ -421,7 +450,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
         "source_pin": source_preservation_pin(source),
         "model": ModelRef(provider="gemini", id=FLASH_PRIMARY).model_dump(mode="json"),
         "skills": mappings,
-        "mcp_tools": ["search_tools", "call_tool"],
+        "mcp_tools": list(GATED_CATALOGUE) if gated else ["search_tools", "call_tool"],
     }
     manifest.write_text(
         json.dumps(
@@ -488,6 +517,16 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
         yield {"quote": quote, "calls": calls, "represented": represented}
         return
     assert not {"tools", "skills", "mcp"}.intersection(quote.declared_drops)
+    if gated:
+        with pytest.raises(AgentBackendRefused, match="drops mismatch"):
+            await service.set_backend(
+                source,
+                "gemini",
+                accepted.local,
+                actor,
+                accepted_drops=("memory", "sandbox"),
+                expected_preview_digest=quote.digest,
+            )
     accepted = await service.set_backend(
         source,
         "gemini",
@@ -622,15 +661,19 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "consent_request",
-    [PARAMS, LATEST_PARAMS],
+    "consent_request,full",
+    [(PARAMS, False), (LATEST_PARAMS, False), (GATED_PARAMS, True)],
     indirect=True,
-    ids=["root-concrete", "root-latest"],
+    ids=["root-concrete", "root-latest", "gated-mcp-tool"],
 )
-async def test_full_default_preparation_and_fresh_followup_turns(full):
+async def test_full_default_preparation_and_fresh_followup_turns(full, request):
+    gated = request.node.callspec.params["full"]
     assert isinstance(full, tuple), "full source could not retain its authority"
     request, plan, canonical, native, calls, posts, token, *_ = full
-    assert len(canonical.target_spec.skills) == 11
+    assert BUILT_IN, "the default agent carries Anthropic built-ins for this test to skip"
+    assert len(canonical.target_spec.skills) == len(CUSTOM) == 11, (
+        "every authored skill is represented and the Anthropic built-ins are left out"
+    )
     # Assert the native request carries the complete represented authority.
     expected_tools = {tool.name for tool in canonical.target_spec.tools}
     assert {
@@ -693,7 +736,10 @@ async def test_full_default_preparation_and_fresh_followup_turns(full):
         assert body["system_instruction"] == canonical.target_spec.system
         assert token in json.dumps(body["tools"])
         remote = next(tool for tool in body["tools"] if tool["type"] == "mcp_server")
-        assert set(remote["allowed_tools"][0]["tools"]) == {"search_tools", "call_tool"}
+        expected_mcp = (
+            set(GATED_CATALOGUE) - {"add_skill"} if gated else {"search_tools", "call_tool"}
+        )
+        assert set(remote["allowed_tools"][0]["tools"]) == expected_mcp
     assert token not in json.dumps(native) and token not in plan.model_dump_json()
     assert (
         "offline-storage-token" not in json.dumps(native)
@@ -704,6 +750,66 @@ async def test_full_default_preparation_and_fresh_followup_turns(full):
         and b"offline-downscoped-token" not in path.read_bytes()
         for path in plan.records_path.parent.glob("records.sqlite*")
     )
+
+
+@pytest.mark.parametrize("consent_request", [GATED_PARAMS], indirect=True)
+@pytest.mark.parametrize("full", [True], indirect=True)
+async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+
+    assert isinstance(full, tuple), "gated source lost the whole MCP representation"
+    request, plan, canonical, native, _, posts, *_ = full
+    target = canonical.target_spec
+    marker = "mcp_tool:daimon-mcp:add_skill"
+    assert target.declared_drops == (marker, "memory", "sandbox")
+    assert marker in target.system
+    assert not {"tools", "skills", "mcp"}.intersection(target.declared_drops)
+    assert len(target.skills) == len(native["base_environment"]["sources"]) == 11
+    allowed = set(GATED_CATALOGUE) - {"add_skill"}
+    assert set(target.mcp_servers[0].tool_policy["allowed_tools"]) == allowed
+    remote = next(tool for tool in native["tools"] if tool["type"] == "mcp_server")
+    assert remote["allowed_tools"] == [
+        {"mode": "auto", "tools": list(target.mcp_servers[0].tool_policy["allowed_tools"])}
+    ]
+    assert "add_skill" not in json.dumps(remote)
+    # Catalogue verification still covers the complete original source. The
+    # provider execution allowlist is a reduction with its own consent marker.
+    assert set(plan.source_capabilities.mcp_tools) == set(GATED_CATALOGUE)
+    source = await capture_preparation_source(request, fresh=True)
+    missing = classify_source_obligations(
+        source,
+        target.model_copy(update={"declared_drops": ("memory", "sandbox")}),
+        environment=source.representations[0].environment,
+    )
+    assert marker in missing
+    assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [GATED_PARAMS], indirect=True)
+@pytest.mark.parametrize("full", [True], indirect=True)
+async def test_gemini_gated_loss_does_not_waive_runtime_catalogue_verification(full):
+    request, _, canonical, _, _, posts, *_ = full
+    runtime = build_gemini_runtime(canonical)
+    await runtime.read_agent_counterpart(canonical)
+    # Seeing only the reduced execution allowlist is not sufficient authority
+    # to resolve a runtime credential for the complete captured source.
+    full[11]["names"] = list(canonical.target_spec.mcp_servers[0].tool_policy["allowed_tools"])
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    connection = canonical.target_spec.mcp_servers[0]
+    with pytest.raises(ScopeViolation):
+        await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [GATED_PARAMS], indirect=True)
+@pytest.mark.parametrize("full", [True], indirect=True)
+async def test_gemini_native_readback_cannot_reenable_a_declared_unavailable_tool(full):
+    request, _, _, native, _, posts, *_ = full
+    remote = next(tool for tool in native["tools"] if tool["type"] == "mcp_server")
+    remote["allowed_tools"][0]["tools"].append("add_skill")
+    with pytest.raises((AdmissionDenied, UnsupportedCapability)):
+        await read_preparation_counterpart(scope_channel_runtimes(request)[0])
+    assert not posts
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

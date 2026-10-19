@@ -108,7 +108,9 @@ async def test_replay_sdk_owns_sync_async_models_and_interactions(
 
 
 class DefaultSkill(BaseModel):
+    type: str
     skill_id: str
+    platforms: tuple[str, ...] | None = None
 
 
 class AuthoredDefault(BaseModel):
@@ -132,6 +134,7 @@ def defaults() -> dict[str, SkillUpload]:
             ),
         )
         for skill in authored.skills
+        if skill.type == "custom" and skill.platforms is None
         for directory in (ROOT / "defaults/skills" / skill.skill_id,)
     }
 

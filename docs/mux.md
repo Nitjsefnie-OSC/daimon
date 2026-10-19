@@ -3160,13 +3160,16 @@ An agent-origin Gemini plan may supply `source_capabilities` in the existing
 provider runtime manifest. This is separate from accepting portable losses:
 preview and preparation read the original immutable skill versions and compare
 **every retained file byte**, then map supported automatic filesystem operations
-to the profile execution tool. No skills, tools or MCP loss can be accepted in
-this mode. Unknown native controls, publishing approval, foreign credentials,
-non-automatic tools and incomplete source inventories still refuse. Memory and
-the original sandbox remain explicit losses; no existing workspace is copied.
+to the profile execution tool. Coarse skills, tools or MCP losses cannot be
+accepted in this mode. A confirmation-gated MCP tool can be excluded only with
+the explicit per-tool loss consent described below; its sibling tools remain
+available. Unknown native controls, publishing approval, foreign credentials,
+non-automatic filesystem tools and incomplete source inventories still refuse.
+Memory and the original sandbox remain explicit losses; no existing workspace
+is copied.
 
 `source_capabilities` contains the complete `source_pin`, target `model`,
-`mcp_tools` allowlist and one `skills` entry per source skill. Each entry provides
+`mcp_tools` source catalogue and one `skills` entry per source skill. Each entry provides
 concrete `source` and `target` SkillRefs plus an absolute retained ZIP `archive`.
 The target version and digest name the canonical full-byte SkillUpload. Provider
 archive names retain their original spelling, including older underscore names.
@@ -3361,8 +3364,11 @@ explicit preview/consent loss. Model controls, repositories and any other source
 obligations retain their existing classification. Preserving skills, filesystem
 tools and authenticated MCP does not discharge those separate obligations.
 
-The MCP allowlist must equal the ordinary chat catalogue after the server's
-search transform (normally `search_tools` and `call_tool`). A recorded source
+The source `mcp_tools` list must equal the complete ordinary chat catalogue
+after the server's search transform, including directly listed approval tools
+alongside `search_tools` and `call_tool`. The target execution allowlist can
+exclude a confirmation-gated tool only with its named loss consent; that does
+not waive complete source-catalogue verification. A recorded source
 restricted to direct `describe_agent`/`list_my_sessions` is refused; preserving
 those operations through the proxy requires explicit consent to the actual
 source catalogue, rather than narrowing or expanding authority during a switch.
@@ -3376,6 +3382,15 @@ to automatic permission. OpenAI's hosted Agents API currently exposes no MCP
 MCP approval protocol cannot be used on Agents sessions. The existing OpenAI
 browser-origin approval path remains unchanged.
 
+The Gemini adapter also has no MCP approval request/response path. It compiles
+the retained tools as `allowed_tools: [{"mode": "auto", "tools": [...]}]` and
+omits each confirmation-gated tool from that list. This preserves automatic
+execution for the unaffected tools without granting automatic permission to a
+tool that required approval. Private skill mounts and the runtime MCP token
+still require the complete original source catalogue, not just the reduced
+execution list. Eleven attached skills and mapped filesystem tools can remain
+available alongside a named MCP tool loss.
+
 For this unsupported case, capture retains the server and its other tools, but
 excludes the gated tool from its executable `allowed_tools`. Preview declares
 `mcp_tool:<server>:<tool>` (for example `mcp_tool:daimon-mcp:add_skill`) and the
@@ -3387,3 +3402,17 @@ tools is refused rather than publishing an ambiguous empty allowlist. Existing u
 Anthropic permission policies retain their behavior.
 
 Provider contract: [Agents MCP connections](https://developers.openai.com/api/docs/guides/agents-api/tools/mcp).
+
+
+#### Native builtin defaults in hosted OpenAI source mappings
+
+Native toolsets with an enabled default can include `web_fetch` and `web_search`
+even when only the six file/shell tools appear in their explicit configs.
+Capture resolves those defaults rather than narrowing the source to the configs.
+OpenAI retains native web search and the existing file/shell execution mapping.
+Its hosted Agents profile has no native URL-fetch tool, so preview names
+`builtin_tool:web_fetch` as a loss and requires explicit acceptance through the
+normal chat-agent backend selection consent. The target instructions disclose
+that loss. The source remains unchanged, and the declaration does not waive any
+sibling capability. Hosted bash is not claimed to emulate the provider's native
+URL-fetch behavior; its existing execution and network authority are unchanged.
