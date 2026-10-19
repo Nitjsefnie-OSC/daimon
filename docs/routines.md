@@ -299,7 +299,10 @@ Every DM-routine session, including a recovery replacement, is tracked durably b
 
 When a stop ends unresolved, the owner receives a one-line DM notice through
 the same owner and tenant policy checks as routine results. It has no public
-fallback.
+fallback. Late private errors are recorded on routine metadata only while
+the destination still matches the owner DM captured for that fire. Retargeting
+or clearing delivery cannot publish diagnostics from the earlier private run;
+session stop obligations and outcomes are still recorded.
 
 The run is unattended. Before anything is sent the session's tool settings
 are rewritten from the current policy (`gate_session_snapshot`), and every

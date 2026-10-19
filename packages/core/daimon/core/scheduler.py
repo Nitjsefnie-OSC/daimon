@@ -132,12 +132,19 @@ async def _record_fire_error(
     reason: TerminationReason | None,
     *,
     private: bool = False,
+    expected_destination: tuple[str | None, str | None],
 ) -> None:
     """Record a failure on a FRESH session (never reuse fire's session)."""
     try:
         async with asyncio.timeout(1), sm() as s, s.begin():
             if private:
-                await record_result(s, routine_id, tail=None, error=msg)
+                await record_result(
+                    s,
+                    routine_id,
+                    tail=None,
+                    error=msg,
+                    expected_destination=expected_destination,
+                )
             else:
                 await record_failure(s, routine_id, error=msg, reason=reason)
     except Exception:
@@ -211,7 +218,12 @@ async def run_one_tick(
                 sm, row.tenant_id, "scheduler", origin="routine", agent_id=row.agent_id
             ).finish(reason=TerminationReason.ADMISSION_CAP_EXCEEDED)
             await _record_fire_error(
-                sm, row.id, "cap_exceeded", TerminationReason.ADMISSION_CAP_EXCEEDED
+                sm,
+                row.id,
+                "cap_exceeded",
+                TerminationReason.ADMISSION_CAP_EXCEEDED,
+                private=row.destination_kind == "dm",
+                expected_destination=(row.destination_kind, row.destination_id),
             )
             continue
         fireable.append(row)
@@ -247,6 +259,7 @@ async def run_one_tick(
                         timeout,
                         TerminationReason.CEILING,
                         private=row.destination_kind == "dm",
+                        expected_destination=(row.destination_kind, row.destination_id),
                     )
                 except Exception as err:
                     reason = termination_reason(err)
@@ -258,12 +271,18 @@ async def run_one_tick(
                         f"{type(err).__name__}: {err}"[:500],
                         reason,
                         private=row.destination_kind == "dm",
+                        expected_destination=(row.destination_kind, row.destination_id),
                     )
         except asyncio.CancelledError as err:
             observation.finish(error=err)
             # Includes cancellation while waiting for a dispatch slot.
             await _record_fire_error(
-                sm, row.id, "scheduler_shutdown", None, private=row.destination_kind == "dm"
+                sm,
+                row.id,
+                "scheduler_shutdown",
+                None,
+                private=row.destination_kind == "dm",
+                expected_destination=(row.destination_kind, row.destination_id),
             )
             raise
         finally:

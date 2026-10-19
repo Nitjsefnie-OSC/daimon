@@ -289,6 +289,25 @@ async def _build_fire(
             )
         return turn_deps[0]
 
+    async def _record_admission_failure(
+        s: AsyncSession,
+        routine_id: uuid.UUID,
+        *,
+        error: str,
+        reason: TerminationReason,
+        row: RoutineRow,
+    ) -> None:
+        if row.destination_kind == "dm":
+            await record_result(
+                s,
+                routine_id,
+                tail=None,
+                error=error,
+                expected_destination=("dm", row.destination_id),
+            )
+        else:
+            await record_failure(s, routine_id, error=error, reason=reason)
+
     async def _refused_over_channel_budget(row: RoutineRow, *, platform: str) -> bool:
         """Record and refuse a fire over its channel budget. Keyed on `row.channel_id`,
         the channel the fire is billed to (the destination's parent, else where the
@@ -310,11 +329,12 @@ async def _build_fire(
             channel_id=row.channel_id,
         )
         async with sm() as s, s.begin():
-            await record_failure(
+            await _record_admission_failure(
                 s,
                 row.id,
                 error="channel_budget_exceeded",
                 reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
+                row=row,
             )
         return True
 
@@ -358,7 +378,13 @@ async def _build_fire(
                 reason=error.reason,
             )
             async with sm() as s, s.begin():
-                await record_result(s, row.id, tail=None, error=error.reason)
+                await record_result(
+                    s,
+                    row.id,
+                    tail=None,
+                    error=error.reason,
+                    expected_destination=("dm", owner_user_id),
+                )
             return
         payload = await collect_routine_files(client, session_id=reply.session_id, text=reply.text)
         async with sm() as s, s.begin():
@@ -380,16 +406,29 @@ async def _build_fire(
                     row.id,
                     tail=None,
                     error="routine has no created_by_user_id",
+                    expected_destination=(row.destination_kind, row.destination_id),
                 )
             return
 
         async with sm() as s, s.begin():
             tenant = await get_tenant(s, row.tenant_id)
             if tenant is None:
-                await record_result(s, row.id, tail=None, error="routine tenant not found")
+                await record_result(
+                    s,
+                    row.id,
+                    tail=None,
+                    error="routine tenant not found",
+                    expected_destination=(row.destination_kind, row.destination_id),
+                )
                 return
             if tenant.archived_at is not None:
-                await record_result(s, row.id, tail=None, error="routine tenant archived")
+                await record_result(
+                    s,
+                    row.id,
+                    tail=None,
+                    error="routine tenant archived",
+                    expected_destination=(row.destination_kind, row.destination_id),
+                )
                 return
             platform = tenant.platform
             if row.destination_kind == "dm" and (
@@ -404,6 +443,7 @@ async def _build_fire(
                     row.id,
                     tail=None,
                     error="routine DMs are disabled or the owner is not allowed",
+                    expected_destination=(row.destination_kind, row.destination_id),
                 )
                 return
             principal = await get_or_create_platform_principal(
@@ -511,7 +551,13 @@ async def _build_fire(
                     tenant_id=str(row.tenant_id),
                     reason=policy_error,
                 )
-                await record_result(s, row.id, tail=None, error=policy_error)
+                await record_result(
+                    s,
+                    row.id,
+                    tail=None,
+                    error=policy_error,
+                    expected_destination=(row.destination_kind, row.destination_id),
+                )
                 return
 
         # Admission gate: per-tenant balance — independent of Stripe config.
@@ -525,11 +571,12 @@ async def _build_fire(
                 tenant_id=str(row.tenant_id),
             )
             async with sm() as s, s.begin():
-                await record_failure(
+                await _record_admission_failure(
                     s,
                     row.id,
                     error="balance_depleted",
                     reason=TerminationReason.ADMISSION_BALANCE_DEPLETED,
+                    row=row,
                 )
             return
 

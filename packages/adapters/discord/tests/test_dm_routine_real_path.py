@@ -134,6 +134,7 @@ class Upstream:
         self.create_agents: list[Any] = []
         self.replacement_server_url: str | None = None
         self.file_listing_error = False
+        self.file_listing_hook: Any = None
         self.memory_outage = False
         self.download_hook: Any = None
         self.pause_call = (
@@ -171,6 +172,12 @@ class Upstream:
                 return httpx.Response(
                     503, json={"error": {"type": "api_error", "message": "offline"}}
                 )
+            if (
+                request.method == "GET"
+                and request.url.path.endswith("/files")
+                and self.file_listing_hook is not None
+            ):
+                await self.file_listing_hook()
             if (
                 request.method == "GET"
                 and request.url.path.endswith("/files")
@@ -1360,6 +1367,98 @@ async def test_mount_outage_matches_live_dm_without_another_owners_memory(harnes
     assert reply.text == "private answer"
     assert harness.memory_stores(live) == harness.memory_stores(reply.session_id) == {}
     assert harness.manifest(live) == harness.manifest(reply.session_id)
+
+
+@pytest.mark.parametrize("change", ["retarget", "clear"])
+@pytest.mark.parametrize("stage", ["run", "refusal", "collector"])
+async def test_private_failure_after_destination_change_does_not_publish_error(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, change: str, stage: str
+):
+    from daimon.core.stores.routines import update_routine
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    canary = "private-provider-filename-canary.txt"
+
+    async def fail() -> None:
+        entered.set()
+        await release.wait()
+        if stage == "refusal":
+            raise direct_messages.DirectMessageAccessRevoked("private_refusal", message=canary)
+        raise RuntimeError(canary)
+
+    async def failing_run(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
+        entered.set()
+        await release.wait()
+        raise RuntimeError(canary)
+        yield b""  # pragma: no cover -- make this a streaming provider response
+
+    if stage == "collector":
+        # Pause the real collector at the provider file-list transport boundary.
+        harness.upstream.file_listing_hook = fail
+    elif stage == "refusal":
+        gate = direct_messages._gate_session
+
+        async def refused(*args: Any, **kwargs: Any) -> Any:
+            await gate(*args, **kwargs)
+            await fail()
+
+        monkeypatch.setattr(direct_messages, "_gate_session", refused)
+    else:
+        harness.upstream.scripts = [failing_run]
+    row = await _routine_row(harness)
+    task = asyncio.create_task(harness.fire(row))
+    await asyncio.wait_for(entered.wait(), 10)
+    async with harness.factory.begin() as db:
+        await update_routine(
+            db,
+            row.id,
+            tenant_id=row.tenant_id,
+            **(
+                {"clear_destination": True}
+                if change == "clear"
+                else {
+                    "destination_kind": "channel",
+                    "destination_id": BUDGET,
+                    "channel_id": BUDGET,
+                }
+            ),
+        )
+    release.set()
+    await asyncio.wait_for(task, 20)
+    async with harness.factory() as db:
+        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    assert after is not None and after.last_error is None
+    assert after.last_result_tail is None and after.delivery_payload is None
+    from daimon.adapters.discord.routines_panel.subviews import build_last_output_container
+    from daimon.adapters.mcp.auth.resolver import AuthIdentity
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.adapters.mcp.tools.routines import _get_routine_impl, _list_routines_impl
+
+    runtime = McpRuntime(
+        session_factory=harness.factory,
+        client=harness.upstream.client,
+        settings=harness.settings,
+        deployment_default=DeploymentDefault(),
+    )
+    admin = AuthIdentity(
+        account_id=harness.accounts[OWNER_B],
+        tenant_id=row.tenant_id,
+        role=Role.ADMIN,
+        platform="discord",
+        external_id=str(GUILD),
+        platform_user_id=OWNER_B,
+        is_admin=True,
+    )
+    shared = await _get_routine_impl(runtime, admin, routine_id=row.id)
+    listed = await _list_routines_impl(runtime, admin)
+    assert shared.last_error is None
+    assert next(r for r in listed if r.id == row.id).last_error is None
+    container = build_last_output_container(shared)
+    assert canary not in str(container.to_component_dict())
+    assert "private_refusal" not in str(container.to_component_dict())
+    (intent,) = await harness.intents(row)
+    assert intent.state == ("completed" if stage == "collector" else "stopped")
+    assert intent.stop_attempts == (0 if stage == "collector" else 1)
 
 
 async def test_terminal_success_then_collector_failure_keeps_completed(harness: Harness):
