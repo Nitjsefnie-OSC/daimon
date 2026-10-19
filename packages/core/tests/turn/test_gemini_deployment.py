@@ -2040,3 +2040,95 @@ async def test_hosted_gemini_worker_refuses_a_foreign_journal_before_provider_io
         )
     assert exc.value.reason == "journal_owner_mismatch"
     assert (len(calls), len(owned.wire.requests)) == before
+
+
+@pytest.mark.parametrize("platform", ["teams", "discord", "slack"])
+async def test_a_new_gemini_thread_sends_its_platforms_system_prompt_with_fragments_intact(
+    platform: str,
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_clean: None,
+) -> None:
+    """The inline agent is created with this platform's variant of the plan's system, and
+    the tenant's context-fragment block after it is sent byte for byte."""
+    import re
+
+    import yaml
+    from daimon.core.agent_guidance import apply_credential_guidance
+    from daimon.core.context_prompt import FRAGMENT_MARKER, ContextFragment, encode_fragments
+
+    from .test_gemini_codec import interaction
+    from .test_gemini_runtime_transport import clients_for
+
+    config = selected.admission.backend_revision
+    assert config is not None
+    moved = ConfigRevision.create(
+        config.channel.model_copy(update={"platform": platform}),
+        1,
+        resolve_default(BackendConfig(backend="gemini", profile=PROFILE, model=FLASH_PRIMARY)),
+    )
+    selected = replace(
+        selected,
+        platform=platform,
+        admission=replace(selected.admission, backend_revision=moved, backend=check_backend(moved)),
+    )
+    defaults = Path(__file__).resolve().parents[4] / "defaults" / "agents" / "daimon.yaml"
+    shipped = apply_credential_guidance(yaml.safe_load(defaults.read_text())["system"])
+    other = "Slack" if platform != "slack" else "Discord"
+    system = encode_fragments(
+        shipped,
+        {"routine": ContextFragment(text=f"Post the summary to {other} first.", mode="extend")},
+    )
+    plan = entry(selected, tmp_path)
+    plan["system"] = system
+    manifest(monkeypatch, tmp_path / "manifest.json", [plan])
+    monkeypatch.setenv("N4_OFFLINE_GEMINI_KEY", "offline-selected-key")
+    posts: list[dict[str, JsonValue]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            posts.append(json.loads(request.content))
+        return httpx.Response(200, json=interaction("one"))
+
+    clients_for(monkeypatch, handle)
+    async with selected.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=selected.tenant_id)
+    deps = replace(selected.deps, state_store=None)
+    prepared = await bind_session_impl(
+        deps,
+        selected.admission,
+        tenant_id=selected.tenant_id,
+        platform=platform,
+        external_user_id=selected.external_user_id,
+        thread_id=selected.thread_id,
+        session_account_id=selected.session_account_id,
+        reuse_existing=True,
+    )
+
+    async def reseed() -> str:
+        pytest.fail("Gemini turn used Anthropic recovery")
+
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=selected.tenant_id,
+        platform=platform,
+        thread_id=selected.thread_id,
+        external_user_id=selected.external_user_id,
+        user_message="question",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        operation_key="offline-gemini:platform-system",
+    )
+
+    sent = cast(str, posts[0]["system_instruction"])
+    head, marker, fragments = sent.partition(FRAGMENT_MARKER)
+    assert marker == FRAGMENT_MARKER
+    assert fragments == system.partition(FRAGMENT_MARKER)[2], "the fragment block is intact"
+    assert f"Post the summary to {other} first." in fragments
+    foreign = "|".join(p for p in ("discord", "slack", "teams") if p != platform)
+    assert re.search(foreign, head, re.IGNORECASE) is None
+    assert head != shipped
