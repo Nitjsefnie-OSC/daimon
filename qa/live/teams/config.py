@@ -111,7 +111,7 @@ class TeamsQaConfig(StrictModel):
         """Load a private JSON config and secure its token directory."""
         from qa.live.teams.secret_store import read_secret
 
-        selected = path or os.environ.get("DAIMON_TEAMS_QA_CONFIG")
+        selected = path or (None if config_secret else os.environ.get("DAIMON_TEAMS_QA_CONFIG"))
         secret = config_secret or os.environ.get("DAIMON_TEAMS_QA_CONFIG_SECRET")
         if selected is not None:
             content = Path(selected).read_text()

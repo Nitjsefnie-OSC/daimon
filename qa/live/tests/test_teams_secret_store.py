@@ -91,6 +91,7 @@ def test_config_secret_and_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     config_name = "projects/qa-project/secrets/teams-qa-config"
     api.payloads[config_name] = json.dumps(config_source()).encode()
     monkeypatch.setattr("qa.live.teams.secret_store.client", lambda: api)
+    monkeypatch.setenv("DAIMON_TEAMS_QA_CONFIG", "/nonexistent/teams-qa.json")
     config = TeamsQaConfig.load(config_secret=config_name)
     assert config.token_dir is None
     store = TokenStore(config, SecretManagerCacheBackend("qa-project", "teams-qa", api))
@@ -174,5 +175,6 @@ def test_refresh_reports_and_continues(
     ]
     assert "member: reauthentication required (account unavailable)" in output.err
     assert "::error title=Teams QA reauth::" in output.err
-    assert "--config-secret projects/qa-project/secrets/config" in output.err
+    assert "--config-secret <TEAMS_QA_CONFIG_SECRET>" in output.err
+    assert "qa-project" not in output.err
     assert SENTINEL not in output.out + output.err

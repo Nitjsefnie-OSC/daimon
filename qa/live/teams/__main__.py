@@ -84,12 +84,16 @@ async def execute(args: argparse.Namespace, config: TeamsQaConfig) -> bool:
                 )
                 hint = f"{exc}; run: python -m qa.live.teams login --persona {persona}"
                 secret_name = args.config_secret or os.environ.get("DAIMON_TEAMS_QA_CONFIG_SECRET")
-                if secret_name and not (args.config or os.environ.get("DAIMON_TEAMS_QA_CONFIG")):
+                in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+                if in_actions:
+                    # Public Actions logs: name the variable, not the project.
+                    secret_name = secret_name and "<TEAMS_QA_CONFIG_SECRET>"
+                if args.config_secret or (
+                    secret_name and not (args.config or os.environ.get("DAIMON_TEAMS_QA_CONFIG"))
+                ):
                     hint += f" --config-secret {secret_name}"
-                elif args.config_secret:
-                    hint += f" --config-secret {args.config_secret}"
                 print(hint, file=sys.stderr)
-                if os.environ.get("GITHUB_ACTIONS") == "true":
+                if in_actions:
                     print(f"::error title=Teams QA reauth::{hint}", file=sys.stderr)
         return successful
     else:
