@@ -59,6 +59,7 @@ from daimon.core.stores.thread_sessions import (
     transfer_active_turn,
 )
 from daimon.core.stores.turn_origins import bind_origin_session
+from daimon.core.thread_models import MODEL_FALLBACK_NOTICE
 from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.approvals import (
@@ -1115,6 +1116,8 @@ async def run_prepared_turn_impl(
     # every ordinary turn, which then sends byte-identical bytes to before.
     context = context_prompt(origin, system=prepared.admission.agent.system)
     prefix = context + prepared.continuity.user_prefix
+    if prepared.admission.model_fell_back:
+        prefix += MODEL_FALLBACK_NOTICE
 
     @contextlib.asynccontextmanager
     async def persisted(
