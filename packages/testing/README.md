@@ -884,6 +884,19 @@ checks; a copied PASS or matching caller-supplied hash pair is never consulted.
 Foreign capture identities, mismatched roots, missing usage/coverage, extra
 native sends and silence cannot earn a pass.
 
+The twenty-second window is authored by the source; what is observed depends on
+the `clock`/`sleep` pair of `New15Bindings`. By default both are real time, so
+the window is a genuine wall-clock observation. The included tests inject the
+event loop's own clock instead: they patch `loop.time`, stamp every capture
+(posts, logs, the admission window) from it, and advance it in 0.25 s steps with a
+real slice of I/O between steps. Timers the system armed (`asyncio.sleep`,
+`loop.call_later`) therefore fire at their due loop time inside the window, in
+order, and a late answer is captured. The window is covered in loop time, not in
+wall time. Work that only wall time can advance is not covered, so a task the
+denial spawned that is still running after the window, or a thread it started,
+fails the capture rather than going unseen. An injected pair must keep that
+property: it may not add to the clock without running the timers due before it.
+
 The included actual-SDK/Postgres proofs exercise Anthropic, OpenAI and Gemini.
 Their explicitly **mock** tariff is USD100 per million input/output tokens,
 markup one and zero offline native infrastructure; 100 input plus 50 output
