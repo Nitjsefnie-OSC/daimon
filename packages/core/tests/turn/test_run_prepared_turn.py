@@ -2734,6 +2734,14 @@ async def test_two_turns_recovering_one_dead_session_leave_one_live_row(
     )
 
 
+# Both ceiling tests below aim the real turn ceiling at `link_replacement`, which they
+# make sleep 30s, so the ceiling lands after the replacement session exists. Everything
+# before it (the first attempt, the 404, transcript read, session and memory-store
+# creation) has to finish inside the deadline: at 1s it did not on a loaded CI runner, and
+# the ceiling fired inside `create_ma_session` instead. Each test waits out the full value.
+RECOVERY_CEILING_S = 5.0
+
+
 async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement(
     db_session: AsyncSession,
     db_schema: str,
@@ -2763,7 +2771,10 @@ async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement
 
     real_link = run_module.link_replacement
 
+    linking = asyncio.Event()
+
     async def slow_link(*args: object, **kwargs: object) -> None:
+        linking.set()
         await asyncio.sleep(30)  # the ceiling fires here, after the replacement exists
         await real_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
@@ -2800,7 +2811,7 @@ async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement
             reseed_user_message=_reseed,
             recovery_lifecycle=_recovery_lifecycle,
             render_interval_s=0.001,
-            deadline=datetime.now(UTC) + timedelta(seconds=1.0),
+            deadline=datetime.now(UTC) + timedelta(seconds=RECOVERY_CEILING_S),
         )
         async with sessionmaker() as s:
             rows = (
@@ -2819,6 +2830,7 @@ async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement
         await engine.dispose()
 
     assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    assert linking.is_set(), "the ceiling must land in link_replacement, not before it"
     live = [(r.ma_session_id, r.replaced_by_id) for r in rows if r.status == "live"]
     assert live == [], f"a replacement survived the rolled-back recovery: {live}"
     assert [r.ma_session_id for r in rows] == ["sess_old"], (
@@ -2859,7 +2871,10 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
 
     real_link = run_module.link_replacement
 
+    linking = asyncio.Event()
+
     async def slow_link(*args: object, **kwargs: object) -> None:
+        linking.set()
         await asyncio.sleep(30)  # the ceiling fires here, after the session exists
         await real_link(*args, **kwargs)  # pyright: ignore[reportArgumentType]
 
@@ -2909,12 +2924,13 @@ async def test_a_rolled_back_recovery_archives_the_session_it_created(
             render_interval_s=0.001,
             # The turn ceiling fires while link_replacement sleeps; the archive
             # answers at once, so only this deadline is waited out.
-            deadline=datetime.now(UTC) + timedelta(seconds=1.0),
+            deadline=datetime.now(UTC) + timedelta(seconds=RECOVERY_CEILING_S),
         )
     finally:
         await engine.dispose()
 
     assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    assert linking.is_set(), "the ceiling must land in link_replacement, not before it"
     assert len(session_bodies) == 1, "recovery created one upstream session"
     assert archived == ["sess_1"], (
         "the session the rolled-back recovery created must be archived; "
