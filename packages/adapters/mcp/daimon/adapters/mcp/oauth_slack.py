@@ -131,19 +131,20 @@ accounts for personal access.</p>
 def _success_html(
     *,
     workspace: str,
-    signup_credit: Decimal,
+    credit: Decimal | None,
     display_name: str = "daimon",
     promo_codes: bool = False,
 ) -> HTMLResponse:
     """Branded success page.
 
+    ``credit``: the tenant's prepaid balance when above zero, else no credit line.
     ``promo_codes``: some code is redeemable now, so point admins at /billing.
 
     `workspace` is the `team.name` from the Slack OAuth response —
     attacker-influenceable, so it is HTML-escaped before interpolation.
     """
     safe = html.escape(workspace, quote=False)
-    credit = _format_credit(signup_credit)
+    credit_line = f"<p>{_format_credit(credit)} in credit is ready.</p>\n" if credit else ""
     safe_name = html.escape(display_name, quote=False)
     promo = (
         "<p>have a promo code? admins can redeem it in <code>/billing</code>.</p>\n"
@@ -153,8 +154,7 @@ def _success_html(
     body = f"""
 <h1>Installed in {safe}</h1>
 <p>Invite it to a channel with <code>/invite @{safe_name}</code>, then mention it there.</p>
-<p>{credit} in credit is ready.</p>
-{promo}<p class="dim">You can close this tab and return to Slack.</p>
+{credit_line}{promo}<p class="dim">You can close this tab and return to Slack.</p>
 """
     return _page(title="Daimon installed", state_bar="", body_html=body)
 
@@ -544,7 +544,7 @@ def build_oauth_slack_routes(
 
         return _success_html(
             workspace=result.team_name or team_id,
-            signup_credit=settings.billing.signup_credit,
+            credit=credit,
             display_name=display_name,
             promo_codes=promo_codes,
         )
