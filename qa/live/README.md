@@ -550,4 +550,8 @@ new cache back without posting anything. The `Teams QA token refresh`
 workflow runs it weekly on staging. If it reports `reauthentication
 required`, run the printed `login` command once for that persona.
 
-For exploratory sessions, follow [the agent-facing Teams QA guide](teams/AGENT-QA.md).
+For exploratory sessions, stay on staging and post only in the configured QA
+channel and each persona's own 1:1 with the bot. Bare command words such as
+`routines` or `billing` are code-routed and take no model turn; any other text
+does. Card action titles are evidence only: never click them, and never print
+a token cache. `smoke --all` is the only fixed live check.
