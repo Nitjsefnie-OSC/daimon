@@ -1269,7 +1269,10 @@ async def test_endpoint_bound_rule_allows_the_unattended_pause(harness: Harness)
     assert decision["result"] == "allow"
 
 
-async def test_replacement_endpoint_cannot_reuse_predecessor_allow(harness: Harness):
+@pytest.mark.parametrize("rule_endpoint,rule", [("original", "allow"), ("replacement", "deny")])
+async def test_replacement_endpoint_cannot_reuse_predecessor_allow(
+    harness: Harness, rule_endpoint: str, rule: str
+):
     from daimon.core.authz import Subject
     from daimon.core.stores.agent_tool_rules import set_rule
 
@@ -1287,22 +1290,22 @@ async def test_replacement_endpoint_cannot_reuse_predecessor_allow(harness: Harn
     upstream.kill_first_send = True
     upstream.replacement_server_url = "https://replacement.example/mcp"
     async with harness.factory.begin() as db:
-        for url, rule in (
-            (SLACK_SERVER["url"], "allow"),
-            (upstream.replacement_server_url, "deny"),
-        ):
-            await set_rule(
-                db,
-                tenant_id=harness.tenant.id,
-                agent_id="ag_daimon",
-                agent_name="daimon",
-                tool_key="slack/send_message",
-                server_url=url,
-                rule=rule,
-                scope="chat_and_routines",
-                set_by=OWNER_A,
-                actor=Subject(is_admin=True),
-            )
+        await set_rule(
+            db,
+            tenant_id=harness.tenant.id,
+            agent_id="ag_daimon",
+            agent_name="daimon",
+            tool_key="slack/send_message",
+            server_url=(
+                SLACK_SERVER["url"]
+                if rule_endpoint == "original"
+                else upstream.replacement_server_url
+            ),
+            rule=rule,
+            scope="chat_and_routines",
+            set_by=OWNER_A,
+            actor=Subject(is_admin=True),
+        )
     upstream.scripts = [pause_on_public_send]
     row = await _routine_row(harness)
     await harness.fire(row)
@@ -1312,6 +1315,11 @@ async def test_replacement_endpoint_cannot_reuse_predecessor_allow(harness: Harn
     assert after.delivery_payload is None
     assert len(upstream.state.sessions) == 2
     assert upstream.create_agents == ["ag_daimon", "ag_daimon"]
+    first, replacement = upstream.state.sessions.values()
+    assert {s.name: s.url for s in first.agent.mcp_servers} == {"slack": SLACK_SERVER["url"]}
+    assert {s.name: s.url for s in replacement.agent.mcp_servers} == {
+        "slack": upstream.replacement_server_url,
+    }
     assert not any(event["type"] == "user.message" for _, event in upstream.sent)
     assert all(intent.state == "stopped" for intent in await harness.intents(row))
 
