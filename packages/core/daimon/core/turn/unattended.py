@@ -17,6 +17,7 @@ with it on, the same selection a chat turn asks on.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from anthropic import AsyncAnthropic
@@ -24,7 +25,8 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_session_agent_update_param import (
     BetaManagedAgentsSessionAgentUpdateParam,
 )
-from daimon.core.session_ports_compat import update_session_record
+from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL, MA_METADATA_KEY_PRIVATE_DM
+from daimon.core.session_ports_compat import retrieve_session_record, update_session_record
 from daimon.core.tool_safety import (
     ToolSafetyPolicy,
     backend_switch_tools,
@@ -37,6 +39,7 @@ from daimon.core.tool_safety import (
 from daimon.core.turn.approvals import (
     AnnotationLookup,
     agent_rule_lookup,
+    channel_for_tool_rules,
     daimon_rule_tools_for,
     unattended_decider,
 )
@@ -64,8 +67,8 @@ async def gate_session_snapshot(
     *,
     scope: Scope,
     public_url: str | None,
-    session_factory: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    tenant_id: uuid.UUID | None,
 ) -> None:
     """Make `session`'s gated calls pause under `policy`, before anything is sent.
 
@@ -78,8 +81,12 @@ async def gate_session_snapshot(
     """
     tools = [t.model_dump(mode="json") for t in session.agent.tools]
     servers = [s.model_dump(mode="json") for s in session.agent.mcp_servers]
-    rules = await daimon_rule_tools_for(
-        session_factory, policy, tenant_id=tenant_id, agent_id=session.agent.id
+    rules = (
+        await daimon_rule_tools_for(
+            session_factory, policy, tenant_id=tenant_id, agent_id=session.agent.id
+        )
+        if session_factory is not None
+        else frozenset[str]()
     )
     protected = protected_tools(policy)
     gated = session_tools_for_policy(
@@ -144,4 +151,50 @@ def unattended_posture(
             daimon_rules=True,
             annotations_for=annotations_for,
         )
+    )
+
+
+def session_gate(
+    client: AsyncAnthropic,
+    session_id: str,
+    policy: ToolSafetyPolicy,
+    *,
+    scope: Scope,
+    public_url: str | None,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    tenant_id: uuid.UUID | None,
+) -> Callable[[], Awaitable[None]]:
+    """The gate a driven unattended turn runs before each send (`unattended_sends`).
+
+    It reads the session as it is now and gates that snapshot, so a policy or
+    rule that changed while the turn was paused reaches its next call. A
+    failed read or update raises, and the send it guards does not happen.
+    """
+
+    async def gate() -> None:
+        await gate_session_snapshot(
+            client.with_options(max_retries=0),
+            await retrieve_session_record(client, session_id, scope=scope),
+            policy,
+            scope=scope,
+            public_url=public_url,
+            session_factory=session_factory,
+            tenant_id=tenant_id,
+        )
+
+    return gate
+
+
+def session_rules_channel(session: BetaManagedAgentsSession, *, platform: str) -> str | None:
+    """The channel whose tool rules a turn on `session` runs under.
+
+    The conversation's own stamped channel, a Slack thread's parent, and never
+    a DM's source channel (`channel_for_tool_rules`); not the channel its spend
+    is billed to.
+    """
+    metadata = session.metadata or {}
+    return channel_for_tool_rules(
+        platform=platform,
+        channel_id=metadata.get(MA_METADATA_KEY_CHANNEL),
+        private_dm_id=metadata.get(MA_METADATA_KEY_PRIVATE_DM),
     )

@@ -1150,3 +1150,60 @@ async def test_an_approval_tool_sent_through_call_tool_is_refused_without_a_card
     [sent] = _confirmations(fa)
     assert sent["result"] == "deny" and "Call publish_report directly" in str(sent["deny_message"])
     assert prompts == []
+
+
+async def test_an_unattended_turn_gates_before_its_message_and_each_confirmation() -> None:
+    """Review B, finding 1: one boundary for every unattended send."""
+    from daimon.core.turn.driver import unattended_sends
+
+    fa = FakeAnthropic()
+    _script(fa, ("tu_read", "linear", "get_issue"))
+    order: list[str] = []
+
+    async def gate() -> None:
+        order.append(f"gate@{len(fa.beta.sessions.events.sent_events)}")
+
+    with unattended_sends(gate):
+        final = await run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="nightly",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+            tool_confirmation=PolicyApproval(decide=unattended_decider(_ON)),
+        )
+    assert final.error is None
+    # Before the message (nothing sent yet), then before the confirmation.
+    assert order == ["gate@0", "gate@1"]
+    assert [e["result"] for e in _confirmations(fa)] == ["allow"]
+    # Finding 2: every send asked for a client with no SDK retry.
+    assert fa.options and all(o == {"max_retries": 0} for o in fa.options)
+
+
+async def test_a_failed_confirmation_gate_sends_no_confirmation() -> None:
+    from daimon.core.turn.driver import unattended_sends
+
+    fa = FakeAnthropic()
+    _script(fa, ("tu_read", "linear", "get_issue"))
+    calls = 0
+
+    async def gate() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("session update refused")
+
+    with unattended_sends(gate), pytest.raises(RuntimeError, match="refused"):
+        await run_turn(
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="nightly",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=_EXEMPT,
+            tool_confirmation=PolicyApproval(decide=unattended_decider(_ON)),
+        )
+    assert not [e for e in _confirmations(fa) if e["result"] == "allow"]

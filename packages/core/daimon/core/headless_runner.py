@@ -85,6 +85,7 @@ from daimon.core.turn.approvals import daimon_rule_tools_for
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
+from daimon.core.turn.driver import unattended_sends
 from daimon.core.turn.io import turn_io
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
@@ -105,7 +106,7 @@ from daimon.core.turn.run import (
 from daimon.core.turn.runtime_manifest import capture_preparation_source
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
-from daimon.core.turn.unattended import protected_tools, unattended_posture
+from daimon.core.turn.unattended import protected_tools, session_gate, unattended_posture
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import TextPart
@@ -302,8 +303,10 @@ async def run_turn_impl(
        ``unattended_posture(tool_safety, ...)`` (with the policy on, reads
        run and third-party writes are refused unless the operator allowed
        them in unattended runs; off, ordinary third-party calls are allowed;
-       Daimon's card-only actions are refused either way — nobody is here to
-       press Approve), ``deadline=effective_deadline``
+       Daimon's card-only actions are refused — a backend switch and
+       Microsoft mail either way, Microsoft file changes with the policy on;
+       nobody is here to press Approve), each send gated first and sent once
+       (`unattended_sends`), ``deadline=effective_deadline``
        (the same instant that bounded step 1/2's assembly, so the driver's own
        ``remaining_s`` naturally subtracts the time assembly already spent —
        one window, two disjoint legs, no double enforcement), and a billing
@@ -490,27 +493,43 @@ async def run_turn_impl(
         # Driver's own run_turn builds and sends the `user.message` event itself
         # from `user_message=trigger_message` — the drain (steps 3-6 of the old
         # bespoke loop) is fully delegated below.
-        state: TurnState = await drive_turn(
-            anthropic=anthropic,
-            scope=turn_scope,
-            session_id=session.id,
-            user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
-            lifecycle=_NoOpLifecycle(),
-            cancel=asyncio.Event(),  # never set — headless has no cancel source
-            render_interval_s=2.0,  # nothing renders; do not spin the diff timer
-            billing=billing,
-            # Nobody is here to press a card: the one unattended decider,
-            # from the policy now in force, never `AutoApprove`.
-            tool_confirmation=unattended_posture(
+        gate_scope = (
+            turn_scope
+            if turn_scope is not None
+            else Scope.legacy_host_authorized(call_site="headless_runner:run_turn:gate")
+        )
+        with unattended_sends(
+            session_gate(
+                anthropic,
+                session.id,
                 tool_safety,
-                session=session,
+                scope=gate_scope,
                 public_url=public_url,
                 session_factory=session_factory,
                 tenant_id=tenant_id,
-                channel_id=origin_place.channel_id if origin_place is not None else None,
-            ),
-            deadline=effective_deadline,
-        )
+            )
+        ):
+            state: TurnState = await drive_turn(
+                anthropic=anthropic,
+                scope=turn_scope,
+                session_id=session.id,
+                user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
+                lifecycle=_NoOpLifecycle(),
+                cancel=asyncio.Event(),  # never set — headless has no cancel source
+                render_interval_s=2.0,  # nothing renders; do not spin the diff timer
+                billing=billing,
+                # Nobody is here to press a card: the one unattended decider,
+                # from the policy now in force, never `AutoApprove`.
+                tool_confirmation=unattended_posture(
+                    tool_safety,
+                    session=session,
+                    public_url=public_url,
+                    session_factory=session_factory,
+                    tenant_id=tenant_id,
+                    channel_id=origin_place.channel_id if origin_place is not None else None,
+                ),
+                deadline=effective_deadline,
+            )
 
         if (observation := current_outcome.get()) is not None:
             observation.finish(state=state)

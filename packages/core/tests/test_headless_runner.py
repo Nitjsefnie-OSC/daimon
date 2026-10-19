@@ -210,6 +210,8 @@ def _build_client(
             r"/v1/sessions/[^/]+/events",
             lambda request, match: list_response(event_dicts),
         )
+    # The unattended gate reads the session before each send.
+    router.add("GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=session_json))
     _register_agent_environment_routes(router, model_id=model_id)
     return build_fake_anthropic(router.dispatch)
 
@@ -654,6 +656,9 @@ async def test_run_turn_propagates_httpx_error() -> None:
         raise httpx.ConnectError("boom")
 
     router.add("POST", r"/v1/sessions", handle_create)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     _register_agent_environment_routes(router)
@@ -767,6 +772,9 @@ async def test_run_turn_attaches_vault_when_mcp_settings(
         lambda _r, _m: httpx.Response(200, json={"id": "vlt_new", "type": "vault"}),
     )
     router.add("POST", r"/v1/sessions", handle_session_create)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     _register_agent_environment_routes(router)
@@ -1047,6 +1055,7 @@ def _build_client_with_files(
     router.add("POST", r"/v1/sessions", handle_create)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
+    router.add("GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=session_json))
     _register_session_vault_routes(router)
     _register_agent_environment_routes(router)
     return build_fake_anthropic(router.dispatch)
@@ -1204,6 +1213,9 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
     )
     router.add("POST", r"/v1/files", handle_files)
     router.add("POST", r"/v1/sessions", handle_create)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     _register_agent_environment_routes(router)
@@ -1261,6 +1273,9 @@ async def test_run_turn_past_deadline_raises_a_ceiling_turn_error_from_session_a
         return httpx.Response(200, json=session_json)
 
     router.add("POST", r"/v1/sessions", handle_create)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
     _register_agent_environment_routes(router)
 
     async def _slow_agent_retrieve(request: httpx.Request) -> httpx.Response:
@@ -1302,6 +1317,9 @@ async def test_run_turn_ceiling_breach_during_the_drain_raises_a_ceiling_turn_er
         return httpx.Response(200, json={"data": None})
 
     router.add("POST", r"/v1/sessions", handle_create)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     _register_agent_environment_routes(router)
 

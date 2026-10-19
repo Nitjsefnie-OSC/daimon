@@ -46,8 +46,9 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
 
@@ -119,7 +120,7 @@ from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.usage import UsageObservation
-from mux.drivers.anthropic.transport import LegacyTurnTransport
+from mux.drivers.anthropic.transport import LegacyTurnTransport, single_attempt_mutation
 from mux.errors import ProviderError
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
@@ -341,6 +342,27 @@ async def _decide_or_refuse_on_cancel(
     raise _InterruptInConsume()
 
 
+#: The gate an unattended run installs (`unattended_sends`): awaited right
+#: before the turn's message and before every confirmation batch, live or on a
+#: reconnect, so each send resumes the session under the policy now in force.
+#: A gate that raises stops that send.
+_UNATTENDED_GATE: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar(
+    "turn_unattended_gate", default=None
+)
+
+
+@contextlib.contextmanager
+def unattended_sends(gate: Callable[[], Awaitable[None]]) -> Iterator[None]:
+    """Run the enclosed turn as unattended: `gate` before every send, and
+    every send a single attempt (no SDK retry after its gate and decision)."""
+    token = _UNATTENDED_GATE.set(gate)
+    try:
+        with single_attempt_mutation():
+            yield
+    finally:
+        _UNATTENDED_GATE.reset(token)
+
+
 async def _send_decision_batch(
     batch: _DecisionBatch,
     *,
@@ -353,6 +375,8 @@ async def _send_decision_batch(
     try:
         if cancel.is_set():
             raise _InterruptInConsume()
+        if (gate := _UNATTENDED_GATE.get()) is not None:
+            await gate()
         await io.send(batch.events)
     except BaseException as err:
         await _bounded(
@@ -649,6 +673,8 @@ async def run_turn(
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
+            if (gate := _UNATTENDED_GATE.get()) is not None:
+                await gate()
             try:
                 await io.send(batch)
             except _anthropic.BadRequestError as err:

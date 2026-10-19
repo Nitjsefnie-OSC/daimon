@@ -328,6 +328,13 @@ class FakeAnthropic:
     """
 
     beta: FakeBeta = field(default_factory=FakeBeta)
+    #: Every `with_options` call: a single-attempt send asks for max_retries=0.
+    options: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
+
+    def with_options(self, **options: object) -> FakeAnthropic:
+        """The same fake (it never retries), with the requested options noted."""
+        self.options.append(options)
+        return self
 
 
 # --- Error constructors (SDK exception shape) -----------------------------

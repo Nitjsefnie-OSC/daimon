@@ -101,6 +101,28 @@ def _router(
         return httpx.Response(200, json=env.model_dump(mode="json"))
 
     router.add("POST", r"/v1/sessions", handle_create)
+    # The unattended gate reads the session before each send.
+    router.add(
+        "GET",
+        r"/v1/sessions/ses_1$",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=ma_session(
+                id="ses_1",
+                agent=ma_agent(
+                    id="agent_x",
+                    tools=agent_tools or [_LINEAR_TOOLSET],
+                    mcp_servers=agent_servers
+                    or [{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
+                ),
+            ).model_dump(mode="json"),
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/ses_1$",
+        lambda r, m: router.dispatch(httpx.Request("GET", r.url)),
+    )
     router.add(
         "GET", r"/v1/sessions/[^/]+/events/stream", lambda r, m: sse_response(events or _events())
     )
