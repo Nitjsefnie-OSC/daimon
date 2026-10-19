@@ -46,9 +46,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 @pytest.fixture
 async def owned(
-    db_preflight: DatabasePreflight, db_nullpool_engine: AsyncEngine
+    db_preflight: DatabasePreflight, db_committing_engine: AsyncEngine
 ) -> tuple[AgentBackendService, BackendAgent, BackendActor, async_sessionmaker[AsyncSession]]:
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as session:
         tenant = await make_tenant(session)

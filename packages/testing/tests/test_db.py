@@ -15,9 +15,11 @@ import pytest
 from daimon.core import agent_identity
 from daimon.core._models import Base
 from daimon.testing.db import (
+    _assert_committing_pool_clean,  # pyright: ignore[reportPrivateUsage]
     _create_schema_with_tables,  # pyright: ignore[reportPrivateUsage]
     _drain_background_tasks,  # pyright: ignore[reportPrivateUsage]
     _drop_schema,  # pyright: ignore[reportPrivateUsage]
+    _forget_touched_connections,  # pyright: ignore[reportPrivateUsage]
     _fresh_schema_session,  # pyright: ignore[reportPrivateUsage]
     _require_test_dsn,  # pyright: ignore[reportPrivateUsage]
     build_test_engine,
@@ -32,7 +34,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSessionTransaction,
     async_sessionmaker,
 )
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, QueuePool
 
 # A pid past this host's pid_max (4194304 on Linux) can never be alive.
 _DEAD_PID = 4194304
@@ -90,6 +92,82 @@ async def test_truncate_all_removes_committed_rows_when_called(
             await fresh.execute(text(f'SELECT count(*) FROM "{db_schema}".tenants'))
         ).scalar_one()
     assert count == 0, "a fresh connection must see no rows after truncate_all"
+
+
+async def test_worker_connections_give_up_on_a_lock_wait_after_a_minute(
+    db_session: AsyncSession,
+) -> None:
+    """A lock wait between a test's own connections must end, not hang the job."""
+    assert (await db_session.execute(text("SHOW lock_timeout"))).scalar_one() == "1min"
+
+
+_SESSION_LEAKS = [
+    pytest.param("SET search_path = public", "search_path is 'public'", id="set-search-path"),
+    pytest.param(
+        "SET statement_timeout = '5s'",
+        "statement_timeout is '5s'",
+        id="set-statement-timeout",
+    ),
+    pytest.param("SET TIME ZONE 'Asia/Manila'", "TimeZone is 'Asia/Manila'", id="set-timezone"),
+    pytest.param("CREATE TEMP TABLE leaked_temp (x integer)", "1 temp object", id="temp-table"),
+    pytest.param("LISTEN leaked_channel", "LISTEN channel", id="listen"),
+    pytest.param(
+        "SELECT pg_advisory_lock(7310042)", "session-level advisory lock", id="advisory-lock"
+    ),
+]
+
+
+@pytest.mark.parametrize(("statement", "message"), _SESSION_LEAKS)
+async def test_committing_pool_guard_rejects_session_state_left_on_a_pooled_connection(
+    db_committing_pool: AsyncEngine, db_schema: str, statement: str, message: str
+) -> None:
+    """What a test leaves on a pooled connection would reach the next test; the guard names it."""
+    pool = db_committing_pool.pool
+    if not isinstance(pool, QueuePool):
+        pytest.skip("DAIMON_TEST_NULLPOOL=1 closes every connection on checkin")
+    baseline = pool.checkedout()
+    _forget_touched_connections(pool)
+    async with db_committing_pool.connect() as conn:
+        await conn.execute(text(statement))
+        await conn.commit()  # the session survives the commit; only the pool can end it
+    with pytest.raises(AssertionError, match=message):
+        await _assert_committing_pool_clean(db_committing_pool, pool, baseline, db_schema)
+    # The guard repaired the connection, so the next test starts clean.
+    async with db_committing_pool.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+    await _assert_committing_pool_clean(db_committing_pool, pool, baseline, db_schema)
+
+
+async def test_committing_pool_guard_rejects_a_transaction_left_open_on_a_pooled_connection(
+    db_committing_pool: AsyncEngine, db_schema: str
+) -> None:
+    pool = db_committing_pool.pool
+    if not isinstance(pool, QueuePool):
+        pytest.skip("DAIMON_TEST_NULLPOOL=1 keeps no checkout count")
+    baseline = pool.checkedout()
+    conn = await db_committing_pool.connect()
+    try:
+        await conn.execute(text("SELECT 1"))  # begins a transaction nobody ends
+        with pytest.raises(AssertionError, match="still checked out"):
+            await _assert_committing_pool_clean(db_committing_pool, pool, baseline, db_schema)
+    finally:
+        await conn.close()
+    await _assert_committing_pool_clean(db_committing_pool, pool, baseline, db_schema)
+
+
+async def test_committing_pool_guard_rejects_a_session_fence_permit_never_released(
+    db_committing_pool: AsyncEngine, db_schema: str
+) -> None:
+    from daimon.core.session_preparation_gate import pool_headroom
+
+    pool = db_committing_pool.pool
+    if not isinstance(pool, QueuePool):
+        pytest.skip("DAIMON_TEST_NULLPOOL=1 has no session fence")
+    sessions = async_sessionmaker(db_committing_pool, expire_on_commit=False)
+    async with pool_headroom(sessions):
+        with pytest.raises(AssertionError, match="fence permit"):
+            await _assert_committing_pool_clean(db_committing_pool, pool, 0, db_schema)
+    await _assert_committing_pool_clean(db_committing_pool, pool, 0, db_schema)
 
 
 @pytest.mark.fresh_schema

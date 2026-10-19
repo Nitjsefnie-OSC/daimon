@@ -1438,7 +1438,7 @@ async def test_prepared_scope_is_refused_by_all_existing_owners_before_io(field)
 
 @pytest.mark.parametrize("outcome", ["ack", "lost_agent_ack", "drops"])
 async def test_unproved_native_worker_refuses_before_agent_and_resource_creation(
-    db_preflight, db_nullpool_engine, outcome
+    db_preflight, db_committing_engine, outcome
 ):
     from daimon.core.fleet import spawn_operation_key
     from daimon.core.stores.mux_state import PostgresStateStore
@@ -1451,7 +1451,7 @@ async def test_unproved_native_worker_refuses_before_agent_and_resource_creation
     from ..test_sessions import _session_create_handler, worker_source_context
 
     sessions, tenant, account, original, environment, worker, source = await worker_source_context(
-        db_nullpool_engine
+        db_committing_engine
     )
     if outcome == "drops":
         worker = dataclasses.replace(

@@ -678,13 +678,13 @@ async def test_legacy_budget_stamp_uses_ma_before_deciding_replacement(
 @pytest.mark.parametrize("missing_snapshot", [True, False], ids=["reuse", "replace"])
 async def test_legacy_budget_stamp_does_not_block_independent_writes(
     db_session: AsyncSession,
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     missing_snapshot: bool,
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     deps = _deps(factory, _Transport())
     first = await _prepare(
         deps,
@@ -716,7 +716,7 @@ async def test_legacy_budget_stamp_does_not_block_independent_writes(
 
     # A stamp held by preparation must not block a later independent write.
     # Bound actual database lock waits, rather than healthy I/O under host load.
-    event.listen(db_nullpool_engine.sync_engine, "begin", bound_lock_wait)
+    event.listen(db_committing_engine.sync_engine, "begin", bound_lock_wait)
     try:
         second = await _prepare(
             deps,
@@ -725,7 +725,7 @@ async def test_legacy_budget_stamp_does_not_block_independent_writes(
             account=account,
         )
     finally:
-        event.remove(db_nullpool_engine.sync_engine, "begin", bound_lock_wait)
+        event.remove(db_committing_engine.sync_engine, "begin", bound_lock_wait)
     assert isinstance(second, PreparedTurn)
     assert (second.ma_session_id == first.ma_session_id) is missing_snapshot
     async with factory() as session:
@@ -1652,14 +1652,14 @@ async def test_a_refused_platform_skill_is_left_out_without_a_message_or_a_repla
 
 
 async def test_the_missing_skill_message_holds_through_the_replacement_backoff(
-    db_session: AsyncSession, db_nullpool_engine: AsyncEngine
+    db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     """PR #857 review: a retry inside the backoff names the skill too, without calling MA.
 
     Separate connections, as in production: the failed preparation's stored
     reason must survive the first refusal being raised.
     """
-    sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessionmaker = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await add_channel_skill(
@@ -2906,7 +2906,7 @@ async def test_missing_legacy_source_is_not_retrieved_again_for_memory_replaceme
 
 @pytest.mark.parametrize("entry", ["handle", "prepared"])
 async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
-    db_session, db_nullpool_engine, db_schema, monkeypatch, entry
+    db_session, db_committing_engine, db_schema, monkeypatch, entry
 ):
     """Sol's paused production recheck probe, with preparation and replacement.
 
@@ -2920,7 +2920,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     from daimon.testing.db import build_test_engine
     from daimon.testing.turn_fakes import RecordingLifecycle
 
-    seed_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    seed_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant, transport, deps, _, first = await _changed_channel_agent(db_session, seed_factory)
     account = await _account_of(seed_factory, first.admission.account_id)
     engine = build_test_engine(
@@ -3067,7 +3067,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
 
 @pytest.mark.parametrize("entry", ["handle", "prepared"])
 async def test_sends_complete_while_two_replacements_block_on_ma_io(
-    db_session, db_nullpool_engine, db_schema, monkeypatch, entry
+    db_session, db_committing_engine, db_schema, monkeypatch, entry
 ):
     """Two checkpoints, then two MA creates, must leave sends usable at 5+10."""
     from daimon.core.session_preparation_gate import PreparationGate
@@ -3075,7 +3075,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
     from daimon.testing.db import build_test_engine
     from daimon.testing.turn_fakes import RecordingLifecycle
 
-    seed_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    seed_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
         db_session, seed_factory
     )
@@ -3217,7 +3217,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
 @pytest.mark.parametrize("contended", [False, True])
 @pytest.mark.parametrize("blocked_phase", ["checkpoint", "create"])
 async def test_independent_sends_during_replacements_with_old_session_waiters(
-    db_session, db_nullpool_engine, db_schema, monkeypatch, entry, contended, blocked_phase
+    db_session, db_committing_engine, db_schema, monkeypatch, entry, contended, blocked_phase
 ):
     """Two checkpoints, then two MA creates, must leave sends usable at 5+10."""
     from daimon.core import session_mutation
@@ -3226,7 +3226,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
     from daimon.testing.db import build_test_engine
     from daimon.testing.turn_fakes import RecordingLifecycle
 
-    seed_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    seed_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
         db_session, seed_factory
     )
@@ -3493,14 +3493,14 @@ async def test_replacement_prelock_ma_work_exceeds_old_fence_budget(
 
 @pytest.mark.parametrize("queue", ["gate", "same_session"])
 async def test_turn_queued_behind_long_replacements_waits_then_runs(
-    db_session, db_nullpool_engine, db_schema, monkeypatch, queue
+    db_session, db_committing_engine, db_schema, monkeypatch, queue
 ):
     from daimon.core.session_preparation_gate import PreparationGate, preparation_counts
     from daimon.core.turn import run as turn_run
     from daimon.testing.db import build_test_engine
     from daimon.testing.turn_fakes import RecordingLifecycle
 
-    seed_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    seed_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
         db_session, seed_factory
     )
@@ -3920,11 +3920,11 @@ async def test_inherited_sealed_transcript_keeps_read_only_memory_after_unseal(
 
 
 async def test_unseal_during_preparation_retains_inherited_memory_restriction(
-    db_session, db_nullpool_engine, monkeypatch
+    db_session, db_committing_engine, monkeypatch
 ):
     from daimon.core import session_preparation
 
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
         db_session, factory, sealed=True
     )
@@ -3971,11 +3971,11 @@ async def test_unseal_during_preparation_retains_inherited_memory_restriction(
     ] == ["read_only", "read_only"]
 
 
-async def test_prepared_turn_cannot_resume_retired_session(db_session, db_nullpool_engine):
+async def test_prepared_turn_cannot_resume_retired_session(db_session, db_committing_engine):
     from daimon.core.turn.run import run_prepared_turn
     from daimon.testing.turn_fakes import RecordingLifecycle
 
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant, transport, deps, _, first, successor, _ = await _review_replacement(db_session, factory)
     # Prove the DB fence itself rejects the stale prepared capability even if
     # an MA transport ignores archive state.
@@ -4016,8 +4016,8 @@ async def test_prepared_turn_cannot_resume_retired_session(db_session, db_nullpo
     assert live.id == successor.mapping_id
 
 
-async def test_failed_handoff_create_keeps_predecessor_writable(db_session, db_nullpool_engine):
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+async def test_failed_handoff_create_keeps_predecessor_writable(db_session, db_committing_engine):
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
         db_session, factory
     )
@@ -4034,10 +4034,10 @@ async def test_failed_handoff_create_keeps_predecessor_writable(db_session, db_n
     assert old.status == "live"
 
 
-async def test_create_fence_rechecks_inherited_seals(db_session, db_nullpool_engine, monkeypatch):
+async def test_create_fence_rechecks_inherited_seals(db_session, db_committing_engine, monkeypatch):
     from daimon.core.turn import prepare as prepare_module
 
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
         db_session, factory, sealed=True
     )
@@ -4091,7 +4091,7 @@ async def test_create_fence_rechecks_inherited_seals(db_session, db_nullpool_eng
 
 
 async def test_handoff_waits_for_an_inflight_handle_send(
-    db_session, db_nullpool_engine, monkeypatch
+    db_session, db_committing_engine, monkeypatch
 ):
     from daimon.core import session_preparation
     from daimon.core.session_fence_retry import FenceUnavailable
@@ -4107,7 +4107,7 @@ async def test_handoff_waits_for_an_inflight_handle_send(
             raise
 
     monkeypatch.setattr(session_preparation, "lock_session_mutation", observed_lock)
-    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     tenant, transport, deps, admission_deps, first = await _changed_channel_agent(
         db_session, factory
     )

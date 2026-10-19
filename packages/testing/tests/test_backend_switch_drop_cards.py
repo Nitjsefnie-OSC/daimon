@@ -31,7 +31,7 @@ from daimon.core.confirmation import ApprovedConfirmation, prompt_for_tool_call
 from daimon.core.native_admins import GroupMembersCache
 from daimon.core.stores.domain import Role
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
-from daimon.testing.db import db_nullpool_engine  # noqa: F401
+from daimon.testing.db import db_committing_engine  # noqa: F401
 
 PLATFORMS = ("discord", "slack", "teams")
 TARGETS = ("openai", "gemini")
@@ -96,7 +96,7 @@ class Chat:
 
 
 @pytest.fixture(params=PLATFORMS)
-async def chat(request: pytest.FixtureRequest, db_preflight, db_nullpool_engine):  # noqa: F811
+async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engine):  # noqa: F811
     from anthropic.types.beta import BetaManagedAgentsAgent
     from daimon.adapters.mcp.auth.resolver import AuthIdentity
     from daimon.adapters.mcp.runtime import McpRuntime
@@ -123,7 +123,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_nullpool_engine)
 
     platform: str = request.param
     requester = REQUESTER[platform]
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     async with sessions.begin() as session:
         tenant = await make_tenant(session, platform=platform)  # pyright: ignore[reportArgumentType]
@@ -269,7 +269,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_nullpool_engine)
 @pytest.mark.parametrize("binding", ["main", "routed"])
 async def test_chat_fixture_refuses_unowned_binds_without_skipping_or_connecting(
     db_preflight,
-    db_nullpool_engine,  # noqa: F811
+    db_committing_engine,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     binding: str,
 ):
@@ -289,8 +289,10 @@ async def test_chat_fixture_refuses_unowned_binds_without_skipping_or_connecting
         attempts.append(True)
         raise AssertionError("fixture ownership validation must precede connection")
 
-    for engine in (db_nullpool_engine, foreign):
+    # `do_connect` alone misses a pooled engine's warm connection, so also trap checkout.
+    for engine in (db_committing_engine, foreign):
         event.listen(engine.sync_engine, "do_connect", refuse_connection)
+        event.listen(engine.sync_engine.pool, "checkout", refuse_connection)
 
     def injected_factory(engine, **kwargs):
         if binding == "main":
@@ -299,7 +301,7 @@ async def test_chat_fixture_refuses_unowned_binds_without_skipping_or_connecting
 
     monkeypatch.setattr(sa_asyncio, "async_sessionmaker", injected_factory)
     # Invoke the actual fixture body so converting refusal to pytest.skip fails this control.
-    fixture = chat.__wrapped__(SimpleNamespace(param="discord"), db_preflight, db_nullpool_engine)
+    fixture = chat.__wrapped__(SimpleNamespace(param="discord"), db_preflight, db_committing_engine)
     try:
         with pytest.raises(ValueError, match="owned local"):
             await anext(fixture)
@@ -308,8 +310,9 @@ async def test_chat_fixture_refuses_unowned_binds_without_skipping_or_connecting
         pytest.fail("an unowned fixture bind must raise ValueError, never skip")
     finally:
         await fixture.aclose()
-        for engine in (db_nullpool_engine, foreign):
+        for engine in (db_committing_engine, foreign):
             event.remove(engine.sync_engine, "do_connect", refuse_connection)
+            event.remove(engine.sync_engine.pool, "checkout", refuse_connection)
         await foreign.dispose()
 
 

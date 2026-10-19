@@ -51,6 +51,13 @@ local `daimon_test` outside GitHub Actions CI; a green run against that name
 does not exercise those database tests. CI alone admits `daimon_test` with
 both `GITHUB_ACTIONS=true` and `CI=true` and a registered process-owned schema.
 Remote databases and URL query overrides are refused before I/O.
+A test whose sessions really commit, or that needs several independent
+connections, requests `db_committing_engine`: a pooled engine like production's.
+It fails the test that leaves session state on a pooled connection (a `SET`, a
+temp table, a `LISTEN`, an advisory lock). Use `db_nullpool_engine` for code that
+runs `asyncio.run` per call or takes session-level advisory locks, and set
+`DAIMON_TEST_NULLPOOL=1` to run everything on one connection per checkout.
+`packages/testing/README.md` has the isolation contract.
 Mark a test that runs its own DDL with `@pytest.mark.fresh_schema` to give it a private throwaway schema
 instead, and run `scripts/db/sweep_test_schemas.py` to reclaim schemas left
 behind by a killed run.

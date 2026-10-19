@@ -57,13 +57,13 @@ from .conftest import make_status_idle
 @pytest.fixture
 async def root_turn(
     db_preflight,
-    db_nullpool_engine,
+    db_committing_engine,
     *,
     live_root=False,
     null_environment_description=False,
     resolved_model=False,
 ):
-    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
     async with sm.begin() as db:
         tenant = await make_tenant(db)
@@ -1608,10 +1608,10 @@ async def test_retention_never_extends_existing_database_expiry(root_turn):
 
 
 @pytest.fixture
-async def recorded_fresh_root(db_preflight, db_nullpool_engine):
+async def recorded_fresh_root(db_preflight, db_committing_engine):
     async for value in root_turn.__wrapped__(
         db_preflight,
-        db_nullpool_engine,
+        db_committing_engine,
         live_root=True,
         null_environment_description=True,
         resolved_model=True,
