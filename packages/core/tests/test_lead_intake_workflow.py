@@ -464,3 +464,20 @@ async def test_manual_source_replay_is_independent_of_gmail_connection(
     replay = await service.submit(prepared, "7")
     assert replay.id == first.id
     assert ports.writes == []
+
+
+async def test_gmail_tombstone_survives_connection_rename(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, ports = await setup(lead_sessions, "active")
+    first = await service.submit(draft(), "7")
+    assert first.status == "completed"
+    config, credentials = await store.configuration()
+    renamed = config.model_copy(update={"revision": 2, "source_connection_id": "gmail-renamed"})
+    await store.configure(renamed, credentials)
+    assert await store.seen_source(renamed, draft().source.message_id)
+    assert (await service.submit(draft(), "7")).id == first.id
+    await store.purge(datetime.now(UTC) + timedelta(days=91))
+    replay = await service.submit(draft(), "7")
+    assert replay.id == first.id and replay.submission is None
+    assert ports.writes.count("starter") == 1

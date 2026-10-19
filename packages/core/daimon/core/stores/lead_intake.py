@@ -129,7 +129,7 @@ class IntakeStore:
         actor_id: str | None,
         provenance: tuple[UUID, UUID] | None = None,
     ) -> IntakeRecord:
-        connection = config.source_connection_id if submission.source.kind == "gmail" else "discord"
+        connection = "gmail" if submission.source.kind == "gmail" else "discord"
         digest = hashlib.sha256(
             f"{self.tenant_id}:{connection}:{submission.source.key}".encode()
         ).hexdigest()
@@ -204,15 +204,11 @@ class IntakeStore:
 
     def source_digest(self, config: IntakeConfig, message_id: str) -> str:
         key = f"gmail:{config.gmail_mailbox.strip().lower()}:{message_id}"
-        return hashlib.sha256(
-            f"{self.tenant_id}:{config.source_connection_id}:{key}".encode()
-        ).hexdigest()
+        return hashlib.sha256(f"{self.tenant_id}:gmail:{key}".encode()).hexdigest()
 
     async def seen_source(self, config: IntakeConfig, message_id: str) -> bool:
         key = f"gmail:{config.gmail_mailbox.strip().lower()}:{message_id}"
-        digest = hashlib.sha256(
-            f"{self.tenant_id}:{config.source_connection_id}:{key}".encode()
-        ).hexdigest()
+        digest = hashlib.sha256(f"{self.tenant_id}:gmail:{key}".encode()).hexdigest()
         async with self.sessions() as session:
             return (
                 await session.scalar(
