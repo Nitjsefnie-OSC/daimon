@@ -207,7 +207,14 @@ async def test_mcp_service_loads_real_frozen_origin_without_an_injected_parent(r
     await freeze(root_turn)
     deps, prepared, _, intent, origin, scope, _, transport = root_turn
     parent, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    # Emulate an active execution, rather than borrowing a frozen origin after
+    # its prepared driver has exited and revoked its session grant.
+    from daimon.core.stores.turn_origins import bind_origin_session
+
+    async with deps.sessionmaker.begin() as db:
+        await bind_origin_session(db, origin_id=origin.id, chat_session_id="test-session")
     caller = AuthIdentity(
+        chat_session_id="test-session",
         tenant_id=UUID(scope.tenant_id),
         account_id=parent.fleet.account_id,
         role=Role.USER,

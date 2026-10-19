@@ -2173,6 +2173,36 @@ def _warm_vault_mirror_handler(
             return memory_handler(request)
         except NotHandled:
             pass
+        if request.method == "POST" and request.url.path == "/v1/vaults":
+            body = json.loads(request.content)
+            assert body["display_name"].startswith(display + ":session:")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vlt_execution",
+                    "type": "vault",
+                    "display_name": body["display_name"],
+                    "metadata": None,
+                    "archived_at": None,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/vaults/vlt_execution/credentials":
+            body = json.loads(request.content)
+            assert body["metadata"]["daimon_chat_session"]
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vcrd_execution",
+                    "type": "credential",
+                    "vault_id": "vlt_execution",
+                    "metadata": body["metadata"],
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": body["auth"]["mcp_server_url"],
+                    },
+                },
+            )
         if request.method == "GET" and request.url.path == "/v1/vaults":
             return httpx.Response(
                 200,
@@ -2497,7 +2527,7 @@ async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Hiding is per caller: the person who drove the sign-in still gets the
-    server, and their session is created the plain way — by agent id."""
+    server alongside the session-scoped Daimon identity."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
     connected_account_id = uuid.UUID("00000000-0000-0000-0000-00000000dd03")
@@ -2538,9 +2568,12 @@ async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
         tool_safety=OPEN_TOOL_SAFETY,
     )
 
-    assert session_bodies[0]["agent"] == "ag_personal", (
-        "nothing hidden means the call shape does not change at all"
-    )
+    sent_agent = session_bodies[0]["agent"]
+    assert sent_agent["id"] == "ag_personal"
+    assert [server["name"] for server in sent_agent["mcp_servers"]] == ["docs", "daimon-mcp"]
+    assert sent_agent["mcp_servers"][0]["url"] == "https://mcp.example.com/docs"
+    assert "daimon_session=" in sent_agent["mcp_servers"][1]["url"]
+    assert session_bodies[0]["vault_ids"] == ["vlt_execution", "vlt_caller"]
 
 
 @pytest.mark.parametrize(

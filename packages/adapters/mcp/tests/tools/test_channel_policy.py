@@ -138,6 +138,7 @@ async def _caller(
             role=Role.USER,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
         origin_id = str(origin.id)
     if platform == "slack":
@@ -155,6 +156,7 @@ async def _caller(
             account_id=principal.account_id,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=chat_agent),
             secret=_SECRET,
+            chat_session_id="test-session",
             now=dt.datetime.now(dt.UTC),
         )
     await db_session.commit()
