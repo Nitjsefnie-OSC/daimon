@@ -45,6 +45,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
+from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
     ToolUseBlock,
@@ -151,7 +152,7 @@ def _may_have_outputs(state: TurnState) -> bool:
     )
 
 
-class TeamsTurnLifecycle:
+class TeamsTurnLifecycle(OutputGate):
     """Implements `daimon.core.turn.lifecycle.TurnLifecycle`. One per turn attempt."""
 
     def __init__(
@@ -251,6 +252,7 @@ class TeamsTurnLifecycle:
 
     async def _send(self, activity: MessageActivityInput, *, message_id: str | None) -> str:
         activity.id = message_id
+        await self.check_output()
         sent = await self._sender.send(
             self._conversation_id, activity, service_url=self._service_url
         )

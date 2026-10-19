@@ -35,6 +35,11 @@ skills mid-session, so a session carrying skills is refused. Shell/native tools
 and the Daimon management server are removed before sends. A changed provider
 session requires explicit re-enrollment instead of implicit recovery.
 
+Watch sends and report writes recheck live access and all three spend gates.
+Platform sends, edits, chunks, terminal completions/errors and upload steps share
+a latched delivery check; after a refusal, cleanup cannot publish retained content.
+Detached watch output-file sweeps are disabled after the execution grant ends.
+
 Watch restrictions last only for the watch turn. The runner restores the original
 session tool arrays before releasing it, including on errors and cancellation.
 It also invalidates cached tool hashes before restriction; after a process

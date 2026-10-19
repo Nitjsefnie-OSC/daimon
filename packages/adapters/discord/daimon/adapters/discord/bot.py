@@ -212,6 +212,7 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
+from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.prepare import PreparedTurn, admitted_session_scope, bind_session
 from daimon.core.turn.protection import (
     ConfirmedProtection,
@@ -1065,6 +1066,9 @@ class DaimonBot(commands.Bot):
         once and never stranded, which a per-turn cutoff could not promise.
         Sweeps stay serialized per session.
         """
+        if isinstance(getattr(lifecycle, "output_authorization", None), OutputAuthorization):
+            # A watch's execution grant ends with the turn, before detached sweeps.
+            return
         if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
             return
         session_id = outcome.ma_session_id

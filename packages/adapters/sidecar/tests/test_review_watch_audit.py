@@ -3,13 +3,18 @@
 import uuid
 
 import pytest
+from daimon.core.stores import watches
 from daimon.core.stores.watches import audit_sidecar_identity
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from . import test_callbacks
 
 registered = test_callbacks.registered
+event = test_callbacks.event
+deliver = test_callbacks.deliver
+KEY = test_callbacks.KEY
 
 pytestmark = [pytest.mark.fresh_schema, pytest.mark.usefixtures("watch_privilege_audit_lock")]
 
@@ -148,3 +153,83 @@ async def test_privilege_audit_refuses_an_indeterminate_catalog_result():
 
     with pytest.raises(ValueError, match="Unsafe"):
         await audit_sidecar_identity(SimpleNamespace(scalar=AsyncMock(return_value=None)))
+
+
+@pytest.mark.usefixtures("watch_privilege_audit_lock")
+async def test_real_restricted_login_cannot_enumerate_credentials_edit_policy_or_forge_wakes(
+    db_engine, db_session_factory, registered
+):
+    name = "sc_" + uuid.uuid4().hex
+    async with db_session_factory() as db:
+        schema = await db.scalar(text("SELECT current_schema()"))
+    async with db_engine.begin() as db:
+        await db.execute(
+            text(f"CREATE ROLE {name} LOGIN PASSWORD 'isolated-test' IN ROLE daimon_sidecar")
+        )
+    engine = create_async_engine(
+        db_engine.url.set(username=name, password="isolated-test"),
+        connect_args={"server_settings": {"search_path": f'"{schema}",public'}},
+    )
+    sessions = async_sessionmaker(engine)
+    try:
+        async with sessions.begin() as db:
+            await watches.audit_sidecar_identity(db)
+        async with sessions.begin() as db:
+            await db.execute(text("CREATE TEMP TABLE watches(id uuid)"))
+            await watches.accept_page_event(db, event(registered), key=KEY)
+            await db.execute(text("DROP TABLE pg_temp.watches"))
+        async with db_session_factory() as db:
+            rows = (
+                await db.execute(
+                    text(
+                        "SELECT p.proconfig,r.rolname,p.proacl FROM pg_proc p "
+                        "JOIN pg_roles r ON r.oid=p.proowner JOIN pg_namespace n ON n.oid=p.pronamespace "
+                        "WHERE n.nspname=current_schema() AND p.proname='accept_watch_page_event'"
+                    )
+                )
+            ).one()
+            assert rows[0] == ["search_path=pg_catalog, pg_temp"]
+            assert rows[1] == "daimon_watch_ingress_owner"
+            assert not any(entry.startswith("=") for entry in rows[2])
+
+        for sql in (
+            "SELECT * FROM agent_mcp_credentials",
+            "SELECT * FROM tenant_access_policies",
+            "UPDATE tenant_access_policies SET tenant_id=gen_random_uuid()",
+            "SELECT * FROM watch_capabilities",
+            "INSERT INTO task_continuations(reason) VALUES('timer')",
+            "UPDATE watches SET instructions='forged'",
+            f'CREATE TABLE "{schema}".shadow(id int)',
+        ):
+            async with engine.connect() as connection:
+                with pytest.raises(DBAPIError) as refused:
+                    await connection.execute(text(sql))
+                assert getattr(refused.value.orig, "sqlstate", None) == "42501", sql
+        # A digest is not a signing key; the privileged verifier hashes raw material itself.
+        with pytest.raises((DBAPIError, ValueError)):
+            await deliver(sessions, event(registered, key="b" * 64), key="b" * 64)
+        for grant, revoke in (
+            (f"ALTER ROLE {name} CREATEDB", f"ALTER ROLE {name} NOCREATEDB"),
+            (f"GRANT pg_read_all_data TO {name}", f"REVOKE pg_read_all_data FROM {name}"),
+            (
+                f'GRANT SELECT ON "{schema}".watch_capabilities TO PUBLIC',
+                f'REVOKE SELECT ON "{schema}".watch_capabilities FROM PUBLIC',
+            ),
+            (
+                f'GRANT SELECT(digest) ON "{schema}".watch_capabilities TO {name}',
+                f'REVOKE SELECT(digest) ON "{schema}".watch_capabilities FROM {name}',
+            ),
+        ):
+            async with db_engine.begin() as db:
+                await db.execute(text(grant))
+            try:
+                async with sessions.begin() as db:
+                    with pytest.raises(ValueError, match="Unsafe"):
+                        await watches.audit_sidecar_identity(db)
+            finally:
+                async with db_engine.begin() as db:
+                    await db.execute(text(revoke))
+    finally:
+        await engine.dispose()
+        async with db_engine.begin() as db:
+            await db.execute(text(f"DROP ROLE {name}"))

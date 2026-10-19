@@ -85,6 +85,7 @@ from daimon.core.turn.card_state import CardState as State
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import fit_notice, render_termination_notice
+from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from daimon.core.turn.state import (
@@ -147,7 +148,7 @@ def _map_sse_event(event: RawMessageStreamEvent) -> EmbedEvent | None:
     return EmbedEvent(kind="message", label=text)
 
 
-class SlackTurnLifecycle:
+class SlackTurnLifecycle(OutputGate):
     """TurnLifecycle implementation for Slack. Created fresh per turn.
 
     Accumulates Block Kit state from SSE events, debounces chat.update at
@@ -204,6 +205,7 @@ class SlackTurnLifecycle:
         self._answer_ts: str | None = None
         self._render_tables = render_tables
         self._client = client
+        self._post_as_agent = self.guarded_output(post_as_agent)
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
@@ -332,7 +334,7 @@ class SlackTurnLifecycle:
         }
         if blocks is not None:
             kwargs["blocks"] = blocks
-        resp = await post_as_agent(self._client, self._identity, **kwargs)
+        resp = await self._post_as_agent(self._client, self._identity, **kwargs)
         ts = cast(str, resp["ts"])
         await self.record_post(ts)
         return ts
@@ -411,7 +413,7 @@ class SlackTurnLifecycle:
                 self._register_pending(self._cancel_key, self._cancel, self._author_id)
                 self._pending_registered = True
             try:
-                resp = await post_as_agent(
+                resp = await self._post_as_agent(
                     self._client,
                     self._identity,
                     on_customized=self._set_header_customized,
@@ -438,6 +440,7 @@ class SlackTurnLifecycle:
             self._last_flush = now
         else:
             # Debounce elapsed — update the status message in place.
+            await self.check_output()
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
                 ts=self._status_ts,
@@ -495,7 +498,7 @@ class SlackTurnLifecycle:
         prior SSE flush.
         """
         if self._status_ts is None:
-            resp = await post_as_agent(
+            resp = await self._post_as_agent(
                 self._client,
                 self._identity,
                 on_customized=self._set_header_customized,
@@ -508,6 +511,7 @@ class SlackTurnLifecycle:
             self._register(self._status_ts, self._cancel, self._author_id)
             await self.record_post(self._status_ts)
         else:
+            await self.check_output()
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
                 ts=self._status_ts,
@@ -683,7 +687,7 @@ class SlackTurnLifecycle:
                     # turn, so a dropped server is named on its own line.
                     tool_only_notice = render_degraded_notice(state.mcp_failures)
                     if tool_only_notice is not None:
-                        resp = await post_as_agent(
+                        resp = await self._post_as_agent(
                             self._client,
                             self._identity,
                             channel=self._channel,
@@ -756,7 +760,7 @@ class SlackTurnLifecycle:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))
                         current_ts = self._status_ts
                     else:
-                        resp = await post_as_agent(
+                        resp = await self._post_as_agent(
                             self._client,
                             self._identity,
                             channel=self._channel,
@@ -838,6 +842,7 @@ class SlackTurnLifecycle:
             blocks[0] = {"type": "markdown", "text": updated}
         try:
             if self._notify_on_completion and self._answer_ts is not None:
+                await self.check_output()
                 await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                     channel=self._channel,
                     ts=self._answer_ts,

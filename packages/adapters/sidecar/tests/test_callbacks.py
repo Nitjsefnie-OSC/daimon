@@ -6,13 +6,14 @@ import asyncio
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from daimon.adapters.sidecar.main import create_app
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.page_events import sign_page_event, verify_page_event
-from daimon.core.stores import watches
+from daimon.core.stores import tenant_ledger, watches
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_sessions import create_thread_session
@@ -21,7 +22,7 @@ from daimon.testing.watch_fixtures import install_watch_ports
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 pytestmark = pytest.mark.fresh_schema
 KEY = "os-host-test-" + "ab" * 32
@@ -36,6 +37,13 @@ async def registered(db_session_factory, monkeypatch):
         await install_watch_ports(session)
         await watches.set_watch_control(session, scope="global", enabled=True)
         tenant = await make_tenant(session)
+        await tenant_ledger.insert_entry(
+            session,
+            tenant_id=tenant.id,
+            delta_usd=Decimal(100),
+            reason="trial",
+            idempotency_key=f"watch-test:{tenant.id}",
+        )
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant.id, platform="discord", external_id="123"
         )
@@ -381,86 +389,6 @@ async def test_watch_caps_reject_new_evidence_without_extra_wakes(
         assert await db.scalar(text("SELECT count(*) FROM task_continuations")) == 1
 
 
-@pytest.mark.usefixtures("watch_privilege_audit_lock")
-async def test_real_restricted_login_cannot_enumerate_credentials_edit_policy_or_forge_wakes(
-    db_engine, db_session_factory, registered
-):
-    name = "sc_" + uuid.uuid4().hex
-    async with db_session_factory() as db:
-        schema = await db.scalar(text("SELECT current_schema()"))
-    async with db_engine.begin() as db:
-        await db.execute(
-            text(f"CREATE ROLE {name} LOGIN PASSWORD 'isolated-test' IN ROLE daimon_sidecar")
-        )
-    engine = create_async_engine(
-        db_engine.url.set(username=name, password="isolated-test"),
-        connect_args={"server_settings": {"search_path": f'"{schema}",public'}},
-    )
-    sessions = async_sessionmaker(engine)
-    try:
-        async with sessions.begin() as db:
-            await watches.audit_sidecar_identity(db)
-        async with sessions.begin() as db:
-            await db.execute(text("CREATE TEMP TABLE watches(id uuid)"))
-            await watches.accept_page_event(db, event(registered), key=KEY)
-            await db.execute(text("DROP TABLE pg_temp.watches"))
-        async with db_session_factory() as db:
-            rows = (
-                await db.execute(
-                    text(
-                        "SELECT p.proconfig,r.rolname,p.proacl FROM pg_proc p "
-                        "JOIN pg_roles r ON r.oid=p.proowner JOIN pg_namespace n ON n.oid=p.pronamespace "
-                        "WHERE n.nspname=current_schema() AND p.proname='accept_watch_page_event'"
-                    )
-                )
-            ).one()
-            assert rows[0] == ["search_path=pg_catalog, pg_temp"]
-            assert rows[1] == "daimon_watch_ingress_owner"
-            assert not any(entry.startswith("=") for entry in rows[2])
-
-        for sql in (
-            "SELECT * FROM agent_mcp_credentials",
-            "SELECT * FROM tenant_access_policies",
-            "UPDATE tenant_access_policies SET tenant_id=gen_random_uuid()",
-            "SELECT * FROM watch_capabilities",
-            "INSERT INTO task_continuations(reason) VALUES('timer')",
-            "UPDATE watches SET instructions='forged'",
-            f'CREATE TABLE "{schema}".shadow(id int)',
-        ):
-            async with engine.connect() as connection:
-                with pytest.raises(DBAPIError) as refused:
-                    await connection.execute(text(sql))
-                assert getattr(refused.value.orig, "sqlstate", None) == "42501", sql
-        # A digest is not a signing key; the privileged verifier hashes raw material itself.
-        with pytest.raises((DBAPIError, ValueError)):
-            await deliver(sessions, event(registered, key="b" * 64), key="b" * 64)
-        for grant, revoke in (
-            (f"ALTER ROLE {name} CREATEDB", f"ALTER ROLE {name} NOCREATEDB"),
-            (f"GRANT pg_read_all_data TO {name}", f"REVOKE pg_read_all_data FROM {name}"),
-            (
-                f'GRANT SELECT ON "{schema}".watch_capabilities TO PUBLIC',
-                f'REVOKE SELECT ON "{schema}".watch_capabilities FROM PUBLIC',
-            ),
-            (
-                f'GRANT SELECT(digest) ON "{schema}".watch_capabilities TO {name}',
-                f'REVOKE SELECT(digest) ON "{schema}".watch_capabilities FROM {name}',
-            ),
-        ):
-            async with db_engine.begin() as db:
-                await db.execute(text(grant))
-            try:
-                async with sessions.begin() as db:
-                    with pytest.raises(ValueError, match="Unsafe"):
-                        await watches.audit_sidecar_identity(db)
-            finally:
-                async with db_engine.begin() as db:
-                    await db.execute(text(revoke))
-    finally:
-        await engine.dispose()
-        async with db_engine.begin() as db:
-            await db.execute(text(f"DROP ROLE {name}"))
-
-
 async def test_signature_binds_raw_bytes_and_every_registered_field(registered):
     delivery = event(registered)
     assert verify_page_event(delivery, key=KEY, now=datetime.now(UTC))
@@ -554,6 +482,11 @@ async def test_database_rate_and_row_quotas_are_independent_of_wake_coalescing(
         ("discord", "cancelled"),
         ("discord", "restore_error"),
         ("discord", "dead_session"),
+        *[
+            (platform, "spend_" + cap)
+            for platform in ("discord", "slack", "teams")
+            for cap in ("balance", "member_cap", "channel_budget")
+        ],
     ],
 )
 async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
@@ -666,6 +599,38 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         gate = driver._UNATTENDED_GATE.get()
         assert gate is not None
         await gate()
+        if ending.startswith("spend_"):
+            from daimon.core.stores.tenants import get_tenant
+            from daimon.testing.factories import make_channel_budget, make_tenant_user_cap
+
+            async with db_session_factory.begin() as db:
+                tenant = await get_tenant(db, registered.tenant_id)
+                if ending == "spend_balance":
+                    await tenant_ledger.insert_entry(
+                        db,
+                        tenant_id=registered.tenant_id,
+                        delta_usd=Decimal(-101),
+                        reason="usage",
+                        idempotency_key=f"drain:{key}",
+                    )
+                elif ending == "spend_member_cap":
+                    await make_tenant_user_cap(
+                        db, tenant=tenant, user_id=registered.owner_external_id, amount=Decimal(0)
+                    )
+                else:
+                    await make_channel_budget(
+                        db,
+                        tenant=tenant,
+                        platform=platform,
+                        channel_id=registered.parent_channel_id,
+                        limit_usd=Decimal(0),
+                    )
+            # The installed gate is the one the driver uses for confirmation sends.
+            with pytest.raises(AdmissionDenied):
+                await gate()
+            with pytest.raises(AdmissionDenied):
+                await kwargs["lifecycle"].on_render(TurnState())
+            return TurnState()
         async with db_session_factory.begin() as db:
             await watches.revoke_capabilities(db, registered.id, now=datetime.now(UTC))
         with pytest.raises(AdmissionDenied):
@@ -726,7 +691,7 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         role=Role.USER,
         attended=False,
     ) as origin:
-        if ending in ("normal", "dead_session"):
+        if ending in ("normal", "dead_session") or ending.startswith("spend_"):
             outcome = await call
             assert not outcome.recovered
         else:

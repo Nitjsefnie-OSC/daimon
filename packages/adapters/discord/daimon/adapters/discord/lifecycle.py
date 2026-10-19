@@ -54,6 +54,7 @@ from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
     TextBlock,
@@ -333,7 +334,7 @@ def _split_with_name_prefix(text: str, agent_name: str) -> list[str]:
     return chunks
 
 
-class DiscordTurnLifecycle:
+class DiscordTurnLifecycle(OutputGate):
     """TurnLifecycle implementation for Discord. Created fresh per turn.
 
     Receives SSE events, accumulates embed state, debounces Discord API calls.
@@ -401,7 +402,7 @@ class DiscordTurnLifecycle:
         self._notify_on_completion = notify_on_completion
         self._acknowledgment_managed = acknowledgment_managed
         self._render_tables = render_tables
-        self._send = send
+        self._send = self.guarded_output(send)
         self._request_id = request_id
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
@@ -410,8 +411,8 @@ class DiscordTurnLifecycle:
         self._alert_webhook_url = alert_webhook_url
         self._waiting_for_tenant_slot = waiting_for_tenant_slot
         self._queue_card_shown = False
-        self._edit = edit
-        self._urgent_edit = urgent_edit
+        self._edit = self.guarded_output(edit)
+        self._urgent_edit = self.guarded_output(urgent_edit) if urgent_edit is not None else None
         self._delete = delete
         # Nobody asked for an unprompted turn, so it stays invisible until it
         # has something to show: no up-front thinking embed, no "Turn

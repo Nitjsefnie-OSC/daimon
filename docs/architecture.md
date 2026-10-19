@@ -2456,7 +2456,9 @@ so unrelated work stays readable during rollback.
 Migration `0116_watches` follows `0115_origin_session_grants`. A watch turn explicitly
 passes `attended=False`, uses core admission and S1's unattended decider, and
 revalidates registration, stops, key generation and exact session before every
-driver send. Its current execution origin must be unattended and hold the exact
+driver send. Balance, member monthly caps and the attributed channel budget are
+read again before model and confirmation sends and before each report write.
+Its current execution origin must be unattended and hold the exact
 bound session grant; missing or mismatched grants refuse the send. The common gate covers all three chat adapters,
 including confirmation sends. Watches require a gateable Managed Agents session;
 unsupported backends and implicit session replacement are refused. Deployment and
@@ -2469,7 +2471,11 @@ back to a parent channel. Evidence is byte-bounded and escaped as untrusted text
 The runner restores the original tool/server arrays before leaving the turn,
 including on errors and cancellation. Cached tool hashes are invalidated first so
 after interruption the next bind reapplies its ordinary tools. S1 revokes the
-origin session grant after this cleanup.
+origin session grant after this cleanup. Output authorization also gates each
+platform send/edit/upload, including terminal success, interrupted completion,
+errors and overflow chunks. A failed check latches delivery off for the rest of
+the turn and its late tasks, so finalization cannot publish retained content.
+Detached watch output-file sweeps do not run after the execution grant ends.
 
 Revoking a key, stopping a watch or disabling an owner/tenant/global gate cancels
 queued wakes. Re-enabling does not revive them. Evidence expires after seven days;
