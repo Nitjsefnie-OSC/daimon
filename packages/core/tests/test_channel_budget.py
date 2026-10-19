@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -9,11 +10,12 @@ import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from daimon.core import usage_recording
+from daimon.core import channel_budget, usage_recording
 from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.channel_budget import (
     ChannelBudgetError,
     ChannelBudgetStatus,
+    balance_footer,
     budget_period,
     describe_budget,
     get_channel_budget_status,
@@ -292,3 +294,29 @@ async def test_recorders_stamp_the_channel_on_both_rows(
     assert sorted(c for c in ledger if c is not None) == ["chan-1", "chan-2"], (
         "each debit carries its channel"
     )
+
+
+@pytest.mark.parametrize(
+    ("balance", "footer"),
+    [
+        (Decimal("8.1"), "$8.10 left"),
+        (Decimal("0"), "No credit left"),
+        (Decimal("-0.01"), "No credit left"),
+        (None, None),
+    ],
+)
+async def test_the_footer_never_shows_a_negative_balance(
+    monkeypatch: pytest.MonkeyPatch, balance: Decimal | None, footer: str | None
+) -> None:
+    async def prepaid_balance(_session: object, *, tenant_id: object) -> Decimal | None:
+        return balance
+
+    monkeypatch.setattr(channel_budget, "get_prepaid_balance", prepaid_balance)
+    shown = await balance_footer(
+        object(),  # type: ignore[arg-type]
+        tenant_id=uuid.uuid4(),
+        platform="teams",
+        budget_channel_id=None,
+        now=_NOW,
+    )
+    assert shown == footer, "a turn settling past zero showed $-0.01 left in Teams"
