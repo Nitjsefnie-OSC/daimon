@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, cast, get_args
 from unittest.mock import AsyncMock, MagicMock
@@ -97,7 +98,7 @@ _FILE: dict[str, Any] = {
 }
 
 
-def _mutated(change: Any) -> BetaManagedAgentsSession:
+def _mutated(change: Callable[[dict[str, Any]], object]) -> BetaManagedAgentsSession:
     """A root snapshot changed in its raw provider form, then parsed as the SDK does."""
     session = _root_session().model_dump(mode="json")
     change(session)
@@ -649,3 +650,61 @@ def test_a_reviewed_session_with_every_known_capability_passes() -> None:
     require_allowed_capabilities(session, allow_skills=True)
     with pytest.raises(AdmissionDenied):
         require_allowed_capabilities(session, allow_skills=False)
+
+
+def _daimon_and_foreign(public_url: str) -> BetaManagedAgentsSession:
+    return _root_session(
+        tools=[
+            *_tools(),
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "daimon-mcp",
+                "default_config": ALLOW,
+                "configs": [{"name": "list_agents", **ALLOW}],
+            },
+        ],
+        mcp_servers=[*deepcopy(SERVERS), {"name": "daimon-mcp", "type": "url", "url": public_url}],
+    )
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["safety_on", "safety_off"])
+@pytest.mark.parametrize("entry_point", [None, *ENTRY_POINTS])
+async def test_every_retained_mcp_call_pauses_for_the_decider(
+    entry_point: UnattendedEntryPoint | None, enabled: bool
+) -> None:
+    """Trusted Daimon tools and, with safety off, foreign writes ask too.
+
+    Nothing an MCP server offers runs on its own in an unattended session; the
+    decider then answers as before (Daimon's ordinary tools and, with safety
+    off, foreign calls are allowed).
+    """
+    public_url = "https://daimon.example/mcp"
+    policy = ToolSafetyPolicy(enabled=enabled)
+    snapshot = _daimon_and_foreign(public_url)
+    provider, result = await _drive(snapshot, entry_point, policy=policy, public_url=public_url)
+
+    assert result.error is None
+    [agent] = provider.at_send
+    toolsets = [t for t in agent["tools"] if t["type"] == "mcp_toolset"]
+    assert {t["mcp_server_name"] for t in toolsets} == {"linear", "daimon-mcp"}
+    for toolset in toolsets:
+        assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+        assert all(c["permission_policy"] == {"type": "always_ask"} for c in toolset["configs"]), (
+            toolset
+        )
+    posture = unattended_posture(
+        policy,
+        session=snapshot,
+        public_url=public_url,
+        session_factory=None,
+        tenant_id=None,
+        entry_point=entry_point,
+    )
+    daimon = await posture.decide(
+        ToolCall(tool_use_id="d", server_name="daimon-mcp", tool_name="list_agents")
+    )
+    foreign = await posture.decide(
+        ToolCall(tool_use_id="f", server_name="linear", tool_name="create_issue")
+    )
+    assert daimon.allow
+    assert foreign.allow is not enabled

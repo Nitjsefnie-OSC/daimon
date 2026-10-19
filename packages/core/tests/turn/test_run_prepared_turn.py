@@ -4087,3 +4087,125 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_keeps_builtins
     assert isinstance(posture, PolicyApproval)
     bash = await posture.decide(ToolCall(tool_use_id="tu", server_name=None, tool_name="bash"))
     assert bash.allow is ENTRY_POINT_POLICY[entry_point].allow_builtins
+
+
+@pytest.mark.parametrize("origin", ["chat", "worker"], ids=["wake", "fleet_worker"])
+@pytest.mark.parametrize(
+    ("server", "enabled"),
+    [("linear", False), ("daimon-mcp", True), ("daimon-mcp", False)],
+    ids=["foreign-safety-off", "trusted-safety-on", "trusted-safety-off"],
+)
+async def test_unattended_prepared_turn_makes_every_mcp_call_pause(
+    origin: Any,
+    server: str,
+    enabled: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wakes and fleet workers: trusted Daimon tools, and foreign ones with
+    safety off, pause before running; the decider allows them as before."""
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn import driver
+    from daimon.core.turn.posture import PolicyApproval
+    from daimon.testing.ma_models import ma_session
+
+    public_url = "https://daimon.example/mcp"
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-mcp",
+        ma_session_id="sess_mcp",
+    )
+    await db_session.commit()
+    url = public_url if server == "daimon-mcp" else "https://linear.example/mcp"
+    agent = ma_agent(
+        id="ag_1",
+        tenant_id=tenant.id,
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": server,
+                "configs": [
+                    {
+                        "name": "list_agents",
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    }
+                ],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        ],
+        mcp_servers=[{"type": "url", "name": server, "url": url}],
+    )
+    snapshot = ma_session(id="sess_mcp", agent=agent)
+    updates: list[dict[str, Any]] = []
+
+    def update(request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        updates.append(json.loads(request.content)["agent"])
+        return httpx.Response(200, json=snapshot.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_mcp$",
+        lambda _r, _m: httpx.Response(200, json=snapshot.model_dump(mode="json")),
+    )
+    router.add("POST", r"/v1/sessions/sess_mcp$", update)
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router),
+        tool_safety=ToolSafetyPolicy(enabled=enabled),
+        public_url=public_url,
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=_admission(
+            account_id=account.id, agent=agent, env=ma_environment(id="env_1", tenant_id=tenant.id)
+        ),
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_mcp",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    postures: list[object] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        gate = driver._UNATTENDED_GATE.get()  # pyright: ignore[reportPrivateUsage]
+        assert gate is not None
+        await gate()
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    await run_prepared_turn(
+        deps,
+        prepared,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-mcp",
+        external_user_id="user-1",
+        user_message="wake up",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=_reseed,
+        recovery_lifecycle=_recovery_lifecycle,
+        render_interval_s=0.001,
+        attended=False,
+        origin=origin,
+    )
+
+    [sent] = updates
+    [toolset] = sent["tools"]
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+    assert all(c["permission_policy"] == {"type": "always_ask"} for c in toolset["configs"])
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    decision = await posture.decide(
+        ToolCall(tool_use_id="tu", server_name=server, tool_name="list_agents")
+    )
+    assert decision.allow

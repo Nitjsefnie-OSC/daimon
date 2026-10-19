@@ -171,9 +171,11 @@ async def test_routine_write_is_denied_when_the_policy_is_on() -> None:
 
 
 async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
+    """Created as the agent is; the unattended gate still makes every call pause."""
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
-    client = build_fake_anthropic(_router(creates=creates, sends=sends).dispatch)
+    updates: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_router(creates=creates, sends=sends, updates=updates).dispatch)
 
     await run_turn(
         anthropic=client,
@@ -184,6 +186,10 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
     )
 
     assert creates[0]["agent"] == "agent_x", "no override when enforcement is off"
+    # The fake keeps serving the frozen snapshot, so every gate rewrites it.
+    assert updates
+    (toolset,) = updates[0]["agent"]["tools"]
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
     (sent,) = _confirmations(sends)
     assert sent["result"] == "allow", "off allows an ordinary third-party call"
 
@@ -508,3 +514,36 @@ async def test_a_routine_keeps_its_sandbox_by_the_entry_point_policy() -> None:
     for body in [creates[0], *updates]:
         (builtins,) = [t for t in body["agent"]["tools"] if t["type"] == "agent_toolset_20260401"]
         assert builtins["default_config"]["enabled"] is True
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_a_routines_own_daimon_tools_pause_for_the_decider(enabled: bool) -> None:
+    """Trusted is not unasked: Daimon's ordinary tools pause, and the decider allows them."""
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+    client = build_fake_anthropic(
+        _router(
+            creates=creates,
+            sends=sends,
+            updates=updates,
+            agent_tools=[_toolset("daimon-mcp")],
+            agent_servers=[{"name": "daimon-mcp", "type": "url", "url": _PUBLIC_URL}],
+            events=_events(server="daimon-mcp", name="list_agents", tool_input={}),
+        ).dispatch
+    )
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="list them",
+        tool_safety=ToolSafetyPolicy(enabled=enabled),
+        mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
+    )
+
+    toolset = updates[-1]["agent"]["tools"][0]
+    assert toolset["mcp_server_name"] == "daimon-mcp"
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+    (sent,) = _confirmations(sends)
+    assert sent["result"] == "allow"

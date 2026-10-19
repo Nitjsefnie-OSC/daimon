@@ -1626,3 +1626,74 @@ async def test_a_coordinator_session_is_never_checkpointed(
     assert outcome.gap_reason == "checkpoint_failed"
     assert state.sent_batches == []
     assert state.sessions[old_session].agent.tools == before
+
+
+@pytest.mark.parametrize(
+    ("enabled", "public_url"),
+    [(False, None), (True, "https://daimon.example/mcp"), (False, "https://daimon.example/mcp")],
+    ids=["foreign-safety-off", "trusted-safety-on", "trusted-safety-off"],
+)
+async def test_every_mcp_call_of_a_checkpoint_pauses_for_the_decider(
+    enabled: bool, public_url: str | None, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The checkpoint turn is unattended: trusted Daimon tools and, with safety
+    off, foreign ones ask before running; nothing in the session runs unasked."""
+    from anthropic.types.beta.beta_managed_agents_mcp_toolset import BetaManagedAgentsMCPToolset
+
+    state = FakeSessionsState(ma=FakeMAState())
+    client = _client(state)
+    old_session = await _make_session(client)
+    allow = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    servers = [("linear", "https://mcp.linear.app/mcp")]
+    if public_url is not None:
+        servers.append(("daimon-mcp", public_url))
+    session = state.sessions[old_session]
+    state.sessions[old_session] = session.model_copy(
+        update={
+            "agent": session.agent.model_copy(
+                update={
+                    "tools": [
+                        BetaManagedAgentsMCPToolset.model_validate(
+                            {
+                                "type": "mcp_toolset",
+                                "mcp_server_name": name,
+                                "default_config": allow,
+                                "configs": [{"name": "list_agents", **allow}],
+                            }
+                        )
+                        for name, _url in servers
+                    ],
+                    "mcp_servers": [
+                        BetaManagedAgentsMCPServerURLDefinition(name=name, type="url", url=url)
+                        for name, url in servers
+                    ],
+                }
+            )
+        }
+    )
+    _seed_conversation(state, old_session, with_reply=True)
+
+    await transfer_workspace(
+        client,
+        db_session_factory,
+        old_session_id=old_session,
+        old_snapshot=_snapshot(),
+        tenant_id=TENANT_ID,
+        external_user_id="U123",
+        transfer_id=TRANSFER_ID,
+        markup=Decimal("1.0"),
+        checkpoint_deadline=DEADLINE,
+        from_agent_name="analysis-bot",
+        sleep=_no_sleep,
+        now=_now,
+        tool_safety=ToolSafetyPolicy(enabled=enabled),
+        public_url=public_url,
+        platform="discord",
+    )
+
+    tools = state.sessions[old_session].agent.tools
+    assert {t.mcp_server_name for t in tools if t.type == "mcp_toolset"} == {n for n, _ in servers}
+    for tool in tools:
+        assert tool.type == "mcp_toolset"
+        assert tool.default_config.permission_policy.type == "always_ask"
+        assert all(c.permission_policy.type == "always_ask" for c in tool.configs)

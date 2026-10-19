@@ -439,3 +439,42 @@ async def test_an_operator_run_keeps_its_sandbox_by_the_entry_point_policy(
     await _run(monkeypatch, db_session_factory, session, events, ToolSafetyPolicy(enabled=True))
     assert session.tools[0]["default_config"]["enabled"] is True
     assert _confirmations(session) == ["allow"]
+
+
+@pytest.mark.parametrize(
+    ("server", "policy", "public_url"),
+    [
+        ("linear", ToolSafetyPolicy(enabled=False), None),
+        ("daimon-mcp", ToolSafetyPolicy(enabled=True), _PUBLIC),
+        ("daimon-mcp", ToolSafetyPolicy(enabled=False), _PUBLIC),
+    ],
+    ids=["foreign-safety-off", "trusted-safety-on", "trusted-safety-off"],
+)
+async def test_every_mcp_call_of_an_operator_run_pauses_for_the_decider(
+    server: str,
+    policy: ToolSafetyPolicy,
+    public_url: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Neither a trusted server nor safety off leaves a tool that runs unasked;
+    the decider then allows the call as it did before."""
+    url = public_url if server == "daimon-mcp" else _LINEAR["url"]
+    session = _Session(
+        [_toolset(server, per_tool="list_agents")], [{"name": server, "type": "url", "url": url}]
+    )
+    await _run(
+        monkeypatch,
+        db_session_factory,
+        session,
+        _events(server, "list_agents"),
+        policy,
+        public_url=public_url,
+    )
+    kinds = [kind for kind, _ in session.wire]
+    assert kinds.index("update") < kinds.index("user.message")
+    toolset = session.wire[0][1]["tools"][0]
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+    assert toolset["configs"]
+    assert all(c["permission_policy"] == {"type": "always_ask"} for c in toolset["configs"])
+    assert _confirmations(session) == ["allow"]

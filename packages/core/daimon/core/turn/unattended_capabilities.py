@@ -289,6 +289,24 @@ def _disabled_builtins(tool: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _asking(tool: dict[str, Any]) -> dict[str, Any]:
+    """An MCP toolset whose every call pauses for the unattended decider.
+
+    Trusted, policy-off and per-tool `always_allow` settings all become
+    `always_ask`; `enabled` is kept. What the decider then allows (Daimon's
+    own ordinary tools, any call with tool safety off) is unchanged, but each
+    call is decided, with the agent's rules, channel and trusted hints.
+    """
+    if tool.get("type") != MCP_TOOLSET:
+        return tool
+    ask = {"type": "always_ask"}
+    return {
+        **tool,
+        "default_config": {**(tool.get("default_config") or {}), "permission_policy": ask},
+        "configs": [{**config, "permission_policy": ask} for config in _configs(tool)],
+    }
+
+
 def _allowlisted(
     tools: list[dict[str, Any]],
     servers: list[dict[str, Any]],
@@ -354,9 +372,11 @@ async def constrain_capabilities(
     Refuses first (`require_allowed_capabilities`). Built-in and custom tools
     are disabled unless `allow_builtins`; with a `tool_allowlist` of
     `server/tool` keys only those MCP tools stay, and every server no kept
-    toolset names is dropped. Every MCP toolset left is gated as
-    `session_tools_for_policy` gates it, Daimon's `protected_tools` ask, the
-    agent's rules apply, and a foreign `daimon-mcp` URL is healed.
+    toolset names is dropped. Every MCP toolset left, Daimon's own included and
+    with tool safety on or off, asks on its default and on every per-tool
+    config, so each call reaches the unattended decider; Daimon's
+    `protected_tools` and rule tools are listed as `session_tools_for_policy`
+    lists them, and a foreign `daimon-mcp` URL is healed.
     """
     require_allowed_capabilities(snapshot, allow_skills=allow_skills)
     original = SessionToolConfig.of(snapshot)
@@ -387,7 +407,7 @@ async def constrain_capabilities(
     )
     healed = heal_reserved_server(policy, servers, public_url=public_url, confirmed_tools=protected)
     send = SessionToolConfig(
-        tools=gated if gated is not None else tools,
+        tools=[_asking(tool) for tool in (gated if gated is not None else tools)],
         mcp_servers=healed if healed is not None else servers,
     )
     return ConstrainedSession(send=send, original=original, changed=send != original)
