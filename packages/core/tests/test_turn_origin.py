@@ -595,6 +595,9 @@ def test_each_platforms_controls_list_the_places_daimon_works_there(platform: st
 
     assert _PLACES[platform] in rendered
     assert "only place" not in prose
+    assert "when you quote or sum up what someone wrote" in prose, (
+        "a person's own words quoted back must not carry another app's name either"
+    )
     for other in {"discord", "slack", "teams"} - {platform}:
         assert other not in prose, f"{platform} controls name {other}"
 
