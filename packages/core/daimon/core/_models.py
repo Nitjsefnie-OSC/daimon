@@ -433,6 +433,39 @@ class ChannelAdmin(Base):
     )
 
 
+class RoutineSession(Base):
+    """Durable allocation obligations; independent of routine/mapping deletion."""
+
+    __tablename__ = "routine_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('recorded', 'session_created', 'running', 'stopping', "
+            "'completed', 'stopped', 'stop_unresolved')",
+            name="ck_routine_sessions_state",
+        ),
+        CheckConstraint("stop_attempts BETWEEN 0 AND 3", name="ck_routine_sessions_attempts"),
+        Index("routine_sessions_pending_idx", "state", "next_attempt_at"),
+        Index("routine_sessions_routine_idx", "tenant_id", "routine_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    routine_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    fire_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    ma_session_id: Mapped[str | None] = mapped_column(Text)
+    mapping_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="recorded")
+    stop_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_detail: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Routine(Base):
     __tablename__ = "routines"
     __table_args__ = (

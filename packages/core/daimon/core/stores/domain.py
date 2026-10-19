@@ -226,6 +226,39 @@ class UnattendedRequester(BaseModel):
     role_ids: tuple[str, ...] = ()
 
 
+RoutineSessionState = Literal[
+    "recorded", "session_created", "running", "stopping", "completed", "stopped", "stop_unresolved"
+]
+
+
+class RoutineSessionRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    routine_id: uuid.UUID
+    fire_id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    ma_agent_id: str
+    ma_session_id: str | None
+    mapping_id: uuid.UUID | None
+    owner_key: int
+    state: RoutineSessionState
+    stop_attempts: int
+    next_attempt_at: datetime | None
+    failure_detail: str | None
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None
+
+
+class RoutineLifecycleStatus(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    pending: int = 0
+    stop_unresolved: int = 0
+
+
 class RoutineRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -245,6 +278,7 @@ class RoutineRow(BaseModel):
     next_fire_at: datetime | None
     last_fired_at: datetime | None
     last_error: str | None
+    session_lifecycle: RoutineLifecycleStatus = RoutineLifecycleStatus()
     last_result_tail: str | None
     destination_kind: RoutineDestinationKind | None = None
     destination_id: str | None = None
