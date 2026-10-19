@@ -1515,6 +1515,9 @@ admission before any of this runs.
 - **`daimon run`**, in
   `packages/adapters/cli/daimon/adapters/cli/run/command.py`, is a single-turn
   subprocess entry point that calls `run_turn` directly with `BillingExempt`.
+  Nobody answers a card there, so it is unattended: before the message it
+  gates the operator's session (`gate_session_snapshot`, whatever the session
+  was created with) and answers every pause with `unattended_posture`.
 - **Wakes** run a turn in an existing thread later, with nobody mentioning the
   bot: a handoff's first turn for the new agent, work unblocked by a private
   form, a one-shot timer (`daimon.core.continuity.timers`, the `create_timer`

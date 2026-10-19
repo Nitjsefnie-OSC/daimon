@@ -10,6 +10,7 @@ from typing import Annotated
 
 import anthropic
 import typer
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.cli.logging import configure_admin_logging
 from daimon.adapters.cli.run.events import (
     TerminalFailed,
@@ -19,17 +20,18 @@ from daimon.adapters.cli.run.events import (
 from daimon.adapters.cli.run.lifecycle import NdjsonLifecycle
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import discover_tenant
-from daimon.core.config import load_settings, load_turn_settings
-from daimon.core.mux_backend import resource_scope
+from daimon.core.config import Settings, load_settings, load_turn_settings
+from daimon.core.mux_backend import platform_scope, resource_scope
+from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.identity import get_or_create_cli_principal
-from daimon.core.tool_safety import trusted_servers_for
-from daimon.core.turn.approvals import chat_tool_confirmation
+from daimon.core.turn.approvals import AnnotationLookup
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.outcomes import current_outcome, observe_turn
 from daimon.core.turn.posture import BillingExempt, RequireApproval, ToolConfirmation
 from daimon.core.turn.state import TurnState
+from daimon.core.turn.unattended import gate_session_snapshot, unattended_posture
 from mux.errors import ScopeViolation
 
 
@@ -58,30 +60,54 @@ def run_command(
     user_message = _resolve_user_message(raw_message)
 
     settings = load_settings()
-
-    # No card surface here: with the tool-safety policy on, reads run and
-    # third-party writes are refused (`no_confirmation_surface`); off, this is
-    # the driver's default `RequireApproval`.
-    tool_confirmation = chat_tool_confirmation(
-        settings.tool_safety,
-        requester_platform_user_id=settings.cli.local_user or "cli",
-        confirm=None,
-        trusted_servers=trusted_servers_for(
-            str(settings.mcp.public_url) if settings.mcp.public_url is not None else None
-        ),
-    )
-
-    async def _with_defaults() -> int:
-        async with build_runtime(settings) as rt:
-            return await run_conversation(
-                rt=rt,
-                session_id=session,
-                user_message=user_message,
-                tool_confirmation=tool_confirmation,
-            )
-
-    exit_code = asyncio.run(_with_defaults())
+    exit_code = asyncio.run(_run_with_defaults(settings, session, user_message))
     raise typer.Exit(code=exit_code)
+
+
+async def _run_with_defaults(settings: Settings, session: str, user_message: str) -> int:
+    """Gate the operator's session, then run the turn under the unattended rules.
+
+    Nobody answers a card here, so this is an unattended turn: before the
+    message the session's own tool config is rewritten from the current
+    policy (`gate_session_snapshot`), whatever it was created with, and every
+    pause is decided by `unattended_posture`.
+    """
+    async with build_runtime(settings) as rt:
+        public_url = str(settings.mcp.public_url) if settings.mcp.public_url is not None else None
+        scope = platform_scope("CLI operator run gate")
+        async with rt.sessionmaker() as db:
+            tenant_id = await discover_tenant(db)
+        snapshot = await retrieve_session_record(rt.anthropic, session, scope=scope)
+        await gate_session_snapshot(
+            rt.anthropic.with_options(max_retries=0),
+            snapshot,
+            settings.tool_safety,
+            scope=scope,
+            public_url=public_url,
+            session_factory=rt.sessionmaker,
+            tenant_id=tenant_id,
+        )
+        # Decide on what the gate left (a healed reserved URL, for one).
+        snapshot = await retrieve_session_record(rt.anthropic, session, scope=scope)
+        return await run_conversation(
+            rt=rt,
+            session_id=session,
+            user_message=user_message,
+            tool_confirmation=unattended_posture(
+                settings.tool_safety,
+                session=snapshot,
+                public_url=public_url,
+                session_factory=rt.sessionmaker,
+                tenant_id=tenant_id,
+                annotations_for=_annotations_for(rt, snapshot),
+            ),
+        )
+
+
+def _annotations_for(rt: CliRuntime, session: BetaManagedAgentsSession) -> AnnotationLookup | None:
+    """Operator-trusted MCP hints for `session`'s calls; none on this build."""
+    del rt, session
+    return None
 
 
 # `RequireApproval` is frozen and field-less; one shared default (ruff B008).
