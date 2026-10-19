@@ -3350,10 +3350,19 @@ file, owned by the runtime user, mode 0600. Provisioners use the existing
 provider-neutral after-ACK credential binding with `chat_execution=True` against
 the retained canonical source; they must not mint a token before the native agent has been acknowledged
 and read back. The real host factory passes the scoped resolver into the OpenAI
-driver. Only session creation receives the bearer: its registered identity,
-account/tenant, expiry, revocation and exact authenticated catalogue are checked
-before exposure to the captured destination. Agent metadata and runtime
-manifests contain the credential reference, never the bearer itself.
+driver. Before session creation, the resolver checks the bearer's registered
+identity, account/tenant, expiry, revocation and exact authenticated catalogue.
+The driver writes it through the native vault port into a new caller-scoped
+session vault, bound to the captured MCP URL, and attaches only `vault_ids` and
+the credential ID to the session request. Inline MCP authorization is not sent.
+Agent metadata, session bindings and runtime manifests contain references,
+never bearer values. The binding retains the owned vault identity so deleting
+the session also deletes its vault and credentials after a process restart;
+independently supplied vaults remain retained. A definite session-create
+rejection cleans the new vault; an uncertain native creation retains it for
+reconciliation, since accepted work may still need it. A newly authorized
+credential remains required after caller-token expiry; this adds no automatic
+refresh or broader MCP permissions.
 
 Memory has no native preservation mapping in this profile and remains an
 explicit preview/consent loss. Model controls, repositories and any other source

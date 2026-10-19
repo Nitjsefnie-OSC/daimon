@@ -19,9 +19,10 @@ from mux.contracts.resources import (
     SessionSpec,
     UpdatePlan,
 )
+from mux.drivers.openai import session_mcp
 from mux.drivers.openai._common import Context, objects, owned, query, text
 from mux.drivers.openai.actions import content
-from mux.drivers.openai.mcp_auth import MCPSecretResolver, session_tools
+from mux.drivers.openai.mcp_auth import MCPSecretResolver
 from mux.drivers.openai.mounts import resources, vault_ids
 from mux.drivers.openai.normalize import required_actions
 from mux.drivers.openai.session_controls import SessionControls
@@ -46,10 +47,12 @@ class OpenAISessions:
         self._c, self._binding_lookup = context, binding_lookup
         self._controls = controls if controls is not None else SessionControls()
         self._mcp_secrets = mcp_secrets
+        self._mcp_bindings: dict[tuple[str, str | None, str], ProviderBinding] = {}
 
     def _binding(self, scope: Scope, raw: Object) -> ProviderBinding:
         id_ = text(raw["id"])
         binding = self._binding_lookup(scope, id_) if self._binding_lookup is not None else None
+        binding = binding or self._mcp_bindings.get((scope.tenant_id, scope.account_id, id_))
         if binding is not None:
             if (
                 binding.provider != "openai"
@@ -271,14 +274,28 @@ class OpenAISessions:
             body["input"] = [
                 {"role": "user", "content": content(initial.content, self._c.profile_id)}
             ]
-        tools = await session_tools(
-            scope, agent, self._c, self._mcp_secrets, vaults_attached=bool(vaults)
+        tools, managed = await session_mcp.prepare(
+            self._c, scope, agent, self._mcp_secrets, key=key, vaults_attached=bool(vaults)
         )
         if tools is not None:
             body["agent"] = {**object_json(body.get("agent") or {}), "tools": tools}
-        return await self._decode(
-            scope, await self._c.call("POST", "/agents/sessions", body=body, key=key), creating=True
-        )
+        if managed is not None:
+            body["vault_ids"] = [managed.vault.id]
+        try:
+            raw = await self._c.call("POST", "/agents/sessions", body=body, key=key)
+        except ProviderError as error:
+            # Only a definite rejection proves no session can still need its vault.
+            if managed is not None and error.native_code in ("400", "401", "403", "404", "422"):
+                await managed.delete(self._c, scope, key=key + ":mcp-cleanup")
+            raise
+        session = await self._decode(scope, raw, creating=True)
+        if managed is not None:
+            binding = session.binding.model_copy(
+                update={"native_refs": {**session.binding.native_refs, **managed.refs()}}
+            )
+            self._mcp_bindings[(scope.tenant_id, scope.account_id, session.ref.id)] = binding
+            session = session.model_copy(update={"binding": binding})
+        return session
 
     @owned
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
@@ -348,11 +365,24 @@ class OpenAISessions:
         self._c.check(scope, ref, "session")
         path = "/agents/sessions/" + segment(ref.id)
         deleting = False
+        binding = self._binding_lookup(scope, ref.id) if self._binding_lookup is not None else None
+        binding = binding or self._mcp_bindings.get((scope.tenant_id, scope.account_id, ref.id))
+        managed = session_mcp.from_binding(self._c, scope, binding)
         try:
             async with asyncio.timeout(_DELETE_TIMEOUT):
                 while True:
                     self._c.check(scope, ref, "session")
-                    raw = await self._c.call("GET", path)
+                    try:
+                        raw = await self._c.call("GET", path)
+                    except ProviderError as error:
+                        if managed is None or error.native_code != "404":
+                            raise
+                        try:
+                            await managed.delete(self._c, scope, key=key + ":mcp-vault")
+                        except ProviderError as missing:
+                            if missing.native_code != "404":
+                                raise
+                        return DeletionReceipt(operation_id=key, deleted=(ref, managed.vault))
                     if raw.get("id") != ref.id:
                         raise ValueError("wrong session identity")
                     self._c.record(scope, raw)
@@ -360,6 +390,8 @@ class OpenAISessions:
                     if not isinstance(vault_ids, list):
                         raise ValueError("invalid vault IDs")
                     vaults = tuple(self._c.ref(scope, "vault", text(v)) for v in vault_ids)
+                    if managed is not None and managed.vault.id not in vault_ids:
+                        raise ContinuityLost(ref.id, ("session MCP vault attachment changed",))
                     status = text(raw["status"])
                     if status not in ("idle", "failed", "in_progress", "requires_action"):
                         raise ValueError("unknown native session status")
@@ -375,8 +407,14 @@ class OpenAISessions:
                             if error.category != "conflict" or error.native_code != "409":
                                 raise
                         else:
+                            if managed is not None:
+                                await managed.delete(self._c, scope, key=key + ":mcp-vault")
                             return DeletionReceipt(
-                                operation_id=key, deleted=(ref,), retained=vaults
+                                operation_id=key,
+                                deleted=(ref, managed.vault) if managed is not None else (ref,),
+                                retained=tuple(
+                                    v for v in vaults if managed is None or v.id != managed.vault.id
+                                ),
                             )
                     await asyncio.sleep(_DELETE_POLL_INTERVAL)
         except TimeoutError:
