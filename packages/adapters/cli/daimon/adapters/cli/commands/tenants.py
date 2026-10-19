@@ -698,7 +698,10 @@ def tenants_access_policy_set_command(
     invoker: Annotated[
         list[str] | None,
         typer.Option(
-            help="Platform user id allowed to start turns (repeatable). Admins always may."
+            help=(
+                "Platform user id allowed to start turns (repeatable). "
+                "Admins bypass the lists only while invoker_admin_bypass is on."
+            )
         ),
     ] = None,
     invoker_role: Annotated[
