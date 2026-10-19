@@ -23,7 +23,7 @@ from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_iter
 from daimon.core.stores import routine_sessions as store
 from daimon.core.stores.domain import RoutineSessionRow
-from mux.drivers.anthropic.core_admin import CoreAdmin
+from mux.drivers.anthropic.core_admin import CORE_ADMIN_NAMESPACE, CoreAdmin
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -134,7 +134,7 @@ class RoutineSessionSupervisor:
             backend = managed_agents(
                 self.client, scope=scope, resources=frozenset({("agent", row.ma_agent_id)})
             )
-            port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+            port = backend.extension(CoreAdmin, namespace=CORE_ADMIN_NAMESPACE, version=1)
             async for record in legacy_iter(
                 port.sessions_for_agent(
                     scope, resource_ref(backend, "agent", row.ma_agent_id, scope=scope)
@@ -211,6 +211,10 @@ class RoutineFire:
         agent_id: str,
         metadata: dict[str, str],
     ) -> BetaManagedAgentsSession:
+        intent_id = uuid.uuid4()
+        # Recovery must recognize our live allocation even while commit or
+        # connection release is awaiting I/O. Register before either await.
+        self.intents.append(intent_id)
         async with self.supervisor.sm.begin() as db:
             row = await store.record(
                 db,
@@ -220,8 +224,8 @@ class RoutineFire:
                 account_id=account_id,
                 ma_agent_id=agent_id,
                 owner_key=self.supervisor.owner_key,
+                intent_id=intent_id,
             )
-        self.intents.append(row.id)
         metadata["daimon_routine_session"] = str(row.id)
         created = await call()
         self.sessions[created.id] = row.id
@@ -236,12 +240,16 @@ class RoutineFire:
 
     async def running(self, session_id: str) -> None:
         async with self.supervisor.sm.begin() as db:
-            await store.transition(db, self.sessions[session_id], "running")
+            row = await store.transition(db, self.sessions[session_id], "running")
+            if row.state != "running":
+                raise RuntimeError("The routine session is no longer runnable.")
 
     async def completed(self, session_id: str) -> None:
         async def finalize() -> None:
             async with self.supervisor.sm.begin() as db:
-                await store.transition(db, self.sessions[session_id], "completed")
+                row = await store.transition(db, self.sessions[session_id], "completed")
+                if row.state != "completed":
+                    raise RuntimeError("The routine session completion was superseded.")
 
         task = self.supervisor.own(finalize())
         self.supervisor.completions[self.sessions[session_id]] = task

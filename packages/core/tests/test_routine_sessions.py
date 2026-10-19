@@ -118,3 +118,89 @@ async def test_cancelled_completion_wait_cannot_lose_a_confirmed_success(
     finally:
         await supervisor.abort_pending()
         await client.close()
+
+
+@pytest.mark.parametrize("observed", ["idle", "archived", "deleted", "accepted_only"])
+async def test_stop_requires_terminal_evidence_not_an_accepted_interrupt(observed: str):
+    from datetime import UTC, datetime
+
+    from daimon.core.errors import TurnError
+    from daimon.core.ma import stop_routine_session
+    from daimon.testing.ma import NotHandled, combine_handlers, sse_response
+    from daimon.testing.ma_models import ma_session
+
+    state = FakeSessionsState(FakeMAState())
+    sid = "session_stop"
+    if observed != "deleted":
+        state.sessions[sid] = ma_session(
+            id=sid,
+            status="idle" if observed == "idle" else "running",
+            archived_at=datetime.now(UTC) if observed == "archived" else None,
+        )
+
+    def stream(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/events/stream"):
+            return sse_response([])
+        raise NotHandled
+
+    client = build_fake_anthropic(combine_handlers(stream, make_fake_sessions_handler(state)))
+    scope = resource_scope(
+        tenant_id=str(uuid.uuid4()), account_id=str(uuid.uuid4()), authorization_id="test-stop"
+    )
+    try:
+        if observed == "accepted_only":
+            with pytest.raises(TurnError) as error:
+                await stop_routine_session(client, session_id=sid, scope=scope)
+            assert error.value.kind == "interrupt_timeout"
+            assert any(event["type"] == "user.interrupt" for event in state.events[sid])
+        else:
+            assert await stop_routine_session(client, session_id=sid, scope=scope)
+            assert not state.events.get(sid)
+    finally:
+        await client.close()
+
+
+async def test_terminal_stop_refuses_late_execution_and_delivery(
+    db_session_factory: async_sessionmaker[AsyncSession],
+):
+    from daimon.core.routine_sessions import RoutineFire
+
+    sm = db_session_factory
+    async with sm.begin() as db:
+        row = await store.record(
+            db,
+            routine_id=uuid.uuid4(),
+            fire_id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            account_id=uuid.uuid4(),
+            ma_agent_id="ag_test",
+            owner_key=123,
+        )
+        await store.transition(db, row.id, "stopping")
+        stopped = await store.transition(db, row.id, "stopped")
+
+    def no_io(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a terminal intent cannot execute again")
+
+    client = build_fake_anthropic(no_io)
+    supervisor = RoutineSessionSupervisor(sm, client, owner_key=123)
+    fire = RoutineFire(
+        supervisor,
+        row.routine_id,
+        fire_id=row.fire_id,
+        intents=[row.id],
+        sessions={"session_private": row.id},
+    )
+    try:
+        with pytest.raises(RuntimeError, match="no longer runnable"):
+            await fire.running("session_private")
+        with pytest.raises(RuntimeError, match="completion was superseded"):
+            await fire.completed("session_private")
+        await supervisor.drain()
+        async with sm() as db:
+            after = await store.get(db, row.id)
+        assert after is not None and after.state == "stopped"
+        assert after.finished_at == stopped.finished_at
+    finally:
+        await supervisor.abort_pending()
+        await client.close()

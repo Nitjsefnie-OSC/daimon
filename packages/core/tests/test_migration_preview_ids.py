@@ -31,13 +31,20 @@ ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = ROOT / "packages/core/alembic"
 FORK = "0109_github_tokens_live_index"
 MAIN = "0110_microsoft_accounts"
-HEAD = "0113_unattended_turn_provenance"
-CHAIN = [MAIN, "0111_cold_dm_agent", "0112_routine_dm_destination", HEAD]
+HEAD = "0114_routine_sessions"
+CHAIN = [
+    MAIN,
+    "0111_cold_dm_agent",
+    "0112_routine_dm_destination",
+    "0113_unattended_turn_provenance",
+    HEAD,
+]
 TABLES = {
     "microsoft_user_tokens",
     "microsoft_sign_ins",
     "direct_message_policies",
     "routines",
+    "routine_sessions",
 }
 
 
@@ -235,6 +242,8 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 command.downgrade(config, target)
                 assert sync.scalar(text("SELECT version_num FROM alembic_version")) == target
                 inspector = inspect(sync)
+                if target == "0113_unattended_turn_provenance":
+                    assert not inspector.has_table("routine_sessions")
                 if target == "0112_routine_dm_destination":
                     assert "unattended_turn_event_id" not in {
                         c["name"] for c in inspector.get_columns("usage_reconcile_progress")

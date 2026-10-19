@@ -22,9 +22,10 @@ async def record(
     account_id: uuid.UUID,
     ma_agent_id: str,
     owner_key: int,
+    intent_id: uuid.UUID | None = None,
 ) -> RoutineSessionRow:
     row = RoutineSession(
-        id=uuid.uuid4(),
+        id=intent_id or uuid.uuid4(),
         routine_id=routine_id,
         fire_id=fire_id,
         tenant_id=tenant_id,
@@ -55,7 +56,10 @@ async def transition(
 ) -> RoutineSessionRow:
     row = (
         await db.execute(
-            select(RoutineSession).where(RoutineSession.id == intent_id).with_for_update()
+            select(RoutineSession)
+            .where(RoutineSession.id == intent_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one()
     if row.state in TERMINAL:
@@ -100,6 +104,7 @@ async def begin_attempt(
             select(RoutineSession)
             .where(RoutineSession.id == intent_id)
             .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     now = datetime.now(UTC)

@@ -257,6 +257,7 @@ source_modules = [
     "daimon.core.reports",
     "daimon.core.roster",
     "daimon.core.routine_delivery",
+    "daimon.core.routine_sessions",
     "daimon.core.routines",
     "daimon.core.routing_facts",
     "daimon.core.rule_views",

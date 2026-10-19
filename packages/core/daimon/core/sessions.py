@@ -1160,6 +1160,10 @@ async def create_session(
             try:
 
                 async def allocated() -> BetaManagedAgentsSession:
+                    if routine_lifecycle is not None and before_create is not None:
+                        # Recording the independent intent awaited persistence:
+                        # recheck authority after it, immediately before create.
+                        await before_create()
                     if allocation is None:
                         return await create()
                     return await allocation(

@@ -3555,3 +3555,37 @@ async def test_fire_collects_outputs_from_real_headless_turn(
     assert payload.text == ("" if agent_posted else "Here is the report.")
     assert [file.file_id for file in payload.files] == ["file_report"]
     assert after.last_result_tail == "Here is the report."
+
+
+async def test_owner_loss_cancels_dispatch_and_arms_a_bounded_fail_stop() -> None:
+    from daimon.adapters.scheduler.main import _watch_process_owner
+
+    lost, stopped = asyncio.Event(), asyncio.Event()
+    cancelled, release = asyncio.Event(), asyncio.Event()
+    terminated: list[int] = []
+
+    async def unresponsive_dispatch() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+
+    main = asyncio.create_task(unresponsive_dispatch())
+    await asyncio.sleep(0)
+    watcher = asyncio.create_task(
+        _watch_process_owner(lost, stopped, main, terminate=terminated.append, hard_exit_s=0.01)
+    )
+    try:
+        lost.set()
+        await cancelled.wait()
+        assert stopped.is_set()
+        async with asyncio.timeout(1):
+            while not terminated:
+                await asyncio.sleep(0.01)
+        assert terminated == [1]
+    finally:
+        release.set()
+        await main
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)

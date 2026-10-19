@@ -202,7 +202,7 @@ async def stop_routine_session(
 
     try:
         session = await retrieve_session_record(client, session_id, scope=scope)
-        if session.status in {"idle", "archived"}:
+        if session.archived_at is not None or session.status in {"idle", "archived"}:
             return True
         await send_interrupt_and_wait(client, session_id=session_id, scope=scope, timeout_s=3)
         return True

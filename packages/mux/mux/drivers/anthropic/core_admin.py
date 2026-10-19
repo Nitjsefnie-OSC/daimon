@@ -17,6 +17,8 @@ from mux.drivers.anthropic.resources._native import native_snapshot
 from mux.drivers.anthropic.transport import LegacyTurnTransport, mutation_client
 from mux.errors import ScopeViolation
 
+CORE_ADMIN_NAMESPACE = "anthropic.core_admin"
+
 
 class CoreAdmin(Protocol):
     """anthropic.core_admin@1: scoped account purge and disposable-workspace walks."""

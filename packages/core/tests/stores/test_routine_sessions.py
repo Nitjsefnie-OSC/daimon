@@ -3,10 +3,16 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from daimon.core._models import RoutineSession
 from daimon.core.stores import routine_sessions as store
 from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+
+@pytest.fixture
+def db_session_factory(db_engine: AsyncEngine, db_clean: None) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(db_engine, expire_on_commit=False)
 
 
 async def test_terminal_outcomes_are_immutable(
@@ -104,3 +110,32 @@ async def test_deleting_a_routine_cannot_delete_its_pending_stop(
         assert pending is not None and pending.state == "stopping"
         assert pending.failure_detail == "x" * 500
         assert any(row.id == intent.id for row in await store.pending(db))
+
+
+async def test_stale_identity_map_cannot_overwrite_another_transactions_terminal_outcome(
+    db_session_factory: async_sessionmaker[AsyncSession],
+):
+    sm = db_session_factory
+    async with sm.begin() as db:
+        row = await store.record(
+            db,
+            routine_id=uuid.uuid4(),
+            fire_id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            account_id=uuid.uuid4(),
+            ma_agent_id="ag_private",
+            owner_key=123,
+        )
+        await store.transition(db, row.id, "session_created", session_id="session_private")
+        await store.transition(db, row.id, "running")
+    async with sm() as stale:
+        held = await stale.get(RoutineSession, row.id)
+        assert held is not None and held.state == "running"
+        await stale.commit()
+        async with sm.begin() as current:
+            completed = await store.transition(current, row.id, "completed")
+        async with stale.begin():
+            result = await store.transition(stale, row.id, "stopping", failure="late cancel")
+        assert result.state == "completed"
+        assert result.finished_at == completed.finished_at
+        assert result.failure_detail is None

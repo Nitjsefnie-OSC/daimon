@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import contextlib
 import functools
+import os
 import signal
 import sys
 import uuid
@@ -146,7 +147,7 @@ from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refresh
-from daimon.core.stores.worker_ownership import hold_worker_owner
+from daimon.core.stores.worker_ownership import OWNER_HARD_EXIT_S, hold_worker_owner
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.admission import DmSource
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
@@ -1377,6 +1378,25 @@ async def _run_loops(
             task.cancel()
 
 
+async def _watch_process_owner(
+    ownership_lost: asyncio.Event,
+    stop_event: asyncio.Event,
+    main_task: asyncio.Task[object],
+    *,
+    terminate: Callable[[int], object] = os._exit,
+    hard_exit_s: float = OWNER_HARD_EXIT_S,
+) -> None:
+    """Stop admission immediately, bounded by the shared stale-owner grace."""
+    await ownership_lost.wait()
+    stop_event.set()
+    deadline = asyncio.get_running_loop().call_later(hard_exit_s, terminate, 1)
+    try:
+        main_task.cancel()
+        await asyncio.Event().wait()
+    finally:
+        deadline.cancel()
+
+
 async def run(
     argv: list[str] | None = None,
     *,
@@ -1483,11 +1503,9 @@ async def run(
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires, supervisor=supervisor)
     stop_event = asyncio.Event()
 
-    async def stop_on_owner_loss() -> None:
-        await ownership_lost.wait()
-        stop_event.set()
-
-    owner_watcher = asyncio.create_task(stop_on_owner_loss())
+    main_task = asyncio.current_task()
+    assert main_task is not None
+    owner_watcher = asyncio.create_task(_watch_process_owner(ownership_lost, stop_event, main_task))
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:

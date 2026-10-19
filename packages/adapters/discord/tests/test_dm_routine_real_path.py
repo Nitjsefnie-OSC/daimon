@@ -395,7 +395,9 @@ class Harness:
             if session.metadata.get("daimon_routine_session")
             in {str(intent) for intent in self.completed_intents}
         )
-        return SimpleNamespace(text=after.last_result_tail, session_id=session_id)
+        return SimpleNamespace(
+            text=after.last_result_tail, session_id=session_id, routine_id=row.id
+        )
 
     @property
     def completed_intents(self) -> set[Any]:
@@ -1129,9 +1131,13 @@ async def test_exhaustion_survives_a_later_fire_and_notifies_only_the_owner(
 
 async def test_attached_owner_credentials_are_nonempty_distinct_and_scope_checked(harness: Harness):
     import jwt
+    from daimon.adapters.mcp.auth.resolver import AuthIdentity
     from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier, token_row_refusal
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.adapters.mcp.tools.routines import _get_routine_impl
     from daimon.core.stores.accounts import get_account_with_tenant
     from daimon.core.stores.mcp_tokens import get_mcp_token
+    from fastmcp.exceptions import ToolError
 
     a = await harness.routine(OWNER_A)
     b = await harness.routine(OWNER_B)
@@ -1182,6 +1188,28 @@ async def test_attached_owner_credentials_are_nonempty_distinct_and_scope_checke
         assert access is not None and access.claims["sub"] == scope.account_id
         assert access.claims["chat_agent_id"] == str(agent_uuid)
         assert access.claims["tenant_id"] == str(harness.tenant.id)
+        auth = AuthIdentity(
+            account_id=uuid.UUID(access.claims["sub"]),
+            tenant_id=uuid.UUID(access.claims["tenant_id"]),
+            role=Role(access.claims["role"]),
+            platform=access.claims["platform"],
+            external_id=access.claims["external_id"],
+            platform_user_id=access.claims["platform_user_id"],
+            chat_agent_id=uuid.UUID(access.claims["chat_agent_id"]),
+            token_kind="agent",
+            token_jti=uuid.UUID(chat["metadata"]["daimon_chat_jti"]),
+        )
+        runtime = McpRuntime(
+            session_factory=harness.factory,
+            client=upstream.client,
+            settings=harness.settings,
+            deployment_default=DeploymentDefault(),
+        )
+        mine, theirs = (a, b) if owner == OWNER_A else (b, a)
+        own = await _get_routine_impl(runtime, auth, routine_id=mine.routine_id)
+        assert own.created_by_user_id == owner and own.last_result_tail == "private answer"
+        with pytest.raises(ToolError, match="routine not found"):
+            await _get_routine_impl(runtime, auth, routine_id=theirs.routine_id)
         claims = jwt.decode(token, b"t" * 32, algorithms=["HS256"])
         other = OWNER_B if owner == OWNER_A else OWNER_A
         async with harness.factory() as db:
