@@ -261,11 +261,12 @@ routine refuses, and its card-only actions: a routine's session asks on a
 backend switch and Microsoft mail and invites, policy on or off, and on
 Microsoft file changes with it on, and the routine refuses them. See
 [architecture.md](architecture.md). Stopping or cancelling a routine, reaching
-its turn ceiling, or a failed decision or session update at a pending call
-leaves the call paused and interrupts the session once, without sending
-confirmations, including on runtimes without session reads. The first of these
-starts the interrupt; a later cancellation, during card cleanup or while the
-stream closes, cannot skip it or send a second one.
+its turn ceiling, or a failed decision or session update interrupts the session
+once and sends no confirmations, so pending calls stay paused, including on
+runtimes without session reads. The first of these, wherever the turn is,
+starts the interrupt before any cleanup; a later cancellation, during card
+cleanup or while the stream closes, cannot skip it, send a second one or let a
+confirmation out. Cleanup waits for the interrupt for a bounded time only.
 
 A routine with a destination sends its trigger message after a
 `<turn_controls>` block (`render_routine_controls` in
