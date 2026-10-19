@@ -282,12 +282,9 @@ def test_a_sentence_start_is_read_from_a_bounded_look_back(text: str, expected: 
         ("teams", "See HTTPS://github.com/Discord/x now"),
         ("teams", "See Https://GitHub.com/Discord/x now"),
         ("teams", "See https://github.com:8080/Discord/x now"),
-        ("teams", "See https://discord.com.example.org/x now"),
-        ("teams", "See https://notdiscord.com/x now"),
         ("slack", "See <https://discord.com:1@github.com|x> now"),
         ("slack", "See <HTTPS://github.com/Discord|x> now"),
         ("teams", "See [x](https://discord.com:1@github.com/a) now"),
-        ("teams", "See [x](HTTPS://discord.com.example.org/a) now"),
     ],
 )
 def test_the_parsed_host_keeps_a_url_on_another_host_exact(platform: str, text: str) -> None:
@@ -423,3 +420,16 @@ def test_the_fallback_replaces_a_full_width_foreign_url() -> None:
 def test_the_fallback_keeps_whitespace_exactly() -> None:
     text = "Use Slack\n\tnow  https://slack.com/a "
     assert blunt_scrub_other_platforms(text, "teams") == "Use another app\n\tnow  another app "
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://discord.com(Discord)",
+        "https://discord.com.example.org/x",
+        "https://notdiscord.com/x",
+        "[x](HTTPS://discord.com.example.org/a)",
+    ],
+)
+def test_a_host_that_contains_another_apps_domain_is_replaced(url: str) -> None:
+    assert scrub_other_platforms(f"See {url} now", "teams") == "See another app now"

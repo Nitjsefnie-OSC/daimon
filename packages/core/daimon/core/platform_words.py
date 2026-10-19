@@ -431,11 +431,16 @@ def _host_of(url: str) -> str:
 
 def _is_other_app_url(url: str, patterns: _Patterns) -> bool:
     """Whether `url` is on another app's host; a URL that cannot be parsed is judged by
-    whether it contains one of their domains anywhere."""
+    whether it contains one of their domains anywhere.
+
+    A parsed host that merely contains one of their domains (`discord.com(Discord)`, which
+    `urlsplit` returns as a host, or `discord.com.example.org`) counts too: a false positive
+    is a replaced link, a miss is a leak."""
     try:
-        return patterns.host.search(_host_of(url)) is not None
+        host = _host_of(url)
     except ValueError:
         return patterns.domain.search(url) is not None
+    return patterns.host.search(host) is not None or patterns.domain.search(host) is not None
 
 
 def _other_url(match: re.Match[str], text: str, patterns: _Patterns) -> str:
