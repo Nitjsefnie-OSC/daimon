@@ -191,6 +191,9 @@ async def set_access_policy(
             )
     payload = policy.model_dump(mode="json")
     backends = payload.pop("enabled_backends")
+    # Older readers already imply the default admin bypass and forbid unknown keys.
+    if policy.invoker_admin_bypass:
+        payload.pop("invoker_admin_bypass")
     # Leave empty keys out, so a build from before them still reads a row
     # that sets none of them.
     for key in (

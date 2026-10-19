@@ -69,6 +69,7 @@ from daimon.testing.factories import (
     make_tenant,
     make_tenant_config,
 )
+from daimon.testing.membership import FixtureMembershipResolver
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -453,8 +454,15 @@ async def test_admit_bills_an_operator_token(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     operator = await _verified_operator_identity(sessionmaker)
+    assert operator.platform_user_id is not None
     with pytest.raises(ToolError, match="credit is depleted"):
-        await _admit(operator, sessionmaker=sessionmaker, billing_config=None, tool_name="ask")
+        await _admit(
+            operator,
+            sessionmaker=sessionmaker,
+            membership_resolver=FixtureMembershipResolver(operator.platform_user_id),
+            billing_config=None,
+            tool_name="ask",
+        )
 
 
 async def test_tenant_summary_lists_configured_and_budgeted_channels(

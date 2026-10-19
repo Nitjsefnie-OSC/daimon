@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - A Discord routine that delivers to its owner's DM now runs like a DM with Daimon: it reads and writes your personal memory under the same rules as your DMs, and has the same web, file, internal-tool and connected-tool access. Each run starts fresh in its own private scope and never touches the DM conversation you have selected. A DM routine has your normal DM abilities, but nobody is watching what it does along the way: a mistaken send or publish tool call could expose personal content before you see the final DM. Calls that need an approval are refused unless the unattended permissions already allow them; keeping those permissions narrow is the cheapest protection. Daimon still posts the final reply only to your DM, after rechecking your access. DM routines need a Managed Agents agent for now; a routine whose agent runs on another provider is refused and says so. A run that fails or times out is stopped and delivers nothing. Channel and thread routines are unchanged and do not read personal memory.
+- Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
+
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
 
 - Discord routines can deliver privately to their owner through MCP, the routines panel, or `daimon routines create --destination dm`. Delivery rechecks live access, respects tenant DM controls, and exposes failures without public fallback or outbox replay across polls. Platform SDKs may retry a single send after a server error or connection reset. Creation-time source channels, threads and provenance status are immutable across retargeting, clearing and DM conversion. Legacy unknown-source routines retain ordinary edits and firing, but must be recreated from their source to get DM delivery. Routines created from a private conversation verify its saved guild source; cold conversations remain source-free, and unknown provenance refuses DM delivery. CLI source IDs are verified against the selected tenant's guild, including in dry-run.
@@ -21,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gate Discord turns and routine owners by configured role IDs, with current membership checks for MCP, scheduled fires, and private delivery. Configure roles with `daimon tenants access-policy set --invoker-role`.
 
 ### Fixed
+
+- Access policies that keep the default admin bypass remain readable by older deployments during rolling upgrades.
 
 - Discord private conversations retain operational and billing notices while access denials stay silent. Discovery failures after membership and invoker checks show a generic notice without server or agent names.
 

@@ -1,13 +1,35 @@
-"""Async Alembic env. Reads DSN from DAIMON_DATABASE_URL or DAIMON_DATABASE__URL env var."""
+"""Async Alembic env; DSN from DAIMON_DATABASE_URL or DAIMON_DATABASE__URL.
+
+Invariant: main revisions receive no repair writes. Only online upgrade/downgrade
+may atomically repair a stored legacy preview stamp in the migration transaction.
+Other commands never repair or perform implicit writes. Explicit stamp and
+ensure_version bookkeeping retain normal Alembic behavior on non-legacy states.
+Inspection never creates a version table, even on an empty/unversioned database.
+Plain history/heads remain graph-only. Commands entering this env diagnose stored
+legacy stamps without repairing; old literal targets and
+offline legacy ranges are unsupported: run ``alembic upgrade head`` online first.
+
+The DEPLOYER serializes migrations; this environment adds no advisory lock or
+retry loop. Lane: .github/workflows/lane.yml:46, group lane-<lane>. Staging/prod:
+.github/workflows/deploy.yml:66, group deploy-gcp-<environment>, with the blocking
+Cloud Run migrate job at :206-210. These callers must run one migrator at a time.
+A concurrent manual run can fail with ordinary PostgreSQL DDL conflicts; after
+the other invocation finishes, retry normally, as on main.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable, Iterable
+from typing import cast
 
-from alembic import context
+from alembic import context, util
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext, MigrationStep
+from alembic.script import ScriptDirectory
 from daimon.core._models import Base
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -16,7 +38,7 @@ config = context.config
 db_url = os.environ.get("DAIMON_DATABASE_URL") or os.environ.get("DAIMON_DATABASE__URL")
 if db_url:
     config.set_main_option("sqlalchemy.url", db_url)
-elif not config.get_main_option("sqlalchemy.url"):
+elif not config.get_main_option("sqlalchemy.url") and "connection" not in config.attributes:
     # Flat DAIMON_DATABASE_URL is intentional — alembic CLI runs outside
     # pydantic-settings. The app uses nested DAIMON_DATABASE__URL.
     raise RuntimeError(
@@ -26,6 +48,40 @@ elif not config.get_main_option("sqlalchemy.url"):
 
 target_metadata = Base.metadata
 
+LEGACY_REVISIONS = {
+    "0110_cold_dm_agent": "0111_cold_dm_agent",
+    "0111_routine_dm_destination": "0112_routine_dm_destination",
+    "0112_unattended_turn_provenance": "0113_unattended_turn_provenance",
+    "0113_microsoft_accounts": "0113_unattended_turn_provenance",
+}
+
+
+def _legacy_error(revision: str) -> util.CommandError:
+    return util.CommandError(
+        f"Legacy preview revision '{revision}' cannot be used for this command. "
+        "Run `alembic upgrade head` online to reconcile the disposable preview database first. "
+        "Only online upgrade/downgrade from a stored legacy stamp is supported; "
+        "use canonical revision IDs for targets and offline SQL."
+    )
+
+
+def _reject_legacy_targets() -> None:
+    opts = context.get_context().opts
+    for option in ("starting_rev", "destination_rev"):
+        value = str(opts.get(option, ""))
+        for revision in LEGACY_REVISIONS:
+            if revision in value:
+                raise _legacy_error(revision)
+
+
+def _is_migration_command() -> bool:
+    # destination_rev is also set by stamp and autogenerate. Recognize the
+    # actual Alembic command callbacks instead, for both CLI and command API.
+    fn = context.get_context().opts.get("fn")
+    return getattr(fn, "__module__", None) == "alembic.command" and getattr(
+        fn, "__name__", None
+    ) in ("upgrade", "downgrade")
+
 
 def run_migrations_offline() -> None:
     context.configure(
@@ -34,14 +90,78 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
+    _reject_legacy_targets()
     with context.begin_transaction():
         context.run_migrations()
+
+
+def _reject_stored_legacy(revisions: tuple[str, ...]) -> None:
+    for revision in revisions:
+        if revision in LEGACY_REVISIONS:
+            raise _legacy_error(revision)
 
 
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
+    migrating = _is_migration_command()
+    fn = context.get_context().opts.get("fn")
+    bookkeeping = getattr(fn, "__module__", None) == "alembic.command" and getattr(
+        fn, "__name__", None
+    ) in ("do_stamp", "do_ensure_version")
+    if bookkeeping:
+        original = cast(Callable[[tuple[str, ...], MigrationContext], Iterable[MigrationStep]], fn)
+
+        def guard_bookkeeping(
+            revisions: tuple[str, ...], migration_context: MigrationContext
+        ) -> Iterable[MigrationStep]:
+            # Reuse Alembic's normal head read: non-legacy bookkeeping emits
+            # exactly the same SQL as main, including version-table creation.
+            _reject_stored_legacy(revisions)
+            return original(revisions, migration_context)
+
+        context.configure(
+            connection=connection, target_metadata=target_metadata, fn=guard_bookkeeping
+        )
+    else:
+        _reject_legacy_targets()
+        if not migrating:
+            context.configure(
+                connection=connection, target_metadata=target_metadata, dont_mutate=True
+            )
     with context.begin_transaction():
+        if migrating:
+            _normalize_preview_revision(connection)
+        elif not bookkeeping or context.get_context().opts.get("purge"):
+            # Purge deletes rows BEFORE invoking its callback, so validate the
+            # stored stamp first. Inspection likewise diagnoses before lookup.
+            _reject_stored_legacy(context.get_context().get_current_heads())
         context.run_migrations()
+
+
+def _normalize_preview_revision(connection: Connection) -> None:
+    """Translate deployed preview stamps to the main-authoritative chain atomically.
+
+    The old preview chain applied the DM/provenance changes before Microsoft
+    accounts. Install that missing predecessor before translating its stamp;
+    never replay the DM migrations, which would lose data or duplicate columns.
+    S1's old head already includes Microsoft accounts and needs only an alias.
+    This runs inside Alembic's transaction, including for downgrade commands.
+    """
+    migration_context = context.get_context()
+    revisions = migration_context.get_current_heads()
+    for old_revision in revisions:
+        new_revision = LEGACY_REVISIONS.get(old_revision)
+        if new_revision is None:
+            continue
+        if old_revision != "0113_microsoft_accounts":
+            microsoft = ScriptDirectory.from_config(config).get_revision("0110_microsoft_accounts")
+            assert microsoft is not None
+            with Operations.context(migration_context):
+                microsoft.module.upgrade()
+        connection.execute(
+            text("UPDATE alembic_version SET version_num = :new WHERE version_num = :old"),
+            {"new": new_revision, "old": old_revision},
+        )
 
 
 async def run_migrations_online() -> None:
@@ -59,5 +179,7 @@ async def run_migrations_online() -> None:
 
 if context.is_offline_mode():
     run_migrations_offline()
+elif "connection" in config.attributes:
+    do_run_migrations(config.attributes["connection"])
 else:
     asyncio.run(run_migrations_online())

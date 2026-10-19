@@ -247,7 +247,7 @@ async def test_read_only_change_is_rechecked_before_session_use(db_session_facto
 
 @pytest.mark.fresh_schema
 async def test_dm_agent_migration_round_trip_preserves_enablement(db_session):
-    path = Path(__file__).parents[1] / "alembic/versions/0110_cold_dm_agent.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0111_cold_dm_agent.py"
     spec = importlib.util.spec_from_file_location("cold_dm_migration", path)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
