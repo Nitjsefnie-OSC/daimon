@@ -298,7 +298,8 @@ async def balance_footer(
 ) -> str | None:
     """A turn footer's money: what an active channel budget has left, else the prepaid
     balance, as ``$8.10 left``; None for an operator-funded tenant outside a budgeted
-    channel."""
+    channel. A prepaid balance at or below zero reads ``No credit left``: a turn can
+    settle a few cents past zero, and ``$-0.01 left`` is not something to show people."""
     if budget_channel_id is not None:
         status = await get_channel_budget_status(
             session, tenant_id=tenant_id, platform=platform, channel_id=budget_channel_id, now=now
@@ -306,7 +307,9 @@ async def balance_footer(
         if status is not None and status.is_active:
             return f"${status.remaining_usd:.2f} left"
     balance = await get_prepaid_balance(session, tenant_id=tenant_id)
-    return None if balance is None else f"${balance:.2f} left"
+    if balance is None:
+        return None
+    return f"${balance:.2f} left" if balance > 0 else "No credit left"
 
 
 def may_set_channel_budget(subject: Subject, channel_id: str) -> Decision:
