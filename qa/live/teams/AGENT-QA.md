@@ -9,8 +9,9 @@ checks from the current code; `smoke --all` is the only fixed live test.
 
 - Your own `@pymc-labs.com` Google account must already be on the Teams QA
   secrets in the `pymc-daimon-staging` project. Only the teammates the Teams QA
-  operator granted have that access; if `status` below fails with a permission
-  error, ask the operator instead of requesting broader access.
+  operator granted have that access; never request broader access yourself.
+- The Teams QA operator is whoever gave you this guide; ask them for access,
+  staging claims and re-sign-ins.
 - `gcloud`, `git` and `uv` installed.
 
 Sign in once with your PyMC Labs account (the second command is the one the
@@ -32,9 +33,18 @@ uv run python -m qa.live.teams status --persona admin
 uv run python -m qa.live.teams status --persona member
 ```
 
-`status` prints each persona's token expiry. You need no local files, browser
-or Teams sign-in: the config and both personas' token caches live in Secret
-Manager. Using the tokens may add a new secret version; that is expected.
+`status` prints the persona's account and cache metadata, never a token. The
+check is `"refresh_token_present": true`. `expiry` is the short-lived access
+token's and is often in the past; that is fine, because the next command renews
+it. `status` cannot tell whether a sign-in has expired; only a
+`reauth_required` from a later command means that. If `status` fails with
+`Teams QA command failed: RuntimeError` or `DefaultCredentialsError`, the
+secrets are unreachable: re-run `gcloud auth application-default login` with
+your PyMC Labs account, then ask the operator.
+
+You need no local files, browser or Teams sign-in: the config and both
+personas' token caches live in Secret Manager. Using the tokens may add a new
+secret version; that is expected.
 
 ## 3. Rules
 
@@ -45,7 +55,11 @@ Manager. Using the tokens may add a new secret version; that is expected.
 - post anywhere but the configured QA channel and each persona's own 1:1 chat
   with the staging bot, or contact a real person;
 - click card actions or open dialogs (action titles are evidence only);
-- run `logout` or `login`, or change secrets, IAM, config or agent defaults;
+- run `login`, `logout`, `refresh`, `install-flow` or `verify-target` (they
+  sign in, write or delete secret versions, or are operator tools), or change
+  secrets, IAM, config or agent defaults;
+- commit or publish QA output; smoke summaries hold real message IDs and reply
+  text;
 - spend money, create things or change settings through the bot.
 
 **Runs that need no staging claim.** A run qualifies only if all of these hold:
@@ -89,13 +103,12 @@ These standalone text commands are code-routed, **zero model turns**:
 | `setup` | Agent roster and setup controls by persona. |
 | `routines` | Admin sees `New routine`; member sees only their own routines and no create action. |
 | `billing` | Admin sees credit controls; member sees their own usage and fewer controls. |
-| `memory` | What the agent remembers for this persona. |
+| `memory` | What the agent remembers for this persona. Send the bare word only: `memory forget-mine <code>` deletes data. |
 | `privacy` | Personal data controls; inspect only, do not invoke actions. |
-| `new` | Starts a fresh conversation; use only when a reset is intended. |
+| `new` | Starts a fresh conversation. It changes session state, so it needs a staging claim. |
 | `support` | Available only when enabled; inspect its card without sending a request. |
 
-Only a bare command word is code-routed. A leading `/` works; `memory` also
-accepts specific documented arguments. Other prose, including `routines please`,
+Only a bare command word is code-routed. A leading `/` works. Other prose, including `routines please`,
 is a **model turn**. Keep any approved free text to harmless QA questions; do
 not ask the bot to change settings, contact people, or access real user data.
 
@@ -136,28 +149,42 @@ uv run python -m qa.live.teams read --persona admin --from chat --since 5m
 Use `card_texts` for card copy and `action_titles` for visible controls.
 Commands must go to the 1:1 chat (`--to chat`): in a channel the bot answers
 privately and the tool can't read it. For an approved free-text channel probe,
-`send --to channel`, then `wait` or `read` with `--from thread:<message_id>`.
+`send --to channel`, then
+`wait --from thread:<message_id> --after <message_id>` or
+`read --from thread:<message_id>`.
+
+Other failures: `after_not_found` (the `--after` ID isn't in that chat or
+thread), `invalid_since` (use `30s`, `5m` or `1h`, at most 24 hours), and
+`{"ok":false,"error":"command_failed","type":"RuntimeError"}` (secrets
+unreachable; see section 2).
 
 ## 7. Smoke test
 
 The fixed smoke test posts four commands (admin and member, `routines` and
-`billing`) with zero model turns and writes a summary to the results folder:
+`billing`) with zero model turns. Those four posts count toward the session's
+post limits. It writes a summary with real message IDs and reply text, including
+staging users' names from the billing card, so write it outside the repo and
+never commit it:
 
 ```bash
-uv run python -m qa.live.teams smoke --all --go --results <dir>
+uv run python -m qa.live.teams smoke --all --go --results ~/teams-qa-results
 ```
 
 ## 8. When something goes wrong
 
-- `reauth_required`: a persona's sign-in has expired. Stop, and tell the Teams
-  QA operator which persona; only the operator can sign it in again. A weekly
+- `reauth_required` from a verb, or `<persona>: reauthentication required
+  (...)` on stderr with exit 1 from `smoke`: that persona's sign-in has
+  expired. Stop, and tell the Teams QA operator which persona; only the
+  operator can sign it in again. A weekly
   job refreshes both personas, so this should be rare.
 - `post_outcome_unknown`: the post may or may not exist. Run `read` to check,
   report the uncertainty, and never resend blindly.
 - `chat_not_quiet`: the bot hasn't answered the last post yet. Wait or `read`;
   do not post over it.
-- Permission denied on the secrets: your account isn't granted. Ask the
-  operator.
+- `Teams QA command failed: RuntimeError`, `command_failed` or
+  `DefaultCredentialsError`: the secrets are unreachable. Re-run
+  `gcloud auth application-default login` with your PyMC Labs account; if it
+  still fails, your account isn't granted, so ask the operator.
 - Stop too on a reply from an unexpected bot or model, anything that looks like
   production, a staging deploy starting, or an action that would affect or
   contact a real person. Admin cards such as `billing` list staging users' names
