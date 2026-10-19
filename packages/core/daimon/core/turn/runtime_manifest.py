@@ -21,7 +21,6 @@ from daimon.core.neutral_resources import (
     WorkerSpecRefused,
     resolve_worker_spec,
 )
-from daimon.core.thread_models import with_model_override
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
@@ -81,13 +80,22 @@ _ADMISSION_FACTS = {
     name: TypeAdapter(annotation)
     for name, annotation in get_type_hints(Admission).items()
     if name
-    not in ("agent", "environment", "observation", "backend_counterpart", "backend_agent_revision")
+    not in (
+        "agent",
+        "environment",
+        "observation",
+        "backend_counterpart",
+        "backend_agent_revision",
+        # A conversation's model choice never reaches a fleet root
+        # (`bind_session_impl` drops it first), so it is never frozen.
+        "model_override",
+        "model_fell_back",
+        "authored_agent",
+    )
 }
 
 #: Admission facts a root retained before they existed read as their default.
-_LEGACY_ADMISSION_FACTS = frozenset(
-    {"daimon_rule_tools", "daimon_rules_need_driver", "model_override", "model_fell_back"}
-)
+_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools", "daimon_rules_need_driver"})
 
 log = structlog.get_logger(__name__)
 
@@ -1361,11 +1369,7 @@ async def capture_preparation_source(
         request = replace(
             request,
             source=None,
-            admission=replace(
-                request.admission,
-                agent=with_model_override(actual, request.admission.model_override),
-                environment=environment,
-            ),
+            admission=replace(request.admission, agent=actual, environment=environment),
         )
     source = request.source
     if source is None:

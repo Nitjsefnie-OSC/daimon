@@ -83,7 +83,6 @@ from daimon.core.stores.thread_sessions import (
     read_session_seals,
     record_session_seals,
 )
-from daimon.core.thread_models import with_model_override
 from daimon.core.turn.admission import Admission, reauthorize, restrict_inherited_memory
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -283,10 +282,7 @@ class ProviderPreparationRequest:
             actual = await retrieve_agent(self.deps.anthropic, pins[0][0].id, scope=self.scope)
             root = replace(
                 self,
-                admission=replace(
-                    self.admission,
-                    agent=with_model_override(actual, self.admission.model_override),
-                ),
+                admission=replace(self.admission, agent=actual),
                 source=None,
                 counterpart=None,
                 verified_counterpart=None,
@@ -663,7 +659,10 @@ async def create_ma_session(
             before_create=fence,
             on_app_access=capture_app_access,
             channel_skills=skills,
-            model_override=admission.model_override,
+            # A worker runs its approved model; a conversation's choice never reaches it.
+            model_override=None
+            if preparation is not None and preparation.worker is not None
+            else admission.model_override,
             resource_source=preparation.source
             if preparation is not None and preparation.worker is not None
             else None,
@@ -1205,6 +1204,12 @@ async def stamp_session_seal(
         ) from error
 
 
+async def _holds_fleet_grant(deps: TurnDeps, admission: Admission, *, now: dt.datetime) -> bool:
+    from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+
+    return await read_agent_fleet_grant(deps, admission, now=now) is not None
+
+
 async def bind_session_impl(
     deps: TurnDeps,
     admission: Admission,
@@ -1277,6 +1282,18 @@ async def bind_session_impl(
         effective_deadline = turn_deadline(
             now=now(), deadline=effective_deadline, authority_deadline=worker.limits.deadline
         )
+
+    if admission.model_override is not None and (
+        worker is not None
+        or (
+            deps.fleet_enabled
+            and admission.grant is not None
+            and await _holds_fleet_grant(deps, admission, now=now())
+        )
+    ):
+        # A conversation's model choice is for its own turns only: a fleet root
+        # and every worker run the model the agent's owner approved.
+        admission = admission.authored()
 
     profile = _admitted_profile(admission)
     if worker is not None and admission.backend_revision_origin != "agent":

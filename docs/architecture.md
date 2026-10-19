@@ -1515,7 +1515,8 @@ carrying the work over as for any model edit. The successor is created with
 speed but no effort, so no effort is offered. The tool runs only for a
 verified, attended turn origin: routines, wakes and agent-chat callers can't
 change a conversation's model. `/model` runs the same `START_TURN` check that
-admission makes.
+admission makes. Fleet roots and workers ignore the choice (see Worker fleets
+below), and `/model` says so when the thread's agent holds a fleet grant.
 
 ### Worker fleets
 
@@ -1530,6 +1531,13 @@ row's version. Worker turns have a concurrency pool of their own, counted from
 these rows per tenant (`DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`) and
 per process, so a fan-out never takes the chat turns' slots. Fleets are off by
 default (`DAIMON_FLEET__ENABLED`).
+
+A conversation's model choice (`/model`) never reaches a fleet. When the
+answering agent holds a fleet grant, `bind_session_impl` puts the authored agent
+back (`Admission.authored`) before the root session is prepared. A worker's
+bind does the same, and its session is never created with an override. A
+frozen root therefore records the model the agent's owner approved, and the
+override is not among its retained admission facts.
 
 ### Same-thread handoff
 

@@ -5816,7 +5816,9 @@
         "think as hard as you can" means ``opus``; ``default`` goes back to the
         agent's own model. There is no effort setting. The conversation keeps
         the choice for every later reply until someone changes it; the reply
-        in progress keeps its model. Other conversations are unaffected.
+        in progress keeps its model. Other conversations are unaffected, and
+        a worker fleet (its root and every worker) always runs the agent's
+        approved model.
         <blank line>
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned

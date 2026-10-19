@@ -238,6 +238,25 @@ class Admission:
     # A choice was kept but can't run here, so this turn runs the agent's own
     # model and says so.
     model_fell_back: bool = False
+    # The stored agent before the conversation's model was put in `agent`; set
+    # only with `model_override`. A fleet root or worker runs it (`authored`).
+    authored_agent: BetaManagedAgentsAgent | None = field(default=None, compare=False, repr=False)
+
+    def authored(self) -> Admission:
+        """This admission without the conversation's model choice: the agent as authored.
+
+        Fleet roots and their workers run the model the agent's owner approved,
+        never a conversation's override.
+        """
+        if self.authored_agent is None:
+            return self
+        return replace(
+            self,
+            agent=self.authored_agent,
+            authored_agent=None,
+            model_override=None,
+            model_fell_back=False,
+        )
 
     def __post_init__(self) -> None:
         if self.backend_revision is not None and self.backend_revision_origin not in (
@@ -1002,7 +1021,7 @@ async def admit_impl(
             ),
             anthropic_backend=backend_revision is None or backend_revision.model is None,
         )
-    agent = thread_model.agent
+    authored_agent, agent = agent, thread_model.agent
     mark("thread_model")
 
     result = Admission(
@@ -1035,6 +1054,7 @@ async def admit_impl(
         grant=grant,
         model_override=thread_model.model_override,
         model_fell_back=thread_model.fell_back,
+        authored_agent=authored_agent if thread_model.model_override is not None else None,
     )
     mark("result")
     _log.info(

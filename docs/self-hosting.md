@@ -148,7 +148,9 @@ Asking in words ("use opus", "think harder") does the same on Discord, Slack
 and Teams. Only people who may start a turn in the thread can change it, and
 other threads keep the agent's own model. There is no effort setting. A choice
 that can no longer run, such as in a channel set to another backend, falls back
-to the agent's own model, and the reply says so.
+to the agent's own model, and the reply says so. Worker fleets ignore the
+choice: when the thread's agent holds a fleet grant, its turns there and every
+worker run the model the agent's owner approved, and `/model` says so.
 
 Unclicked private credential forms can update their original Discord card
 after expiry when `DAIMON_DISCORD__CREDENTIAL_FORM_EXPIRY=true`. The default
