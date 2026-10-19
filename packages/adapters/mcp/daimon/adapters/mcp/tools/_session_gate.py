@@ -25,6 +25,7 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.session_seal import session_facts
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
+from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import has_confirmation_gate, microsoft_send_tools
 from daimon.core.turn.approvals import daimon_rule_tools_for
@@ -179,7 +180,8 @@ async def _recorded_as_gated(
                 | microsoft_send_tools(
                     enabled=runtime.settings.microsoft_accounts.configured,
                     tool_safety_on=runtime.settings.tool_safety.enabled,
-                ),
+                )
+                | await confirmation_tools(runtime.session_factory, auth.tenant_id),
                 daimon_rule_tools=daimon_rule_tools,
             )
             if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(

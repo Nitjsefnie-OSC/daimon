@@ -161,6 +161,7 @@ ANY_KEY: Final[str] = "*"
 #: call only previews, and runs. With it, an unattended run is always refused.
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_skill": "content_hash",
+    "lead_intake_resolve": "resolution",
     "request_agent_backend_switch": "preview_digest",
     # Every call names its action, so every call asks.
     "microsoft_send": "action",
@@ -191,6 +192,7 @@ def _always_confirmed_tools() -> frozenset[str]:
     """Every other confirmation-table entry requires review when policy is on."""
     return (
         frozenset(CONFIRMED_DAIMON_TOOLS)
+        - frozenset({"lead_intake_resolve"})
         - backend_switch_tools(enabled=True)
         - microsoft_send_tools(enabled=True, tool_safety_on=True)
     )
@@ -361,8 +363,8 @@ class ToolSafetyPolicy(BaseModel):
             "a write in chat waits for the requester to press Approve on a confirmation card, "
             "and a write in a routine or other unattended run is refused unless listed in "
             "unattended_writes. Applies to sessions created after it is set; a chat thread "
-            "keeps its current session until that is replaced. Off keeps every tool "
-            "auto-approved."
+            "keeps its current session until that is replaced. Off keeps third-party tools "
+            "auto-approved. Native actions requiring explicit human approval still ask."
         ),
     )
     agent_rules: bool = Field(

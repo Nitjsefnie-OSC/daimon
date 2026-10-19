@@ -415,3 +415,35 @@ async def test_partial_dossier_recovery_precedes_archive(
     assert (await service.resume(first.id)).status == "completed"
     assert ports.writes.count("dossier:0") == ports.writes.count("dossier:1") == 1
     assert ports.writes.index("dossier:2") < ports.writes.index("archive")
+
+
+async def test_resolution_confirmation_is_tenant_opt_in(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.lead_intake import confirmation_tools
+
+    assert await confirmation_tools(lead_sessions, uuid4()) == frozenset()
+    store, _, _ = await setup(lead_sessions)
+    assert await confirmation_tools(lead_sessions, store.tenant_id) == frozenset(
+        {"lead_intake_resolve"}
+    )
+
+
+async def test_resolution_cannot_approve_another_configuration_revision(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, ports = await setup(lead_sessions)
+    record = await service.submit(draft(), "7")
+    config, credentials = await store.configuration()
+    await store.configure(
+        config.model_copy(update={"revision": 2, "portal_id": "different"}), credentials
+    )
+    with pytest.raises(ValueError, match="config_revision_review"):
+        await service.resolve(
+            record.id,
+            IntakeResolution(
+                company_id="200", evidence="Verified company selection for the original portal."
+            ),
+            "7",
+        )
+    assert ports.writes == []

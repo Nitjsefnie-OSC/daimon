@@ -17,6 +17,7 @@ from daimon.adapters.mcp.tools._channel_policy import (
     require_channel_writable,
 )
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.adapters.mcp.tools.discord._client import (
     _resolve_member,  # pyright: ignore[reportPrivateUsage]
     rest_client,
@@ -128,6 +129,12 @@ async def service(
         origins = await list_running_origins(runtime, auth)
         if not routine and not origins:
             raise ToolError("interactive_origin_required")
+        if resolve and (
+            len(origins) != 1
+            or await session_card_gap(runtime, auth, origins[0], tool_name="lead_intake_resolve")
+            is not None
+        ):
+            raise ToolError("human_resolution_approval_required")
         if any(home_of(policy, o.parent_channel_id, o.thread_id) for o in origins):
             raise ToolError("isolated_source_export_denied")
         origin_ids = {value for o in origins for value in (o.parent_channel_id, o.thread_id)}

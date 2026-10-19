@@ -99,3 +99,55 @@ def test_missing_or_wrong_server_evidence_fails_closed(
             routine_id=config.routine_id if routine else uuid4(),
             execution_active=True,
         )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_resolution_requires_exact_human_approval_even_when_safety_disabled(enabled: bool) -> None:
+    from daimon.core.confirmation import prompt_for_tool_call
+    from daimon.core.tool_safety import (
+        DAIMON_SERVER_NAME,
+        ToolCall,
+        ToolSafetyPolicy,
+        decide_tool_call,
+    )
+
+    call = ToolCall(
+        tool_use_id="resolve-1",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="lead_intake_resolve",
+        input={
+            "intake_id": "synthetic-intake",
+            "resolution": {
+                "company_id": "200",
+                "contact_id": "201",
+                "deal_id": "202",
+                "evidence": "Verified original identity and project with sales.",
+            },
+        },
+    )
+    policy = ToolSafetyPolicy(enabled=enabled)
+    assert (
+        decide_tool_call(
+            policy,
+            call,
+            attended=True,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            confirmed_tools=frozenset({"lead_intake_resolve"}),
+        ).outcome
+        == "ask"
+    )
+    assert (
+        decide_tool_call(
+            policy,
+            call,
+            attended=False,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            confirmed_tools=frozenset({"lead_intake_resolve"}),
+        ).outcome
+        == "deny"
+    )
+    prompt = prompt_for_tool_call(call, requester_platform_user_id="7", now=datetime.now(UTC))
+    assert "Company id: 200" in prompt.detail_lines
+    assert "Contact id: 201" in prompt.detail_lines
+    assert "Deal id: 202" in prompt.detail_lines
+    assert any("Verified original identity" in line for line in prompt.detail_lines)

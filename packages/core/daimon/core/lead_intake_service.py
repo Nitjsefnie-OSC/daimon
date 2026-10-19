@@ -300,6 +300,9 @@ class IntakeService:
             record = await self.store.get(intake_id)
             if record.status not in {"pending", "review"}:
                 raise ValueError("intake_not_resolvable")
+            current_config, _ = await self.store.configuration()
+            if record.config_revision != current_config.revision:
+                raise ValueError("config_revision_review")
             p = record.progress
             await self.reauthorize(record.submission.source if record.submission else None)
             before = p.model_dump_json()

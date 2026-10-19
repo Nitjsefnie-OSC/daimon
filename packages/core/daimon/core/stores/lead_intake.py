@@ -744,3 +744,14 @@ async def purge_auxiliary(
     if tenant_id is not None:
         query = query.where(LeadMailboxScanRecord.tenant_id == tenant_id)
     await session.execute(query)
+
+
+async def confirmation_tools(
+    sessions: async_sessionmaker[AsyncSession], tenant_id: UUID
+) -> frozenset[str]:
+    """Only opted-in tenants add the resolver to their mandatory approval gates."""
+    async with sessions() as session:
+        configured = await session.scalar(
+            select(LeadIntakeConfig.tenant_id).where(LeadIntakeConfig.tenant_id == tenant_id)
+        )
+    return frozenset({"lead_intake_resolve"}) if configured else frozenset()

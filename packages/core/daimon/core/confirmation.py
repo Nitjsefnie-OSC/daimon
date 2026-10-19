@@ -318,6 +318,21 @@ def prompt_for_tool_call(
                 f"Message: {preview or '(empty)'}",
             )
         )
+    elif call.tool_name == "lead_intake_resolve" and server == DAIMON_SERVER_NAME:
+        resolution = data.get("resolution")
+        fields = cast("dict[str, object]", resolution) if isinstance(resolution, dict) else {}
+        action = "Resolve lead"
+        title = "Confirm lead resolution?"
+        denied_action = "Lead resolution not applied"
+        consequence = "Use these selections and resume intake. No email is sent."
+        detail_lines = (
+            f"Intake: {data.get('intake_id')}",
+            *(
+                f"{key.replace('_', ' ').capitalize()}: {value}"
+                for key, value in fields.items()
+                if value is not None
+            ),
+        )
     elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
         agent = str(data.get("agent_name") or data.get("agent") or "agent")
         if not name:
@@ -368,6 +383,15 @@ def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     return backend_switch_tools(enabled=deps.backend_selection_enabled) | microsoft_send_tools(
         enabled=deps.microsoft_send, tool_safety_on=deps.tool_safety.enabled
     )
+
+
+async def confirmed_tools_for_tenant(deps: TurnDeps, tenant_id: uuid.UUID) -> frozenset[str]:
+    from daimon.core.stores.lead_intake import confirmation_tools
+
+    base = confirmed_tools_for_turn(deps)
+    if not deps.public_url:
+        return base
+    return base | await confirmation_tools(deps.sessionmaker, tenant_id)
 
 
 def backend_switch_callbacks(

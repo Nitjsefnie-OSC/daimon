@@ -442,3 +442,8 @@ admission; disabling it gives admins no exception to the core-role/user gate.
 Agent keys and operator tokens cannot impersonate an interactive resolver.
 Routine calls require the exact configured routine, tenant, executing agent,
 creator and a still-live server-issued execution grant. Routines never resolve.
+
+Lead resolution also requires a live interactive session that held the exact
+resolver tool for the requester's approval. Tenant opt-in adds that native
+approval gate even with third-party tool safety off; a role grant or a routine
+allowlist alone cannot approve selections.

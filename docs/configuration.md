@@ -1400,7 +1400,8 @@ Classify attached (third-party) MCP tools as read or write and gate the writes: 
 in chat waits for the requester to press Approve on a confirmation card, and a write in
 a routine or other unattended run is refused unless listed in unattended_writes. Applies
 to sessions created after it is set; a chat thread keeps its current session until that
-is replaced. Off keeps every tool auto-approved.
+is replaced. Off keeps third-party tools auto-approved. Native actions requiring
+explicit human approval still ask.
 
 ### `DAIMON_TOOL_SAFETY__AGENT_RULES`
 

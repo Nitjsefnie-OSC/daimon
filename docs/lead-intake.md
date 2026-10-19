@@ -167,3 +167,8 @@ Recovery may replay only operations with native duplicate prevention after
 remote reconciliation: CRM unique-key creates, one thread per starter, label-set
 archive and association PUTs. Uncertain Discord message POSTs require history
 recovery or authorized starter resolution; they are never blindly reposted.
+
+Human resolution requires the requester's approval card showing the exact
+selected IDs and evidence, even when third-party tool safety is disabled.
+The handler verifies the live gated session before committing the resolution.
+Routine submit/resume does not acquire a resolution grant through that card.
