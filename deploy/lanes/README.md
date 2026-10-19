@@ -2,6 +2,8 @@
 
 Staging tracks `main`. A lane is separate: a Preview lane deploys a chosen branch on demand, and a fleet lane is for agents.
 
+Daimon cutover work (#179) targets lane/preview only: open each change as a PR against lane/preview, never main; it reaches main only through the final cutover merge.
+
 Push a branch named `lane/<you>` to deploy its current commit:
 
 ```sh
