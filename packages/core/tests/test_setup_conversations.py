@@ -81,13 +81,13 @@ async def test_missing_bound_responder_is_explicit_and_does_not_reconcile() -> N
 
 
 def test_setup_thread_name_names_the_target_when_one_is_chosen() -> None:
-    assert setup_thread_name("writer") == "Managing writer", (
-        "the thread name says which agent is being managed"
+    assert setup_thread_name("writer") == "Setting up writer", (
+        "the thread name says which agent is being set up"
     )
 
 
 def test_setup_thread_name_stands_in_for_an_unchosen_target() -> None:
-    assert setup_thread_name(None) == "Managing agents", (
+    assert setup_thread_name(None) == "Setting up agents", (
         "a conversation opened before a target is chosen still needs a readable name"
     )
 
@@ -104,7 +104,7 @@ def test_shared_keys_sentence_names_the_agent_whose_keys_are_shared() -> None:
 
 
 _MEMBER_ROLE_LINE = (
-    "You can make your own agents and add keys or tools to any of them. "
+    "You can make your own agents and add a key to any agent. "
     "Changes to an agent other people use, or to who answers in a channel, "
     "need a workspace admin. Ask anyway and I'll write the request for them."
 )
@@ -182,7 +182,7 @@ def test_opener_uses_the_platform_name_for_an_admin() -> None:
 
 
 def test_roster_setup_label_names_the_target_without_changing_its_identity() -> None:
-    assert setup_target_label("Researcher") == "⚙️ Manage Researcher", "name the action's target"
-    assert setup_target_label(None) == "⚙️ Manage agents", "no target opens the chooser"
+    assert setup_target_label("Researcher") == "⚙️ Set up Researcher", "name the action's target"
+    assert setup_target_label(None) == "⚙️ Set up agents", "no target opens the chooser"
     label = setup_target_label("x" * 64)
     assert len(label) == 30 and label.endswith("…"), "long names fit the button with an ellipsis"

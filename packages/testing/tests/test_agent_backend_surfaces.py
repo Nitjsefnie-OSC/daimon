@@ -548,7 +548,7 @@ def test_slack_teams_unconfigured_renderers_keep_backend_control_absent():
         channel_id="C1",
         attribution=None,
     )
-    teams = tc.details_card(details(), here="chat", page=0, coding_tools=False)
+    teams = tc.details_card(details(), here="chat", page=0, coding_tools=False, is_admin=True)
     assert "Model backend" not in json.dumps(slack)
     assert "Model backend" not in teams.model_dump_json()
 

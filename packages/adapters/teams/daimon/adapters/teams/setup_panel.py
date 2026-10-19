@@ -487,6 +487,7 @@ class SetupPanel:
             here=actor.conversation_id,
             page=page,
             coding_tools=coding_tools,
+            is_admin=actor.is_admin,
             github_panel=github_panel,
             expanded=expanded,
             backend_options=backend_options,

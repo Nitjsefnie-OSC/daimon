@@ -22,8 +22,12 @@ from mux.errors import ScopeViolation
 # here so the Discord panel, the Slack panel and the MCP outcome cannot drift:
 # an agent named on one platform and the same agent named on the other must
 # read identically.
-SETUP_ACTION_LABEL: Final = "⚙️ Manage agents"
-EMPTY_ROSTER_COPY: Final = "No agent answers here yet. Use Manage agents to add one."
+#
+# "Set up", not "Manage": the button opens a chat that anyone may use, and a
+# member can only add a key, make their own agent or ask an admin for the rest,
+# so "Manage" read as an admin action to the people it was never for.
+SETUP_ACTION_LABEL: Final = "⚙️ Set up agents"
+EMPTY_ROSTER_COPY: Final = "No agent answers here yet. Use Set up agents to add one."
 
 # Discord rejects a thread name longer than 100 characters outright, so the
 # name is truncated rather than left to fail at thread creation.
@@ -35,13 +39,13 @@ def setup_thread_name(target_name: str | None) -> str:
 
     ``target_name`` is None before the person has chosen what to manage.
     """
-    name = f"Managing {target_name}" if target_name else "Managing agents"
+    name = f"Setting up {target_name}" if target_name else "Setting up agents"
     return name[:_MAX_SETUP_THREAD_NAME_CHARS]
 
 
 def setup_target_label(agent_name: str | None) -> str:
     """Name the roster action's target within both platforms' button width."""
-    label = f"⚙️ Manage {agent_name}" if agent_name else SETUP_ACTION_LABEL
+    label = f"⚙️ Set up {agent_name}" if agent_name else SETUP_ACTION_LABEL
     return label if len(label) <= 30 else f"{label[:29]}…"
 
 
@@ -155,7 +159,7 @@ def build_setup_opener(
         "Daimon itself can't be edited; ask me to fork it and change the fork."
         if is_admin
         else (
-            "You can make your own agents and add keys or tools to any of them. "
+            "You can make your own agents and add a key to any agent. "
             "Changes to an agent other people use, or to who answers in a channel, "
             f"need {admin_noun}. Ask anyway and I'll write the request for them."
         )

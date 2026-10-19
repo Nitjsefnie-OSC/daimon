@@ -161,11 +161,11 @@ def _submit_data(form: dict[str, Any]) -> dict[str, Any]:
     return submit["data"]
 
 
-async def test_details_offers_add_skill_only_on_an_agent_that_can_take_one(
+async def test_details_offers_add_skill_only_to_an_admin_on_an_agent_that_can_take_one(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     async with _running(
-        db_session_factory, teams_api_fake, _Skills(), local_helper=True
+        db_session_factory, teams_api_fake, _Skills(), admin=True, local_helper=True
     ) as service:
         helper = await post_activity(
             service, make_card_action("agent_setup", "details", agent="helper")
@@ -173,8 +173,23 @@ async def test_details_offers_add_skill_only_on_an_agent_that_can_take_one(
         built_in = await post_activity(
             service, make_card_action("agent_setup", "details", agent="daimon")
         )
-    assert "Add skill" in json.dumps(helper), "a member's own agent can take a skill"
+    assert "Add skill" in json.dumps(helper), "an admin can add a skill to an editable agent"
     assert "Add skill" not in json.dumps(built_in), "a starting agent is never changed"
+
+
+async def test_details_does_not_offer_a_member_add_skill_or_coding_tools(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Both only ever refuse a member, so neither button is shown to one."""
+    async with _running(
+        db_session_factory, teams_api_fake, _Skills(), local_helper=True
+    ) as service:
+        helper = json.dumps(
+            await post_activity(service, make_card_action("agent_setup", "details", agent="helper"))
+        )
+    assert "Add skill" not in helper, "adding a skill needs an admin"
+    assert "coding tools" not in helper, "a coding-tool token needs an admin"
+    assert "Set up helper" in helper, "the way to ask for a change stays"
 
 
 async def test_a_paste_is_previewed_then_added_as_the_agents_own_and_details_refresh(

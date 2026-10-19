@@ -530,7 +530,7 @@ def build_details_view(
 ) -> dict[str, Any]:
     """One agent's whole readable state, in the order the roster promised.
 
-    `is_admin` controls the avatar buttons. The core phrases
+    `is_admin` controls the avatar, Add skill and coding-tool buttons. The core phrases
     `details.unrouted_note` in the reader's voice. Key values are not a
     parameter: the model carries names and attribution only.
     """
@@ -610,17 +610,21 @@ def build_details_view(
         if current is not None:
             picker["initial_option"] = current
         blocks.append(_section("*Model backend*", accessory=picker))
-    actions = [
-        _button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name),
-        _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name),
-    ]
-    if coding_tools_available:
+    actions = [_button(action_id=ACTION_GITHUB_REPOS, label="🐙 GitHub repos", value=details.name)]
+    # Only the buttons that can work for this reader: adding a skill and minting
+    # a coding-tool token are admin changes (a built-in agent takes no skill even
+    # from an admin), so a member is not offered a button that only refuses.
+    if is_admin and not details.daimon_managed:
+        actions.append(
+            _button(action_id=ACTION_ADD_SKILL, label=ADD_SKILL_LABEL, value=details.name)
+        )
+    if is_admin and coding_tools_available:
         actions.insert(
             0,
             _button(action_id=ACTION_CODING_TOOLS, label=CODING_TOOLS_LABEL, value=details.name),
         )
     blocks.append({"type": "actions", "elements": actions})
-    if not coding_tools_available:
+    if is_admin and not coding_tools_available:
         blocks.append(_context(CODING_TOOLS_UNAVAILABLE_NOTE))
     return finish_modal(
         title=title,

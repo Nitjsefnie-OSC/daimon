@@ -30,7 +30,9 @@ def test_teams_details_lists_repos_and_working_repo_without_grant_actions() -> N
             ),
         ),
     )
-    card = details_card(details, here="channel", page=0, coding_tools=False, github_panel=panel)
+    card = details_card(
+        details, here="channel", page=0, coding_tools=False, is_admin=True, github_panel=panel
+    )
     rendered = str(card.model_dump())
     assert "Helper's repos" in rendered
     assert "owner/work" in rendered and "owner/library" in rendered
@@ -46,6 +48,7 @@ def test_teams_details_lists_repos_and_working_repo_without_grant_actions() -> N
         here="channel",
         page=0,
         coding_tools=False,
+        is_admin=True,
         github_panel=GrantsPanel(repos=(), working_repo=None),
     )
     assert "No working repo" in str(empty.model_dump())

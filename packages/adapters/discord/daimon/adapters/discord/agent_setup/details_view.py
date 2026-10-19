@@ -412,17 +412,18 @@ class DetailsView(PanelViewBase):
             preview_container.add_item(preview_row)
             self.add_item(preview_container)
             return
+        is_builtin = is_builtin_agent(
+            name=details.name,
+            metadata={MA_METADATA_KEY_MANAGED: "true"} if details.daimon_managed else None,
+            default_agent_name=runtime.deployment_default.agent_name,
+        )
         container = build_details_container(
             state,
             details,
             expanded_detail=state.expanded_detail,
             is_admin=state.is_admin,
             attribution=None,
-            is_builtin=is_builtin_agent(
-                name=details.name,
-                metadata={MA_METADATA_KEY_MANAGED: "true"} if details.daimon_managed else None,
-                default_agent_name=runtime.deployment_default.agent_name,
-            ),
+            is_builtin=is_builtin,
             identity_enabled=identity_enabled_for(runtime.settings, "discord", state.guild_id),
         )
         for name, toggle in _toggle_buttons(container).items():
@@ -444,24 +445,30 @@ class DetailsView(PanelViewBase):
             elif isinstance(child, discord.ui.Button) and child.custom_id == AVATAR_DETAILS_ID:
                 child.callback = self._on_avatar_details  # type: ignore[method-assign]
 
+        # Only the buttons that can work for this reader: a coding-tool token and a
+        # skill are admin changes, and a built-in agent takes no skill at all, so a
+        # member is never offered a button that only refuses.
         action_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
-        coding_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-            label=CODING_TOOLS_LABEL, style=discord.ButtonStyle.secondary
-        )
-        coding_button.callback = self._on_coding_tools  # type: ignore[method-assign]  # per-instance callback
-        action_row.add_item(coding_button)
+        if state.is_admin:
+            coding_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                label=CODING_TOOLS_LABEL, style=discord.ButtonStyle.secondary
+            )
+            coding_button.callback = self._on_coding_tools  # type: ignore[method-assign]  # per-instance callback
+            action_row.add_item(coding_button)
         if self.agent is not None:
             github_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 label="🐙 GitHub repos", style=discord.ButtonStyle.secondary
             )
             github_button.callback = self._on_github_repos  # type: ignore[method-assign]
             action_row.add_item(github_button)
+        if self.agent is not None and state.is_admin and not is_builtin:
             add_skill_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 label=ADD_SKILL_LABEL, style=discord.ButtonStyle.secondary
             )
             add_skill_button.callback = self._on_add_skill  # type: ignore[method-assign]  # per-instance callback
             action_row.add_item(add_skill_button)
-        container.add_item(action_row)
+        if action_row.children:  # Discord rejects an empty row
+            container.add_item(action_row)
 
         if (
             channel_backend.backend_selection_enabled(runtime.settings.turn)
