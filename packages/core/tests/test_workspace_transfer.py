@@ -1336,13 +1336,32 @@ async def test_full_transfer_accepts_partial_upload_reply_and_enqueues_cleanup(
 
 
 @pytest.mark.parametrize(
-    ("policy", "expected"),
-    [(ToolSafetyPolicy(enabled=True), "deny"), (OPEN_TOOL_SAFETY, "allow")],
-    ids=["on", "off"],
+    ("policy", "tool", "destructive", "expected"),
+    [
+        (ToolSafetyPolicy(enabled=True), "create_issue", False, "deny"),
+        (OPEN_TOOL_SAFETY, "create_issue", False, "allow"),
+        (
+            ToolSafetyPolicy(enabled=True, trusted_annotations=("linear",)),
+            "memory_flag_list",
+            False,
+            "allow",
+        ),
+        (
+            ToolSafetyPolicy(enabled=True, trusted_annotations=("linear",)),
+            "memory_flag_list",
+            True,
+            "deny",
+        ),
+        (ToolSafetyPolicy(enabled=True), "memory_flag_list", False, "deny"),
+    ],
+    ids=["on", "off", "trusted-read", "trusted-destructive", "untrusted-read"],
 )
 async def test_a_checkpoint_turn_is_decided_by_the_unattended_rules(
     policy: ToolSafetyPolicy,
     expected: str,
+    tool: str,
+    destructive: bool,
+    monkeypatch: pytest.MonkeyPatch,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Design test 7: a third-party write pending in the checkpoint turn is
@@ -1355,6 +1374,40 @@ async def test_a_checkpoint_turn_is_decided_by_the_unattended_rules(
     state = FakeSessionsState(ma=FakeMAState())
     client = _client(state)
     old_session = await _make_session(client)
+    from daimon.core import mcp_tool_annotations
+
+    catalogues: list[str] = []
+    url = "https://mcp.linear.app/mcp"
+    session = state.sessions[old_session]
+    state.sessions[old_session] = session.model_copy(
+        update={
+            "agent": session.agent.model_copy(
+                update={
+                    "mcp_servers": [
+                        BetaManagedAgentsMCPServerURLDefinition(
+                            name="linear",
+                            type="url",
+                            url=url,
+                        )
+                    ]
+                },
+            )
+        }
+    )
+
+    async def catalogue(server_url: str, token: str | None) -> list[dict[str, Any]]:
+        catalogues.append(server_url)
+        return [
+            {
+                "name": tool,
+                "annotations": {
+                    "readOnlyHint": True,
+                    "destructiveHint": destructive,
+                },
+            }
+        ]
+
+    monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", catalogue)
     _seed_conversation(state, old_session, with_reply=True)
     state.stream_scripts[old_session] = [
         session_turn_sse(
@@ -1362,7 +1415,7 @@ async def test_a_checkpoint_turn_is_decided_by_the_unattended_rules(
                 id="sevt_write",
                 type="agent.mcp_tool_use",
                 mcp_server_name="linear",
-                name="create_issue",
+                name=tool,
                 input={},
                 evaluated_permission="ask",
                 processed_at=NOW,
@@ -1415,6 +1468,8 @@ async def test_a_checkpoint_turn_is_decided_by_the_unattended_rules(
         if event["type"] == "user.tool_confirmation"
     ]
     assert answers == [expected]
+
+    assert catalogues == ([url] if policy.trusted_annotations else [])
 
 
 @pytest.mark.parametrize(
