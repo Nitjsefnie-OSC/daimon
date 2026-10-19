@@ -260,11 +260,12 @@ not affected, apart from an agent's `ask` or `deny` rule on one
 routine refuses, and its card-only actions: a routine's session asks on a
 backend switch and Microsoft mail and invites, policy on or off, and on
 Microsoft file changes with it on, and the routine refuses them. See
-[architecture.md](architecture.md). Stopping or cancelling a routine, or reaching
-its turn ceiling, leaves pending calls paused and interrupts without sending
-confirmations, including on runtimes without session reads. This also holds when
-cancellation arrives while the driver drains a completed decision or a Stop
-winner, or retires confirmation cards.
+[architecture.md](architecture.md). Stopping or cancelling a routine, reaching
+its turn ceiling, or a failed decision or session update at a pending call
+leaves the call paused and interrupts the session once, without sending
+confirmations, including on runtimes without session reads. The first of these
+starts the interrupt; a later cancellation, during card cleanup or while the
+stream closes, cannot skip it or send a second one.
 
 A routine with a destination sends its trigger message after a
 `<turn_controls>` block (`render_routine_controls` in
