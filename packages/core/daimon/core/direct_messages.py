@@ -69,7 +69,7 @@ from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from mux.profiles import MANAGED_AGENTS
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 _log = structlog.get_logger(__name__)
 
@@ -1080,13 +1080,18 @@ async def owner_dm_turn(
     async def acquire() -> AsyncExitStack:
         stack = AsyncExitStack()
         try:
-            db = await stack.enter_async_context(deps.sessionmaker.begin())
+            bind = deps.sessionmaker.kw.get("bind")
+            engine = bind.engine if isinstance(bind, AsyncConnection) else bind
+            if not isinstance(engine, AsyncEngine):
+                raise RuntimeError("DM owner exclusion requires an async database engine")
+            connection = await stack.enter_async_context(engine.connect())
+            db = await stack.enter_async_context(AsyncSession(bind=connection))
+            await stack.enter_async_context(db.begin())
             await try_fence(db, f"owner_dm:{platform}:{owner}", schema_scoped=True)
             # Keep the owner's transaction on a dedicated connection. Returning
             # its pool slot leaves ordinary preparation/mutation headroom even
             # with the minimum four-connection work pool. Closing this detached
             # connection physically releases the lock on every local exit.
-            connection = await db.connection()
             await connection.run_sync(lambda sync: sync.detach())
         except BaseException:
             await stack.aclose()

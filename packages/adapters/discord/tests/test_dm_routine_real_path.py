@@ -1420,7 +1420,7 @@ async def test_channel_routine_stays_headless_without_personal_memory(harness: H
     (sid,) = harness.upstream.state.sessions
     assert len(harness.memory_stores(sid)) == 1
     assert set(harness.memory_stores(sid).values()) == {"read_only"}
-    assert not harness.gated, "channel execution retains its existing headless path"
+    assert harness.upstream.state.sessions[sid].metadata["daimon_private_dm"] == f"routine:{row.id}"
 
 
 @pytest.mark.parametrize("gate", ["role", "admin_switch", "dm_disabled", "recipient", "source"])
