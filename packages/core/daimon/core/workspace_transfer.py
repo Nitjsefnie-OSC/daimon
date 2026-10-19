@@ -545,6 +545,7 @@ async def transfer_workspace(
             public_url=public_url,
             session_factory=sessionmaker,
             tenant_id=tenant_id,
+            entry_point="checkpoint",
         )
     ):
         state = await run_turn(
@@ -575,6 +576,7 @@ async def transfer_workspace(
                 session_factory=sessionmaker,
                 tenant_id=tenant_id,
                 channel_id=session_rules_channel(old_session, platform=platform),
+                entry_point="checkpoint",
             ),
             deadline=checkpoint_deadline,
             # The checkpoint executes the old session: decided again right before.

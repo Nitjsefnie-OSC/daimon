@@ -105,7 +105,13 @@ from daimon.core.turn.provider_actions import (
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
-from daimon.core.turn.unattended import protected_tools, refuse_ungated_confirmation, session_gate
+from daimon.core.turn.unattended import refuse_ungated_confirmation, session_gate
+from daimon.core.turn.unattended_capabilities import (
+    capability_policy,
+    capability_posture,
+    protected_tools,
+    unattended_entry_point,
+)
 from daimon.core.turn_origin import current_origin_id, execution_origin
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
 from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
@@ -1084,6 +1090,10 @@ async def run_prepared_turn_impl(
                 ),
             )
         )
+        tool_confirmation = capability_posture(
+            tool_confirmation,
+            allow_builtins=capability_policy(unattended_entry_point(origin)).allow_builtins,
+        )
 
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
@@ -1194,6 +1204,7 @@ async def run_prepared_turn_impl(
                                     session_factory=deps.sessionmaker,
                                     tenant_id=tenant_id,
                                     read_session=read_session,
+                                    entry_point=unattended_entry_point(origin),
                                 )
                             )
                         )
