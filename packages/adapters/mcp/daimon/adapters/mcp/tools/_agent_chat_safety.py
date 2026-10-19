@@ -209,7 +209,7 @@ async def pending_turn(
     """Hide approval pauses from reply pollers and reattach after a restart."""
     if (id(runtime), session.id) in _workers:
         return True
-    if not runtime.settings.tool_safety.enabled or session.status != "idle":
+    if session.status != "idle":
         return False
     result = await list_session_events(
         runtime.client,

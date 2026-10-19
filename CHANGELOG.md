@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP polling recovers frozen tool confirmations after a restart with tool safety disabled.
+
 - OpenAI agents with native web search and host-bound MCP now accept the provider's echoed default search fields and empty credential carriers during readback. Nondefault search controls and nonempty native credentials remain refused.
 
 - Fleet workers get distinct names, so later mentions keep reaching the original agent. Defaults updates leave live workers alone.

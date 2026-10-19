@@ -294,6 +294,6 @@ the current safety policy before sending the message, preserving its caller
 resources and visible servers. Polling resumes confirmation handling after a
 server restart. With tool safety disabled, MCP turns retain their existing
 permissions; confirmations on a previously gated session are answered using
-the disabled policy.
+the disabled policy, including when the service restarts after safety is disabled.
 
 Operator `daimon run` uses this unattended policy too, including `unattended_writes`; chat-only allow rules do not grant unattended permission.

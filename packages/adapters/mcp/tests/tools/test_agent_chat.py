@@ -4213,3 +4213,85 @@ async def test_mcp_turn_unattended_policy(
             if task is not None and not task.done():
                 task.cancel()
             await client.close()
+
+
+async def test_restart_recovers_frozen_confirmation_after_safety_disabled(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    import asyncio
+
+    from daimon.adapters.mcp.tools import _agent_chat_safety as safety
+
+    session = ma_session(
+        id="ses_restart",
+        agent=ma_agent(
+            tools=[
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "linear",
+                    "configs": [],
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_ask"},
+                    },
+                }
+            ]
+        ),
+    )
+    pause = {
+        "id": "evt_pause",
+        "type": "session.status_idle",
+        "stop_reason": {
+            "type": "requires_action",
+            "event_ids": ["evt_tool"],
+        },
+    }
+    confirmations: list[dict[str, Any]] = []
+
+    def events(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        if confirmations:
+            return list_response([_make_idle_event()])
+        if req.url.params.get("limit") == "1":
+            return list_response([pause])
+        return list_response(
+            [
+                pause,
+                {
+                    "id": "evt_tool",
+                    "type": "agent.mcp_tool_use",
+                    "mcp_server_name": "linear",
+                    "name": "create_issue",
+                    "input": {},
+                    "evaluated_permission": "ask",
+                },
+                {
+                    "id": "evt_user",
+                    "type": "user.message",
+                    "content": [{"type": "text", "text": "hi"}],
+                },
+            ]
+        )
+
+    def send(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        confirmations.extend(json_body(req)["events"])
+        return send_events_response(data=[])
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/ses_restart$",
+        lambda r, m: httpx.Response(200, json=session.model_dump(mode="json")),
+    )
+    router.add("GET", r"/v1/sessions/ses_restart/events$", events)
+    router.add("POST", r"/v1/sessions/ses_restart/events$", send)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.tool_safety = ToolSafetyPolicy(enabled=False)
+    try:
+        assert (id(runtime), session.id) not in safety._workers  # pyright: ignore[reportPrivateUsage]
+        assert await safety.pending_turn(runtime, _auth(), session)
+        worker = safety._workers[(id(runtime), session.id)]  # pyright: ignore[reportPrivateUsage]
+        await asyncio.wait_for(worker, timeout=5)
+        assert [e["result"] for e in confirmations] == ["allow"]
+    finally:
+        await client.close()
