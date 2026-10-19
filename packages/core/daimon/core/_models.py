@@ -1746,8 +1746,9 @@ class TeamsMessageAdmission(Base):
     turn starts or the message is otherwise answered. `message` (the parsed
     inbound) is kept only while unhandled, so a restart can replay it; a dead
     owner's unhandled row is reclaimed at the next boot. `notice_sent` records
-    the restart notice, so no drain repeats it. A privacy purge deletes a
-    person's rows by (tenant, user); a tenant's deletion cascades to them.
+    the restart notice, so no drain repeats it. A privacy purge clears the
+    person and the words from their rows by (tenant, user) but keeps each row as
+    the duplicate key; a tenant's deletion cascades to them.
     """
 
     __tablename__ = "teams_message_admissions"

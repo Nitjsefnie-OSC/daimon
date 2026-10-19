@@ -665,6 +665,15 @@ def no_admission_reclaimer() -> Iterator[AsyncMock]:
         yield loop
 
 
+@pytest.fixture(autouse=True)
+def no_restart_catch_up() -> Iterator[AsyncMock]:
+    """The boot's Graph catch-up would share the test connection too; its own tests run it."""
+    with patch(
+        "daimon.adapters.teams.restart_catch_up.RestartCatchUp.run", new_callable=AsyncMock
+    ) as run:
+        yield run
+
+
 @pytest.fixture
 def teams_api_fake() -> TeamsApiFake:
     return TeamsApiFake()

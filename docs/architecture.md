@@ -1316,7 +1316,8 @@ Isolation is enforced in two places at once.
 `tenants.id`, and stores take `tenant_id` as a parameter rather than reading
 it from anywhere ambient. Erasure is not left to cascades:
 `packages/core/daimon/core/purge.py` deletes every row referencing a principal
-in FK-safe order in one transaction, and
+in FK-safe order in one transaction (a Teams message receipt is cleared of the
+person but kept for 24 hours, as the duplicate guard), and
 `packages/core/daimon/core/privacy.py` is its read-only mirror for the preview
 panel. A schema-reflecting drift-guard test fails when a new person-scoped
 table joins one path and not the other.

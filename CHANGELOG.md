@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - In Teams, a refusal or an error when opening another dialog (setup, routines, Ask a person, channel settings, credential requests) now shows its message in a small dialog instead of "Unable to reach app. Please try again."
 
+- In Teams, an @mention, a thread reply or a group chat message posted while Daimon was restarting for an update is no longer lost: the next start reads it back from Graph, if it is under 10 minutes old, and runs it once. A message in a 1:1 chat cannot be read back, so one sent then still has to be sent again.
+
 - A turn footer no longer shows a negative balance such as `$-0.01 left` when a turn settles just past zero; it reads `No credit left`.
 
 - Agents whose GitHub repos span several organizations can now push a clone of a repo from another organization through the mounted GitHub helper (`github-repo.sh owner/repo push <branch>`); they used to push it with the working organization's token and get a 404.

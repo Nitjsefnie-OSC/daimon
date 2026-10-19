@@ -8,8 +8,10 @@ with due handoffs and timers. Unmentioned thread replies go to organic thread
 participation (`participation.py`), whose turns run here, silently on failure.
 In private and shared channels, where Teams delivers only @mentions, the
 other messages arrive from Graph (`channel_subscriptions.py`) and are routed
-the same way (`handle_graph_message`). Every message claims one admission
-row (`admissions.py`), whichever source brings it first.
+the same way (`handle_graph_message`). After a boot, the messages posted while
+the adapter was restarting are read back from Graph the same way
+(`restart_catch_up.py`). Every message claims one admission row
+(`admissions.py`), whichever source brings it first.
 """
 
 from __future__ import annotations
@@ -60,6 +62,7 @@ from daimon.adapters.teams.deployment_admins import (
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import (
     DENIED,
+    GraphSource,
     Refusal,
     TeamsInbound,
     canonical_uuid,
@@ -86,6 +89,7 @@ from daimon.adapters.teams.private_replies import SENDER_ONLY, PrivateReplies, r
 from daimon.adapters.teams.provider_actions import TeamsProviderActions
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.reactions import React, TeamsReactions
+from daimon.adapters.teams.restart_catch_up import RestartCatchUp
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
 from daimon.adapters.teams.thread_handoff import hand_over_button
@@ -353,6 +357,7 @@ class TeamsApp:
         routine_poster: RoutinePoster | None = None,
         ask_human: bool = False,
         subscriptions: ChannelSubscriptions | None = None,
+        catch_up: RestartCatchUp | None = None,
         react: React | None = None,
         feed: ActivityFeed | None = None,
     ) -> None:
@@ -387,6 +392,8 @@ class TeamsApp:
         self._ask_human = ask_human
         # Graph subscriptions to private and shared channels; None leaves them mention-only.
         self._subscriptions = subscriptions
+        # Reads back what a restart's gap lost; None leaves it lost.
+        self._catch_up = catch_up
         self._renewals: asyncio.Task[None] | None = None
         self.outputs = TeamsOutputDelivery(
             runtime=runtime, sender=self._sender, spawn=self.spawn, files=channel_files
@@ -416,6 +423,9 @@ class TeamsApp:
         # Not durable: a retry landing after a restart runs a second turn.
         self._seen: OrderedDict[tuple[str, str], None] = OrderedDict()
         self._recovery: asyncio.Task[None] | None = None
+        # When the HTTP service began accepting activities: what a restart's catch-up stops at.
+        self._serving_from: datetime | None = None
+        self._serving = asyncio.Event()
         self._wake_poller: asyncio.Task[None] | None = None
         self._delivery_poller: asyncio.Task[None] | None = None
         # When each busy conversation last got a message: a newer one supersedes
@@ -483,6 +493,19 @@ class TeamsApp:
                     )
         return self._recovery
 
+    def begin_serving(self) -> None:
+        """The service is about to accept Bot Framework activities: what it posted before
+        is Graph's to read back (`RestartCatchUp`), what comes after is its own."""
+        if self._serving_from is None:
+            self._serving_from = datetime.now(UTC)
+            self._serving.set()
+
+    async def serving_from(self) -> datetime:
+        """When `begin_serving` was called, waiting for it."""
+        await self._serving.wait()
+        assert self._serving_from is not None
+        return self._serving_from
+
     async def _open_wake_thread(self, wake: WakeThread) -> bool:
         """The wake poller's hook: run a chat's due wakes via `dispatch_after_input`.
 
@@ -519,6 +542,9 @@ class TeamsApp:
                 delay = min(delay * 2, _RECOVERY_MAX_RETRY_DELAY_S)
         if self._teams.enabled:
             await self._reclaim()
+            if self._catch_up is not None:
+                # After the reclaim, so a row a predecessor held is replayed, not claimed anew.
+                self.spawn(self._catch_up.run(), name="teams.restart-catch-up")
 
     async def _reclaim(self) -> None:
         """Replay what an exited process admitted but never handled, oldest first per chat.
@@ -694,18 +720,23 @@ class TeamsApp:
 
         Claimed first, so a drain during a slow boot sweep leaves it for the next boot.
         """
+        if not await self._claim(parsed):
+            return
+        if self._recovery is not None:
+            await asyncio.shield(self._recovery)  # a predecessor's replays go first
+        await self._intake(parsed)
+
+    async def _claim(self, parsed: TeamsInbound) -> bool:
+        """Admit the message; False for a duplicate, or when the claim could not be recorded."""
         try:
             claimed = await self._admissions.claim(parsed, now=datetime.now(UTC))
         except _DB_ERRORS as exc:
             # Unrecorded, a redelivery could be answered too: stay silent.
             log.error("teams.admission.claim_failed", exc_info=exc)
-            return
+            return False
         if not claimed:
             log.info("teams.message.duplicate", conversation_type=parsed.kind)
-            return
-        if self._recovery is not None:
-            await asyncio.shield(self._recovery)  # a predecessor's replays go first
-        await self._intake(parsed)
+        return claimed
 
     async def _intake(self, parsed: TeamsInbound) -> None:
         """Route an admitted message as a fresh one: a replay takes this path too."""
@@ -838,36 +869,87 @@ class TeamsApp:
         self._dispatch_inbound(parsed)
 
     async def handle_graph_message(
-        self, message: GraphMessage, channel: TeamsChannelSubscriptionRow
+        self,
+        message: GraphMessage,
+        channel: TeamsChannelSubscriptionRow,
+        *,
+        mentions: bool = False,
     ) -> None:
         """A message Graph reported from a subscribed channel, admitted as a Bot Framework one.
 
         Its admission row is keyed like the activity's (`admission_channel`), so a
         message seen both ways runs once, across restarts too. The parse drops
-        @mentions first: Bot Framework delivers those. While draining it is held
-        as an activity would be: Graph never resends a notice answered 202, and
-        the caller moves its watermark past it, so the next boot's reclaim runs it.
+        @mentions first, as Bot Framework delivers those, unless `mentions`: a
+        boot's catch-up makes up for a restart's gap, when it could not. While
+        draining it is held as an activity would be: Graph never resends a
+        notice answered 202, and the caller moves its watermark past it, so the
+        next boot's reclaim runs it.
         """
-        parsed = parse_graph_message(
-            message,
-            channel,
-            configured_tenant=self._teams.tenant_id,
-            bot_app_id=self._teams.client_id,
-        )
+        source = GraphSource.of_subscription(channel)
+        parsed = self._parse_graph(message, source, mentions=mentions)
         if self.draining:
             if not isinstance(parsed, Refusal):
                 await self._hold_inbound(parsed)
         elif not isinstance(parsed, Refusal):
             self._dispatch_inbound(parsed)
-        elif parsed.text is not None:
-            thread = f"{channel.channel_id};messageid={message.reply_to_id or message.id}"
+        else:
+            await self._refuse_graph(parsed, message, source)
 
-            async def reply(text: str) -> object:
-                return await self._sender.send(
-                    thread, MessageActivityInput(text=text), service_url=channel.service_url
-                )
+    async def catch_up_graph_messages(
+        self, source: GraphSource, messages: list[GraphMessage]
+    ) -> None:
+        """Admit and run what a restart's gap lost, read back from one conversation.
 
-            await self._refuse(parsed, thread, message.id, "channel", reply)
+        `messages` are oldest first and include @mentions, which Bot Framework did
+        not deliver. Each claims the admission row an activity would: one that
+        Bot Framework or an earlier boot already admitted is skipped. The rest
+        run in order, as a predecessor's reclaimed ones do. Nothing is read once
+        draining; the next boot reads again.
+        """
+        fresh: list[TeamsInbound] = []
+        try:
+            for message in messages:
+                if self.draining:
+                    break
+                try:
+                    parsed = self._parse_graph(message, source, mentions=True)
+                    if isinstance(parsed, Refusal):
+                        await self._refuse_graph(parsed, message, source)
+                    elif not self._ignored_unprompted(parsed) and await self._claim(parsed):
+                        fresh.append(parsed)
+                except Exception:
+                    # One message must not strand the rows already claimed for replay.
+                    log.exception("teams.restart_catch_up.message_failed")
+        finally:
+            self._replay(fresh)
+
+    def _parse_graph(
+        self, message: GraphMessage, source: GraphSource, *, mentions: bool
+    ) -> TeamsInbound | Refusal:
+        return parse_graph_message(
+            message,
+            source,
+            configured_tenant=self._teams.tenant_id,
+            bot_app_id=self._teams.client_id,
+            mentions=mentions,
+        )
+
+    async def _refuse_graph(
+        self, parsed: Refusal, message: GraphMessage, source: GraphSource
+    ) -> None:
+        """Answer a refused Graph message in its thread, if it is owed an answer."""
+        if parsed.text is None:
+            return
+        conversation = source.channel_id
+        if source.kind == "channel":
+            conversation += f";messageid={message.reply_to_id or message.id}"
+
+        async def reply(text: str) -> object:
+            return await self._sender.send(
+                conversation, MessageActivityInput(text=text), service_url=source.service_url
+            )
+
+        await self._refuse(parsed, conversation, message.id, source.kind, reply)
 
     async def _refuse(
         self,
@@ -911,11 +993,18 @@ class TeamsApp:
 
     def _dispatch_inbound(self, parsed: TeamsInbound) -> None:
         """Admit a verified message for the mention, typed-name or participation path."""
+        if not self._ignored_unprompted(parsed):
+            self.spawn(self._admit(parsed), name="teams.turn")
+
+    def _ignored_unprompted(self, parsed: TeamsInbound) -> bool:
+        """An unaddressed thread reply with participation off asks nothing: drop it."""
         participation = self.runtime.settings.thread_participation.mode
-        if parsed.unprompted and not parsed.by_name and participation is ParticipationMode.DISABLED:
+        unwanted = (
+            parsed.unprompted and not parsed.by_name and participation is ParticipationMode.DISABLED
+        )
+        if unwanted:
             log.debug("teams.message.ignored", conversation_type="channel", reason="disabled")
-            return
-        self.spawn(self._admit(parsed), name="teams.turn")
+        return unwanted
 
     async def _plain_text_mentions_on(self) -> bool:
         """Read the tenant's switch for a message that already names the bot as text."""
