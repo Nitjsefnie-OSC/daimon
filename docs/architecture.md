@@ -120,6 +120,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
 | `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text and `/` commands answered privately (`private_replies.py`) and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
+| `daimon.adapters.sidecar` | `packages/adapters/sidecar/` | Capability callback HTTP ingress; no turns or provider credentials. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
@@ -2434,3 +2435,22 @@ credential. Refresh preserves its routine/execution discriminator and session
 grant; the shared personal-credential vault never receives routine provenance.
 Every unattended confirmation path protects lead resolution, even with general
 tool safety disabled.
+
+
+
+### Callback watch entry point
+
+`daimon-sidecar` runs the callback adapter. Core registration binds an existing
+conversation to its tenant, human owner, concrete agent and provider session.
+`POST /callbacks/watches/{watch_id}` takes a bearer capability and `X-Event-ID`.
+One restricted database function commits evidence and a `watch_fired` continuation
+atomically. Events coalesce into a pending wake, retaining twenty events and an
+omitted count. The capability login has no direct table access.
+
+The platform adapter claims the core wake, rechecks the registration, admits the
+owner under current policy, binds the session and runs an explicitly unattended
+turn. S1's unattended decider handles tool pauses; the session's tool policy is
+re-gated before every send. Evidence is escaped inside an untrusted envelope.
+Deleted threads settle explicitly and never redirect to their parent. Compatible
+core queue readers are shared by Discord, Slack and Teams; CLI and scheduler do
+not independently execute continuation rows.

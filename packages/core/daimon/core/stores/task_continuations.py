@@ -67,6 +67,8 @@ async def record_continuation(
     call recognises its own row instead of queueing a second one.
     `available_at` makes it a wake: polled, and not claimable before then.
     """
+    if reason not in get_args(ContinuationReason):
+        raise ValueError("Unknown continuation reason")
     orm = TaskContinuation(
         tenant_id=tenant_id,
         platform=platform,

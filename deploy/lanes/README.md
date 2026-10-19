@@ -136,3 +136,41 @@ The serializing deployment callers are:
 
 Any deployer or manual operator outside those workflow groups must preserve this
 single-migrator invariant, including when starting or retrying Cloud Run jobs.
+
+### Callback watch sidecar
+
+The optional `preview-sidecar` Compose profile runs `daimon-sidecar` and a TLS
+proxy. It uses the same immutable commit image (`DAIMON_LANE_IMAGE` and
+`DAIMON_LANE_SHA`) as the lane and waits for successful migrations. It has its
+own health check, bounded resources and restart policy. Only the proxy publishes
+TLS; `/healthz`, database and other paths are private. Use a distinct hostname
+and capability set per lane. The proxy's default `localhost` is for local use;
+set `DAIMON_SIDECAR_PUBLIC_HOST` to the preview callback hostname and optionally
+`DAIMON_SIDECAR_TLS_PORT` when the host uses a different TLS port.
+
+The migration creates the `daimon_sidecar` NOLOGIN capability group. Provision a
+separate login with a random password and grant it that group only. Never grant
+it the application's owner role, table rights, schema CREATE, or provider/vault
+credentials. Set `DAIMON_SIDECAR__DATABASE_URL` to its lane-local DSN (TLS required
+across hosts). Password creation and rotation are operator secret-management
+operations. The group can execute only `accept_watch_callback`; it cannot read
+registrations, capabilities, credentials or policy, or directly insert wakes.
+
+The service receives an explicit environment allowlist, without `.env` inheritance.
+Its independent settings use `DAIMON_SIDECAR__`: `DATABASE_URL`, `HOST`, `PORT`,
+`MAX_CONCURRENT`, and `REQUEST_TIMEOUT_S`; see the generated configuration reference
+for bounds and defaults. Enrollment is through core's registration API after
+human admission; this slice has no MCP enrollment tool or polling source. A
+registration must name an existing exact thread, owner, agent and live provider
+session. Issue the returned random capability privately and send it only in the
+`Authorization: Bearer …` header. Rotation revokes old capabilities atomically.
+
+Send UTF-8 evidence to `POST /callbacks/watches/{watch_id}` with `X-Event-ID`
+(stable across retries, at most 128 characters). The registered producer namespace
+is immutable; callback fields cannot change routing or instructions. Payloads are
+limited to 16 KiB, sixty deliveries per watch per minute and bounded concurrency.
+A 202 acknowledges committed acceptance; retries deduplicate. A 429 or 503 may
+be retried using the same event ID. A 403 means the capability, binding or watch
+is unavailable. Watch and owner daily turn caps apply even across concurrent
+watch deliveries. Keep the compatible reader release installed when rolling back;
+the migration deliberately retains evidence and has no downgrade.

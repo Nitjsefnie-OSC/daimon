@@ -97,6 +97,49 @@ services:
     entrypoint: ["python", "-m", "daimon.adapters.slack"]
     restart: unless-stopped
 
+  sidecar:
+    profiles: ["preview-sidecar"]
+    image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
+    labels:
+      org.opencontainers.image.revision: ${DAIMON_LANE_SHA:?DAIMON_LANE_SHA is required}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    # No env_file: source ingress receives neither provider nor vault credentials.
+    environment:
+      DAIMON_SIDECAR__DATABASE_URL: ${DAIMON_SIDECAR__DATABASE_URL:-postgresql+asyncpg://sidecar:unconfigured@postgres:5432/daimon}
+      DAIMON_SIDECAR__PORT: "8780"
+      DAIMON_SIDECAR__MAX_CONCURRENT: "8"
+      DAIMON_SIDECAR__REQUEST_TIMEOUT_S: "10"
+    entrypoint: ["daimon-sidecar"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8780/healthz', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    mem_limit: 192m
+    cpus: 0.5
+    pids_limit: 64
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+
+  sidecar-proxy:
+    profiles: ["preview-sidecar"]
+    image: caddy:2-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    depends_on:
+      sidecar:
+        condition: service_healthy
+    environment:
+      DAIMON_SIDECAR_PUBLIC_HOST: ${DAIMON_SIDECAR_PUBLIC_HOST:-localhost}
+    ports: ["${DAIMON_SIDECAR_TLS_PORT:-443}:443"]
+    volumes:
+      - ./Caddyfile.sidecar:/etc/caddy/Caddyfile:ro
+      - sidecar_proxy_data:/data
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    restart: unless-stopped
+
   wipe:
     image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
     profiles: ["ops"]
@@ -128,3 +171,4 @@ services:
 volumes:
   pgdata:
   preview-parity-calls:
+  sidecar_proxy_data:

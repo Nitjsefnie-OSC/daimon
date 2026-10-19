@@ -29,7 +29,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Final, Literal
+from typing import Final, Literal, get_args
 
 from anthropic import AsyncAnthropic
 from daimon.core.continuity.messages import (
@@ -171,6 +171,8 @@ def require_writable_reason(reason: ContinuationReason) -> None:
     unrelated timers. There is deliberately no caller override: enabling this
     producer requires a compatible-reader release and a proved rollback floor.
     """
+    if reason not in get_args(ContinuationReason):
+        raise ContinuationReasonUnavailable("Unknown continuation reason")
     if reason == "worker_finished":
         raise ContinuationReasonUnavailable(
             "Worker completion enqueueing requires a compatible-reader release"
@@ -447,7 +449,7 @@ async def decide_continuation(
     # A timer is the agent's own appointment: the person talking in the
     # meantime is expected, not a newer request that replaces it.
     if (
-        request.reason != "timer"
+        request.reason not in ("timer", "watch_fired")
         and latest_user_message_at is not None
         and latest_user_message_at > row.created_at
     ):
@@ -461,6 +463,14 @@ async def decide_continuation(
             ),
         )
 
+    if request.reason == "watch_fired":
+        from daimon.core.stores.watches import watch_seed
+
+        async with sessionmaker() as session:
+            seed = await watch_seed(session, row, now=now)
+        if seed is None:
+            return ContinuationDecision(action="skip_target_changed")
+        return ContinuationDecision(action="dispatch", seed_user_message=seed)
     if request.reason == "timer":
         return ContinuationDecision(
             action="dispatch",

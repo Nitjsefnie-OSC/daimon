@@ -51,6 +51,7 @@ typo is silent — check the spelling here.
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
+- [Sidecar](#sidecar)
 - [Notebook host (standalone service)](#notebook-host-standalone-service)
 - [Report host (standalone service)](#report-host-standalone-service)
 - [Billing (Stripe)](#billing-stripe)
@@ -1577,6 +1578,41 @@ exits non-zero.
 
 Port for the stdlib liveness responder (used by the platform health check). Must not
 collide with mcp's 8080 or discord's 8081 on the shared host.
+
+## Sidecar
+
+Read from `daimon.adapters.sidecar.settings.SidecarSettings`. Prefix `DAIMON_SIDECAR__`.
+
+### `DAIMON_SIDECAR__DATABASE_URL`
+
+`SecretStr` · **required** · secret
+
+Lane database URL for a dedicated login granted only daimon_sidecar. Require TLS for
+remote databases.
+
+### `DAIMON_SIDECAR__HOST`
+
+`str` · optional · default `0.0.0.0`
+
+Private listen address behind the callback-only TLS proxy.
+
+### `DAIMON_SIDECAR__PORT`
+
+`int` · optional · default `8780`
+
+Private callback and health HTTP port.
+
+### `DAIMON_SIDECAR__MAX_CONCURRENT`
+
+`int` · optional · default `8`
+
+Maximum concurrent callback transactions; excess requests receive 429.
+
+### `DAIMON_SIDECAR__REQUEST_TIMEOUT_S`
+
+`float` · optional · default `10`
+
+Total callback body and database deadline in seconds.
 
 ## Notebook host (standalone service)
 

@@ -3339,6 +3339,7 @@ class SlackApp:
                     platform="slack",
                     thread_id=thread_id,
                     external_user_id=row.requester_external_user_id,
+                    attended=False,
                     origin="handoff" if handoff_notice is not None else "chat",
                     attended=continuation_attended(row),
                     user_message=(

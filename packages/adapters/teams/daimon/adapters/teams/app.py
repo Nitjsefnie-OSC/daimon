@@ -1401,6 +1401,7 @@ class TeamsApp:
                     holder,
                     markers,
                     new_lifecycle,
+                    attended=continuation is None,
                     role=role or Role.USER,  # admission's: one read per turn
                     handoff=handoff,
                     reraise=reraise,
@@ -1471,6 +1472,7 @@ class TeamsApp:
         new_lifecycle: LifecycleFactory,
         *,
         role: Role,
+        attended: bool = True,
         handoff: HandoffFactory | None,
         reraise: bool,
         attended: bool,
@@ -1597,6 +1599,7 @@ class TeamsApp:
                 platform="teams",
                 thread_id=inbound.thread_id,
                 external_user_id=inbound.user_id,
+                attended=attended,
                 origin="handoff" if notice is not None else "chat",
                 attended=attended,
                 user_message=message,

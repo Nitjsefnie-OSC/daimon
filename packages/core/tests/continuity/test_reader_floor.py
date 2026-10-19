@@ -105,3 +105,54 @@ async def test_selected_completion_without_callback_defers_without_input_or_noti
             )
             == []
         )
+
+
+@pytest.mark.fresh_schema
+async def test_released_floor_ignores_watch_without_hiding_timer(db_session, address):
+    reader = _released_reader()
+    for i in range(101):
+        await seed(
+            db_session,
+            address,
+            reason="watch_fired",
+            thread=f"watch-{i}",
+            available_at=NOW - timedelta(days=1),
+        )
+    timer = await seed(db_session, address)
+    due = await reader.list_due_wake_rows(
+        db_session, platform="discord", now=NOW, max_attempts=5, limit=1
+    )
+    assert [r.idempotency_key for r in due] == [timer]
+
+
+@pytest.mark.fresh_schema
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams", "cli"])
+async def test_current_shared_reader_accepts_watch_for_every_platform(
+    db_session, address, platform
+):
+    from daimon.core.stores import task_continuations as queue
+    from sqlalchemy import text
+
+    key = await seed(db_session, address, reason="watch_fired")
+    await db_session.execute(
+        text("UPDATE task_continuations SET platform=:platform"), {"platform": platform}
+    )
+    rows = await queue.list_dispatchable_continuations(
+        db_session,
+        tenant_id=address["tenant_id"],
+        platform=platform,
+        thread_id="thread",
+        now=NOW,
+        max_attempts=5,
+    )
+    assert [r.idempotency_key for r in rows] == [key]
+
+
+async def test_unknown_reason_cannot_be_produced():
+    from daimon.core.continuity.continuation import (
+        ContinuationReasonUnavailable,
+        require_writable_reason,
+    )
+
+    with pytest.raises(ContinuationReasonUnavailable, match="Unknown"):
+        require_writable_reason("future_reason")
