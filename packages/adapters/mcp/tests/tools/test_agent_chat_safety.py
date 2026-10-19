@@ -1025,6 +1025,7 @@ async def test_session_annotations_over_fake_http(
     factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from daimon.core import mcp_tool_annotations
     from daimon.core.mcp_oauth import discovery
 
     fake = FakeSession(script=[[("linear", tool, {})], [("linear", tool, {})]])
@@ -1058,11 +1059,17 @@ async def test_session_annotations_over_fake_http(
 
     original = httpx.AsyncClient
 
-    def client(**kwargs: Any) -> httpx.AsyncClient:
-        return original(transport=httpx.MockTransport(handle), **kwargs)
+    class Client(original):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(transport=httpx.MockTransport(handle), **kwargs)
 
-    monkeypatch.setattr(httpx, "AsyncClient", client)
-    monkeypatch.setattr(discovery, "assert_public_https_url", lambda *a, **k: None)
+    async def catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(httpx, "AsyncClient", Client)
+            scoped.setattr(discovery, "assert_public_https_url", lambda *a, **k: None)
+            return list(await discovery.read_mcp_catalogue(url, token))
+
+    monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", catalogue)
     if entry == "resume":
         boundary = fake.pause()
         await _record(factory, boundary)

@@ -45,6 +45,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
 )
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import run as run_module
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
@@ -111,6 +112,7 @@ def _deps(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -3124,14 +3126,16 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
     assert result.allow and len(prompts) == 1, "the adapter's card hook answered the write"
 
 
+@pytest.mark.parametrize("attended", [True, False], ids=["chat", "unattended"])
 @pytest.mark.parametrize(
     "trusted", [("bridge",), (), ("other",)], ids=["trusted", "empty", "other-server-trusted"]
 )
-async def test_a_chat_turn_reads_trusted_server_annotations_with_the_agent_token(
+async def test_a_prepared_turn_reads_trusted_server_annotations_with_the_agent_token(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     trusted: tuple[str, ...],
+    attended: bool,
 ) -> None:
     """The production wiring: `run_prepared_turn` hands the decider a lookup that
     reads a trusted server's catalogue, so a `readOnlyHint` read runs without
@@ -3222,6 +3226,7 @@ async def test_a_chat_turn_reads_trusted_server_annotations_with_the_agent_token
         recovery_lifecycle=_recovery_lifecycle,
         render_interval_s=0.001,
         confirm_write=card,
+        attended=attended,
     )
 
     (posture,) = postures
@@ -3230,7 +3235,9 @@ async def test_a_chat_turn_reads_trusted_server_annotations_with_the_agent_token
         ToolCall(tool_use_id="tu", server_name="bridge", tool_name="memory_flag_list")
     )
     if "bridge" not in trusted:
-        assert not result.allow and len(prompts) == 1, "the name decides: a noun-first write"
+        assert not result.allow and len(prompts) == int(attended), (
+            "the name decides: a noun-first write"
+        )
         assert tokens == [] and credential_reads == [], "no tools/list for an untrusted server"
         return
     assert result.allow and prompts == [], "readOnlyHint ran the read without a card"
