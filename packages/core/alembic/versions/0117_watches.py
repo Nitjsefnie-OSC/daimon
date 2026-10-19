@@ -7,8 +7,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision = "0116_watches"
-down_revision = "0115_origin_session_grants"
+revision = "0117_watches"
+down_revision = "0116_thread_model_settings"
 branch_labels = None
 depends_on = None
 

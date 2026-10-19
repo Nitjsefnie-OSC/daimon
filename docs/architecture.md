@@ -2453,7 +2453,7 @@ are shared by Discord, Slack and Teams; CLI and scheduler do not independently
 execute continuations. Old compatible readers ignore the new reason before batching,
 so unrelated work stays readable during rollback.
 
-Migration `0116_watches` follows `0115_origin_session_grants`. A watch turn explicitly
+Migration `0117_watches` follows `0116_thread_model_settings`. A watch turn explicitly
 passes `attended=False`, uses core admission and the shared unattended decider, and
 revalidates registration, stops, key generation and exact session before every
 driver send. Balance, member monthly caps and the attributed channel budget are

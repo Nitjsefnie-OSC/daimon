@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 def watch_migration() -> dict[str, object]:
     return runpy.run_path(
-        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0116_watches.py")
+        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0117_watches.py")
     )
 
 

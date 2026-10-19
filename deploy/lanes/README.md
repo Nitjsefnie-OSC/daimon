@@ -148,8 +148,8 @@ published TLS port. The proxy image is pinned by digest; the application uses
 `DAIMON_LANE_IMAGE` with `DAIMON_LANE_SHA`, as for other lane services.
 
 `DAIMON_WATCHES__ENABLED` defaults to false. Keep it false until the execution-bound
-origin-grant prerequisite and watch release are reviewed. Migration `0116_watches`
-follows `0115_origin_session_grants`. Every watch send requires its current
+origin-grant prerequisite and watch release are reviewed. Migration `0117_watches`
+follows `0116_thread_model_settings`. Every watch send requires its current
 unattended execution origin to hold the bound session grant; missing, attended or
 mismatched grants refuse dispatch. The execution cleanup, driver gates and attendance
 changes do not automatically enable watches. A separate core-owned database

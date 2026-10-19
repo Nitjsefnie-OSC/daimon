@@ -25,7 +25,7 @@ Health checks do not enqueue anything. Core's queue is the only delivery queue.
 
 Public v1 enrollment binds an existing Discord thread. All continuation adapters
 read the reason, and the common driver gate rechecks watch bindings before sends.
-Migration `0116_watches` follows `0115_origin_session_grants`. A send requires
+Migration `0117_watches` follows `0116_thread_model_settings`. A send requires
 the current unattended execution origin and the exact bound session grant;
 missing, attended or mismatched grants fail closed. Both producer gates stay
 default-off until release review.

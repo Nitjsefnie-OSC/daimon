@@ -32,7 +32,7 @@ SCRIPTS = ROOT / "packages/core/alembic"
 FORK = "0109_github_tokens_live_index"
 MAIN = "0110_microsoft_accounts"
 REVERSIBLE_HEAD = "0116_thread_model_settings"
-HEAD = "0116_watches"
+HEAD = "0117_watches"
 CHAIN = [
     MAIN,
     "0111_cold_dm_agent",
