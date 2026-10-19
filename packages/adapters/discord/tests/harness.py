@@ -15,7 +15,9 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import TurnQueueSettings
 from daimon.core.membership import CachedMembershipResolver, Membership
+from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn_queue import TurnQueue
+from daimon.testing.turn_fakes import deps_for
 
 
 def make_bot(runtime: DiscordRuntime) -> DaimonBot:
@@ -23,6 +25,19 @@ def make_bot(runtime: DiscordRuntime) -> DaimonBot:
     mentioned in every message, so `on_message` reaches orchestration."""
     intents = discord.Intents.default()
     intents.message_content = True
+    if not isinstance(runtime, DiscordRuntime):
+        runtime = DiscordRuntime(
+            settings=runtime.settings,
+            anthropic=runtime.anthropic,
+            sessionmaker=runtime.sessionmaker,
+            notebook_rate_limiter=runtime.notebook_rate_limiter,
+            billing_config=runtime.billing_config,
+            deployment_default=runtime.deployment_default,
+            resolver_cache=runtime.resolver_cache,
+            turn_deps=deps_for(runtime.anthropic, runtime.sessionmaker),
+        )
+    if not isinstance(runtime.turn_deps, TurnDeps):
+        runtime = replace(runtime, turn_deps=deps_for(runtime.anthropic, runtime.sessionmaker))
     bot = DaimonBot(runtime=runtime, intents=intents)
 
     async def membership(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
