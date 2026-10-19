@@ -82,6 +82,7 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
     read_session_seals,
     record_session_seals,
+    thread_ids_for_sessions,
 )
 from daimon.core.turn.admission import Admission, reauthorize, restrict_inherited_memory
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
@@ -576,10 +577,23 @@ async def create_ma_session(
                 retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
             )
 
+    # False only when a prepared create returned a session recorded by an earlier
+    # attempt under the same operation key (`persistence.mutate` replays it); a row
+    # may already name that one.
+    allocated_here = True
+
     async def allocate(
         call: Callable[[], Awaitable[BetaManagedAgentsSession]], wire: SessionCreateRequest
     ) -> BetaManagedAgentsSession:
         assert preparation is not None and persistence is not None
+        nonlocal allocated_here
+        allocated_here = False
+
+        async def create_upstream(_key: str) -> BetaManagedAgentsSession:
+            nonlocal allocated_here
+            allocated_here = True
+            return await call()
+
         return await persistence.mutate(
             None,
             "session_create",
@@ -597,7 +611,7 @@ async def create_ma_session(
                 ),
                 "create": wire.model_dump(mode="json"),
             },
-            lambda _key: call(),
+            create_upstream,
             BetaManagedAgentsSession,
             lambda _: "processed",
             guard=fence,
@@ -699,59 +713,104 @@ async def create_ma_session(
                 platform_skill_ids=admission.platform_skill_ids - {refused},
             )
 
-    async with deps.sessionmaker() as session:
-        personal_memory_store_id = await get_personal_memory_store_id(
-            session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=admission.account_id
+    # `create_session` archives its own session on any failure up to its return.
+    # From here until `CreatedSession` is returned no row names the session and
+    # no caller holds its id, so a cancel (Stop, the ceiling) or a database error
+    # in the personal-memory lookup below would leave it live upstream for good.
+    try:
+        async with deps.sessionmaker() as session:
+            personal_memory_store_id = await get_personal_memory_store_id(
+                session, tenant_id=tenant_id, agent_id=agent_uuid, account_id=admission.account_id
+            )
+        has_repo = any(
+            isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
+            for resource in ma_session.resources
         )
-    has_repo = any(
-        isinstance(resource, BetaManagedAgentsGitHubRepositoryResource)
-        for resource in ma_session.resources
-    )
-    # App tokens sit in the vault even when no working repo is mounted; record an
-    # issue time only when this session was actually delivered some.
-    (
-        has_app_tokens,
-        token_repo_urls,
-        token_scopes,
-        token_issued_at_by_installation,
-    ) = _delivered_app_snapshot_state(delivered_app_access)
-    snapshot = snapshot_from_created_session(
-        ma_session,
-        env_sha256=env_sha256,
-        # Left to the builder: it reads the id off the session's own `.env`
-        # file resource, which is the same object `upload_env_and_mount`
-        # uploaded a moment ago.
-        env_file_id=None,
-        # `resolve_clone_token` minted the repo credential inside the
-        # `create_session` call above, so "now" is when it was issued.
-        repo_token_issued_at=int(time.time()) if has_repo or has_app_tokens else None,
-        vault_id=(
-            ma_session.vault_ids[-1]
-            if github_mode == "app" and ma_session.vault_ids
-            else next(iter(ma_session.vault_ids), None)
-        ),
-        sent_skills=session_skills(admission.agent, admission.channel_skills),
-        github_mode=github_mode,
-        personal_memory_store_ids=(
-            () if personal_memory_store_id is None else (personal_memory_store_id,)
-        ),
-    ).model_copy(
-        update={
-            "token_repo_urls": token_repo_urls,
-            "token_scopes": token_scopes,
-            "token_issued_at_by_installation": token_issued_at_by_installation,
-            "unavailable_repos": tuple(
-                (url, dt.datetime.now(dt.UTC)) for url in excluded_repo_urls
+        # App tokens sit in the vault even when no working repo is mounted; record an
+        # issue time only when this session was actually delivered some.
+        (
+            has_app_tokens,
+            token_repo_urls,
+            token_scopes,
+            token_issued_at_by_installation,
+        ) = _delivered_app_snapshot_state(delivered_app_access)
+        snapshot = snapshot_from_created_session(
+            ma_session,
+            env_sha256=env_sha256,
+            # Left to the builder: it reads the id off the session's own `.env`
+            # file resource, which is the same object `upload_env_and_mount`
+            # uploaded a moment ago.
+            env_file_id=None,
+            # `resolve_clone_token` minted the repo credential inside the
+            # `create_session` call above, so "now" is when it was issued.
+            repo_token_issued_at=int(time.time()) if has_repo or has_app_tokens else None,
+            vault_id=(
+                ma_session.vault_ids[-1]
+                if github_mode == "app" and ma_session.vault_ids
+                else next(iter(ma_session.vault_ids), None)
             ),
-            "unavailable_notice_pending": excluded_repo_urls,
-        }
-    )
-    return CreatedSession(
-        ma_session_id=ma_session.id,
-        snapshot=snapshot,
-        admission=admission,
-        seal_ids=frozenset(seal),
-    )
+            sent_skills=session_skills(admission.agent, admission.channel_skills),
+            github_mode=github_mode,
+            personal_memory_store_ids=(
+                () if personal_memory_store_id is None else (personal_memory_store_id,)
+            ),
+        ).model_copy(
+            update={
+                "token_repo_urls": token_repo_urls,
+                "token_scopes": token_scopes,
+                "token_issued_at_by_installation": token_issued_at_by_installation,
+                "unavailable_repos": tuple(
+                    (url, dt.datetime.now(dt.UTC)) for url in excluded_repo_urls
+                ),
+                "unavailable_notice_pending": excluded_repo_urls,
+            }
+        )
+        return CreatedSession(
+            ma_session_id=ma_session.id,
+            snapshot=snapshot,
+            admission=admission,
+            seal_ids=frozenset(seal),
+        )
+    except BaseException:
+        from daimon.core.turn.run import (
+            _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
+        )
+        from mux.drivers.anthropic.transport import single_attempt_mutation
+
+        try:
+            named = False
+            if not allocated_here:
+                # A replayed session may belong to a row an earlier attempt
+                # committed; archive it only if the read shows none does.
+                async with deps.sessionmaker() as db:
+                    named = bool(
+                        await thread_ids_for_sessions(
+                            db, tenant_id=tenant_id, ma_session_ids=[ma_session.id]
+                        )
+                    )
+            if named:
+                log.info("turn.create_cleanup_skipped_named_session", session_id=ma_session.id)
+            else:
+                with single_attempt_mutation():
+                    await _archive_orphaned_session(
+                        deps.anthropic,
+                        session_id=ma_session.id,
+                        scope=preparation.scope
+                        if preparation is not None
+                        else admitted_session_scope(
+                            admission, tenant_id=tenant_id, session_id=ma_session.id
+                        ),
+                    )
+        except Exception as cleanup_error:
+            # The row read or binding validation failed before any archive was
+            # sent: leave the session alone. The error being unwound is the one
+            # the caller must see.
+            log.warning(
+                "turn.recovery_orphan_archive_failed",
+                session_id=ma_session.id,
+                error=str(cleanup_error)[:200],
+            )
+        raise
 
 
 async def insert_mapping(
