@@ -132,7 +132,7 @@ class GatedSender(FakeSender):
 
 async def _settled(lifecycle: TeamsTurnLifecycle) -> None:
     """Let the click's background edit run to its end."""
-    task = lifecycle._stopping_task  # pyright: ignore[reportPrivateUsage]
+    task = lifecycle._card_edits.stopping  # pyright: ignore[reportPrivateUsage]
     assert task is not None
     await task
 
@@ -161,9 +161,9 @@ async def test_a_double_click_starts_one_edit() -> None:
     sender = FakeSender()
     lifecycle = await _posted(sender)
     assert lifecycle.request_stop() is not None
-    first = lifecycle._stopping_task  # pyright: ignore[reportPrivateUsage]
+    first = lifecycle._card_edits.stopping  # pyright: ignore[reportPrivateUsage]
     assert lifecycle.request_stop() is not None
-    assert lifecycle._stopping_task is first  # pyright: ignore[reportPrivateUsage]
+    assert lifecycle._card_edits.stopping is first  # pyright: ignore[reportPrivateUsage]
     await _settled(lifecycle)
     assert len(sender.sent) == 2, "one Stopping edit"
 
@@ -231,7 +231,7 @@ async def test_a_stop_click_after_the_turn_ended_sends_nothing() -> None:
     lifecycle = await _posted(sender)
     await lifecycle.on_terminal_success(TurnState())
     assert lifecycle.request_stop() is None and not lifecycle.stopping
-    assert lifecycle._stopping_task is None  # pyright: ignore[reportPrivateUsage]
+    assert lifecycle._card_edits.stopping is None  # pyright: ignore[reportPrivateUsage]
 
     sender = FakeSender()
     lifecycle = await _posted(sender)
@@ -269,6 +269,42 @@ async def test_recovery_attempt_stays_stopping_and_follows_the_old_attempts_edit
     sender.release.set()
     await closing
     assert "Stopped." in _card_json(sender, -1), "the new attempt's notice is last"
+
+
+def _adopt(old: TeamsTurnLifecycle, sender: FakeSender) -> TeamsTurnLifecycle:
+    adopted = TeamsTurnLifecycle(
+        sender=sender,
+        conversation_id=CONVERSATION_ID,
+        service_url=SERVICE_URL,
+        cancel_key="key-1",
+        clock=Clock(),
+        adopt_message_id=old.message_id,
+    )
+    adopted.inherit_stop(old)
+    return adopted
+
+
+async def test_a_stop_on_the_recovery_attempt_after_the_old_attempt_closed_sends_nothing() -> None:
+    sender = FakeSender()
+    old = await _posted(sender)
+    adopted = _adopt(old, sender)
+    await old.close_with_notice("Took too long.")  # the run closes the original attempt
+    assert adopted.request_stop() is None, "the turn has ended on the card"
+    assert len(sender.sent) == 2 and "Took too long." in _card_json(sender, -1)
+
+
+async def test_the_old_attempts_close_waits_for_a_stop_clicked_on_the_recovery_attempt() -> None:
+    sender = GatedSender(held=1)
+    old = await _posted(sender)
+    adopted = _adopt(old, sender)
+    adopted.request_stop()
+    await sender.entered.wait()
+    closing = asyncio.create_task(old.close_with_notice("Took too long."))
+    await asyncio.sleep(0.05)
+    assert len(sender.sent) == 2 and not closing.done(), "waits behind the stopping edit"
+    sender.release.set()
+    await closing
+    assert "Took too long." in _card_json(sender, -1), "the closing notice is last"
 
 
 async def test_renders_draw_the_turns_tool_lines_and_the_latest_draft() -> None:

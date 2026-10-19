@@ -816,7 +816,7 @@ async def test_only_the_author_can_cancel(
     assert card_module.STOPPING_HEADLINE in stopping, "the clicker sees it at once"
     assert card_module.CANCEL_VERB not in stopping, "no Stop button on the stopping card"
     assert len(sender.sent) == 1, "the click handler sends nothing itself"
-    await entry.lifecycle._stopping_task  # pyright: ignore[reportPrivateUsage]
+    await entry.lifecycle._card_edits.stopping  # pyright: ignore[reportPrivateUsage]
     assert len(sender.sent) == 2 and sender.activities[-1].id == "m-1", (
         "the lifecycle edits the card"
     )
@@ -852,7 +852,7 @@ async def test_a_stop_survives_dead_session_recovery(
         adopted = recovery_lifecycle(asyncio.Event())
         seen["entry"] = teams._cancel_registry[key]  # pyright: ignore[reportPrivateUsage]
         seen["adopted"] = adopted
-        await adopted._stopping_task  # pyright: ignore[reportPrivateUsage]
+        await adopted._card_edits.stopping  # pyright: ignore[reportPrivateUsage]
         seen["edited"] = sender.activities[-1].model_copy(deep=True)
         later = await teams.handle_cancel(_click(key, AAD_OBJECT_ID))
         seen["again"] = later
