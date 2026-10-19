@@ -1098,3 +1098,82 @@ async def test_a_worker_on_an_older_turn_does_not_hide_a_newer_card(
     finally:
         stale.cancel()
     assert fake.calls == []
+
+
+async def test_a_lost_turn_record_leaves_the_pause_unresumable(
+    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write fails after an accepted send: the sender still answers; after a
+    restart nobody does (fail closed)."""
+
+    async def refuse(*_a: object, **_k: object) -> None:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(session_settle_state, "record_unattended_turn", refuse)
+    fake = FakeSession(frozen="always_ask")
+    runtime = _runtime(fake, factory, _ENABLED)
+    # The sender's worker is stopped before it answers: the process died.
+    with patch.object(safety, "_answer", AsyncMock(side_effect=RuntimeError("crash"))):
+        await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+        await _settle(runtime)
+    _restart()
+    with pytest.raises(ToolError, match="approval in the chat"):
+        await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    assert fake.confirmations == []
+
+
+async def test_another_sessions_record_does_not_authorize_this_one(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(frozen="always_ask")
+    boundary = fake.pause()
+    async with factory.begin() as db:
+        await session_settle_state.record_unattended_turn(
+            db, managed_session_id="ses_elsewhere", turn_event_id=boundary, rules_channel_id=None
+        )
+    runtime = _runtime(fake, factory, _DISABLED)
+    with pytest.raises(ToolError, match="approval in the chat"):
+        await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    assert fake.confirmations == []
+
+
+async def test_a_resume_by_a_key_bound_elsewhere_keeps_the_turns_channel(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _deny_in_channel(factory, "C1")
+    fake = FakeSession(tool="get_issue")
+    await _record(factory, fake.pause(), channel="C1")
+    runtime = _runtime(fake, factory, _RULES)
+    _restart()
+    await _continue_turn_impl(runtime, _auth(bound="C2", platform="discord"), _SESSION, None)
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == ["deny"]
+
+
+async def test_a_channel_ask_beats_an_agent_wide_allow_for_routines(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory.begin() as db:
+        await make_tenant(db, id=_TENANT_ID)
+    admin = Subject(is_admin=True, platform_user_id="UA")
+    for channel, rule, scope in ((None, "allow", "chat_and_routines"), ("C1", "ask", "chat")):
+        async with factory.begin() as db:
+            await agent_tool_rules.set_rule(
+                db,
+                tenant_id=_TENANT_ID,
+                agent_id=_MA_AGENT_ID,
+                agent_name="safety",
+                tool_key="linear/create_issue",
+                channel_id=channel,
+                server_url=_LINEAR_URL,
+                rule=rule,
+                scope=scope,
+                set_by="admin",
+                actor=admin,
+            )
+    for auth, expected in ((_auth(), "allow"), (_auth(bound="C1", platform="discord"), "deny")):
+        fake = FakeSession()
+        runtime = _runtime(fake, factory, _RULES)
+        await _continue_turn_impl(runtime, auth, _SESSION, "hi")
+        await _settle(runtime)
+        assert [c["result"] for c in fake.confirmations] == [expected]

@@ -1145,8 +1145,13 @@ answers only pauses after its own `user.message` boundary, each decided at
 call time by `unattended_posture`: `unattended_decider` with the agent's
 rules for that channel (`channel_for_tool_rules`), the protected tools
 refused, never `AutoApprove` and never the session's frozen config.
-Confirmations themselves are not re-gated; the gate before the message
-covers the turn. `annotations_for` is the seam for operator-trusted MCP
+Each confirmation batch resumes the turn, so the worker gates the session
+again before deciding it, and a failed gate sends nothing. Messages,
+confirmations and gate updates go out with one attempt (`single_attempt`,
+no SDK retry), so nothing is resent after its gate and decision; a failed or
+ambiguous attempt raises and is left for a new, fully checked call. The
+registry keeps each worker's turn boundary: a worker reads as `running`, and
+a resume reuses it, only for the turn it owns. `annotations_for` is the seam for operator-trusted MCP
 hints; nothing supplies them yet. A read never answers a pause: `get_session`
 (both), `get_my_session` and hub `get_session` report `running` while this
 process's worker owns the turn and `paused` with a hint otherwise; list tools
