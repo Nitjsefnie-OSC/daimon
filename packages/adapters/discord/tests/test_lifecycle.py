@@ -43,6 +43,7 @@ from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
@@ -452,7 +453,7 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
     )
     deps = replace(
         deps_for(None, None),
-        tool_safety=False,
+        tool_safety=OPEN_TOOL_SAFETY,
         public_url="https://example.test",
         turn_path="legacy",
         backend=None,
