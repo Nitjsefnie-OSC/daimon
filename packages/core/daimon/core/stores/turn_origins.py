@@ -28,11 +28,13 @@ async def create_origin(
     expires_at: datetime,
     now: datetime,
     is_setup: bool = False,
+    sender_foreign: bool = False,
 ) -> TurnOriginRow:
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
         id=uuid.uuid4(),
         is_setup=is_setup,
+        sender_foreign=sender_foreign,
         created_at=now,
         tenant_id=tenant_id,
         account_id=account_id,

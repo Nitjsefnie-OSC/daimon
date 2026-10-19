@@ -46,6 +46,11 @@ async def require_one_to_one(
     calendar and OneNote content must not reach a channel or group chat.
     """
     origin = await require_turn_origin(runtime, auth, origin_context_id)
+    if origin.sender_foreign:
+        raise ToolError(
+            f"{what} works only for people in the organisation that added Daimon, and this "
+            "person is from another organisation, so nothing was read or sent."
+        )
     if not origin.parent_channel_id.startswith("a:"):
         raise ToolError(
             f"{what} can only be used in the person's 1:1 chat with Daimon, and this "

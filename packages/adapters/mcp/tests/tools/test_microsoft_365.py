@@ -28,6 +28,7 @@ from daimon.adapters.mcp.tools.microsoft.graph import (
     microsoft_search_impl,
     microsoft_send_impl,
 )
+from daimon.adapters.mcp.tools.setup_target import caller_is_foreign
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -141,7 +142,13 @@ async def _person(sm: async_sessionmaker[AsyncSession]) -> tuple[TenantRow, Auth
     return tenant, auth
 
 
-async def _origin(sm: async_sessionmaker[AsyncSession], auth: AuthIdentity, parent: str) -> str:
+async def _origin(
+    sm: async_sessionmaker[AsyncSession],
+    auth: AuthIdentity,
+    parent: str,
+    *,
+    foreign: bool = False,
+) -> str:
     now = datetime.now(UTC)
     async with sm.begin() as session:
         origin = await create_origin(
@@ -158,6 +165,7 @@ async def _origin(sm: async_sessionmaker[AsyncSession], auth: AuthIdentity, pare
             role=Role.USER,
             expires_at=now + timedelta(minutes=10),
             now=now,
+            sender_foreign=foreign,
         )
     return str(origin.id)
 
@@ -462,6 +470,38 @@ async def test_personal_content_stays_out_of_channels(
                 runtime, auth, query="budget", kinds=["event"], size=5, origin_context_id=origin
             )
     assert not fake.graph_requests, "mail or calendar must not even be fetched in a channel"
+
+
+@pytest.mark.parametrize("what", ["mail", "calendar search"])
+async def test_a_guest_from_another_organisation_is_not_sent_to_a_one_to_one_chat(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft, what: str
+) -> None:
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    origin = await _origin(committing_sessionmaker, auth, CHANNEL, foreign=True)
+    runtime = _runtime(committing_sessionmaker, fake)
+    with pytest.raises(ToolError, match="organisation that added Daimon") as refused:
+        if what == "mail":
+            await microsoft_get_impl(runtime, auth, path="/me/messages", origin_context_id=origin)
+        else:
+            await microsoft_search_impl(
+                runtime, auth, query="budget", kinds=["event"], size=5, origin_context_id=origin
+            )
+    assert "1:1" not in str(refused.value), "a guest has no 1:1 chat to ask again in"
+    assert not fake.graph_requests, "nothing is fetched for them"
+
+
+async def test_the_caller_is_foreign_when_a_running_turn_says_so(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    _, auth = await _person(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, FakeMicrosoft())
+
+    assert await caller_is_foreign(runtime, auth) is False, "no running turn"
+    await _origin(committing_sessionmaker, auth, CHANNEL)
+    assert await caller_is_foreign(runtime, auth) is False, "a local sender"
+    await _origin(committing_sessionmaker, auth, CHANNEL, foreign=True)
+    assert await caller_is_foreign(runtime, auth) is True, "a guest's running turn"
 
 
 async def test_personal_content_is_read_in_the_one_to_one_chat(

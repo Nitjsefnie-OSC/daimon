@@ -172,3 +172,39 @@ async def test_running_origins_are_listed_per_caller(
         db_session, tenant_id=tenant.id, account_id=account.id, platform="teams", now=now
     )
     assert [row.thread_id for row in running] == ["t-1"], "only this caller's turns"
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+async def test_an_origin_remembers_whether_its_sender_is_from_another_organisation(
+    db_session: AsyncSession, foreign: bool
+) -> None:
+    tenant = await make_tenant(db_session, platform="teams")
+    account = await make_account(db_session, tenant=tenant)
+    now = datetime.now(UTC)
+    created = await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="teams",
+        parent_channel_id="19:abc@thread.tacv2",
+        thread_id="19:abc@thread.tacv2;messageid=1",
+        responder_ma_agent_id="agent_daimon",
+        responder_name="Daimon",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        expires_at=now + timedelta(minutes=10),
+        now=now,
+        sender_foreign=foreign,
+    )
+    read = await get_active_origin(
+        db_session,
+        origin_id=created.id,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="teams",
+        now=now,
+    )
+
+    assert created.sender_foreign is foreign
+    assert read is not None and read.sender_foreign is foreign

@@ -1581,6 +1581,7 @@ class TeamsApp:
             configuration_target_ma_agent_id=config.configuration_target_ma_agent_id,
             configuration_target_name=config.configuration_target_name,
             is_setup=config.thread_binding_kind == "setup",
+            sender_foreign=inbound.is_foreign,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
             quiet = notice is not None or prepared.continuity.state == "continued"
@@ -1589,7 +1590,6 @@ class TeamsApp:
                 responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
                 session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,
-                foreign_sender=inbound.is_foreign,
             )
             render = functools.partial(
                 render_user_message,

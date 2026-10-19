@@ -67,10 +67,11 @@ def test_the_words_for_a_local_sender_still_name_the_chat(place: Place) -> None:
 
 @pytest.mark.parametrize("place", _PLACES)
 def test_a_foreign_senders_turn_controls_carry_those_words(place: Place) -> None:
-    origin = _origin("teams", parent_channel_id="19:abc123@thread.tacv2", thread_id=_THREADS[place])
+    channel = {"parent_channel_id": "19:abc123@thread.tacv2", "thread_id": _THREADS[place]}
+    guest = _origin("teams", sender_foreign=True, **channel)
 
-    foreign = json.loads(render_turn_origin(origin, foreign_sender=True).split("\n")[1])
-    local = json.loads(render_turn_origin(origin).split("\n")[1])
+    foreign = json.loads(render_turn_origin(guest).split("\n")[1])
+    local = json.loads(render_turn_origin(_origin("teams", **channel)).split("\n")[1])
 
     assert foreign["words"]["setup"] == f"ask {_HOST} to send `setup`"
     _no_private_chat(json.dumps(foreign["words"]))

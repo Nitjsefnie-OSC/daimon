@@ -207,6 +207,13 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
     )
 
 
+def for_foreign_sender(card: HereCard) -> HereCard:
+    """`card` for someone from another organisation: no 1:1 chat to send `setup` in,
+    in its structured facts and in its text."""
+    foreign = card.model_copy(update={"foreign": True})
+    return foreign.model_copy(update={"text": render_here_card_text(foreign)})
+
+
 def render_here_card_text(card: HereCard) -> str:
     """Plain MCP text; the structured HereCard keeps all existing facts."""
     rendered = render_here_card(card)

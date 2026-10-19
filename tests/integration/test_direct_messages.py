@@ -1222,7 +1222,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         ):
             result = await call_mcp_tool(app, token=token, name=name, arguments=args)
             rendered = json.dumps(result)
-            assert ("session not found" not in rendered) is allowed, rendered
+            assert ("conversation not found" not in rendered) is allowed, rendered
             if "events" in name:
                 assert ("private transcript sentinel" in rendered) is allowed, rendered
         if agent:
@@ -1240,12 +1240,12 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
                 ),
             ):
                 result = await call_mcp_tool(app, token=token, name=name, arguments=args)
-                assert "session not found" in json.dumps(result), result
+                assert "conversation not found" in json.dumps(result), result
         else:
             result = await call_mcp_tool(
                 app, token=token, name="hub_session_probe", arguments={"handle": handle}
             )
-            assert "session not found" in json.dumps(result), result
+            assert "conversation not found" in json.dumps(result), result
 
     async def observe(request):
         session_index = int(request.url.path.split("/")[3].rsplit("_", 1)[1]) - 1

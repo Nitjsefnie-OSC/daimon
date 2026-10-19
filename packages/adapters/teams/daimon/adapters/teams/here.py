@@ -20,7 +20,12 @@ from daimon.adapters.teams.card_actions import heading
 from daimon.adapters.teams.commands import CommandContext
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.errors import DaimonError
-from daimon.core.here_card import HereCard, load_here_card, render_here_card
+from daimon.core.here_card import (
+    HereCard,
+    for_foreign_sender,
+    load_here_card,
+    render_here_card,
+)
 from daimon.core.stores.identity import find_platform_principal
 from microsoft_teams.cards import AdaptiveCard, CardElement, TextBlock
 
@@ -74,7 +79,7 @@ async def _load(context: CommandContext) -> HereCard:
             caller_can_view=True,
         )
     # Someone from another organisation has no 1:1 chat to send `setup` in.
-    return card.model_copy(update={"foreign": asked.is_foreign})
+    return for_foreign_sender(card) if asked.is_foreign else card
 
 
 async def show_here(context: CommandContext) -> None:

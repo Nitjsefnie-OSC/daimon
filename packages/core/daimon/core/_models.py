@@ -2445,6 +2445,10 @@ class TurnOrigin(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The sender is from another organisation (Teams): no 1:1 chat with Daimon for them.
+    sender_foreign: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     # Set by `archive_thread` on this turn's own thread; the adapter archives
     # the thread after the turn's last post.
     archive_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
