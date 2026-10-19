@@ -29,7 +29,7 @@ from daimon.core.lead_intake import (
     LeadSubmission,
 )
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, literal, select, text, tuple_, update
+from sqlalchemy import case, delete, func, literal, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -260,7 +260,10 @@ class IntakeStore:
         async with self.sessions() as session:
             query = select(LeadIntakeRecord).where(LeadIntakeRecord.tenant_id == self.tenant_id)
             if pending_only:
-                query = query.where(LeadIntakeRecord.status.in_(("pending", "review")))
+                query = query.where(
+                    LeadIntakeRecord.status.in_(("pending", "review")),
+                    LeadIntakeRecord.expires_at > datetime.now(UTC),
+                )
             if after_id is not None:
                 after = await self.get(after_id)
                 query = query.where(
@@ -279,15 +282,20 @@ class IntakeStore:
 
     async def health(self) -> dict[str, object]:
         async with self.sessions() as session:
+            status = case(
+                (LeadIntakeRecord.expires_at <= datetime.now(UTC), "expired"),
+                else_=LeadIntakeRecord.status,
+            )
             counts = await session.execute(
-                select(LeadIntakeRecord.status, func.count())
+                select(status, func.count())
                 .where(LeadIntakeRecord.tenant_id == self.tenant_id)
-                .group_by(LeadIntakeRecord.status)
+                .group_by(status)
             )
             oldest = await session.scalar(
                 select(func.min(LeadIntakeRecord.created_at)).where(
                     LeadIntakeRecord.tenant_id == self.tenant_id,
                     LeadIntakeRecord.status.in_(("pending", "review")),
+                    LeadIntakeRecord.expires_at > datetime.now(UTC),
                 )
             )
             last_scan = await session.scalar(

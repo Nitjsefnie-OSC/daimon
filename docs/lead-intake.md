@@ -127,7 +127,7 @@ only authorized owners with opaque IDs and private links.
 Lead text, names, research, draft and resolution evidence are encrypted for at
 most 90 days. Reconstructed raw email excludes attachments and expires after
 seven days; operators can shorten both periods. The scheduler erases expired
-content independently of mailbox activity; reads/resume also enforce expiry.
+content independently of mailbox activity; reads hide expired evidence immediately and resume also enforces erasure.
 After expiry, only a tenant-scoped source digest and minimal ledger metadata
 remain. This tombstone prevents the same email being processed again. Effects,
 remote IDs and resolution audit are erased with the content.

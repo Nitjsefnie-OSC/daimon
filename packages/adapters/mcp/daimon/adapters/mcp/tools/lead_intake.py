@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from uuid import UUID
 
 import discord
@@ -264,7 +263,6 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> IntakeRecord:
         """Read one authorized tenant lead, its review state and durable effect progress."""
         async with service(runtime, await _auth(ctx)) as intake:
-            await intake.store.purge(datetime.now(UTC))
             return await intake.store.get(intake_id)
 
     @mcp.tool(tags={"discord"})
@@ -274,7 +272,6 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> list[IntakeRecord]:
         """Read up to 100 tenant leads in the restricted sales queue, oldest first."""
         async with service(runtime, await _auth(ctx)) as intake:
-            await intake.store.purge(datetime.now(UTC))
             return await intake.store.list(after_id=after_id)
 
     @mcp.tool(tags={"discord"})
@@ -283,7 +280,6 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> dict[str, object]:
         """Read tenant lead counts, oldest pending age and mailbox coverage."""
         async with service(runtime, await _auth(ctx)) as intake:
-            await intake.store.purge(datetime.now(UTC))
             config, _ = await intake.store.configuration()
             state = await intake.store.mailbox(config.source_connection_id)
             return {**await intake.store.health(), "mailbox": state.model_dump(mode="json")}

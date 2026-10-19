@@ -1,6 +1,5 @@
 """Private native lead queue; human decisions use the same core intake grants."""
 
-from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
@@ -73,7 +72,6 @@ class LeadsCog(commands.Cog):
             ):
                 raise PermissionError("sales_queue_read_denied")
             # Private data never falls back to the invocation channel.
-            await store.purge(datetime.now(UTC))
             if intake_id:
                 record = await store.get(UUID(intake_id))
                 title = record.submission.thread_title if record.submission else "Expired lead"
