@@ -4148,19 +4148,6 @@ async def test_handoff_waits_for_an_inflight_handle_send(
     client = build_fake_anthropic(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
-    runtime = SimpleNamespace(
-        client=client,
-        session_factory=factory,
-        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
-    )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="discord",
-        platform_user_id="user-1",
-        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
-    )
     entered, release = asyncio.Event(), asyncio.Event()
     real_send = client.beta.sessions.events.send
 
@@ -4174,13 +4161,20 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         return result
 
     monkeypatch.setattr(client.beta.sessions.events, "send", paused_send)
-    # The MCP send uses a single-attempt copy of the client; keep it the patched one.
-    monkeypatch.setattr(
-        "daimon.adapters.mcp.tools.agent_chat.single_attempt", lambda runtime: runtime.client
-    )
-    sending = asyncio.create_task(
-        _continue_turn_impl(runtime, auth, first.ma_session_id, "in flight")
-    )
+    from daimon.core.session_mutation import session_mutation_fence
+
+    async def platform_send():
+        # A human session is driven by its admitted platform driver, not by an
+        # external MCP handle. Exercise the same send/replacement fence here.
+        async with session_mutation_fence(factory, first.ma_session_id):
+            await client.beta.sessions.events.send(
+                first.ma_session_id,
+                events=[
+                    {"type": "user.message", "content": [{"type": "text", "text": "in flight"}]}
+                ],
+            )
+
+    sending = asyncio.create_task(platform_send())
     replacing = None
     entered_wait = asyncio.create_task(entered.wait())
     try:
