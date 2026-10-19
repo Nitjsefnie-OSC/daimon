@@ -26,6 +26,7 @@ class FakeSecrets:
         self.destroyed: list[str] = []
         self.deny_prune = False
         self.deny_destroy = False
+        self.listing: list[SimpleNamespace] | None = None
 
     def access_secret_version(self, *, request: dict[str, str]) -> SimpleNamespace:
         name = request["name"].removesuffix("/versions/latest")
@@ -46,6 +47,8 @@ class FakeSecrets:
     def list_secret_versions(self, *, request: dict[str, str]) -> list[SimpleNamespace]:
         if self.deny_prune:
             raise PermissionDenied("list denied")
+        if self.listing is not None:
+            return self.listing
         return [v for v in self.versions if v.name.startswith(request["parent"] + "/")]
 
     def destroy_secret_version(self, *, request: dict[str, str]) -> None:
@@ -84,6 +87,85 @@ def test_cache_versions_and_prune() -> None:
     assert len(api.versions) == 7
     with pytest.raises(ValueError, match="shared Secret Manager"):
         backend.delete("admin")
+
+
+ENABLED = secretmanager.SecretVersion.State.ENABLED
+DISABLED = secretmanager.SecretVersion.State.DISABLED
+CONFIG = "projects/qa-project/secrets/teams-qa-config"
+ADMIN = "projects/qa-project/secrets/teams-qa-token-admin"
+MEMBER = "projects/qa-project/secrets/teams-qa-token-member"
+
+
+def enabled(api: FakeSecrets, secret: str) -> list[str]:
+    return [v.name for v in api.versions if v.name.startswith(secret + "/") and v.state == ENABLED]
+
+
+@pytest.mark.parametrize("writes", [1, 2, 3, 4, 5, 8])
+def test_prune_boundaries_keep_newest_three(writes: int) -> None:
+    api = FakeSecrets()
+    backend = SecretManagerCacheBackend("qa-project", "teams-qa", api)
+    for _ in range(writes):
+        backend.write("admin", SENTINEL)
+    kept = enabled(api, ADMIN)
+    assert len(kept) == min(writes, 3)
+    assert kept == [v.name for v in api.versions[-len(kept) :]]
+    assert len(api.destroyed) == max(0, writes - 3)
+
+
+def test_prune_never_touches_config_or_other_persona() -> None:
+    api = FakeSecrets()
+    api.add_secret_version(request={"parent": CONFIG, "payload": {"data": b"{}"}})
+    backend = SecretManagerCacheBackend("qa-project", "teams-qa", api)
+    for _ in range(2):
+        backend.write("member", SENTINEL)
+    for _ in range(6):
+        backend.write("admin", SENTINEL)
+    # Even a listing that returns every secret's versions must not reach them.
+    api.listing = list(api.versions)
+    backend.write("admin", SENTINEL)
+    assert enabled(api, CONFIG) == [f"{CONFIG}/versions/1"]
+    assert len(enabled(api, MEMBER)) == 2
+    # The listing predates the last add, so that version survives as a fourth.
+    assert len(enabled(api, ADMIN)) == 4
+    assert all(name.startswith(ADMIN + "/") for name in api.destroyed)
+
+
+def test_prune_ignores_disabled_versions() -> None:
+    api = FakeSecrets()
+    backend = SecretManagerCacheBackend("qa-project", "teams-qa", api)
+    for _ in range(4):
+        backend.write("admin", SENTINEL)
+    api.versions[-1].state = DISABLED
+    backend.write("admin", SENTINEL)
+    assert api.versions[3].state == DISABLED
+    assert len(enabled(api, ADMIN)) == 3
+
+
+def test_concurrent_stale_prunes_keep_newest_three() -> None:
+    api = FakeSecrets()
+    backend = SecretManagerCacheBackend("qa-project", "teams-qa", api)
+    snapshots: list[list[SimpleNamespace]] = []
+    for _ in range(7):
+        api.add_secret_version(request={"parent": ADMIN, "payload": {"data": b"x"}})
+        snapshots.append([SimpleNamespace(name=v.name, state=v.state) for v in api.versions])
+    newest = [v.name for v in api.versions[-3:]]
+    # Writers that listed at different moments prune in any order.
+    for snapshot in reversed(snapshots):
+        api.listing = snapshot
+        backend.write("admin", SENTINEL)
+    assert set(newest) <= set(enabled(api, ADMIN))
+    assert len(enabled(api, ADMIN)) >= 3
+
+
+def test_config_secret_that_is_a_token_secret_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeSecrets()
+    api.payloads[ADMIN] = json.dumps(config_source()).encode()
+    monkeypatch.setattr("qa.live.teams.secret_store.client", lambda: api)
+    monkeypatch.delenv("DAIMON_TEAMS_QA_CONFIG", raising=False)
+    with pytest.raises(ValueError, match="must not be a token secret"):
+        TeamsQaConfig.load(config_secret=ADMIN)
 
 
 def test_config_secret_and_identity(monkeypatch: pytest.MonkeyPatch) -> None:

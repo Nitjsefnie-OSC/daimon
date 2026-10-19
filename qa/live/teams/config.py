@@ -122,6 +122,14 @@ class TeamsQaConfig(StrictModel):
         else:
             raise ValueError("--config or --config-secret is required")
         config = cls.model_validate(json.loads(content))
+        store = config.token_store
+        if secret is not None and selected is None and isinstance(store, SecretManagerTokenStore):
+            tokens = {
+                f"projects/{store.project}/secrets/{store.secret_prefix}-token-{persona}"
+                for persona in config.personas
+            }
+            if secret in tokens:
+                raise ValueError("config secret must not be a token secret")
         if isinstance(config.token_store, FileTokenStore):
             config.token_store.token_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             config.token_store.token_dir.chmod(0o700)

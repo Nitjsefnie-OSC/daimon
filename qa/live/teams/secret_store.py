@@ -76,12 +76,16 @@ class SecretManagerCacheBackend:
         except Exception:
             raise RuntimeError("Teams QA token cache write failed") from None
         try:
+            # Destroy only this persona's enabled versions beyond the newest
+            # three; never another secret's, and never a disabled version.
+            own = f"{name}/versions/"
             versions = self.api.list_secret_versions(request={"parent": name})
             enabled = sorted(
                 (
                     version
                     for version in versions
-                    if version.state == secretmanager.SecretVersion.State.ENABLED
+                    if version.name.startswith(own)
+                    and version.state == secretmanager.SecretVersion.State.ENABLED
                 ),
                 key=lambda version: int(version.name.rsplit("/", 1)[-1]),
                 reverse=True,
