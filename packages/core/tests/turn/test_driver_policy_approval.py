@@ -25,12 +25,10 @@ from daimon.core.tool_safety import (
 from daimon.core.turn import run_turn
 from daimon.core.turn.approvals import (
     chat_tool_confirmation,
-    headless_tool_confirmation,
     interactive_decider,
     unattended_decider,
 )
 from daimon.core.turn.posture import (
-    AutoApprove,
     BillingExempt,
     PolicyApproval,
     RequireApproval,
@@ -110,7 +108,7 @@ async def test_routine_write_is_denied_and_read_is_allowed() -> None:
         cancel=asyncio.Event(),
         render_interval_s=0.001,
         billing=_EXEMPT,
-        tool_confirmation=headless_tool_confirmation(_ON),
+        tool_confirmation=PolicyApproval(decide=unattended_decider(_ON)),
     )
 
     assert final.error is None
@@ -334,7 +332,6 @@ async def test_cancel_while_the_card_is_up_refuses_the_write() -> None:
 
 
 def test_disabled_policy_keeps_the_old_postures() -> None:
-    assert isinstance(headless_tool_confirmation(OPEN_TOOL_SAFETY), AutoApprove)
     assert isinstance(
         chat_tool_confirmation(OPEN_TOOL_SAFETY, requester_platform_user_id="U1", confirm=None),
         RequireApproval,
@@ -1066,11 +1063,13 @@ async def test_an_unattended_run_refuses_an_ask_ruled_daimon_tool_behind_call_to
         cancel=asyncio.Event(),
         render_interval_s=0.001,
         billing=_EXEMPT,
-        tool_confirmation=headless_tool_confirmation(
-            ToolSafetyPolicy(enabled=True, agent_rules=True),
-            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
-            daimon_rules=True,
-            rules_for=rules_for,
+        tool_confirmation=PolicyApproval(
+            decide=unattended_decider(
+                ToolSafetyPolicy(enabled=True, agent_rules=True),
+                trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+                daimon_rules=True,
+                rules_for=rules_for,
+            )
         ),
     )
 

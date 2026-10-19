@@ -51,7 +51,6 @@ from daimon.core.tool_safety import (
     unwrap_daimon_call,
 )
 from daimon.core.turn.posture import (
-    AutoApprove,
     PolicyApproval,
     RequireApproval,
     ToolCallDecider,
@@ -582,26 +581,6 @@ def interactive_decider(
         return ToolConfirmationResult(allow=False, deny_message=_answer_message(call, answer))
 
     return _decide
-
-
-def headless_tool_confirmation(
-    policy: ToolSafetyPolicy,
-    *,
-    trusted_servers: frozenset[str] = frozenset(),
-    rules_for: RuleLookup | None = None,
-    daimon_rules: bool = False,
-) -> ToolConfirmation:
-    """Posture for a run nobody is watching (routines, smoke, transfers).
-
-    Disabled keeps `AutoApprove`, byte-identical to before the policy existed.
-    """
-    if not policy.enabled:
-        return AutoApprove()
-    return PolicyApproval(
-        decide=unattended_decider(
-            policy, trusted_servers=trusted_servers, rules_for=rules_for, daimon_rules=daimon_rules
-        )
-    )
 
 
 def chat_tool_confirmation(

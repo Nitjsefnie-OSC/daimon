@@ -32,14 +32,16 @@ _LINEAR_TOOLSET: dict[str, object] = {
 }
 
 
-def _events() -> list[dict[str, Any]]:
+def _events(
+    server: str = "linear", name: str = "create_issue", tool_input: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     return [
         {
             "id": "evt_tu",
             "type": "agent.mcp_tool_use",
-            "name": "create_issue",
-            "mcp_server_name": "linear",
-            "input": {"title": "Nightly bug"},
+            "name": name,
+            "mcp_server_name": server,
+            "input": tool_input if tool_input is not None else {"title": "Nightly bug"},
             "evaluated_permission": "ask",
             "processed_at": _NOW.isoformat(),
         },
@@ -64,7 +66,14 @@ def _events() -> list[dict[str, Any]]:
     ]
 
 
-def _router(*, creates: list[dict[str, Any]], sends: list[dict[str, Any]]) -> MARouter:
+def _router(
+    *,
+    creates: list[dict[str, Any]],
+    sends: list[dict[str, Any]],
+    events: list[dict[str, Any]] | None = None,
+    agent_tools: list[dict[str, Any]] | None = None,
+    agent_servers: list[dict[str, Any]] | None = None,
+) -> MARouter:
     router = MARouter()
 
     def handle_create(request: httpx.Request, match: Any) -> httpx.Response:
@@ -81,8 +90,9 @@ def _router(*, creates: list[dict[str, Any]], sends: list[dict[str, Any]]) -> MA
     def handle_agent(request: httpx.Request, match: Any) -> httpx.Response:
         agent = ma_agent(
             id="agent_x",
-            tools=[_LINEAR_TOOLSET],
-            mcp_servers=[{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
+            tools=agent_tools or [_LINEAR_TOOLSET],
+            mcp_servers=agent_servers
+            or [{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
         )
         return httpx.Response(200, json=agent.model_dump(mode="json"))
 
@@ -91,7 +101,9 @@ def _router(*, creates: list[dict[str, Any]], sends: list[dict[str, Any]]) -> MA
         return httpx.Response(200, json=env.model_dump(mode="json"))
 
     router.add("POST", r"/v1/sessions", handle_create)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", lambda r, m: sse_response(_events()))
+    router.add(
+        "GET", r"/v1/sessions/[^/]+/events/stream", lambda r, m: sse_response(events or _events())
+    )
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     router.add("GET", r"/v1/agents/([^/]+)", handle_agent)
     router.add("GET", r"/v1/environments/([^/]+)", handle_env)
@@ -145,7 +157,7 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
 
     assert creates[0]["agent"] == "agent_x", "no override when enforcement is off"
     (sent,) = _confirmations(sends)
-    assert sent["result"] == "allow", "AutoApprove, as before"
+    assert sent["result"] == "allow", "off allows an ordinary third-party call"
 
 
 _PUBLIC_URL = "https://mcp.example.com/mcp"
@@ -294,3 +306,35 @@ async def test_run_turn_without_a_policy_is_a_type_error() -> None:
             environment_id="env",
             trigger_message="hi",
         )
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["off", "on"])
+async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(enabled: bool) -> None:
+    """Design §3 routines row: the one unattended decider, never AutoApprove; the
+    session asks on Daimon's card-only actions and the routine refuses them."""
+    daimon = {"name": "daimon-mcp", "type": "url", "url": _PUBLIC_URL}
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    client = build_fake_anthropic(
+        _router(
+            creates=creates,
+            sends=sends,
+            events=_events("daimon-mcp", "microsoft_send", {"action": "send_mail"}),
+            agent_tools=[_toolset("daimon-mcp")],
+            agent_servers=[daimon],
+        ).dispatch
+    )
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="mail the summary",
+        mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
+        tool_safety=ToolSafetyPolicy(enabled=enabled),
+    )
+    (created,) = creates
+    (toolset,) = created["agent"]["tools"]
+    asked = {c["name"] for c in toolset["configs"]}
+    assert "microsoft_send" in asked
+    (sent,) = _confirmations(sends)
+    assert sent["result"] == "deny"

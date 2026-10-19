@@ -1035,7 +1035,10 @@ meters nothing and logs why.
 It also declares a tool-confirmation posture: what the driver does when MA
 pauses the session on a `requires_action` idle. `RequireApproval` ends the
 turn, `AutoApprove` allows every blocked call, and `PolicyApproval` asks a
-decider per call and sends each answer on the same stream. The decider comes
+decider per call and sends each answer on the same stream. Routines and
+other headless runs use `PolicyApproval` with the unattended decider
+(`unattended_posture`), with tool safety on or off; only a workspace
+checkpoint turn still answers with `AutoApprove`. The decider comes
 from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write
 model in `packages/core/daimon/core/tool_safety.py`. With
 `DAIMON_TOOL_SAFETY__AGENT_RULES` on as well, each third-party paused call

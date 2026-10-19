@@ -197,14 +197,18 @@ whole liveness story: status-checked reconnects, the per-call read timeout,
 the cancel race. What it does not inherit is the chat chokepoint. It does not
 call `admit()` or `bind_session()`, so there is no thread-session binding, no
 continuity or handoff, and no dead-session recovery. Nobody is there to
-click, so tool confirmations are answered without a person: with
-`DAIMON_TOOL_SAFETY__ENABLED` off (the default) every call is auto-approved;
-with it on, reads from attached third-party MCP servers run, and a write is
-refused (the agent is told why) unless its server or `server/tool` is listed
-in `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`. Daimon's own tools are not
-affected, apart from an agent's `ask` or `deny` rule on one
+click, so tool confirmations are answered without a person, by the same
+unattended decider agent-chat turns use (`unattended_posture`): with
+`DAIMON_TOOL_SAFETY__ENABLED` off (the default) an ordinary paused call is
+allowed; with it on, reads from attached third-party MCP servers run, and a
+write is refused (the agent is told why) unless its server or `server/tool`
+is listed in `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`. Daimon's own tools are
+not affected, apart from an agent's `ask` or `deny` rule on one
 (`daimon-mcp/<tool>`, with `DAIMON_TOOL_SAFETY__AGENT_RULES` on), which a
-routine refuses. See [architecture.md](architecture.md).
+routine refuses, and its card-only actions: a routine's session asks on a
+backend switch and Microsoft mail and invites, policy on or off, and on
+Microsoft file changes with it on, and the routine refuses them. See
+[architecture.md](architecture.md).
 
 A routine with a destination sends its trigger message after a
 `<turn_controls>` block (`render_routine_controls` in

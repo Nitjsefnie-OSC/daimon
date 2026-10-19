@@ -111,8 +111,8 @@ def unattended_posture(
     *,
     session: BetaManagedAgentsSession,
     public_url: str | None,
-    session_factory: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    tenant_id: uuid.UUID | None,
     channel_id: str | None = None,
     annotations_for: AnnotationLookup | None = None,
 ) -> PolicyApproval:
@@ -121,7 +121,8 @@ def unattended_posture(
     Always `unattended_decider` over `policy`, with the agent's rules bound to
     the servers this session really talks to and to `channel_id`, the
     channel whose rules the turn runs under (`channel_for_tool_rules`; None
-    for a DM or no channel). `protected_tools` are refused. `annotations_for`
+    for a DM or no channel); with no database or tenant there are no rules to
+    read. `protected_tools` are refused. `annotations_for`
     is the seam for operator-trusted MCP hints; it must answer only for
     trusted servers.
     """
@@ -137,7 +138,9 @@ def unattended_posture(
                 server_urls={s.name: s.url for s in session.agent.mcp_servers},
                 also_urls=daimon_endpoint(public_url),
                 channel_id=channel_id,
-            ),
+            )
+            if session_factory is not None and tenant_id is not None
+            else None,
             daimon_rules=True,
             annotations_for=annotations_for,
         )

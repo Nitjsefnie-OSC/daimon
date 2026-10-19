@@ -32,7 +32,10 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     FileMetadata,
 )
-from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
+from anthropic.types.beta.sessions import (
+    BetaManagedAgentsAgentMCPToolUseEvent,
+    BetaManagedAgentsSessionEvent,
+)
 from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
     BetaManagedAgentsAgentMessageEvent,
 )
@@ -294,7 +297,7 @@ async def test_full_final_response_is_returned_for_delivery() -> None:
 
 async def test_auto_allow_confirms_once_and_rides_out_a_reemitted_requires_action() -> None:
     """Two requires_action idle events naming the same blocked id: the first
-    is auto-confirmed exactly once (no double-ack). MA repeats the pause while
+    is allowed (tool safety off) exactly once (no double-ack). MA repeats the pause while
     the batch's other tools run, so a repeat read before MA has taken the
     allow is a duplicate, not a re-ask: the turn carries on to its answer.
     Production 2026-10-08 ended such turns as `requires_action`. A real
@@ -303,6 +306,17 @@ async def test_auto_allow_confirms_once_and_rides_out_a_reemitted_requires_actio
     send_capture: list[dict[str, Any]] = []
 
     events: list[BetaManagedAgentsSessionEvent] = [
+        # The blocked call itself: an unattended decider refuses a pause it
+        # has no tool-use evidence for, whatever the policy.
+        BetaManagedAgentsAgentMCPToolUseEvent(
+            id="tu_x",
+            type="agent.mcp_tool_use",
+            processed_at=_NOW,
+            mcp_server_name="linear",
+            name="create_issue",
+            input={},
+            evaluated_permission="ask",
+        ),
         BetaManagedAgentsSessionStatusIdleEvent(
             id="evt_idle_block_1",
             type="session.status_idle",
