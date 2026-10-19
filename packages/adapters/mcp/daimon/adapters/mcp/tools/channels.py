@@ -130,7 +130,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def send_direct_message(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, recipient_id: str, content: str
     ) -> DirectMessageResult:
-        """Privately message one human member of the current server/workspace.
+        """Privately message one human member of the current workspace.
 
         Pass a platform user ID, not a channel or mention. Both sender and
         recipient must still belong to this tenant. Teams: the recipient's
@@ -139,7 +139,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         delivery or restrict recipients to an allowlist. Plain text only, up to
         19000 characters, split into bounded messages. Returns all delivery IDs;
         a partial failure states how many messages were already sent, so do not
-        blindly resend the whole message. No attachments or cross-tenant DMs.
+        blindly resend the whole message. No attachments or cross-tenant messages.
         """
         return await send_direct_message_impl(
             runtime, await _auth(ctx), recipient_id=recipient_id, content=content
@@ -635,7 +635,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         searching). Unscoped searches report only the visible rows — the
         server-wide count is withheld because it includes channels you cannot
         view. Slack: only content + limit are supported (other filters are
-        Discord-only), and 1:1 DM hits are only returned in a DM with daimon.
+        Discord-only), and 1:1 private-chat hits are only returned in a private chat with daimon.
         Teams: Microsoft has no message search for apps, so this scans the
         most recently active posts (and their replies) of up to 10 channels
         for content; only content, channel_ids, author_ids (Entra ids) and

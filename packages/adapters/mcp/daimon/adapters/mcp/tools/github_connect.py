@@ -464,7 +464,7 @@ def register_github_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Use this when someone asks to let an agent read a private repository
         at github.com/owner/repo. Show a single-use
-        connection button bound to the selected agent to a server admin; repos
+        connection button bound to the selected agent to an admin; repos
         connected this way are for that agent only. Other members get Ask an
         admin and a recorded request. On Teams the card goes to the requester's
         1:1 chat. Never repeat a private link in a shared reply. For a setup

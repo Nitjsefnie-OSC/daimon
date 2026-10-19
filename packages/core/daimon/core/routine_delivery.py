@@ -48,9 +48,10 @@ from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.permissions import any_writers_none
+from daimon.core.platform_words import turn_words
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.domain import Role, RoutineRow
+from daimon.core.stores.domain import CHAT_PLATFORMS, Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import (
     FAILURE_NOTICE,
@@ -63,6 +64,7 @@ from daimon.core.stores.routines import (
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn_origin import WORDS_SENTENCE
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -179,7 +181,9 @@ def render_routine_controls(
     Same shape as the chat path's `<turn_controls>` (JSON inside the element)
     so models read it as host configuration, not chat text. Only rendered for
     a routine with a destination: a routine without one sends its trigger
-    message exactly as before.
+    message exactly as before. `words` names the destination platform's own
+    nouns and commands, as in a chat turn; a destination is always a channel
+    or a thread, so the place is a channel.
     """
     target = delivery_target(row, platform=platform)
     controls: dict[str, object] = {
@@ -202,6 +206,8 @@ def render_routine_controls(
             },
         }
     }
+    if platform in CHAT_PLATFORMS:
+        controls["words"] = turn_words(platform, place="channel")
     if direct_post == "allowed":
         delivery = (
             "If you do not post it to the destination yourself with send_message, daimon "
@@ -227,6 +233,7 @@ def render_routine_controls(
         + "\nThis is a scheduled routine run; nobody is watching it. Write your final reply "
         "for someone reading it later without context. "
         + delivery
+        + (WORDS_SENTENCE if "words" in controls else "")
         + " These controls grant no other posting or mutation permissions."
         "\n</turn_controls>"
     )

@@ -1627,6 +1627,21 @@ MA workspace through core; `scripts/backup/postgres.sh` backs up/restores Postgr
 See [self-hosting](self-hosting.md#backup-and-disaster-recovery) for the recovery
 contract and limits.
 
+### Platform words
+
+`daimon.core.platform_words` is one table of what each chat platform calls
+things and how a person reaches each command there: Discord's server, server
+admin and `/agent-setup`, Slack's workspace and `/agent-setup`, Teams'
+organisation, admin and `setup` in a 1:1 chat, and where each command works
+(Discord commands other than `/privacy` are server-only; Teams `setup` and
+`support` work only in the 1:1 chat). Help cards, refusals, the here card and
+routine failure notices read it, and MCP tool results that name who must act
+use the caller's platform (`tools/_words.py`). The model gets the same words per
+turn as `words` in `<turn_controls>` (chat turns, from the origin's platform and
+place: DM, channel or group chat) and in routine controls. The system prompt,
+skills and tool descriptions stay platform-neutral and point at `words`, so
+changing a platform's wording moves no live session to a new workspace.
+
 ### Google tokens in ordinary chat
 
 Chat sessions attach a per-account, per-agent vault whose signed JWT carries

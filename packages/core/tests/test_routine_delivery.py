@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
@@ -105,6 +106,31 @@ def test_routine_controls_name_the_destination_and_schedule() -> None:
     assert '"channel_id": "C1"' in text and '"schedule": "0 9 * * 1"' in text
     assert "posts your full final reply there" in text
     assert text.endswith("</turn_controls>")
+
+
+@pytest.mark.parametrize(
+    ("platform", "setup", "admin"),
+    [
+        ("discord", "run `/agent-setup`", "Manage Server"),
+        ("slack", "run `/agent-setup`", "workspace admin"),
+        ("teams", "send `setup` in a 1:1 chat with Daimon", "admin team"),
+    ],
+)
+def test_routine_controls_carry_the_destination_platforms_words(
+    platform: str, setup: str, admin: str
+) -> None:
+    text = render_routine_controls(_row(), platform=platform)
+    controls = json.loads(text.split("\n")[1])
+
+    assert controls["words"]["setup"] == setup
+    assert admin in controls["words"]["admin"]
+    assert "use `words` from these controls" in text
+
+
+def test_routine_controls_for_an_unknown_platform_carry_no_words() -> None:
+    text = render_routine_controls(_row(), platform="cli")
+
+    assert '"words"' not in text and "use `words`" not in text
 
 
 def _post_block(

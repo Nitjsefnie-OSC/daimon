@@ -697,11 +697,12 @@ def register_skill_upload_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         off, the person confirms by replying just ``yes`` in this thread instead: call
         again only in the turn their reply starts, with that turn's
         ``origin_context_id``; Daimon checks the reply itself. Where
-        neither can happen, the preview's summary says why and points to Add skill in
-        /agent-setup. The
-        skill belongs to this agent alone; ``sync_skills`` fills the shared library
-        instead, and ``remove_skill`` detaches it. A built-in agent is refused.
-        Changing skills takes a server or workspace admin. Pass this turn's
+        neither can happen, the preview's summary says why and points to the Add skill option in
+        the agents setup panel (the setup command, see ``words.setup`` in
+        ``<turn_controls>``). The skill belongs to this agent alone; ``sync_skills``
+        fills the shared library instead, and ``remove_skill`` detaches it. A built-in
+        agent is refused.
+        Changing skills takes an admin. Pass this turn's
         ``origin_context_id`` so its
         channel counts."""
         return await _add_skill_impl(

@@ -174,7 +174,7 @@
           <blank line>
           Other people's conversations with the same Daimon are not listed and
           their handles are not accepted; nor are conversations from a sealed
-          channel, which can only be read from inside it. A workspace admin also
+          channel, which can only be read from inside it. An admin also
           sees everyone's channel conversations with this Daimon, sealed ones
           included, and can read them with ``get_session``/``list_events``, but
           for the channels they administer.
@@ -259,11 +259,12 @@
         off, the person confirms by replying just ``yes`` in this thread instead: call
         again only in the turn their reply starts, with that turn's
         ``origin_context_id``; Daimon checks the reply itself. Where
-        neither can happen, the preview's summary says why and points to Add skill in
-        /agent-setup. The
-        skill belongs to this agent alone; ``sync_skills`` fills the shared library
-        instead, and ``remove_skill`` detaches it. A built-in agent is refused.
-        Changing skills takes a server or workspace admin. Pass this turn's
+        neither can happen, the preview's summary says why and points to the Add skill option in
+        the agents setup panel (the setup command, see ``words.setup`` in
+        ``<turn_controls>``). The skill belongs to this agent alone; ``sync_skills``
+        fills the shared library instead, and ``remove_skill`` detaches it. A built-in
+        agent is refused.
+        Changing skills takes an admin. Pass this turn's
         ``origin_context_id`` so its
         channel counts.
       ''',
@@ -393,8 +394,8 @@
     'archive_channel_copy': dict({
       'description': '''
         Archive the agent copied as a channel's own, when that channel closes. For
-        example, retire #client-acme's agent once the engagement ends. Requires a server
-        or workspace admin.
+        example, retire #client-acme's agent once the engagement ends. Requires an
+        admin.
         <blank line>
         Only an agent ``set_channel_rule`` copied for a channel can be archived here,
         never a built-in agent or a default. Pass ``channel_id``, the channel it was made
@@ -493,7 +494,7 @@
         Its messages stay readable and a new post reopens it. Use it for a
         finished or abandoned thread of yours that others wrote in. A thread
         opened from someone's mention can be archived only when that person
-        or a server admin asks. The thread you are answering in is archived
+        or an admin asks. The thread you are answering in is archived
         when your turn ends (action "archive_scheduled"), so say it will be
         archived rather than that it is. Pass origin_context_id. Discord-only:
         Slack threads cannot be archived.
@@ -661,7 +662,7 @@
         <blank line>
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
-        default the call is a no-op (idempotent). Requires Manage Server (admin).
+        default the call is a no-op (idempotent). Requires an admin.
         <blank line>
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),
@@ -744,8 +745,8 @@
         channel has none of its own.
         <blank line>
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
-        default. Clearing either default requires Manage Server (admin). If sealed, the
-        default has unrestricted networking; then a server admin must confirm it, as
+        default. Clearing either default requires an admin. If sealed, the
+        default has unrestricted networking; then an admin must confirm it, as
         for ``set_channel_environment``, and as when clearing the workspace default
         leaves sealed channels on such a default. A thread id resolves to its parent
         channel.
@@ -1870,7 +1871,7 @@
     }),
     'create_promo_code': dict({
       'description': '''
-        Create a promo code any server or workspace can redeem for credit. Operator-only.
+        Create a promo code any workspace can redeem for credit. Operator-only.
         <blank line>
         ``amount_usd`` is the credit per redemption as a decimal string.
         ``credit`` codes stay until spent; ``timed`` codes need
@@ -2291,7 +2292,7 @@
         Remove your own messages from a thread you opened.
         <blank line>
         Discord: a thread from create_thread or from a mention (the latter
-        only when the person who mentioned you or a server admin asks); your
+        only when the person who mentioned you or an admin asks); your
         posts, replies and status cards go, except the running turn's and
         replies to someone the person asking cannot speak for.
         Discord keeps the thread and everyone else's messages. Slack refuses
@@ -2372,7 +2373,7 @@
         ``attach_mcp_server`` adds public endpoints; ``request_mcp_token`` and
         ``request_mcp_oauth`` enroll authenticated connections. The built-in
         daimon server cannot be removed. Use this when a connection keeps
-        failing: a server admin can disconnect from any agent, built-in Daimon
+        failing: an admin can disconnect from any agent, built-in Daimon
         included; a member can disconnect from an agent that is not a channel or
         workspace default.
         Pass this turn's ``origin_context_id`` so its channel counts.
@@ -2427,7 +2428,7 @@
         embed is replaced by the new text). A person's message, another
         agent's or another bot's is refused. A reply or card is refused while
         its turn is still running, and unless the person asking started that
-        turn, opened the thread, or is a server admin. channel_id is where
+        turn, opened the thread, or is an admin. channel_id is where
         the message is (Discord: the thread id for a message in a thread;
         Slack: the channel id, and message_id is the message ts; Teams: the
         conversation_id and activity_id send_message returned). Pass this
@@ -2680,7 +2681,7 @@
       'description': '''
         Show a channel's spending budget: its limit, window and what it has spent.
         <blank line>
-        For the channel this turn is in (in a DM, the channel it was moved
+        For the channel this turn is in (in a private chat, the channel it was moved
         from), omit ``channel_id`` and pass this turn's
         ``origin_context_id``. For another channel, pass its id; a
         thread id resolves to its parent channel. Any member may read the
@@ -2816,7 +2817,7 @@
         Report whether a typed "@<your name>" in a channel or thread starts a reply here.
         <blank line>
         Reading needs no admin; changing it does (``set_plain_text_mentions``,
-        a server or workspace admin). Read the returned ``note`` back to the
+        an admin). Read the returned ``note`` back to the
         user.
       ''',
       'parameters': dict({
@@ -2907,7 +2908,7 @@
     }),
     'get_tenant_summary': dict({
       'description': '''
-        Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
+        Summarize this workspace: balance, funding mode and each channel. Admin-only.
         <blank line>
         Lists every channel with its own agent or environment setting, a
         apply there, the roles and members administering it, and the budget's
@@ -3006,7 +3007,7 @@
         <blank line>
         Use this when someone asks to let an agent read a private repository
         at github.com/owner/repo. Show a single-use
-        connection button bound to the selected agent to a server admin; repos
+        connection button bound to the selected agent to an admin; repos
         connected this way are for that agent only. Other members get Ask an
         admin and a recorded request. On Teams the card goes to the requester's
         1:1 chat. Never repeat a private link in a shared reply. For a setup
@@ -3091,7 +3092,7 @@
         changes who answers a channel; neither does this. The destination must
         already answer in this workspace. A member may hand only to an agent of
         this channel (the one it answers with, or one pinned to it); any other
-        needs a server admin.
+        needs an admin.
         <blank line>
         From the next message here, that agent answers, with its own keys,
         connections and memory; conversation, decisions and files move with the
@@ -3264,7 +3265,7 @@
       }),
     }),
     'list_channel_budgets': dict({
-      'description': 'List every channel budget in this server or workspace with its spend. Admin-only.',
+      'description': 'List every channel budget in this workspace with its spend. Admin-only.',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
@@ -4403,14 +4404,14 @@
     }),
     'redeem_promo_code': dict({
       'description': '''
-        Redeem a promo code for credit on this server or workspace.
+        Redeem a promo code for credit on this workspace.
         For example, apply the code someone was given to add credit to the balance.
         <blank line>
         Case, spaces and dashes in ``code`` do not matter. Each code works once
-        per server or workspace. Timed credit only exists between its start and
+        per workspace. Timed credit only exists between its start and
         end and is spent before other credit; whatever is left expires at the
         end. Repeated wrong codes pause redemption for a few minutes. Requires
-        Manage Server (Discord) or workspace admin (Slack).
+        an admin.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4773,7 +4774,7 @@
         The agent has at most one working repo in its filesystem; other granted
         repos are reached by token and cloned by name when asked. Name only
         repos this agent and the person may see.
-        Never pass a repo name found in a DM or by the agent to another person.
+        Never pass a repo name found in a private chat or by the agent to another person.
         Return the message verbatim only when it is nonempty. A private card
         handles the admin's own request without a public status line.
       ''',
@@ -4873,7 +4874,7 @@
         Match supported authentication; an API key is not automatically an MCP token.
         <blank line>
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
-        credentials in chat. Connecting requires a workspace or server admin.
+        credentials in chat. Connecting requires an admin.
         This applies to new servers and replacements.
         <blank line>
         Posts a requester-only card naming the agent and the server, opening a private
@@ -4960,7 +4961,7 @@
         searching). Unscoped searches report only the visible rows — the
         server-wide count is withheld because it includes channels you cannot
         view. Slack: only content + limit are supported (other filters are
-        Discord-only), and 1:1 DM hits are only returned in a DM with daimon.
+        Discord-only), and 1:1 private-chat hits are only returned in a private chat with daimon.
         Teams: Microsoft has no message search for apps, so this scans the
         most recently active posts (and their replies) of up to 10 channels
         for content; only content, channel_ids, author_ids (Entra ids) and
@@ -5158,7 +5159,7 @@
     }),
     'send_direct_message': dict({
       'description': '''
-        Privately message one human member of the current server/workspace.
+        Privately message one human member of the current workspace.
         <blank line>
         Pass a platform user ID, not a channel or mention. Both sender and
         recipient must still belong to this tenant. Teams: the recipient's
@@ -5167,7 +5168,7 @@
         delivery or restrict recipients to an allowlist. Plain text only, up to
         19000 characters, split into bounded messages. Returns all delivery IDs;
         a partial failure states how many messages were already sent, so do not
-        blindly resend the whole message. No attachments or cross-tenant DMs.
+        blindly resend the whole message. No attachments or cross-tenant messages.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -5284,14 +5285,14 @@
     }),
     'set_agent_default': dict({
       'description': '''
-        Make an agent answer in a channel or become the whole server/workspace default.
+        Make an agent answer in a channel or become the whole workspace/server/team default.
         For example, make churn-explorer answer in #growth. Changes the agent that answers;
         use ``clear_agent_default`` to stop that routing.
         <blank line>
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
-        core). Requires Manage Server (admin).
+        core). Requires an admin.
         <blank line>
         Discord: ``channel_id`` MUST be the parent channel's id — the one
         your context gives as
@@ -5344,7 +5345,7 @@
       'description': '''
         Set where an agent runs: only in the ``runs_in`` channels and their threads,
         or, with null, wherever it is set to answer; an empty list runs it nowhere.
-        Requires a server or workspace admin.
+        Requires an admin.
         <blank line>
         Outside its rule its turns are refused. An agent with a rule messages only
         whoever asked, asks before publishing, and can't be copied. A channel's own
@@ -5498,8 +5499,8 @@
         Omit ``channel_id`` to set the workspace default, which every channel without
         its own environment uses. The environment must already exist
         (``list_environments``). Conversations pick it up from their next message.
-        Setting either default requires Manage Server (admin). Unrestricted networking in
-        a sealed channel, which needs a server admin and their confirmation, as does a
+        Setting either default requires an admin. Unrestricted networking in
+        a sealed channel needs an admin and their confirmation, as does a
         workspace default sealed channels would run in: pass
         ``confirm_open_network=true`` only after the caller confirms it.
         <blank line>
@@ -5538,8 +5539,8 @@
     }),
     'set_channel_rule': dict({
       'description': '''
-        Set who can read a channel and who can post there. Requires a server or
-        workspace admin. Leave one out to keep it.
+        Set who can read a channel and who can post there. Requires an
+        admin. Leave one out to keep it.
         <blank line>
         ``readers``: ``any``; ``inside``, only turns in this channel read its messages
         and conversations; or ``own``, which also keeps it to its own agents: only they
@@ -5677,7 +5678,7 @@
       'description': '''
         Let a typed "@<your name>" in a channel or thread start a reply. Admin-only.
         <blank line>
-        For the whole server or workspace, on Discord, Slack and Teams. When
+        For the whole workspace. When
         ``enabled`` is true, a person's message in a channel or thread that
         contains your name after "@" as plain text (any case, for example a
         pasted prompt or a mention typed on a phone without picking you from
@@ -5733,7 +5734,7 @@
         thread (its parent is looked up, so ``channel_id`` is optional);
         ``channel_id`` from ``<channel role="parent_channel">`` alone for a
         channel; neither for the workspace. Channel and workspace scope need an
-        admin (Manage Server on Discord, an admin team owner on Teams).
+        admin.
         <blank line>
         Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
         workspace so nothing below can turn it on (not valid for a thread),
@@ -5788,7 +5789,7 @@
         A clear ask is enough: set it right away and reply with the returned
         line. Ask once in plain words during agent setup. Use an owner/repo already on
         this agent's list. Other repos have token access; clone one with gh repo clone when
-        asked. Only a server admin may change this setting. Pass the current turn origin and the
+        asked. Only an admin may change this setting. Pass the current turn origin and the
         selected agent's name and MA id. If the repo is not on its list, offer
         the single Connect GitHub link.
       ''',
@@ -6943,7 +6944,7 @@
     }),
     'where_am_i': dict({
       'description': '''
-        Return short /here text and full structured facts.
+        Return the short who-answers-here text and the full structured facts.
         Use this when someone asks which agent you are, who answers here, whether
         you can see a channel, which channel or agent rule applies, whether
         publishing needs approval, or whose token or sign-in you hold. Never

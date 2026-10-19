@@ -228,8 +228,8 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         Omit ``channel_id`` to set the workspace default, which every channel without
         its own environment uses. The environment must already exist
         (``list_environments``). Conversations pick it up from their next message.
-        Setting either default requires Manage Server (admin). Unrestricted networking in
-        a sealed channel, which needs a server admin and their confirmation, as does a
+        Setting either default requires an admin. Unrestricted networking in
+        a sealed channel needs an admin and their confirmation, as does a
         workspace default sealed channels would run in: pass
         ``confirm_open_network=true`` only after the caller confirms it.
 
@@ -257,8 +257,8 @@ def register_channel_environment_tools(mcp: FastMCP, runtime: McpRuntime) -> Non
         channel has none of its own.
 
         Omit ``channel_id`` to clear the workspace default, leaving the deployment
-        default. Clearing either default requires Manage Server (admin). If sealed, the
-        default has unrestricted networking; then a server admin must confirm it, as
+        default. Clearing either default requires an admin. If sealed, the
+        default has unrestricted networking; then an admin must confirm it, as
         for ``set_channel_environment``, and as when clearing the workspace default
         leaves sealed channels on such a default. A thread id resolves to its parent
         channel.
