@@ -20,9 +20,11 @@ Run one migrator at a time per database. Alembic does not acquire an application
 advisory lock or retry concurrent migrations. A second manual invocation can fail
 with an ordinary PostgreSQL DDL conflict; let the first invocation finish, then
 retry. The legacy preview stamp repair is part of the same migration transaction.
-Main revision IDs receive no repair writes. Commands other than online upgrade
-and downgrade never write database state, including on an empty database; online
-stamp bookkeeping is disabled (use `stamp --sql` to inspect SQL).
+Main revision IDs receive no repair writes. Only online upgrade and downgrade
+may repair legacy preview stamps. Inspection never performs implicit writes,
+even on an empty database. Explicit `stamp` and `ensure_version` bookkeeping
+retain normal Alembic behavior on empty, main and canonical databases; stored
+legacy preview stamps must be upgraded before bookkeeping.
 
 The serializing deployment callers are:
 

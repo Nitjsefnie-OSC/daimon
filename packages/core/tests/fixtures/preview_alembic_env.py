@@ -1,4 +1,4 @@
-"""Async Alembic env. Reads DSN from DAIMON_DATABASE_URL or DAIMON_DATABASE__URL env var."""
+"""Frozen origin/main 7ab16f240635 env, with injected-connection test support."""
 
 from __future__ import annotations
 

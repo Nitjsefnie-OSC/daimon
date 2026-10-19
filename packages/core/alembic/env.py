@@ -2,10 +2,11 @@
 
 Invariant: main revisions receive no repair writes. Only online upgrade/downgrade
 may atomically repair a stored legacy preview stamp in the migration transaction.
-Every other command is non-mutating, even on an empty/unversioned database.
-Online stamp/ensure_version bookkeeping is therefore rejected; use --sql to
-inspect bookkeeping SQL. Plain history/heads remain graph-only. Commands that
-enter this env diagnose legacy stamps without repairing; old literal targets and
+Other commands never repair or perform implicit writes. Explicit stamp and
+ensure_version bookkeeping retain normal Alembic behavior on non-legacy states.
+Inspection never creates a version table, even on an empty/unversioned database.
+Plain history/heads remain graph-only. Commands entering this env diagnose stored
+legacy stamps without repairing; old literal targets and
 offline legacy ranges are unsupported: run ``alembic upgrade head`` online first.
 
 The DEPLOYER serializes migrations; this environment adds no advisory lock or
@@ -20,9 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable, Iterable
+from typing import cast
 
 from alembic import context, util
 from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext, MigrationStep
 from alembic.script import ScriptDirectory
 from daimon.core._models import Base
 from sqlalchemy import pool, text
@@ -91,27 +95,46 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _reject_stored_legacy(revisions: tuple[str, ...]) -> None:
+    for revision in revisions:
+        if revision in LEGACY_REVISIONS:
+            raise _legacy_error(revision)
+
+
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
-    _reject_legacy_targets()
     migrating = _is_migration_command()
-    if not migrating:
-        # Alembic otherwise creates alembic_version on an empty database even
-        # when the inspection callback yields no migration steps.
-        context.configure(connection=connection, target_metadata=target_metadata, dont_mutate=True)
+    fn = context.get_context().opts.get("fn")
+    bookkeeping = getattr(fn, "__module__", None) == "alembic.command" and getattr(
+        fn, "__name__", None
+    ) in ("do_stamp", "do_ensure_version")
+    if bookkeeping:
+        original = cast(Callable[[tuple[str, ...], MigrationContext], Iterable[MigrationStep]], fn)
+
+        def guard_bookkeeping(
+            revisions: tuple[str, ...], migration_context: MigrationContext
+        ) -> Iterable[MigrationStep]:
+            # Reuse Alembic's normal head read: non-legacy bookkeeping emits
+            # exactly the same SQL as main, including version-table creation.
+            _reject_stored_legacy(revisions)
+            return original(revisions, migration_context)
+
+        context.configure(
+            connection=connection, target_metadata=target_metadata, fn=guard_bookkeeping
+        )
+    else:
+        _reject_legacy_targets()
+        if not migrating:
+            context.configure(
+                connection=connection, target_metadata=target_metadata, dont_mutate=True
+            )
     with context.begin_transaction():
         if migrating:
             _normalize_preview_revision(connection)
-        else:
-            for revision in context.get_context().get_current_heads():
-                if revision in LEGACY_REVISIONS:
-                    raise _legacy_error(revision)
-            fn = context.get_context().opts.get("fn")
-            if getattr(fn, "__name__", None) in ("do_stamp", "do_ensure_version"):
-                raise util.CommandError(
-                    "Online stamp/ensure_version is disabled: only alembic upgrade/downgrade "
-                    "may write database state. Use --sql to inspect bookkeeping SQL."
-                )
+        elif not bookkeeping or context.get_context().opts.get("purge"):
+            # Purge deletes rows BEFORE invoking its callback, so validate the
+            # stored stamp first. Inspection likewise diagnoses before lookup.
+            _reject_stored_legacy(context.get_context().get_current_heads())
         context.run_migrations()
 
 

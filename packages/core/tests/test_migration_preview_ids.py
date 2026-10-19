@@ -327,6 +327,7 @@ async def test_diagnostics_never_write_even_without_a_version_table(
                         lambda: command.check(config),
                         lambda: command.stamp(config, MAIN),
                         lambda: command.stamp(config, MAIN, purge=True),
+                        lambda: command.ensure_version(config),
                         lambda: command.revision(
                             config, message="must not write", autogenerate=True
                         ),
@@ -343,13 +344,6 @@ async def test_diagnostics_never_write_even_without_a_version_table(
                     command.current(config)
                     with pytest.raises(util.CommandError):
                         command.check(config)
-                    for purge in (False, True):
-                        with pytest.raises(
-                            util.CommandError, match="Online stamp/ensure_version is disabled"
-                        ):
-                            command.stamp(config, MAIN, purge=purge)
-                with pytest.raises(util.CommandError):
-                    command.ensure_version(config)
             finally:
                 event.remove(sync, "before_cursor_execute", recorder)
             assert all(sql.lstrip().upper().startswith(("SELECT", "SHOW")) for sql in statements)
@@ -529,3 +523,102 @@ async def test_concurrent_migrator_fails_cleanly_then_retry_succeeds(
             if process.returncode is None:
                 process.terminate()
                 await asyncio.wait_for(process.communicate(), 10)
+
+
+@pytest.mark.parametrize("start", ["empty", MAIN])
+@pytest.mark.parametrize("operation", ["stamp", "ensure_version"])
+async def test_bookkeeping_sql_matches_origin_main(
+    migration_database: AsyncEngine,
+    tmp_path: Path,
+    start: str,
+    operation: str,
+) -> None:
+    # Frozen origin/main env; only the supplied-connection test entrypoint is
+    # adapted. Use the same graph and connection to compare every SQL statement
+    # AND bound parameter, without differences from driver/bootstrap setup.
+    baseline = tmp_path / "main"
+    shutil.copytree(SCRIPTS, baseline, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copy(Path(__file__).parent / "fixtures/preview_alembic_env.py", baseline / "env.py")
+    async with migration_database.connect() as connection:
+
+        def exercise(sync: Connection) -> None:
+            if start == MAIN:
+                command.upgrade(_config(SCRIPTS, sync), MAIN)
+            tables_before = set(inspect(sync).get_table_names())
+            sync.commit()
+            traces: list[list[tuple[str, str]]] = []
+            for scripts in (baseline, SCRIPTS):
+                if start == "empty":
+                    sync.execute(text("DROP TABLE IF EXISTS alembic_version"))
+                else:
+                    sync.execute(
+                        text("UPDATE alembic_version SET version_num = :revision"),
+                        {"revision": MAIN},
+                    )
+                sync.commit()
+                statements: list[tuple[str, str]] = []
+
+                def record(
+                    _conn: Connection,
+                    _cursor: object,
+                    sql: str,
+                    parameters: object,
+                    _context: ExecutionContext,
+                    _executemany: bool,
+                    _statements: list[tuple[str, str]] = statements,
+                ) -> None:
+                    _statements.append((sql, repr(parameters)))
+
+                event.listen(sync, "before_cursor_execute", record)
+                try:
+                    config = _config(scripts, sync)
+                    if operation == "stamp":
+                        # Preserve the documented initial-schema squash recipe.
+                        command.stamp(config, "0001_initial_schema")
+                    else:
+                        command.ensure_version(config)
+                finally:
+                    event.remove(sync, "before_cursor_execute", record)
+                traces.append(statements)
+                expected = (
+                    "0001_initial_schema"
+                    if operation == "stamp"
+                    else (MAIN if start == MAIN else None)
+                )
+                assert sync.scalar(text("SELECT version_num FROM alembic_version")) == expected
+                assert set(inspect(sync).get_table_names()) == tables_before | {"alembic_version"}
+                sync.commit()
+            assert traces[0]
+            assert traces[1] == traces[0]
+
+        await connection.run_sync(exercise)
+
+
+@pytest.mark.parametrize("start", ["empty", MAIN, "0111_cold_dm_agent"])
+async def test_purge_stamp_preserves_normal_nonlegacy_bookkeeping(
+    migration_database: AsyncEngine,
+    start: str,
+) -> None:
+    async with migration_database.connect() as connection:
+
+        def exercise(sync: Connection) -> None:
+            config = _config(SCRIPTS, sync)
+            if start != "empty":
+                command.upgrade(config, start)
+            tables_before = set(inspect(sync).get_table_names())
+            sync.commit()
+            command.stamp(config, "0001_initial_schema", purge=True)
+            assert (
+                sync.scalar(text("SELECT version_num FROM alembic_version"))
+                == "0001_initial_schema"
+            )
+            assert set(inspect(sync).get_table_names()) == tables_before | {"alembic_version"}
+            sync.commit()
+            command.ensure_version(config)
+            assert (
+                sync.scalar(text("SELECT version_num FROM alembic_version"))
+                == "0001_initial_schema"
+            )
+            sync.commit()
+
+        await connection.run_sync(exercise)
