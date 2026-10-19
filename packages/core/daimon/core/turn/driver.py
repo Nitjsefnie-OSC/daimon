@@ -126,7 +126,9 @@ from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
 log = structlog.get_logger(__name__)
 
-InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", "reattach"]
+InterruptPhase = Literal[
+    "pre-stream", "stream-open", "send-initial", "replay", "reattach", "confirmation-gate"
+]
 
 # Module-level singleton so `run_turn`'s default arg isn't a function call in
 # the signature (ruff B008) — `RequireApproval()` is a frozen, field-less
@@ -224,12 +226,27 @@ async def _bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> No
     log.warning("turn.cleanup_timed_out", session_id=session_id, step=what)
 
 
-async def _refuse_blocked(io: TurnIO, session_id: str, fresh: list[str], *, message: str) -> None:
-    """Send `deny` for every id in `fresh`, best effort.
+async def _refuse_blocked(
+    io: TurnIO,
+    session_id: str,
+    fresh: list[str],
+    *,
+    message: str,
+    interrupt_unattended: bool = False,
+) -> None:
+    """Interrupt gated unattended calls; otherwise send best-effort denials.
 
-    The session is on a `requires_action` idle, so the send is accepted and
-    the session does not stay paused on calls nobody will answer.
+    Gated runs leave the calls paused: their normal cancel handler interrupts,
+    or cleanup interrupts here on an outside cancellation or failed gate.
+    Ungated runtimes retain the ordinary best-effort denial behavior.
     """
+    if _UNATTENDED_GATE.get() is not None:
+        # A denial resumes execution too. Once cancellation or a gate failure
+        # ends the decision boundary, leave calls paused and only interrupt.
+        if interrupt_unattended:
+            with contextlib.suppress(_anthropic.APIError, ProviderError, TurnConnectionLost):
+                await io.interrupt(timeout_s=CLEANUP_BUDGET_S)
+        return
     refusals = build_decision_events(
         (tool_use_id, ToolConfirmationResult(allow=False, deny_message=message))
         for tool_use_id in fresh
@@ -320,6 +337,7 @@ async def _decide_or_refuse_on_cancel(
                         session_id,
                         fresh,
                         message="This turn ended before the call was approved; it did not run.",
+                        interrupt_unattended=True,
                     ),
                     name="turn.refuse_blocked",
                 ),
@@ -376,7 +394,23 @@ async def _send_decision_batch(
         if cancel.is_set():
             raise _InterruptInConsume()
         if (gate := _UNATTENDED_GATE.get()) is not None:
-            await gate()
+
+            async def run_gate() -> None:
+                await gate()
+
+            cancel_task = asyncio.create_task(cancel.wait(), name="turn.gate_cancel_waiter")
+            try:
+                await _await_or_cancel(
+                    run_gate(), cancel_task=cancel_task, phase="confirmation-gate"
+                )
+            except _InterruptedDuringRecovery:
+                raise _InterruptInConsume() from None
+            finally:
+                cancel_task.cancel()
+                with _suppress_task_exc():
+                    await cancel_task
+            if cancel.is_set():
+                raise _InterruptInConsume()
         await io.send(batch.events)
     except BaseException as err:
         await _bounded(
@@ -387,7 +421,11 @@ async def _send_decision_batch(
             what="retire_unsent_confirmations",
             session_id=session_id,
         )
-        if cancel.is_set() or isinstance(err, asyncio.CancelledError | _InterruptInConsume):
+        if (
+            _UNATTENDED_GATE.get() is not None
+            or cancel.is_set()
+            or isinstance(err, asyncio.CancelledError | _InterruptInConsume)
+        ):
             await _bounded(
                 asyncio.create_task(
                     _refuse_blocked(
@@ -395,6 +433,7 @@ async def _send_decision_batch(
                         session_id,
                         fresh,
                         message="This turn ended before the call was approved; it did not run.",
+                        interrupt_unattended=not isinstance(err, _InterruptInConsume),
                     ),
                     name="turn.refuse_blocked",
                 ),

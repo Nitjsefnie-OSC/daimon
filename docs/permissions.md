@@ -127,6 +127,10 @@ Microsoft mail or invites are refused with tool safety on or off; Microsoft
 file changes, which ask in chat only with tool safety on, are refused only
 with it on.
 
+In-process unattended runs leave pending calls paused and interrupt the session
+when a decision is cancelled, its turn ceiling expires, or its confirmation
+gate fails. Cleanup sends no denial confirmations past an unsuccessful gate.
+
 Reading a session never answers a tool call. If the service restarts while an
 agent-chat turn waits on one, the turn stays paused, and `get_session` and
 `get_my_session` report `status: paused` with the hint "paused: call

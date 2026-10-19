@@ -1207,3 +1207,94 @@ async def test_a_failed_confirmation_gate_sends_no_confirmation() -> None:
             tool_confirmation=PolicyApproval(decide=unattended_decider(_ON)),
         )
     assert not [e for e in _confirmations(fa) if e["result"] == "allow"]
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
+@pytest.mark.parametrize(
+    "stop", ["decision_cancel", "gate_cancel", "gate_ceiling", "gate_failure", "gate_task_cancel"]
+)
+async def test_unattended_stops_leave_calls_paused_and_interrupt(replay: bool, stop: str) -> None:
+    from daimon.core.turn.driver import unattended_sends
+    from daimon.core.turn.posture import ToolConfirmationResult
+
+    fa = FakeAnthropic()
+    if replay:
+        _replay_script(fa)
+    else:
+        _script(fa, ("tu_write", "linear", "create_issue"))
+    fa.beta.sessions.events.stream_scripts.append(
+        [YieldEvent(make_status_idle(event_id="interrupt_ack", stop_reason=make_end_turn()))]
+    )
+    entered = asyncio.Event()
+    cancel = asyncio.Event()
+    calls = 0
+    cancelled_gate = False
+
+    async def gate() -> None:
+        nonlocal calls, cancelled_gate
+        calls += 1
+        if calls == 1:
+            return  # Initial message is gated successfully.
+        entered.set()
+        if stop == "gate_failure":
+            raise RuntimeError("gate failed")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled_gate = True
+            raise
+
+    async def decide(call: ToolCall) -> ToolConfirmationResult:
+        if stop == "decision_cancel":
+            entered.set()
+            await asyncio.Event().wait()
+        return ToolConfirmationResult(allow=True)
+
+    async def run():
+        with unattended_sends(gate):
+            return await run_turn(
+                anthropic=_cast(fa),
+                session_id="sess_1",
+                user_message="nightly",
+                lifecycle=RecordingLifecycle(),
+                cancel=cancel,
+                render_interval_s=0.001,
+                interrupt_timeout_s=0.05,
+                billing=_EXEMPT,
+                tool_confirmation=PolicyApproval(decide=decide),
+                deadline=(datetime.now(UTC) + timedelta(seconds=0.3))
+                if stop == "gate_ceiling"
+                else None,
+            )
+
+    turn = asyncio.create_task(run())
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    if stop in ("decision_cancel", "gate_cancel"):
+        cancel.set()
+    elif stop == "gate_task_cancel":
+        turn.cancel()
+    if stop == "gate_failure":
+        with pytest.raises(RuntimeError, match="gate failed"):
+            await turn
+    elif stop == "gate_task_cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+    else:
+        result = await asyncio.wait_for(turn, timeout=3)
+        if stop == "gate_ceiling":
+            assert result.error is not None and result.error.kind == "ceiling"
+    assert _confirmations(fa) == [], (
+        "an unsuccessful boundary must send no confirmations, even denials"
+    )
+    assert any(
+        event["type"] == "user.interrupt"
+        for _, batch in fa.beta.sessions.events.sent_events
+        for event in batch
+    ), "stopping a gated boundary interrupts the session"
+    if stop in ("gate_cancel", "gate_ceiling", "gate_task_cancel"):
+        assert cancelled_gate
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name().startswith("turn.") and not task.done()
+    ]

@@ -1141,8 +1141,11 @@ endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
 naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
 reserved name is gated like any other server. A pending card is owned by the
 turn: stopping the turn, a replayed pause, or the turn ceiling cancels the
-decision, refuses the call and retires the card, so an Approve that arrives
-after Stop never runs anything. That cleanup is best effort within a few
+decision and retires the card, so an Approve that arrives after Stop never
+runs anything. Attended cleanup refuses pending calls. A gated unattended
+turn leaves them paused and interrupts instead: even a denial would resume
+execution without a successful gate. Cancellation during a confirmation
+gate cancels that gate before interrupting; a failed gate sends no confirmations. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.
 
