@@ -481,3 +481,59 @@ async def test_gmail_tombstone_survives_connection_rename(
     replay = await service.submit(draft(), "7")
     assert replay.id == first.id and replay.submission is None
     assert ports.writes.count("starter") == 1
+
+
+async def test_resolution_cannot_recreate_data_after_actor_erasure(
+    lead_sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.lead_intake import IntakeRecord
+    from daimon.core.stores.lead_intake import erase_actor
+
+    store, service, _ = await setup(lead_sessions)
+    record = await service.submit(draft(), "7")
+    reached, release = asyncio.Event(), asyncio.Event()
+    original = store.audit
+
+    async def paused_audit(
+        current: IntakeRecord,
+        actor: str,
+        before: str,
+        after: str,
+        *,
+        effect_resolution: tuple[str, str | None] | None = None,
+    ) -> None:
+        reached.set()
+        await release.wait()
+        await original(current, actor, before, after, effect_resolution=effect_resolution)
+
+    monkeypatch.setattr(store, "audit", paused_audit)
+    resolution = asyncio.create_task(
+        service.resolve(
+            record.id,
+            IntakeResolution(company_id="201", evidence="Human checked exact company record 201."),
+            "8",
+        )
+    )
+    await asyncio.wait_for(reached.wait(), 10)
+    try:
+        async with lead_sessions() as session, session.begin():
+            assert await erase_actor(session, store.tenant_id, "7") == 1
+    finally:
+        release.set()
+    with pytest.raises(ValueError, match="intake_erased_or_expired"):
+        await resolution
+    with pytest.raises(ValueError, match="intake_erased_or_expired"):
+        await store.intent(record.id, "company", "stale")
+    config, _ = await store.configuration()
+    with pytest.raises(ValueError, match="intake_erased_or_expired"):
+        await store.opportunity(config, record, "201", "stale personal description")
+    async with lead_sessions() as session:
+        for table in ("lead_resolution_audit", "lead_intake_effects", "lead_opportunities"):
+            assert (
+                await session.scalar(
+                    text(f"SELECT count(*) FROM {table} WHERE tenant_id=:tenant"),
+                    {"tenant": store.tenant_id},
+                )
+                == 0
+            )
+    assert (await store.get(record.id)).submission is None

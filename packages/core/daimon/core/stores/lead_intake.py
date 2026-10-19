@@ -382,8 +382,25 @@ class IntakeStore:
                 else None
             )
 
+    async def _lock_live(self, session: AsyncSession, intake_id: UUID) -> None:
+        # Erasure takes the same parent-row lock before deleting child rows.
+        # A stale resolver/effect snapshot cannot resurrect sensitive children.
+        identity = await session.scalar(
+            select(LeadIntakeRecord.id)
+            .where(
+                LeadIntakeRecord.tenant_id == self.tenant_id,
+                LeadIntakeRecord.id == intake_id,
+                LeadIntakeRecord.encrypted_payload.is_not(None),
+                LeadIntakeRecord.expires_at > datetime.now(UTC),
+            )
+            .with_for_update()
+        )
+        if identity is None:
+            raise ValueError("intake_erased_or_expired")
+
     async def intent(self, intake_id: UUID, step: str, stable_key: str) -> None:
         async with self.sessions() as session, session.begin():
+            await self._lock_live(session, intake_id)
             await session.execute(
                 insert(LeadIntakeEffect)
                 .values(
@@ -421,15 +438,20 @@ class IntakeStore:
         if record.tenant_id != self.tenant_id:
             raise ValueError("tenant_mismatch")
         async with self.sessions() as session, session.begin():
-            await session.execute(
+            await self._lock_live(session, record.id)
+            updated = await session.scalar(
                 update(LeadIntakeRecord)
                 .where(
                     LeadIntakeRecord.tenant_id == self.tenant_id,
                     LeadIntakeRecord.id == record.id,
                     LeadIntakeRecord.encrypted_payload.is_not(None),
+                    LeadIntakeRecord.expires_at > datetime.now(UTC),
                 )
                 .values(status=record.status, encrypted_payload=self.seal(record.model_dump_json()))
+                .returning(LeadIntakeRecord.id)
             )
+            if updated is None:
+                raise ValueError("intake_erased_or_expired")
             if effect_resolution is not None:
                 step, remote_id = effect_resolution
                 conditions = (
@@ -498,6 +520,7 @@ class IntakeStore:
             f"{self.tenant_id}:{config.crm_connection_id}:{config.portal_id}:{choice}".encode()
         ).hexdigest()
         async with self.sessions() as session, session.begin():
+            await self._lock_live(session, record.id)
             await session.execute(
                 insert(LeadOpportunityRecord)
                 .values(
@@ -598,8 +621,15 @@ class IntakeStore:
         """Erase all lead content/effects/audit, keeping only the source tombstone."""
         async with self.sessions() as session, session.begin():
             await purge_auxiliary(session, now, self.tenant_id)
-            expired = select(LeadIntakeRecord.id).where(
-                LeadIntakeRecord.tenant_id == self.tenant_id, LeadIntakeRecord.expires_at <= now
+            expired = list(
+                await session.scalars(
+                    select(LeadIntakeRecord.id)
+                    .where(
+                        LeadIntakeRecord.tenant_id == self.tenant_id,
+                        LeadIntakeRecord.expires_at <= now,
+                    )
+                    .with_for_update()
+                )
             )
             for model in (
                 LeadIntakeEffect,
@@ -681,8 +711,14 @@ async def execution_is_active(
 async def purge_expired(session: AsyncSession, now: datetime) -> None:
     """Scheduler maintenance uses only ciphertext expiry; no decryption key needed."""
     await purge_auxiliary(session, now)
-    expired = select(LeadIntakeRecord.tenant_id, LeadIntakeRecord.id).where(
-        LeadIntakeRecord.expires_at <= now
+    expired = list(
+        (
+            await session.execute(
+                select(LeadIntakeRecord.tenant_id, LeadIntakeRecord.id)
+                .where(LeadIntakeRecord.expires_at <= now)
+                .with_for_update()
+            )
+        ).tuples()
     )
     for model in (
         LeadIntakeEffect,
@@ -716,7 +752,7 @@ async def erase_actor(session: AsyncSession, tenant_id: UUID, actor_id: str) -> 
         LeadIntakeRecord.actor_digest == actor_digest(tenant_id, actor_id),
         LeadIntakeRecord.encrypted_payload.is_not(None),
     )
-    identities = list(await session.scalars(ids))
+    identities = list(await session.scalars(ids.with_for_update()))
     for model in (
         LeadIntakeEffect,
         LeadResolutionAudit,
