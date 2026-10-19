@@ -913,6 +913,10 @@ boundaries and monotonic terminal settlement. Historical certificates and
 standard pending declarations are unchanged; see
 [money and scenario boundaries](../testing/docs/drivers/gemini/LIVE-ROUND.md).
 
+Offline Gemini round fixtures stamp workspace creation and activity from current
+UTC time. Stale-response cases use relative offsets so the intended seven-day
+workspace expiry does not make the fixtures expire as the calendar advances.
+
 
 Explicit native credential offers share one profile-bound host adapter and MCP grant
 check. The returned resource host's complete scope and native catalog authority are

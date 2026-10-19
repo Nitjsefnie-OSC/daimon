@@ -66,6 +66,7 @@ from daimon.core.credential_requests import CUSTOM_ID_PATTERN, CUSTOM_ID_PREFIX
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.membership import Membership
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.posted_controls import CardKind
 from daimon.core.purge import AccountPurgeResult
@@ -78,6 +79,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session
 from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.membership import FixtureMembershipResolver
 from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -352,6 +354,11 @@ class DiscordDriver:
         intents = discord.Intents.default()
         intents.message_content = True
         bot = DaimonBot(runtime=runtime, intents=intents)
+        bot.membership_resolver = FixtureMembershipResolver()  # type: ignore[assignment]
+        bot.runtime = replace(
+            bot.runtime,
+            turn_deps=replace(bot.runtime.turn_deps, membership_resolver=bot.membership_resolver),
+        )
         bot._connection.user = cast(discord.ClientUser, _ParityBotUser(id=999))  # pyright: ignore[reportPrivateUsage]
         return bot
 
@@ -409,6 +416,7 @@ class DiscordDriver:
     ) -> list[str]:
         runtime = self._make_runtime(sessionmaker, router, billing_config=billing_config)
         bot = self._make_bot(runtime)
+        bot.membership_resolver.members[user_id] = Membership(is_member=True)  # type: ignore[attr-defined]
         message = self._make_message(
             workspace_id=workspace_id, channel_id=channel_id, user_id=user_id, text=text
         )
