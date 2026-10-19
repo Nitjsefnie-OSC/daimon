@@ -25,6 +25,7 @@ from daimon.adapters.teams.commands import (
     ANSWERED_IN_CHAT,
     CHANNEL_POINTER,
     NEW_IN_CHANNEL,
+    NO_CHAT_ACROSS_ORGS,
     CommandContext,
     CommandHandler,
     parse_command,
@@ -55,9 +56,7 @@ NOT_YET_PRIVATE = (
 )
 UNSHOWN = "I ran `{name}`, but couldn't show you its result privately here."
 # Admission refusals about the sender, not the thread: only they see them.
-SENDER_ONLY: frozenset[AdmissionDenialReason] = frozenset(
-    {"invoker_not_allowed", "external_participant", "cap_exceeded"}
-)
+SENDER_ONLY: frozenset[AdmissionDenialReason] = frozenset({"invoker_not_allowed", "cap_exceeded"})
 _TIMEOUTS = (TimeoutError, httpx.TimeoutException)
 
 
@@ -158,9 +157,7 @@ class PrivateReplies:
         self._is_admin = is_admin
 
     def command(self, inbound: TeamsInbound) -> tuple[str, str] | None:
-        # Someone from another organisation gets no command: the agent hears their words,
-        # and a command's 1:1 chat cannot be opened across organisations.
-        return None if inbound.is_external else parse_command(inbound.text, self._commands)
+        return parse_command(inbound.text, self._commands)
 
     async def tell_sender(self, inbound: TeamsInbound, text: str) -> None:
         """`text` for `inbound`'s sender only; where Teams refuses that, posted as before."""
@@ -219,6 +216,9 @@ class PrivateReplies:
                     await self.tell_sender(inbound, UNSHOWN.format(name=f"{name} {args}"))
                     return
                 # Otherwise nothing shown yet: answered in full in the 1:1 chat.
+        if inbound.is_foreign:
+            await self.tell_sender(inbound, NO_CHAT_ACROSS_ORGS.format(name=name))
+            return
         chat = await self._direct_chat(inbound)
         pointer = ANSWERED_IN_CHAT if chat else CHANNEL_POINTER
         if chat is None:

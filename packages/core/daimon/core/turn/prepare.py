@@ -40,8 +40,9 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
     BetaManagedAgentsGitHubRepositoryResource,
 )
 from daimon.core.channel_backend import BackendUnsupported
+from daimon.core.channel_skills import PLATFORM_SKILL_RETRY_AFTER
 from daimon.core.config import load_turn_settings
-from daimon.core.confirmation import backend_switch_tools_for_turn
+from daimon.core.confirmation import confirmed_tools_for_turn
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
 from daimon.core.ma_identity import derive_agent_uuid
@@ -53,6 +54,7 @@ from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
 from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
 from daimon.core.session_snapshot import (
+    MaSkill,
     SessionSnapshot,
     TokenScope,
     fingerprint_identity,
@@ -68,6 +70,7 @@ from daimon.core.shared_threads import (
     record_shared_binding,
     resolve_shared_thread,
 )
+from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_files import list_agent_files
@@ -421,20 +424,18 @@ __all__ = [
 
 
 async def _env_bytes_sha256(
-    deps: TurnDeps, *, tenant_id: uuid.UUID, agent_uuid: uuid.UUID, is_external: bool
+    deps: TurnDeps, *, tenant_id: uuid.UUID, agent_uuid: uuid.UUID
 ) -> str | None:
     """Hash of the `.env` bytes `create_session` is about to mount, or None.
 
     Mirrors `credential_env.upload_env_and_mount`: the same tenant-scoped rows
     through the same `assemble_env_bytes`, and None for an agent with no
-    secrets or an external caller (neither gets a `.env` resource). Read BEFORE the
+    secrets (that agent gets no `.env` resource at all). Read BEFORE the
     session is created, deliberately — a key written while `create_session`
     runs then records as stale rather than as current, and a stale hash costs
     one redundant refresh, where a falsely-current one would leave the session
     silently running the old secrets.
     """
-    if is_external:
-        return None
     async with deps.sessionmaker() as session:
         rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
     rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
@@ -609,9 +610,7 @@ async def create_ma_session(
         else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
     )
     github_mode = "app"
-    env_sha256 = await _env_bytes_sha256(
-        deps, tenant_id=tenant_id, agent_uuid=agent_uuid, is_external=admission.is_external
-    )
+    env_sha256 = await _env_bytes_sha256(deps, tenant_id=tenant_id, agent_uuid=agent_uuid)
     native_controls: _NativeBudgetArgs = {}
     if preparation is not None and preparation.native_budget_usd is not None:
         native_controls["native_budget_usd"] = preparation.native_budget_usd
@@ -623,48 +622,82 @@ async def create_ma_session(
         excluded_repo_urls = access.excluded_repo_urls
         delivered_app_access = access
 
-    ma_session = await create_session(
-        deps.anthropic,
-        agent=admission.agent,
-        environment=admission.environment,
-        mcp_settings=deps.mcp,
-        # A shared thread's session carries no caller's credentials.
-        account_id=None if admission.shared_owner is not None else admission.account_id,
-        # Leaves off every server somebody connected through their own OAuth.
-        hide_personal_for=admission.shared_owner,
-        tenant_id=tenant_id,
-        agent_uuid=agent_uuid,
-        session_factory=deps.sessionmaker,
-        fernet=deps.fernet,
-        github_fallback_pat=deps.github_fallback_pat,
-        github_app_id=deps.github_app_id,
-        github_app_private_key=deps.github_app_private_key,
-        agent_github_app=deps.agent_github_app,
-        is_external=admission.is_external,
-        extra_resources=extra_resources,
-        memory_read_only=admission.memory_read_only,
-        # A chat session is keyed on the caller's account, so it belongs to one
-        # person and may carry that person's own memory.
-        personal_memory=True,
-        tool_safety=deps.tool_safety,
-        asks_before_publishing=admission.asks_before_publishing,
-        confirmed_tools=backend_switch_tools_for_turn(deps),
-        slack_turn_context_id=admission.slack_turn_context_id,
-        private_dm_id=admission.private_dm_id,
-        budget_channel_id=admission.budget_channel_id,
-        origin_channel_id=admission.origin_channel_id,
-        origin_thread_id=admission.origin_thread_id,
-        origin_seal_ids=frozenset(seal),
-        before_create=fence,
-        on_app_access=capture_app_access,
-        channel_skills=admission.channel_skills,
-        resource_source=preparation.source
-        if preparation is not None and preparation.worker is not None
-        else None,
-        worker=preparation.worker if preparation is not None else None,
-        **native_controls,
-        allocation=allocate if preparation is not None else None,
-    )
+    async def create(skills: tuple[MaSkill, ...]) -> BetaManagedAgentsSession:
+        return await create_session(
+            deps.anthropic,
+            agent=admission.agent,
+            environment=admission.environment,
+            mcp_settings=deps.mcp,
+            # A shared thread's session carries no caller's credentials.
+            account_id=None if admission.shared_owner is not None else admission.account_id,
+            # Leaves off every server somebody connected through their own OAuth.
+            hide_personal_for=admission.shared_owner,
+            tenant_id=tenant_id,
+            agent_uuid=agent_uuid,
+            session_factory=deps.sessionmaker,
+            fernet=deps.fernet,
+            github_fallback_pat=deps.github_fallback_pat,
+            github_app_id=deps.github_app_id,
+            github_app_private_key=deps.github_app_private_key,
+            agent_github_app=deps.agent_github_app,
+            extra_resources=extra_resources,
+            memory_read_only=admission.memory_read_only,
+            # A chat session is keyed on the caller's account, so it belongs to one
+            # person and may carry that person's own memory.
+            personal_memory=True,
+            tool_safety=deps.tool_safety,
+            asks_before_publishing=admission.asks_before_publishing,
+            confirmed_tools=confirmed_tools_for_turn(deps),
+            daimon_rule_tools=admission.daimon_rule_tools,
+            slack_turn_context_id=admission.slack_turn_context_id,
+            private_dm_id=admission.private_dm_id,
+            budget_channel_id=admission.budget_channel_id,
+            origin_channel_id=admission.origin_channel_id,
+            origin_thread_id=admission.origin_thread_id,
+            origin_seal_ids=frozenset(seal),
+            before_create=fence,
+            on_app_access=capture_app_access,
+            channel_skills=skills,
+            resource_source=preparation.source
+            if preparation is not None and preparation.worker is not None
+            else None,
+            worker=preparation.worker if preparation is not None else None,
+            **native_controls,
+            allocation=allocate if preparation is not None else None,
+        )
+
+    while True:
+        try:
+            ma_session = await create(admission.channel_skills)
+            break
+        except SkillUnavailable as error:
+            refused = error.skill_id
+            if refused is None or refused not in admission.platform_skill_ids:
+                raise
+            # A skill `defaults/` adds on this platform, not one anybody here can
+            # remove: run without it, and leave it out of new sessions for a while
+            # so the drift check doesn't replace this one on the next turn.
+            if deps.platform_skill_memory.refuse(tenant_id, refused, now=dt.datetime.now(dt.UTC)):
+                log.warning(
+                    "session.platform_skill_refused",
+                    tenant_id=str(tenant_id),
+                    skill_id=refused,
+                    retry_after_s=PLATFORM_SKILL_RETRY_AFTER.total_seconds(),
+                    hint="the provider refused a skill defaults/ adds on this platform; "
+                    "sessions run without it until it is retried",
+                )
+            if preparation is not None:
+                # A prepared create is recorded once; the next turn leaves it out.
+                raise SkillUnavailable(
+                    "Daimon couldn't start this conversation just now. Please ask again."
+                ) from error
+            admission = replace(
+                admission,
+                channel_skills=tuple(
+                    skill for skill in admission.channel_skills if skill.skill_id != refused
+                ),
+                platform_skill_ids=admission.platform_skill_ids - {refused},
+            )
 
     async with deps.sessionmaker() as session:
         personal_memory_store_id = await get_personal_memory_store_id(
@@ -702,7 +735,6 @@ async def create_ma_session(
         personal_memory_store_ids=(
             () if personal_memory_store_id is None else (personal_memory_store_id,)
         ),
-        is_external=admission.is_external,
     ).model_copy(
         update={
             "token_repo_urls": token_repo_urls,
@@ -751,7 +783,6 @@ async def insert_mapping(
         platform=platform,
         thread_id=thread_id,
         account_id=session_account_id,
-        is_external=admission.is_external,
         ma_session_id=created.ma_session_id,
         ma_agent_id=admission.agent.id,
         channel_id=admission.budget_channel_id,
@@ -1407,8 +1438,26 @@ async def bind_session_impl(
 
             backend = managed_agents(deps.anthropic, scope=scope)
 
+            # Worker intent retains the root's ownership stamps. The native
+            # allocation needs its own resolver identity, even when the source
+            # is cloned or allocation succeeds before dispatch is interrupted.
+            from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+
+            worker_name = persistence.slot.thread.thread_id.replace("/", "-")
+            native_spec = worker.spec.model_copy(
+                update={
+                    "name": worker_name,
+                    "metadata": {
+                        **(worker.spec.metadata or {}),
+                        MA_METADATA_KEY_NAME: worker_name,
+                        # A runtime worker is not a removed seeded default.
+                        MA_METADATA_KEY_MANAGED: "false",
+                    },
+                }
+            )
+
             async def create(key: str) -> Agent:
-                return await backend.agents.create(scope, worker.spec, key=key)
+                return await backend.agents.create(scope, native_spec, key=key)
 
             allocated = await persistence.mutate(
                 None,
@@ -1428,7 +1477,7 @@ async def bind_session_impl(
                 allocated.ref.account_scope_id,
                 scope,
             )
-            expected = agent_payload(worker.spec)
+            expected = agent_payload(native_spec)
             expected.update(
                 {name: expected.get(name) or [] for name in ("tools", "skills", "mcp_servers")}
             )

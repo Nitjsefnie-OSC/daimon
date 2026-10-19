@@ -11,7 +11,8 @@ must observe real COMMIT visibility.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 import pytest_asyncio
@@ -28,6 +29,20 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
 )
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def isolate_confirmation_workers() -> AsyncIterator[None]:
+    """An agent-chat send starts its turn's confirmation worker; one test's
+    worker must not outlive it into the next test's fakes."""
+    from daimon.adapters.mcp.tools import _agent_chat_safety
+
+    yield
+    workers = list(_agent_chat_safety._workers.values())  # pyright: ignore[reportPrivateUsage]
+    _agent_chat_safety._workers.clear()  # pyright: ignore[reportPrivateUsage]
+    for worker in workers:
+        worker.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
 
 
 @pytest.fixture(autouse=True)

@@ -28,10 +28,10 @@ entry ``session_card_gap`` takes as proof of the card.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Annotated, Any, Final
+from typing import TYPE_CHECKING, Annotated, Any
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.core.tool_safety import CONFIRMED_DAIMON_TOOLS, PUBLISH_TOOLS
+from daimon.core.tool_safety import APPROVAL_TOOLS, proxy_refusal
 from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
 from fastmcp.server.dependencies import get_context
@@ -41,8 +41,7 @@ from fastmcp.tools.base import Tool, ToolResult
 if TYPE_CHECKING:
     from fastmcp.server.transforms.search.base import SearchResultSerializer
 
-#: Daimon's tools a session can hold on `always_ask`.
-APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({*CONFIRMED_DAIMON_TOOLS, *PUBLISH_TOOLS})
+__all__ = ["APPROVAL_TOOLS", "AgentChatAwareBM25SearchTransform"]
 
 
 class AgentChatAwareBM25SearchTransform(BM25SearchTransform):
@@ -89,11 +88,8 @@ class AgentChatAwareBM25SearchTransform(BM25SearchTransform):
 
             Use this to execute tools discovered via search_tools.
             """
-            if name in APPROVAL_TOOLS:
-                raise ToolError(
-                    f"Call {name} directly, not through call_tool: it is listed under its own "
-                    "name so the person can approve it. Nothing was done."
-                )
+            if (refusal := proxy_refusal(name)) is not None:
+                raise ToolError(refusal)
             if name in synthetic:
                 raise ValueError(
                     f"'{name}' is a synthetic search tool and cannot be called via the "

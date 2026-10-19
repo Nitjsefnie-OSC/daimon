@@ -1,4 +1,4 @@
-"""Admin tools for one agent's third-party MCP tool rules."""
+"""Admin tools for one agent's MCP tool rules, third-party and Daimon's own."""
 
 from __future__ import annotations
 

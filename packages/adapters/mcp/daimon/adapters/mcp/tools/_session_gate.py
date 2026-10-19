@@ -26,7 +26,8 @@ from daimon.core.session_seal import session_facts
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import has_confirmation_gate
+from daimon.core.tool_safety import has_confirmation_gate, microsoft_send_tools
+from daimon.core.turn.approvals import daimon_rule_tools_for
 from mux.errors import ScopeViolation
 
 _log = structlog.get_logger(__name__)
@@ -148,7 +149,6 @@ async def _recorded_as_gated(
         agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=agent.id),
         account_id=auth.account_id,
         server_urls={server.name: server.url for server in agent.mcp_servers},
-        is_external=recorded.is_external,
     )
     # MA reporting the agent's own tools means it left the overrides out.
     if reported_tools_sha256 not in {
@@ -157,19 +157,33 @@ async def _recorded_as_gated(
     }:
         return False
     public_url = runtime.settings.mcp.public_url
+    # The bind may have been made with other rules than today's, so both the
+    # current set and none are tried; neither matching reads as not gated.
+    rule_tools = await daimon_rule_tools_for(
+        runtime.session_factory,
+        runtime.settings.tool_safety,
+        tenant_id=auth.tenant_id,
+        agent_id=agent.id,
+    )
     for asks_before_publishing in (False, True):
-        tools = session_tools(
-            agent,
-            hidden,
-            tool_safety=runtime.settings.tool_safety,
-            public_url=None if public_url is None else str(public_url),
-            asks_before_publishing=asks_before_publishing,
-            confirmed_tools=backend_switch_tools(
-                enabled=backend_selection_enabled(runtime.settings.turn)
-            ),
-        )
-        if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
-            [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
-        ):
-            return True
+        for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
+            tools = session_tools(
+                agent,
+                hidden,
+                tool_safety=runtime.settings.tool_safety,
+                public_url=None if public_url is None else str(public_url),
+                asks_before_publishing=asks_before_publishing,
+                confirmed_tools=backend_switch_tools(
+                    enabled=backend_selection_enabled(runtime.settings.turn)
+                )
+                | microsoft_send_tools(
+                    enabled=runtime.settings.microsoft_accounts.configured,
+                    tool_safety_on=runtime.settings.tool_safety.enabled,
+                ),
+                daimon_rule_tools=daimon_rule_tools,
+            )
+            if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
+                [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
+            ):
+                return True
     return False

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -326,7 +326,7 @@ async def test_fragmented_sse_is_lazy_byte_identical_and_books_metadata_before_d
         account_id=SCOPE.account_id,
     )
     book.receive(
-        {"id": "native-owned", "model": MODEL, "updated": "2026-10-12T00:00:00Z"},
+        {"id": "native-owned", "model": MODEL, "updated": datetime.now(UTC).isoformat()},
         NativeRoute("create", session, None, "0" * 64, MODEL),
         success=True,
     )
@@ -433,7 +433,7 @@ def test_invalid_sse_peer_cannot_hide_later_owned_usage_in_same_chunk(tmp_path: 
         account_id=SCOPE.account_id,
     )
     book.receive(
-        {"id": "native-owned", "updated": "2026-10-12T00:00:00Z"},
+        {"id": "native-owned", "updated": datetime.now(UTC).isoformat()},
         NativeRoute("create", session, None, "0" * 64, MODEL),
         success=True,
     )
@@ -453,6 +453,7 @@ def test_invalid_sse_peer_cannot_hide_later_owned_usage_in_same_chunk(tmp_path: 
 
 
 def test_created_stream_acceptance_and_idless_metadata_use_sealed_request(tmp_path: Path) -> None:
+    start = datetime.now(UTC)
     selected = admission(tmp_path, "C06")
     selected.output.mkdir()
     book = UsageBook(selected.output, EvidenceAliases())
@@ -468,7 +469,7 @@ def test_created_stream_acceptance_and_idless_metadata_use_sealed_request(tmp_pa
     book.receive(
         {
             "event_type": "interaction.created",
-            "interaction": {"id": "native-owned", "updated": "2026-10-12T00:00:00Z"},
+            "interaction": {"id": "native-owned", "updated": start.isoformat()},
         },
         route,
         success=True,
@@ -486,7 +487,7 @@ def test_created_stream_acceptance_and_idless_metadata_use_sealed_request(tmp_pa
             "event_type": "interaction.completed",
             "interaction": {
                 "id": "native-owned",
-                "updated": "2026-10-12T00:00:01Z",
+                "updated": (start + timedelta(seconds=1)).isoformat(),
                 "usage": {"total_input_tokens": 64},
             },
         },

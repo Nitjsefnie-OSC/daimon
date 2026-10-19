@@ -37,7 +37,7 @@ from daimon.testing.headless_bindings import (
     serve_catalog_hosts,
     submit_mcp_token,
 )
-from daimon.testing.qa_mcp_host import QaHost, build_host, cleanup, serve
+from daimon.testing.qa_mcp_host import QaHost, SharedQaHost, build_run, end_run, serve
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Verbatim from the frozen catalog scenarios.
@@ -94,16 +94,16 @@ def db_session_factory(
 @pytest.fixture
 async def served(
     db_preflight: DatabasePreflight,
+    qa_shared_host: SharedQaHost,
     tmp_path: Path,
 ) -> AsyncIterator[_Served]:
-    database_url = db_preflight.url  # admitted by the shared preflight first
-    qa = await build_host(database_url=database_url, port=0, root=tmp_path)
+    del db_preflight  # admitted first: the shared host is built on the same database
+    qa = await build_run(qa_shared_host, port=0, root=tmp_path)
     try:
         async with serve(qa) as url:
             yield _Served(qa, loopback_transport(url))
     finally:
-        await qa.engine.dispose()
-        await cleanup(qa.manifest.path(tmp_path), database_url=database_url)
+        await end_run(qa)
 
 
 async def test_the_qa_host_really_tells_a_wrong_token_from_the_right_one(served: _Served) -> None:

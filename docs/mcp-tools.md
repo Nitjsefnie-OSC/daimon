@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 115 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 121 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -45,7 +45,7 @@ Agent-chat primitives plus bounded ``ask`` and completed-chart delivery.
 | `archive_my_session` | agent tokens only | Archive a session when its conversation is finished. |
 | `ask` | agent tokens only | Ask one question and wait for the final answer and any chart images. |
 | `cancel_turn` | agent tokens only | Stop a running turn immediately. |
-| `continue_turn` | agent tokens only | Send a follow-up message on an existing session. |
+| `continue_turn` | agent tokens only | Send a follow-up message on an existing session, or resume a paused one. |
 | `deliver_turn_charts` | agent tokens only | Return the newest completed reply with its chart images and optional links. |
 | `describe_agent` | agent tokens only | Describe the agent associated with this MCP token. |
 | `get_my_session` | agent tokens only | Get one session's status and metadata (no reply text, read-only). |
@@ -67,7 +67,7 @@ Agent removal tools: detach_mcp_server, remove_skill, remove_agent_key, list_age
 
 ## `agent_tool_rules`
 
-Admin tools for one agent's third-party MCP tool rules.
+Admin tools for one agent's MCP tool rules, third-party and Daimon's own.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
@@ -150,6 +150,7 @@ Shared channel MCP tools with per-platform dispatch.
 | `read_channel` | Discord callers, Slack callers, Teams callers | Read channel messages, oldest-first, with pagination metadata. |
 | `read_thread` | Discord callers, Slack callers, Teams callers | Read messages from a thread, oldest-first. |
 | `rename_thread` | Discord callers | Rename a Discord thread; ``name`` is the new title (1-100 characters). |
+| `replace_channel_file` | Teams callers | Save an edited file over a Teams channel file as its new version. |
 | `search_messages` | Discord callers, Slack callers, Teams callers | Search messages with server-side filters. |
 | `send_direct_message` | Discord callers, Slack callers, Teams callers | Privately message one human member of the current server/workspace. |
 | `send_message` | Discord callers, Slack callers, Teams callers | Post a message to a channel. |
@@ -241,6 +242,18 @@ Media MCP tools: YouTube transcript and file upload.
 | --- | --- | --- |
 | `create_file_upload_url` | all callers | Post, send, or share a file to another channel, or from a routine — step 1 of 2. |
 | `fetch_youtube_transcript` | all callers | Fetch the transcript of a public YouTube video for summarization or Q&A. |
+
+## `microsoft.register`
+
+Register connect_microsoft and the Microsoft Graph tools (Teams only).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `connect_microsoft` | Teams callers | Send the person a private Connect Microsoft card so Daimon can use their Microsoft 365. |
+| `microsoft_get` | Teams callers | GET a Microsoft Graph v1.0 path as the person, e.g. /me/drive/root/children. |
+| `microsoft_search` | Teams callers | Search the person's Microsoft 365 as them: files, SharePoint, mail or calendar. |
+| `microsoft_send` | Teams callers | Send an email or a calendar invite from the person's Microsoft account. |
+| `microsoft_write` | Teams callers | Change the person's files or notes through Microsoft Graph, as them. |
 
 ## `notebook`
 
