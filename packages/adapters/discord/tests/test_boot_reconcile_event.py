@@ -400,3 +400,157 @@ async def test_cancelling_the_watcher_leaves_reconcile_tasks_running() -> None:
 
     assert done.is_set(), "the reconcile ran to completion after the watcher was cancelled"
     assert _boot_events(logs) == []
+
+
+def _held_reconcile(
+    release: asyncio.Event, calls: list[uuid.UUID], *, held_fails: bool
+) -> Reconcile:
+    """The first reconcile waits for `release` (and raises if `held_fails`); any
+    later one returns a clean report at once."""
+
+    async def reconcile(*_args: object, tenant_id: uuid.UUID, **_kwargs: object) -> ApplyReport:
+        calls.append(tenant_id)
+        if len(calls) == 1:
+            await release.wait()
+            if held_fails:
+                raise DaimonError("provider down")
+        return ApplyReport()
+
+    return reconcile
+
+
+@pytest.mark.parametrize("held_fails", [False, True], ids=["held_ok", "held_fails"])
+@pytest.mark.parametrize("held", ["joined", "unjoined"])
+async def test_the_event_waits_for_a_reconcile_running_under_the_other_guard(
+    held: str, held_fails: bool
+) -> None:
+    """The joined and unjoined in-flight guards are separate. `joined`: a joined
+    seed is running when the guild drops out of the cache, so on_ready starts an
+    unjoined reconcile that the joined guard never sees. `unjoined`: the mirror,
+    an unjoined refresh running when the guild is back. Either way the event
+    waits for the held reconcile and reports its outcome."""
+    gid = 910000081
+    tenant = _tenant(gid)
+    bot = _bot([gid])
+    release = asyncio.Event()
+    calls: list[uuid.UUID] = []
+
+    with (
+        patch(f"{_BOT}.list_tenants_by_platform", new_callable=AsyncMock, return_value=[tenant]),
+        patch(
+            f"{_BOT}.reconcile_tenant_defaults",
+            side_effect=_held_reconcile(release, calls, held_fails=held_fails),
+        ),
+        patch(f"{_BOT}.set_provision_status", new_callable=AsyncMock),
+        structlog.testing.capture_logs() as logs,
+    ):
+        if held == "joined":
+            held_task = asyncio.create_task(
+                bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
+                    tenant_id=tenant.id, guild=_guild(gid), was_ready=True
+                )
+            )
+        else:
+            held_task = asyncio.create_task(
+                bot._reconcile_unjoined_tenant_defaults(tenant.id)  # pyright: ignore[reportPrivateUsage]
+            )
+        while not calls:
+            await asyncio.sleep(0)
+        if held == "joined":
+            bot._connection._guilds = {}  # pyright: ignore[reportPrivateUsage]
+        await bot.on_ready()
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert calls == [tenant.id, tenant.id], "on_ready's reconcile ran on the other path"
+        assert _boot_events(logs) == [], "no boot event while the held reconcile runs"
+        release.set()
+        await held_task
+        await _drain(bot)
+
+    events = _boot_events(logs)
+    assert len(events) == 1
+    assert (events[0]["tenants"], events[0]["in_flight"]) == (1, 1)
+    if held_fails:
+        assert events[0]["event"] == "discord.boot_reconcile_failed"
+        assert (events[0]["succeeded"], events[0]["failed"]) == (1, 1)
+    else:
+        assert events[0]["event"] == "discord.boot_reconcile_complete"
+        assert (events[0]["succeeded"], events[0]["failed"]) == (2, 0)
+
+
+@pytest.mark.parametrize("held_fails", [False, True], ids=["held_ok", "held_fails"])
+async def test_the_event_waits_for_a_seed_of_a_tenant_skipped_as_reconciled(
+    held_fails: bool,
+) -> None:
+    """A tenant already reconciled by this process gets no boot task, but a seed
+    for it may still be running (a join or hot-path recovery). The event waits."""
+    gid = 910000091
+    tenant = _tenant(gid)
+    bot = _bot([gid])
+    bot._ready_reconciled_tenant_ids.add(tenant.id)  # pyright: ignore[reportPrivateUsage]
+    release = asyncio.Event()
+    calls: list[uuid.UUID] = []
+
+    with (
+        patch(f"{_BOT}.list_tenants_by_platform", new_callable=AsyncMock, return_value=[tenant]),
+        patch(
+            f"{_BOT}.reconcile_tenant_defaults",
+            side_effect=_held_reconcile(release, calls, held_fails=held_fails),
+        ),
+        patch(f"{_BOT}.set_provision_status", new_callable=AsyncMock),
+        structlog.testing.capture_logs() as logs,
+    ):
+        held_task = asyncio.create_task(
+            bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
+                tenant_id=tenant.id, guild=_guild(gid), was_ready=True
+            )
+        )
+        while not calls:
+            await asyncio.sleep(0)
+        await bot.on_ready()
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert calls == [tenant.id], "the reconciled tenant gets no boot reconcile"
+        assert _boot_events(logs) == [], "no boot event while its seed runs"
+        release.set()
+        await held_task
+        await _drain(bot)
+
+    events = _boot_events(logs)
+    assert len(events) == 1
+    assert (events[0]["tenants"], events[0]["in_flight"]) == (0, 1)
+    expected = "discord.boot_reconcile_failed" if held_fails else "discord.boot_reconcile_complete"
+    assert events[0]["event"] == expected
+
+
+async def test_a_boot_reconcile_already_running_at_the_snapshot_counts_once() -> None:
+    """The sweep yields (per-guild command sync), so its own reconciles hold the
+    guard when the snapshot is taken. They are the boot tasks, not extra ones."""
+    gid = 910000101
+    tenant = _tenant(gid)
+    bot = _bot([gid])
+    release = asyncio.Event()
+    calls: list[uuid.UUID] = []
+
+    async def yielding_sync(*_args: object, **_kwargs: object) -> None:
+        await asyncio.sleep(0)
+
+    bot.tree.sync = AsyncMock(side_effect=yielding_sync)  # type: ignore[method-assign]
+
+    with (
+        patch(f"{_BOT}.list_tenants_by_platform", new_callable=AsyncMock, return_value=[tenant]),
+        patch(
+            f"{_BOT}.reconcile_tenant_defaults",
+            side_effect=_held_reconcile(release, calls, held_fails=False),
+        ),
+        patch(f"{_BOT}.set_provision_status", new_callable=AsyncMock),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await bot.on_ready()
+        assert calls == [tenant.id], "the boot seed was running when on_ready finished"
+        release.set()
+        await _drain(bot)
+
+    events = _boot_events(logs)
+    assert [entry["event"] for entry in events] == ["discord.boot_reconcile_complete"]
+    assert (events[0]["tenants"], events[0]["succeeded"], events[0]["in_flight"]) == (1, 1, 0)

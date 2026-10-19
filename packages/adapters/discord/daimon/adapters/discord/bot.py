@@ -2211,10 +2211,18 @@ class DaimonBot(commands.Bot):
                     log.warning("tree_sync_failed", guild_id=tr.external_id, error=str(exc))
         except Exception:
             if watch_boot_reconcile:
-                self._spawn(self._watch_boot_reconcile(boot_tasks, aborted=True))
+                self._spawn(
+                    self._watch_boot_reconcile(
+                        boot_tasks, self._running_reconcile_tasks(), aborted=True
+                    )
+                )
             raise
         if watch_boot_reconcile:
-            self._spawn(self._watch_boot_reconcile(boot_tasks, aborted=False))
+            self._spawn(
+                self._watch_boot_reconcile(
+                    boot_tasks, self._running_reconcile_tasks(), aborted=False
+                )
+            )
         if non_production:
             # Remove commands left by a production deployment without registering
             # any global commands in this environment. Guild copies stay local.
@@ -2256,34 +2264,57 @@ class DaimonBot(commands.Bot):
         except discord.HTTPException as exc:
             log.warning("tree_sync_global_failed", error=str(exc))
 
+    def _running_reconcile_tasks(self) -> set[asyncio.Task[Any]]:
+        """Every task holding either in-flight reconcile guard right now.
+
+        The joined and unjoined guards are separate, so a boot reconcile on one
+        path does not see a reconcile for the same tenant running on the other,
+        and a tenant skipped as already reconciled spawns no boot task at all.
+        The boot watcher waits on this snapshot as well as its own tasks."""
+        current = asyncio.current_task()
+        return {
+            task
+            for task in (*self._seeding.values(), *self._unjoined_reconciling.values())
+            if task is not None and task is not current
+        }
+
     async def _watch_boot_reconcile(
-        self, tasks: list[asyncio.Task[_ReconcileOutcome]], *, aborted: bool
+        self,
+        tasks: list[asyncio.Task[_ReconcileOutcome]],
+        running: set[asyncio.Task[Any]],
+        *,
+        aborted: bool,
     ) -> None:
         """Log one aggregate event once every boot reconcile task has finished.
 
-        A boot reconcile the in-flight guard skipped returns the task already
-        reconciling that tenant (another path got there first); the watcher
-        waits for that task too and counts its result, so `complete` never
-        fires while a reconcile can still write. `asyncio.wait` does not cancel
-        anything if this watcher is cancelled at shutdown, so every task keeps
-        its own lifetime. A task that raised, was cancelled or returned False
-        counts as failed, as does a skip whose running task is unknown.
-        `aborted` is set when on_ready raised before it had started every
-        tenant's reconcile.
+        `running` is the snapshot of reconciles already holding an in-flight
+        guard when on_ready's sweep ended (see `_running_reconcile_tasks`). A
+        boot reconcile the guard skipped returns the task already reconciling
+        that tenant. The watcher waits for all of them, deduplicated by task,
+        and counts each result, so `complete` never fires while a reconcile it
+        could see can still write. `asyncio.wait` does not cancel anything if
+        this watcher is cancelled at shutdown, so every task keeps its own
+        lifetime. A task that raised, was cancelled or returned False counts as
+        failed, as does a skip whose running task is unknown. `aborted` is set
+        when on_ready raised before it had started every tenant's reconcile.
         """
         started = monotonic()
         if tasks:
             await asyncio.wait(tasks)
         succeeded = failed = 0
-        in_flight: list[asyncio.Task[Any]] = []
+        followed: list[asyncio.Task[Any]] = [*running]
         for task in tasks:
             result = None if task.cancelled() or task.exception() is not None else task.result()
             if isinstance(result, asyncio.Task):
-                in_flight.append(result)
+                followed.append(result)
             elif result is False or result is None:
                 failed += 1
             else:
                 succeeded += 1
+        # Dedupe by task: a skip's answer can also be in the snapshot. The boot
+        # tasks are counted above and the watcher never waits on itself.
+        own: set[asyncio.Task[Any] | None] = {*tasks, asyncio.current_task()}
+        in_flight = [task for task in dict.fromkeys(followed) if task not in own]
         if in_flight:
             await asyncio.wait(in_flight)
         for task in in_flight:
