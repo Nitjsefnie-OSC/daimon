@@ -839,6 +839,7 @@ async def run_prepared_turn(
     provider_action: ProviderActionHook | None = None,
     attended: bool | None = None,
     tool_confirmation: ToolConfirmation | None = None,
+    on_session: Callable[[str, uuid.UUID | None], Awaitable[None]] | None = None,
     operation_key: str | None = None,
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
@@ -883,6 +884,7 @@ async def run_prepared_turn(
                 provider_action=provider_action,
                 attended=attended,
                 tool_confirmation=tool_confirmation,
+                on_session=on_session,
                 operation_key=operation_key,
                 active_turn_message_id=active_turn_message_id,
                 before_send=before_send,
@@ -919,6 +921,7 @@ async def run_prepared_turn_impl(
     provider_action: ProviderActionHook | None = None,
     attended: bool | None = None,
     tool_confirmation: ToolConfirmation | None = None,
+    on_session: Callable[[str, uuid.UUID | None], Awaitable[None]] | None = None,
     operation_key: str | None = None,
     active_turn_message_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
@@ -960,6 +963,10 @@ async def run_prepared_turn_impl(
     unseen. With the policy off the posture stays `RequireApproval`.
     `tool_confirmation` replaces that posture for the whole turn, recovery
     included: an unattended DM routine passes the shared `unattended_posture`.
+    `on_session` is awaited with a dead-session recovery's replacement
+    session and mapping before anything is sent into it, so a caller can
+    track and gate the session that is actually running; raising aborts the
+    recovery.
 
     `active_turn_message_id` is the in-flight marker the adapter wrote on
     `prepared.mapping_id` for this turn, if any. A recovery moves it onto the
@@ -1228,6 +1235,8 @@ async def run_prepared_turn_impl(
             active_session_id_cell[0] = new_session_id
             active_mapping_id_cell[0] = new_mapping_id
             recovered_cell[0] = True
+            if on_session is not None:
+                await on_session(new_session_id, new_mapping_id)
 
             # The session this turn was bound to is gone, so whatever the bind
             # decided has been overtaken: this is a replacement after a loss.
