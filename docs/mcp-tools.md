@@ -396,7 +396,7 @@ harder").
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_thread_model` | all callers | Switch the model this conversation runs on when the person asks in words: "use opus", "switch to haiku", "think harder". |
+| `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "think harder". |
 
 ## `thread_participation`
 

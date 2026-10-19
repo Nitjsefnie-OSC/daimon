@@ -95,7 +95,6 @@ async def choose_thread_model(
     platform: str,
     thread_id: str,
     choice: str,
-    account_id: uuid.UUID | None,
 ) -> ThreadModelChange:
     """Keep `choice` for this conversation; refuses before any write."""
     model_id = resolve_choice(choice)
@@ -111,7 +110,6 @@ async def choose_thread_model(
                 platform=platform,
                 thread_id=thread_id,
                 model=model_id,
-                set_by_account_id=account_id,
             )
     if model_id is None:
         note = "This conversation is back on the agent's own model from the next reply."

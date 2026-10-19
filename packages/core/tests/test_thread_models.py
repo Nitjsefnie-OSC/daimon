@@ -22,7 +22,7 @@ from daimon.core.thread_models import (
     resolve_choice,
 )
 from daimon.testing import ma_agent
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _AGENT = ma_agent(id="ag_1", name="daimon", model="claude-sonnet-5-5")
@@ -60,7 +60,6 @@ async def test_a_choice_is_kept_for_its_thread_alone_until_set_back_to_default(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
 
     change = await choose_thread_model(
@@ -69,7 +68,6 @@ async def test_a_choice_is_kept_for_its_thread_alone_until_set_back_to_default(
         platform="discord",
         thread_id="T1",
         choice="opus",
-        account_id=account.id,
     )
     assert change.model_id == "claude-opus-5-5"
     assert change.note == "This conversation runs on Opus 5.5 from the next reply."
@@ -120,7 +118,6 @@ async def test_a_choice_is_kept_for_its_thread_alone_until_set_back_to_default(
         platform="discord",
         thread_id="T1",
         choice="default",
-        account_id=account.id,
     )
     assert back.model_id is None
     async with db_session_factory() as session:
@@ -149,7 +146,6 @@ async def test_a_refused_choice_writes_nothing(
             platform="discord",
             thread_id="T1",
             choice="fable",
-            account_id=None,
         )
     async with db_session_factory() as session:
         assert (
@@ -178,7 +174,6 @@ async def test_a_choice_that_cannot_run_falls_back_to_the_agents_own_model(
             platform="discord",
             thread_id="T1",
             model=stored,
-            set_by_account_id=None,
         )
     async with db_session_factory() as session:
         applied = await apply_thread_model(

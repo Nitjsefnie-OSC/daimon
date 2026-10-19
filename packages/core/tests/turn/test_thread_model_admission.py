@@ -52,7 +52,6 @@ async def test_the_chosen_model_runs_its_thread_across_turns_and_restarts(
         platform="discord",
         thread_id="thr-1",
         choice="opus",
-        account_id=None,
     )
 
     for _restart in range(2):
@@ -81,7 +80,6 @@ async def test_a_choice_no_longer_allowed_runs_the_agents_own_model_and_says_so(
             platform="discord",
             thread_id="thr-1",
             model="claude-retired-1",
-            set_by_account_id=None,
         )
 
     admission = await _admit_in(db_session_factory, tmp_path, tenant, "thr-1")

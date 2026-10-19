@@ -2370,9 +2370,6 @@ class ThreadModelSetting(Base):
     platform: Mapped[str] = mapped_column(Text)
     thread_id: Mapped[str] = mapped_column(Text)
     model: Mapped[str] = mapped_column(Text, nullable=False)
-    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

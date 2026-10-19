@@ -20,7 +20,6 @@ from daimon.adapters.discord.checks import (
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError, UserFacingError
-from daimon.core.stores.identity import find_platform_principal
 from daimon.core.thread_models import (
     choose_thread_model,
     describe_thread_model,
@@ -90,20 +89,12 @@ class ModelCog(commands.Cog):
                     category_unresolved=parent is None,
                 ):
                     raise UserFacingError(_NOT_ALLOWED)
-                async with runtime.sessionmaker() as session:
-                    principal = await find_platform_principal(
-                        session,
-                        tenant_id=tenant_id,
-                        platform="discord",
-                        external_id=str(interaction.user.id),
-                    )
                 change = await choose_thread_model(
                     runtime.sessionmaker,
                     tenant_id=tenant_id,
                     platform="discord",
                     thread_id=str(thread.id),
                     choice=choice.value,
-                    account_id=principal.account_id if principal is not None else None,
                 )
                 text = change.note
             await interaction.edit_original_response(

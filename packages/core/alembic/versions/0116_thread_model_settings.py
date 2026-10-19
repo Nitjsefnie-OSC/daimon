@@ -21,12 +21,10 @@ def upgrade() -> None:
         sa.Column("platform", sa.Text(), nullable=False),
         sa.Column("thread_id", sa.Text(), nullable=False),
         sa.Column("model", sa.Text(), nullable=False),
-        sa.Column("set_by_account_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column(
             "updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
         ),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["set_by_account_id"], ["accounts.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint(
             "tenant_id", "platform", "thread_id", name="pk_thread_model_settings"
         ),

@@ -57,7 +57,6 @@ async def _set_thread_model_impl(
             platform=origin.platform,
             thread_id=origin.thread_id,
             choice=model,
-            account_id=origin.account_id,
         )
     except ThreadModelRefused as exc:
         raise ToolError(str(exc)) from exc
@@ -71,7 +70,7 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str,
         model: Literal["haiku", "sonnet", "opus", "default"],
     ) -> ThreadModelResult:
-        """Switch the model this conversation runs on when the person asks in words: "use opus", "switch to haiku", "think harder".
+        """Run this conversation on another model when the person asks in words: "use opus here", "think harder".
 
         Only on the person's direct instruction in this conversation, never on
         your own judgement or because a model is mentioned. "Think harder" or

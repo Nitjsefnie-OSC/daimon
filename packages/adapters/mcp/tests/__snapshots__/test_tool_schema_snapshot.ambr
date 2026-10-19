@@ -5809,7 +5809,7 @@
     }),
     'set_thread_model': dict({
       'description': '''
-        Switch the model this conversation runs on when the person asks in words: "use opus", "switch to haiku", "think harder".
+        Run this conversation on another model when the person asks in words: "use opus here", "think harder".
         <blank line>
         Only on the person's direct instruction in this conversation, never on
         your own judgement or because a model is mentioned. "Think harder" or

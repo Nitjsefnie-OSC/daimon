@@ -35,7 +35,6 @@ async def set_thread_model(
     platform: str,
     thread_id: str,
     model: str,
-    set_by_account_id: uuid.UUID | None,
 ) -> None:
     stmt = (
         pg_insert(ThreadModelSetting)
@@ -44,16 +43,11 @@ async def set_thread_model(
             platform=platform,
             thread_id=thread_id,
             model=model,
-            set_by_account_id=set_by_account_id,
             updated_at=func.now(),
         )
         .on_conflict_do_update(
             constraint="pk_thread_model_settings",
-            set_={
-                "model": model,
-                "set_by_account_id": set_by_account_id,
-                "updated_at": func.now(),
-            },
+            set_={"model": model, "updated_at": func.now()},
         )
     )
     await session.execute(stmt)

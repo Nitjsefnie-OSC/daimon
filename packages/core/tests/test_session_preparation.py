@@ -4307,7 +4307,6 @@ async def test_a_conversations_model_choice_is_frozen_kept_and_dropped_by_replac
         platform="discord",
         thread_id="thread-1",
         choice="opus",
-        account_id=account.id,
     )
     second = await _prepare(deps, await admitted(), tenant=tenant, account=account)
     assert isinstance(second, PreparedTurn)
@@ -4328,7 +4327,6 @@ async def test_a_conversations_model_choice_is_frozen_kept_and_dropped_by_replac
         platform="discord",
         thread_id="thread-1",
         choice="default",
-        account_id=account.id,
     )
     fourth = await _prepare(deps, await admitted(), tenant=tenant, account=account)
     assert isinstance(fourth, PreparedTurn)
