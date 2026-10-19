@@ -266,6 +266,8 @@ async def test_run_routines_create_when_admin_creates_row_with_creator_user_id(
     )
     texts = [c.kwargs["json"]["text"] for c in fake_slack_web_client.mock.requests[ephemeral_key]]
     assert any("✅ Routine created for" in t for t in texts)
+    assert any("every day at 18:00 UTC" in t for t in texts), "schedule is shown in words"
+    assert not any("0 18 * * *" in t for t in texts), "the raw cron is not echoed"
 
 
 @pytest.mark.asyncio

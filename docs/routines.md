@@ -101,12 +101,16 @@ The platform surfaces differ, and the difference is deliberate:
 - **Slack** `/routines` can create and delete. The panel writes the row
   directly rather than going through the MCP tool, because the Slack
   interaction carries the real user id while an agent's token does not
-  (`packages/adapters/slack/daimon/adapters/slack/routines_panel/`).
+  (`packages/adapters/slack/daimon/adapters/slack/routines_panel/`). The
+  New Routine form opens with the plain way, asking the agent in a channel
+  ("every weekday at 9am, post the sales numbers"), and labels the schedule
+  field "Schedule (advanced: cron, like 0 9 * * 1-5)". The panel rows and the
+  confirmation show the schedule in words (`daimon.core.cron_words`).
 - **Teams** `routines` (1:1 chat) matches Slack: admins create through a
   dialog, and the panel writes the row the same way
-  (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). The
-  shared rules (glyph, label, ordering, admin-or-creator) live in
-  `daimon.core.routines`.
+  (`packages/adapters/teams/daimon/adapters/teams/routines_panel.py`). Its form
+  and schedule words read the same as Slack's. The shared rules (glyph, label,
+  ordering, admin-or-creator) live in `daimon.core.routines`.
 - **Discord** `/routines` is read-mostly: pick a routine, pause or resume it,
   view its last output. Creating one on Discord means asking the agent in
   chat, which calls `create_routine`
