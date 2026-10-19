@@ -95,12 +95,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { suite: core, shard: 0, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
-          - { suite: core, shard: 1, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
-          - { suite: core, shard: 2, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
-          - { suite: core, shard: 3, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
-          - { suite: core, shard: 4, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
-          - { suite: core, shard: 5, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/test_*.py tests/performance" }
+          - { suite: core, shard: 0, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
+          - { suite: core, shard: 1, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
+          - { suite: core, shard: 2, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
+          - { suite: core, shard: 3, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
+          - { suite: core, shard: 4, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
+          - { suite: core, shard: 5, shards: 6, fetch-depth: 0, paths: "qa/live/tests packages/core packages/adapters/cli packages/adapters/scheduler packages/testing tests/integration tests/platform_contract tests/test_*.py tests/performance" }
           - { suite: mcp, shard: 0, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
           - { suite: mcp, shard: 1, shards: 2, fetch-depth: 1, paths: packages/adapters/mcp }
           - { suite: slack, shard: 0, shards: 1, fetch-depth: 1, paths: packages/adapters/slack }
