@@ -64,6 +64,12 @@ async def session_card_gap(
     """
     if origin is None:
         return "no_origin"
+    if tool_name == "lead_intake_resolve" and (
+        not origin.attended
+        or not auth.chat_session_id
+        or origin.chat_session_id != auth.chat_session_id
+    ):
+        return "no_origin"
     async with runtime.session_factory() as session:
         live = await get_live_thread_session(
             session,
@@ -73,6 +79,11 @@ async def session_card_gap(
             account_id=auth.account_id,
         )
     if live is None:
+        return "no_live_session"
+    if tool_name == "lead_intake_resolve" and (
+        live.effective_config is None
+        or live.effective_config.chat_session_id != auth.chat_session_id
+    ):
         return "no_live_session"
     try:
         ma_session = await retrieve_session(

@@ -183,3 +183,7 @@ Dossier thread rules apply independently of the sales channel. Revoking thread
 write permission stops further chunks and resume effects. Get/list and the
 private queue check each actual thread’s visibility and OS read rule; parent
 access alone does not expose a restricted thread.
+
+Interactive intake calls require an attended origin bound to the calling
+provider session’s signed execution grant. Other concurrent conversations grant
+no read or resolution authority; missing or ambiguous bindings refuse the call.

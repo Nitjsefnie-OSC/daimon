@@ -471,3 +471,7 @@ and thread-send permissions. Readback applies each lead thread’s native view,
 history and private-thread membership checks plus its own OS readers rule;
 list results omit inaccessible records. Read-only tools do not require send
 permission.
+
+Lead tools use only the origin bound to the caller’s signed session grant and
+require attended provenance for human actions. Concurrent conversations of the
+same user and agent cannot lend their channel read or approval authority.

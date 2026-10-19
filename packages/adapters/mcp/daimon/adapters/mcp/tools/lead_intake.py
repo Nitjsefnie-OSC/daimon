@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from uuid import UUID
 
 import discord
@@ -12,7 +13,6 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.services.lead_intake import HttpIntakePorts
 from daimon.adapters.mcp.tools._channel_policy import (
-    list_running_origins,
     load_channel_policy,
     require_channel_writable,
 )
@@ -39,10 +39,12 @@ from daimon.core.lead_intake import (
     authorize_intake_actor,
 )
 from daimon.core.lead_intake_service import IntakeAccess, IntakeService, VerifiedSource
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import home_of
 from daimon.core.stores.accounts import account_exists
 from daimon.core.stores.lead_intake import IntakeStore, execution_is_active
 from daimon.core.stores.routines import get_routine
+from daimon.core.stores.turn_origins import get_session_origin
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -191,15 +193,35 @@ async def service(
             )
         except PermissionError as exc:
             raise ToolError(str(exc)) from None
-        origins = await list_running_origins(runtime, auth)
-        if not routine and not origins:
-            raise ToolError("interactive_origin_required")
-        if resolve and (
-            len(origins) != 1
-            or await session_card_gap(runtime, auth, origins[0], tool_name="lead_intake_resolve")
-            is not None
-        ):
-            raise ToolError("human_resolution_approval_required")
+        if not auth.chat_session_id:
+            raise ToolError("execution_session_grant_required")
+        origins = []
+        if not routine:
+            async with runtime.session_factory() as session:
+                origin = await get_session_origin(
+                    session,
+                    tenant_id=auth.tenant_id,
+                    account_id=auth.account_id,
+                    platform="discord",
+                    chat_session_id=auth.chat_session_id,
+                    now=datetime.now(UTC),
+                )
+            if (
+                origin is None
+                or not origin.attended
+                or derive_agent_uuid(
+                    tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
+                )
+                != auth.chat_agent_id
+            ):
+                raise ToolError("attended_execution_origin_required")
+            origins = [origin]
+            if (
+                resolve
+                and await session_card_gap(runtime, auth, origin, tool_name="lead_intake_resolve")
+                is not None
+            ):
+                raise ToolError("human_resolution_approval_required")
         if any(home_of(policy, o.parent_channel_id, o.thread_id) for o in origins):
             raise ToolError("isolated_source_export_denied")
         origin_ids = {value for o in origins for value in (o.parent_channel_id, o.thread_id)}

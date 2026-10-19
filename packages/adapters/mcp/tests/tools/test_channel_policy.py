@@ -905,12 +905,17 @@ async def test_discord_search_hint_does_not_depend_on_the_raw_total_once_sealed(
     assert answers[0][0] == 1
 
 
-@pytest.mark.parametrize("inside", [False, True])
+@pytest.mark.parametrize(
+    "inside,attended,ambiguous",
+    [(False, True, False), (True, True, False), (True, False, False), (True, True, True)],
+)
 async def test_lead_get_list_apply_dossier_thread_readers(
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
     sessionmaker: async_sessionmaker[AsyncSession],
     inside: bool,
+    attended: bool,
+    ambiguous: bool,
 ) -> None:
     from daimon.core.access_policy import ChannelRule
     from daimon.core.discord_membership import DiscordRestMembershipResolver
@@ -925,10 +930,41 @@ async def test_lead_get_list_apply_dossier_thread_readers(
         workspace_id=_GUILD,
         user_id=_CALLER,
         policy=TenantAccessPolicy(channel_rules={"999": ChannelRule(readers="inside")}),
-        origin_channel_id=_SEALED,
+        origin_channel_id=_SEALED if inside else _OTHER,
         origin_thread_id="999" if inside else "888",
     )
     tenant = derive_tenant_uuid(platform="discord", workspace_id=_GUILD)
+    account = await db_session.scalar(
+        text(
+            "SELECT account_id FROM platform_principals WHERE platform='discord' AND external_id=:user"
+        ),
+        {"user": _CALLER},
+    )
+    assert account is not None
+    await db_session.execute(
+        text("UPDATE turn_origins SET attended=:attended WHERE chat_session_id='test-session'"),
+        {"attended": attended},
+    )
+    # An attended sales conversation for the same account/agent is concurrent,
+    # but grants no read or approval authority to this calling session.
+    await create_origin(
+        db_session,
+        tenant_id=tenant,
+        account_id=account,
+        platform="discord",
+        parent_channel_id=_SEALED,
+        thread_id="999",
+        responder_ma_agent_id="agent_x",
+        responder_name="daimon",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(minutes=10),
+        now=dt.datetime.now(dt.UTC),
+        chat_session_id="test-session" if ambiguous else "other-session",
+        attended=True,
+    )
+    await db_session.commit()
     store = IntakeStore(sessionmaker, build_multifernet((_FERNET_KEY,)), tenant)
     config = IntakeConfig(
         agent_id=derive_agent_uuid(tenant_id=tenant, ma_agent_id="agent_x"),
@@ -988,7 +1024,7 @@ async def test_lead_get_list_apply_dossier_thread_readers(
         ("lead_intake_list", {}),
     ):
         result = await _call(app, token, tool, arguments)
-        if inside:
+        if inside and attended and not ambiguous:
             assert "PRIVATE DOSSIER SENTINEL" in _text(result), result
         else:
             assert "PRIVATE DOSSIER SENTINEL" not in _text(result), result
