@@ -224,6 +224,20 @@ class IntakeStore:
             )
             return accepted is not None or expired_discovery is not None
 
+    async def is_discovered(self, config: IntakeConfig, message_id: str) -> bool:
+        async with self.sessions() as session:
+            identity = await session.scalar(
+                select(LeadMailboxMessageRecord.source_digest).where(
+                    LeadMailboxMessageRecord.tenant_id == self.tenant_id,
+                    LeadMailboxMessageRecord.source_digest
+                    == self.source_digest(config, message_id),
+                    LeadMailboxMessageRecord.disposition == "discovered",
+                    LeadMailboxMessageRecord.encrypted_message_id.is_not(None),
+                    LeadMailboxMessageRecord.expires_at > datetime.now(UTC),
+                )
+            )
+            return identity is not None
+
     async def get(self, intake_id: UUID) -> IntakeRecord:
         async with self.sessions() as session:
             row = await session.get(LeadIntakeRecord, (self.tenant_id, intake_id))

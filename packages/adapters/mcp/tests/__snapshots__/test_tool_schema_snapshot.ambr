@@ -3260,6 +3260,27 @@
         'type': 'object',
       }),
     }),
+    'lead_intake_read_source': dict({
+      'description': '''
+        Read attachment-free original Gmail text for an unexpired discovered message.
+        <blank line>
+        Run resume to discover mail, read each source here, then classify and
+        submit its immutable source ID. Uses the configured tenant mailbox;
+        credentials never enter the result. Does not post, archive or change CRM.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'message_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'message_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'lead_intake_resolve': dict({
       'description': '''
         Apply evidence-backed human CRM selections as a sales resolver or core-role member.

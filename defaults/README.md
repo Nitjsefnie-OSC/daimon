@@ -34,3 +34,6 @@ Microsoft accounts are set up.
 `skills/lead-intake` provides opt-in Gmail qualification and dossier guidance for
 native lead intake. It rejects unsolicited selling and operational mail before
 any delivery. Recipient addresses, sales users and CRM settings are tenant-owned.
+
+Lead classification reads each discovered source through `lead_intake_read_source`
+before submission; the model receives source text without service credentials.

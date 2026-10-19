@@ -2289,8 +2289,8 @@ The [lead intake](lead-intake.md) coordinator and evidence contracts live in
 core; tenant stores own encrypted submissions, effect intents, resolution audit,
 mailbox coverage and short-lived routine execution grants. The MCP service
 implements Gmail, HubSpot and Discord HTTP ports without adapter-to-adapter
-imports. Six first-party tools expose submit/resume/resolve and private
-get/list/health; `daimon leads configure` provisions encrypted operator-owned
+imports. Seven first-party tools expose submit/resume/resolve, attachment-free
+preclassification source reads, and private get/list/health; `daimon leads configure` provisions encrypted operator-owned
 integration configuration. Scheduler dispatch signs execution provenance into
 routine credentials and revokes it when the fire ends; retention maintenance
 erases expired evidence independently of intake activity.

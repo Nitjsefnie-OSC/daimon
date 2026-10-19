@@ -18,7 +18,9 @@ A supplier mentioning a project or consulting is still a sales pitch.
 
 Begin every configured email-triage execution with lead_intake_resume. Inspect
 mailbox coverage, errors, pending/review work and remaining discovered messages
-separately; a successful routine run does not prove intake completion. Classify
+separately; a successful routine run does not prove intake completion. Fetch each
+ID with lead_intake_read_source to read attachment-free original text using the
+configured mailbox; this does not expose service credentials. Classify
 every discovered message, including archived mail and the last page. Submit
 `other` with its rejection reason in the description/title/content fields.
 Do not import historical messages before the configured activation checkpoint.

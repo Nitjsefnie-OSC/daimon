@@ -73,6 +73,12 @@ same mailbox and CRM.
 
 ## Qualification and delivery
 
+Run `lead_intake_resume` to discover messages, then `lead_intake_read_source`
+with each immutable message ID to obtain attachment-free original text. This
+read-only path uses configured service credentials without exposing them; it
+accepts only unexpired discoveries. Classify the returned source and submit the
+same source ID with literal evidence through `lead_intake_submit`.
+
 The model classifies each discovered message from its original source. The
 skill rejects cold sales pitches, SEO offers, newsletters, recruiting mail,
 invoices, automatic replies, bounces, phishing, calendar invites, partnership

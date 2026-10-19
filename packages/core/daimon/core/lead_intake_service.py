@@ -71,6 +71,18 @@ class IntakeService:
         self.store, self.ports, self.reauthorize = store, ports, reauthorize
         self.provenance = provenance
 
+    async def read_source(self, message_id: str) -> VerifiedSource:
+        """Fetch an unexpired discovery for classification without retaining it."""
+        config, _ = await self.store.configuration()
+        source = LeadSource(kind="gmail", mailbox=config.gmail_mailbox, message_id=message_id)
+        await self.reauthorize(source)
+        if not await self.store.is_discovered(config, message_id):
+            raise ValueError("unexpired_discovery_required")
+        verified = await self.ports.source(config, source, None)
+        if verified.source != source:
+            raise ValueError("source_identity_mismatch")
+        return verified.model_copy(update={"raw": None})
+
     async def submit(self, draft: LeadDraft, actor_id: str | None) -> IntakeRecord:
         await self.reauthorize(draft.source)
         config, _ = await self.store.configuration()

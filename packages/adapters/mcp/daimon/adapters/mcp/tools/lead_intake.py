@@ -36,7 +36,7 @@ from daimon.core.lead_intake import (
     LeadSource,
     authorize_intake_actor,
 )
-from daimon.core.lead_intake_service import IntakeService
+from daimon.core.lead_intake_service import IntakeService, VerifiedSource
 from daimon.core.permissions import home_of
 from daimon.core.stores.accounts import account_exists
 from daimon.core.stores.lead_intake import IntakeStore, execution_is_active
@@ -256,6 +256,19 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 "has_more_pending": len(pending) > 25,
                 "mailbox_scan": await intake.scan(),
             }
+
+    @mcp.tool(tags={"discord"})
+    async def lead_intake_read_source(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, message_id: str
+    ) -> VerifiedSource:
+        """Read attachment-free original Gmail text for an unexpired discovered message.
+
+        Run resume to discover mail, read each source here, then classify and
+        submit its immutable source ID. Uses the configured tenant mailbox;
+        credentials never enter the result. Does not post, archive or change CRM.
+        """
+        async with service(runtime, await _auth(ctx)) as intake:
+            return await intake.read_source(message_id)
 
     @mcp.tool(tags={"discord"})
     async def lead_intake_resolve(  # pyright: ignore[reportUnusedFunction]

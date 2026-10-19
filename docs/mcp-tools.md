@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 127 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 128 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -243,6 +243,7 @@ First-party lead intake tools; authority derives only from live server context.
 | `lead_intake_get` | Discord callers | Read one authorized tenant lead, its review state and durable effect progress. |
 | `lead_intake_health` | Discord callers | Read tenant lead counts, oldest pending age and mailbox coverage. |
 | `lead_intake_list` | Discord callers | Read up to 100 tenant leads in the restricted sales queue, oldest first. |
+| `lead_intake_read_source` | Discord callers | Read attachment-free original Gmail text for an unexpired discovered message. |
 | `lead_intake_resolve` | Discord callers | Apply evidence-backed human CRM selections as a sales resolver or core-role member. |
 | `lead_intake_resume` | Discord callers | Recover lead effects and mailbox coverage without blindly retrying uncertain creates. |
 | `lead_intake_submit` | Discord callers | Verify and durably register one classified Gmail or own explicit Discord lead. |

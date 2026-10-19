@@ -122,8 +122,16 @@ async def test_fake_model_classification_replay(
 ) -> None:
     store, service, ports = await setup(lead_sessions, "active")
     ports.source_text = row["text"]
-    # Replay the recorded model classification, not a keyword filter in core.
-    result = await service.submit(draft(row["classification"]), "7")
+    discovered = await service.scan()
+    assert "archived-a" in discovered["discovered"]
+    fetched = await service.read_source("archived-a")
+    assert fetched.text == row["text"] and fetched.raw is None
+    # Replay the model decision from the text actually fetched through the
+    # configured mailbox, without a separately provisioned model credential.
+    classification = next(
+        item["classification"] for item in FIXTURES if item["text"] == fetched.text
+    )
+    result = await service.submit(draft(classification, "archived-a"), "7")
     if row["classification"] == "other":
         assert result.status == "rejected"
         assert ports.writes == [], "Junk cannot post, create CRM or archive"
@@ -575,3 +583,17 @@ async def test_unclassified_discovery_expires_from_health_and_resume(
         ).all()
         assert len(rows) == 2
         assert all(row == (None, "expired", "") for row in rows)
+
+
+async def test_preclassification_read_requires_live_discovery(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, ports = await setup(lead_sessions)
+    with pytest.raises(ValueError, match="unexpired_discovery_required"):
+        await service.read_source("undiscovered")
+    await service.scan()
+    assert (await service.read_source("archived-a")).raw is None
+    await store.purge(datetime.now(UTC) + timedelta(days=91))
+    with pytest.raises(ValueError, match="unexpired_discovery_required"):
+        await service.read_source("archived-a")
+    assert ports.writes == []

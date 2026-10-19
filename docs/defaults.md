@@ -261,3 +261,6 @@ The optional `lead-intake` skill classifies consulting/project enquiries and
 prepares source quotes, research and draft replies. Qualification is a model
 step; deterministic source and identity verification remain in the intake
 service. Applying defaults does not activate provider writes.
+
+Lead classification reads each discovered source through `lead_intake_read_source`
+before submission; the model receives source text without service credentials.
