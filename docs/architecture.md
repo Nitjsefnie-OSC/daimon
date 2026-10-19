@@ -197,6 +197,26 @@ card and deliver the final answer. Anthropic keeps its native event tap.
 Alternate-provider usage does not become an Anthropic meter; an unverified
 display cost is omitted.
 
+Whatever a model writes for a person on one chat platform has the other two
+apps' names replaced by "another app" before it is posted
+(`platform_words.scrub_other_platforms`, a plain-text pass that leaves lowercase
+"slack" and "teams" alone). A URL is opaque to the pass: one on another app's
+host is replaced whole, any other is kept byte for byte and only a link's label
+is scrubbed, judged by the parsed host. A scrub that fails logs
+`outbound_scrub.failed` and falls back to a blunt name replacement, so a reply is
+never lost or leaked. `run_prepared_turn` wraps each chat turn's lifecycle
+so the card, the answer and any sealed answer arrive scrubbed on all three
+platforms, and the status card does the same for its draft and tool lines. The
+render loop hands over the whole turn state about every two seconds, so the
+wrapper scrubs again only the text block that grew since the last tick. The
+tools that post for the model (`send_message`, `create_thread`, `edit_message`,
+`rename_thread`, `send_direct_message`, `post_wizard`, `set_display_identity` and
+the GitHub install card's reason), a routine's delivered result, the Discord
+thread title and a Discord reply recovered after a restart pass through it too.
+Stored transcripts, logs and everything sent to the model keep the original text.
+The one deliberate exception is an approval card: it shows exactly what will be
+sent or run, so it is never scrubbed.
+
 **Stage one, `admit()` — `packages/core/daimon/core/turn/admission.py`.** One
 call does identity resolution, config resolution, and every pre-turn gate, and
 returns a frozen `Admission` (account id, MA agent, MA environment, resolved

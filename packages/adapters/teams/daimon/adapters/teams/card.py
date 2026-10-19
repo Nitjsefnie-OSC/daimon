@@ -21,6 +21,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.support_escalation import ASK_THE_TEAM, ESCALATE
 from daimon.core.teams_markdown import escape_dollars
 from daimon.core.turn.notices import TerminationNotice, fit_notice
@@ -82,12 +83,15 @@ def on_stop(state: CardState) -> CardState:
 
 def on_message(state: CardState, text: str) -> CardState:
     """The latest agent text becomes the draft; an empty one keeps the last."""
-    return dataclasses.replace(state, draft=format_draft(text)) if text else state
+    if not text:
+        return state
+    return dataclasses.replace(state, draft=format_draft(scrub_other_platforms(text, "teams")))
 
 
 def on_activity(state: CardState, turn: TurnState) -> CardState:
     """Fold the turn's tool calls into the card: Working while one runs, else Thinking."""
     lines = format_tool_lines(turn.content, finished_ids=turn.finished_tool_ids)
+    lines = tuple(scrub_other_platforms(line, "teams") for line in lines)
     return dataclasses.replace(state, is_working=has_running_tool(turn.content), tool_lines=lines)
 
 

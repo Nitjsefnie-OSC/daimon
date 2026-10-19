@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -47,6 +48,10 @@ from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+#: "1:1" as the chat, not inside a time such as "21:15".
+_ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
+
 
 ENTRA = "11111111-1111-1111-1111-111111111111"
 OID = "22222222-2222-2222-2222-222222222222"
@@ -517,7 +522,7 @@ async def test_a_guest_from_another_organisation_is_not_sent_to_a_one_to_one_cha
             await microsoft_search_impl(
                 runtime, auth, query="budget", kinds=["event"], size=5, origin_context_id=origin
             )
-    assert "1:1" not in str(refused.value), "a guest has no 1:1 chat to ask again in"
+    assert _ONE_TO_ONE.search(str(refused.value)) is None, "a guest has no 1:1 chat to ask again in"
     assert not fake.graph_requests, "nothing is fetched for them"
 
 
@@ -674,7 +679,7 @@ async def test_the_sign_in_card_messages_send_a_guest_to_no_one_to_one_chat(
 
     assert (sent.status, again.status, failed.status) == ("sent", "already_sent", "delivery_failed")
     for message in (sent.message, again.message, failed.message):
-        assert ("1:1" in message) is not foreign, message
+        assert (_ONE_TO_ONE.search(message) is not None) is not foreign, message
     assert "organisation that added Daimon" in failed.message or not foreign
 
 
@@ -700,7 +705,7 @@ def test_file_link_notes_send_a_guest_to_no_one_to_one_chat(foreign: bool) -> No
 
     for note in notes:
         assert note is not None
-        assert ("1:1" in note) is not foreign, note
+        assert (_ONE_TO_ONE.search(note) is not None) is not foreign, note
         assert ("organisation that added Daimon" in note) is foreign, note
 
 

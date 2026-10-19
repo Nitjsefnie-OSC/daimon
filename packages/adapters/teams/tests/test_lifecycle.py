@@ -33,6 +33,7 @@ from daimon.core.message_split import split_fenced
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import TerminationReason
@@ -1155,3 +1156,30 @@ async def test_unchanged_running_state_rerendered_moves_the_elapsed_time() -> No
     assert len(sender.activities) == 3
     assert all(activity.id == "m-1" for activity in sender.activities[1:])
     assert [_card_body(sender, i)[-2]["text"] for i in (1, 2)] == ["12s", "24s"]
+
+
+async def test_nothing_posted_names_another_app() -> None:
+    sender, clock = FakeSender(), Clock()
+    inner = await _posted(sender, clock)
+    lc = OtherAppsScrubbedLifecycle(inner, "teams")
+    await lc.on_sse_event(
+        BetaManagedAgentsAgentMessageEvent(
+            id="e1",
+            type="agent.message",
+            content=[BetaManagedAgentsTextBlock(type="text", text="Looking in Discord or Slack")],
+            processed_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    tool = ToolUseBlock(
+        kind="tool_use", id="t1", type="agent.tool_use", name="discord_read_messages", input={}
+    )
+    clock.now += 10
+    await lc.on_render(TurnState(content=[tool]))
+    live = _card_json(sender, -1)
+    assert "Looking in another app" in live
+    assert "Discord" not in live and "Slack" not in live
+
+    reply = "Teams is right here. Never upload customer data to Discord or Slack."
+    await lc.on_terminal_success(_answer(reply))
+    answer = sender.activities[-2].text
+    assert answer == "Teams is right here. Never upload customer data to another app."

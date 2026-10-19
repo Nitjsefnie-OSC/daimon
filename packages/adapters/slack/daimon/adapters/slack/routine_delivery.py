@@ -79,7 +79,7 @@ async def _dm_fallback(
             return DeliveryOutcome(status="skipped", note=reason)
         opened = await client.conversations_open(users=creator)  # pyright: ignore[reportUnknownMemberType]
         channel = cast("dict[str, str]", opened["channel"])["id"]
-        text = escape_mrkdwn_preserving_mentions(render_fallback_dm(row, reason))
+        text = escape_mrkdwn_preserving_mentions(render_fallback_dm(row, reason, platform="slack"))
         for chunk in split_fenced(text, 11800, word_boundary=True):
             await client.chat_postMessage(channel=channel, text=chunk)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
     except SlackApiError as err:
@@ -217,7 +217,7 @@ def make_slack_routine_poster(
             # Slack drops `username` and `icon_url` without an error when the
             # install lacks chat:write.customize, so the line keeps naming the
             # agent here; only Discord, whose label always carries it, drops it.
-            text = escape_mrkdwn_preserving_mentions(render_fallback_post(row))
+            text = escape_mrkdwn_preserving_mentions(render_fallback_post(row, platform="slack"))
             for chunk in split_fenced(text, 11800, word_boundary=True):
                 await post_as_agent(client, identity, text=chunk, **place)
         except SlackApiError as err:

@@ -8,6 +8,7 @@ their turn, every refusal and the help card say so, and name no other chat app.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, get_args
 
 import pytest
@@ -28,6 +29,10 @@ from .test_no_foreign_platform_names import (
     _origin,  # pyright: ignore[reportPrivateUsage]
 )
 
+#: "1:1" as the chat, not inside a time such as "21:15".
+_ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
+
+
 _HOST = "someone in the organisation that added Daimon"
 _CAPITALISED_HOST = _HOST[0].upper() + _HOST[1:]
 _PLACES: tuple[Place, ...] = ("channel", "group")
@@ -39,7 +44,7 @@ _FOREIGN = RefusalNouns.for_platform("teams", foreign=True)
 
 
 def _no_private_chat(text: str) -> None:
-    assert "1:1" not in text, text
+    assert _ONE_TO_ONE.search(text) is None, text
     assert "private chat" not in text.lower(), text
     _assert_only_own("teams", text)
 

@@ -24,6 +24,7 @@ from daimon.adapters.mcp.tools.teams._tidy import (
     _teams_delete_message_impl,  # pyright: ignore[reportPrivateUsage]
     _teams_edit_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.platform_words import scrub_other_platforms
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -55,6 +56,7 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         escalation channel.
         """
         auth = await _auth(ctx)
+        content = scrub_other_platforms(content, auth.platform)
         if auth.platform == "teams":
             return await _teams_edit_message_impl(
                 runtime,

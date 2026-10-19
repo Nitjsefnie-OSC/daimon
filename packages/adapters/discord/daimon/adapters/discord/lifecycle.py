@@ -428,6 +428,7 @@ class DiscordTurnLifecycle:
         self._state = EmbedState(
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
+            platform="discord",
             started_at=self._clock(),
         )
         # Seeded only by dead-session recovery, which hands over the message the

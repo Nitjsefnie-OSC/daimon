@@ -48,7 +48,7 @@ from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.permissions import any_writers_none
-from daimon.core.platform_words import turn_words
+from daimon.core.platform_words import scrub_other_platforms, turn_words
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import CHAT_PLATFORMS, Role, RoutineRow
@@ -355,15 +355,19 @@ async def record_failure(
     await record_result(session, routine_id, tail=None, error=error)
 
 
-def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
+def render_fallback_post(
+    row: RoutineRow, *, as_agent: bool = False, platform: str | None = None
+) -> str:
     """The message posted for a routine whose agent did not post itself.
+
+    On a chat `platform` the result never names another chat app.
 
     `as_agent` is for a post that carries the agent's own name and face, which
     already say who it is from; the schedule is kept either way, in words
     only where `routine_phrase` can say it exactly. A queued failure notice
     says the run failed instead of introducing a result.
     """
-    payload = (row.delivery_payload or "").strip()
+    payload = scrub_other_platforms((row.delivery_payload or "").strip(), platform)
     phrase = routine_phrase(row.cron_expr, row.timezone)
     if row.delivery_note == FAILURE_NOTICE:
         owner = "The" if as_agent else f"{row.agent_name}'s"
@@ -435,13 +439,14 @@ _DM_REASONS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-def render_fallback_dm(row: RoutineRow, reason: str) -> str:
+def render_fallback_dm(row: RoutineRow, reason: str, *, platform: str | None = None) -> str:
     """The direct message sent to the creator when the destination is unusable.
 
-    The agent and schedule first, then why the result is here, then the result.
+    The agent and schedule first, then why the result is here, then the result,
+    which on a chat `platform` never names another chat app.
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
-    payload = (row.delivery_payload or "").strip()
+    payload = scrub_other_platforms((row.delivery_payload or "").strip(), platform)
     if row.delivery_note == FAILURE_NOTICE:
         why: tuple[str, ...] = ("Your routine failed, so there's no result this time.",)
     else:

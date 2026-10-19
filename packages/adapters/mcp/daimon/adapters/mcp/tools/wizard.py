@@ -33,9 +33,10 @@ from daimon.adapters.mcp.tools.discord import (
 from daimon.adapters.mcp.tools.teams._send import (
     _post_teams_wizard_impl,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.stores.wizard_session import create_wizard_session
 from daimon.core.wizard.expiry import derive_expires_at
-from daimon.core.wizard.spec import Step, WizardSpec
+from daimon.core.wizard.spec import Option, Step, WizardSpec
 from daimon.core.wizard.state import WizardStatus, new_short_id
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -47,6 +48,25 @@ _STOP_SIGNAL: Final[str] = (
     "carrying a keyed block; that is when you resume, with the full history "
     "of having asked."
 )
+
+
+def _scrubbed_step(step: Step, platform: str | None) -> Step:
+    """`step` with the text a person reads scrubbed of other chat apps; answer values stay."""
+    return step.model_copy(
+        update={
+            "question": scrub_other_platforms(step.question, platform),
+            "options": [
+                Option(
+                    label=scrub_other_platforms(option.label, platform),
+                    value=option.value,
+                    description=None
+                    if option.description is None
+                    else scrub_other_platforms(option.description, platform),
+                )
+                for option in step.options
+            ],
+        }
+    )
 
 
 async def _post_wizard_impl(
@@ -64,9 +84,11 @@ async def _post_wizard_impl(
 
     # `image_url` is server-populated: a caller-supplied value must never
     # reach the renderer, so it is stripped before validation even runs.
-    stripped_steps = [step.model_copy(update={"image_url": None}) for step in steps]
+    stripped_steps = [
+        _scrubbed_step(step.model_copy(update={"image_url": None}), auth.platform) for step in steps
+    ]
     try:
-        spec = WizardSpec(prompt=prompt, steps=stripped_steps)
+        spec = WizardSpec(prompt=scrub_other_platforms(prompt, auth.platform), steps=stripped_steps)
     except ValueError as err:
         raise ToolError(
             f"Invalid wizard form: {err} Split it into a shorter follow-up form."
