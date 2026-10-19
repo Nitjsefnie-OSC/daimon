@@ -22,6 +22,7 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.teams.admin_caller import admin_caller
 from daimon.adapters.teams.card_actions import Actor
+from daimon.adapters.teams.deployment_admins import with_admin_team, with_admin_team_if_asked
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
@@ -107,7 +108,7 @@ async def skill_change_refusal(
             place=Place(),
         )
         if pinned is not None:
-            return pinned
+            return await with_admin_team_if_asked(runtime, pinned)
         facts = await load_target_facts(
             session,
             "skill_add",
@@ -123,7 +124,7 @@ async def skill_change_refusal(
         )
     if decide_operation("skill_add", is_admin=caller.is_server_admin, target=facts) == "allow":
         return None
-    return needs_admin(agent.name)
+    return await with_admin_team(runtime, needs_admin(agent.name))
 
 
 def _stamp_refusal(metadata: dict[str, str], *, tenant_id: str, name: str) -> str | None:

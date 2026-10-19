@@ -10,11 +10,13 @@ out of scope per the plan's site list.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import discord
 import pytest
 from daimon.adapters.discord.bot import (
+    _build_ready_embed,  # pyright: ignore[reportPrivateUsage]
     _build_welcome_embed,  # pyright: ignore[reportPrivateUsage]
     _responder_handle,  # pyright: ignore[reportPrivateUsage]
     _setting_up_message,  # pyright: ignore[reportPrivateUsage]
@@ -142,20 +144,30 @@ class TestSettingUpMessage:
         )
 
 
-class TestWelcomeEmbedOnceReadyField:
-    def test_unset_matches_todays_text(self) -> None:
-        embed = _build_welcome_embed("daimon")
-        field = embed.fields[0]
-        assert field.value == (
-            "Mention `@daimon` anywhere to chat, or run `/agent-setup` to see who answers here."
-        ), "unset bot_display_name must render byte-identical welcome copy"
+class TestWelcomeAndReadyEmbeds:
+    def test_setting_up_text_is_plain(self) -> None:
+        embed = _build_welcome_embed()
+        assert embed.title == "⏳ Setting up…"
+        assert embed.description == "Getting ready. This takes a moment."
+        assert not embed.fields, "no progress talk the reader cannot act on"
 
-    def test_set_name_changes_text(self) -> None:
-        embed = _build_welcome_embed("daimon-staging")
-        field = embed.fields[0]
-        assert field.value == (
-            "Mention `@daimon-staging` anywhere to chat, or run `/agent-setup` to see who answers here."
+    def test_ready_text_names_what_it_does_one_thing_to_try_and_the_setup_phrase(self) -> None:
+        embed = _build_ready_embed("daimon")
+        assert embed.title == "👋 Daimon is ready"
+        assert embed.description == (
+            "I answer questions about data and write code, charts and notebooks.\n"
+            "Try it: mention `@daimon` with a question, "
+            "or attach a CSV and ask me to summarise it.\n"
+            'To change who answers or add keys and repos, mention me and say "help me set up".'
         )
+
+    def test_ready_text_uses_the_configured_bot_name(self) -> None:
+        assert "`@daimon-staging`" in (_build_ready_embed("daimon-staging").description or "")
+
+    def test_ready_text_adds_credit_only_when_known(self) -> None:
+        assert "credit" not in (_build_ready_embed("daimon").description or "")
+        with_credit = _build_ready_embed("daimon", credit=Decimal("10")).description or ""
+        assert "You have $10.00 of credit. Each answer shows what's left." in with_credit
 
 
 class TestCreditDepletedMessage:

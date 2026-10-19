@@ -19,6 +19,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.testing import build_fake_anthropic, ma_agent
 from daimon.testing.ma import (
@@ -32,7 +33,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    ADMIN_TEAM,
     ENTRA_TENANT_ID,
+    OTHER_AAD_OBJECT_ID,
     TeamsApiFake,
     build_teams_runtime,
     make_card_action,
@@ -115,14 +118,25 @@ async def _running(
     *,
     admin: bool = False,
     local_helper: bool = False,
+    admin_team_name: str | None = None,
 ) -> AsyncIterator[TeamsHttpService]:
+    """`admin_team_name` records the admin team under that name, with someone else as its owner."""
+    if admin_team_name is not None:
+        async with db_factory.begin() as session:
+            await record_teams_installation(
+                session,
+                tenant_id=TENANT,
+                team_id="19:leads@thread.tacv2",
+                group_id=ADMIN_TEAM,
+                name=admin_team_name,
+            )
     ma = build_fake_anthropic(
         combine_handlers(skills.handle, _versioned(make_fake_ma_handler(_state())))
     )
     runtime = build_teams_runtime(
         db_factory,
         anthropic=ma,
-        admins=(AAD_OBJECT_ID,) if admin else (),
+        admins=(AAD_OBJECT_ID,) if admin else (OTHER_AAD_OBJECT_ID,) if admin_team_name else (),
         deployment_default=DeploymentDefault(agent_name="helper" if local_helper else "daimon"),
     )
     async with running_service(runtime, fake) as service:
@@ -241,3 +255,23 @@ async def test_a_member_is_refused_on_the_organisation_default(
     assert preview["task"]["value"] == add_skill.needs_admin("helper"), "no preview either"
     assert forced["task"]["value"] == add_skill.needs_admin("helper"), "decided again on add"
     assert skills.created == [], "nothing uploaded"
+
+
+async def test_a_refusal_says_who_the_admins_are_when_the_admin_team_is_known(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    async with db_session_factory.begin() as session:
+        await set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=TENANT),
+            tenant_id=TENANT,
+            agent_name="helper",
+            mode="agent",
+        )
+    line = "\n\nAdmins are the owners of the Leads team."
+    async with _running(
+        db_session_factory, teams_api_fake, _Skills(), admin_team_name="Leads"
+    ) as service:
+        shared = await _dialog(service, "fetch", agent="helper")
+
+    assert shared["task"]["value"] == add_skill.needs_admin("helper") + line

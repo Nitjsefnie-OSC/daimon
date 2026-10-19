@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
@@ -21,6 +22,7 @@ from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.mux_backend import resource_scope
 from daimon.core.permissions import dm_source_limited, limited_ids
+from daimon.core.platform_words import words_for
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import (
@@ -32,7 +34,7 @@ from daimon.core.stores.direct_messages import (
     quarantine_conversation,
     start_conversation,
 )
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import ChatPlatform, Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_turn_contexts import (
     create_slack_turn_context,
@@ -54,6 +56,59 @@ from daimon.core.turn_origin import render_turn_origin, turn_origin
 from sqlalchemy.exc import SQLAlchemyError
 
 _log = structlog.get_logger(__name__)
+
+
+#: How many people one process remembers having told that private chats are off.
+COLD_DM_NOTICE_LIMIT = 10_000
+
+
+class ColdDmNotices:
+    """People already answered in this process, so a cold DM gets one reply, not a stream.
+
+    In memory and bounded: the oldest person is forgotten first, and a restart
+    forgets everyone, which at worst repeats the answer once."""
+
+    def __init__(self, limit: int = COLD_DM_NOTICE_LIMIT) -> None:
+        self._limit = limit
+        self._told: OrderedDict[str, None] = OrderedDict()
+
+    def first_time(self, person: str) -> bool:
+        """True the first time `person` is asked about; remembers them."""
+        if person in self._told:
+            self._told.move_to_end(person)
+            return False
+        self._told[person] = None
+        if len(self._told) > self._limit:
+            self._told.popitem(last=False)
+        return True
+
+    def forget(self, person: str) -> None:
+        """Let `person` be answered again, e.g. after the reply could not be sent."""
+        self._told.pop(person, None)
+
+
+def cold_dm_text(platform: ChatPlatform, *, dms_on: bool | None) -> str:
+    """The two-line answer to a private message that has no conversation to continue.
+
+    `dms_on` is whether the person's space has private chats on; None when the
+    platform cannot tell which space they mean (a Discord DM names no server)."""
+    words = words_for(platform)
+    command = words.commands["dm_me"].word
+    if dms_on:
+        return (
+            "I answer in channels first.\n"
+            f"Mention me in a channel, or run `{command}` in one to continue privately here."
+        )
+    if dms_on is None:
+        return (
+            "I can't start a private chat from here.\n"
+            f"Mention me in a {words.space} channel, or run `{command}` there. "
+            f"If it says private chats are off, ask {words.admin} to run `{command} enable`."
+        )
+    return (
+        "Private chats with Daimon are off here.\n"
+        f"Mention me in a channel, or ask {words.admin} to run `{command} enable`."
+    )
 
 
 def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:

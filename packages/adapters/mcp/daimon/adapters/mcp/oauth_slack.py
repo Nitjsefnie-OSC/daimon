@@ -151,11 +151,50 @@ def _success_html(
     )
     body = f"""
 <h1>Installed in {safe}</h1>
-<p>Mention <code>@{safe_name}</code> in an invited channel, or run <code>/agent-setup</code>.</p>
+<p>Invite it to a channel with <code>/invite @{safe_name}</code>, then mention it there.</p>
 <p>{credit} in credit is ready.</p>
 {promo}<p class="dim">You can close this tab and return to Slack.</p>
 """
     return _page(title="Daimon installed", state_bar="", body_html=body)
+
+
+_WELCOME_DM_TIMEOUT_S = 5.0
+
+
+def _welcome_dm_text(*, display_name: str, signup_credit: Decimal, promo_codes: bool) -> str:
+    """The welcome DM to the person who installed Daimon, in Slack mrkdwn."""
+    name = html.escape(display_name, quote=False)  # Slack escapes exactly & < >
+    lines = [
+        "*👋 Daimon is ready*",
+        "I answer questions about data and write code, charts and notebooks.",
+        f"Try it: invite me to a channel with `/invite @{name}`, then mention me there "
+        "with a question, or attach a CSV and ask me to summarise it.",
+        'To change who answers or add keys and repos, mention me and say "help me set up".',
+    ]
+    if signup_credit > 0:
+        lines.append(
+            f"You have {_format_credit(signup_credit)} of credit to start. "
+            "Each answer shows what's left."
+        )
+    if promo_codes:
+        lines.append("Have a promo code? An admin can redeem it in `/billing`.")
+    return "\n".join(lines)
+
+
+async def _dm_installer_welcome(*, bot_token: str, user_id: str, text: str, team_id: str) -> None:
+    """DM `text` to the installing person. A failure is logged and ignored: the
+    install is done and the success page already says how to start."""
+    try:
+        await asyncio.wait_for(
+            AsyncWebClient(token=bot_token).chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=user_id, text=text, unfurl_links=False
+            ),
+            timeout=_WELCOME_DM_TIMEOUT_S,
+        )
+    except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
+        logger.warning(
+            "slack install welcome dm failed", team_id=team_id, error_type=type(exc).__name__
+        )
 
 
 def _enterprise_rejection_html() -> HTMLResponse:
@@ -484,12 +523,23 @@ def build_oauth_slack_routes(
             )
             promo_codes = False
 
+        display_name = settings.slack.bot_display_name if settings.slack is not None else "daimon"
+        if result.authed_user_id is not None:
+            await _dm_installer_welcome(
+                bot_token=result.access_token,
+                user_id=result.authed_user_id,
+                text=_welcome_dm_text(
+                    display_name=display_name,
+                    signup_credit=settings.billing.signup_credit,
+                    promo_codes=promo_codes,
+                ),
+                team_id=team_id,
+            )
+
         return _success_html(
             workspace=result.team_name or team_id,
             signup_credit=settings.billing.signup_credit,
-            display_name=settings.slack.bot_display_name
-            if settings.slack is not None
-            else "daimon",
+            display_name=display_name,
             promo_codes=promo_codes,
         )
 

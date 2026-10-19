@@ -165,6 +165,9 @@ falls back to the last successful one for up to an hour, and demotes no one. If
 the app is removed from the admin team, or no owner list has been read within
 an hour, nobody is an admin in chats and cards until the next good read, while
 stored admin roles stand until then; re-adding the app restores the owners.
+When a Teams refusal sends someone to an admin, it adds "Admins are the owners
+of the {team name} team.", using the name Daimon last recorded for the admin
+team; until that team has had activity with the app in it, the line is left out.
 Admins' turns run with the admin role, and the
 panels unlock the admin actions for them. Every card click and dialog
 re-checks the organisation, the clicker and their role. Boot does the same

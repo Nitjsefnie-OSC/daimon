@@ -106,12 +106,13 @@ def test_the_welcomes_say_what_to_do_in_the_place_they_are_sent() -> None:
     assert welcome_text("Daimon", team=False) == (
         "👋 I'm Daimon. I help with questions and data.\n\n"
         "Ask a question or send me a data file.\n\n"
-        "Send `help` to see what else I can do."
+        'To change who answers or add keys and repos, say "help me set up". '
+        "Send `help` for the rest."
     )
     assert welcome_text("Daimon", team=True) == (
         "👋 I'm Daimon. I answer in the thread where you mention me.\n\n"
         "@mention me in a post or a reply to ask something.\n\n"
-        "For setup and billing, open a 1:1 chat with me and send `help`."
+        'For setup, open a chat with me and say "help me set up".'
     )
 
 

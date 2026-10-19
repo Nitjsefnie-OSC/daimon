@@ -48,12 +48,13 @@ def welcome_lines(bot: str, *, team: bool) -> tuple[str, str, str]:
         return (
             f"👋 I'm {bot}. I answer in the thread where you mention me.",
             "@mention me in a post or a reply to ask something.",
-            "For setup and billing, open a 1:1 chat with me and send `help`.",
+            'For setup, open a chat with me and say "help me set up".',
         )
     return (
         f"👋 I'm {bot}. I help with questions and data.",
         "Ask a question or send me a data file.",
-        "Send `help` to see what else I can do.",
+        'To change who answers or add keys and repos, say "help me set up". '
+        "Send `help` for the rest.",
     )
 
 
