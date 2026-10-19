@@ -17,8 +17,8 @@ from daimon.core.lead_intake import (
     LeadProgress,
 )
 from daimon.core.lead_intake_access import (
-    LeadReader,
     LeadReadDenied,
+    LeadReader,
     LeadReadTarget,
     NativeChannel,
     authorize_lead_read,
