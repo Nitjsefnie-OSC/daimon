@@ -1842,14 +1842,12 @@ limited readers and in DMs under `dm_memory_read_only`. A session without a pers
 store gets shared-store instructions saying that no personal memory is mounted and
 nothing personal is to be recorded. Who else gets one:
 
-- **Routines**: only a legacy routine with no destination and no channel
-  (`rule_views.routine_mounts_personal_memory`) mounts its owner's personal store,
-  read-only like all routine memory. Every routine with a destination,
-  including an owner-DM destination, gets the shared store alone. DM delivery retains ordinary tool authority and
-  mounts no personal memory. The scheduler decides this from the routine row
-  at every fire, so adding a destination stops it at the next run. The agent can
-  still call a posting tool itself; its instructions say not to quote personal
-  memory where others will read it.
+- **Routines**: explicit owner DMs use the normal live-DM memory policy, including
+  personal memory and ordinary write modes. Channel routines use shared memory
+  read-only without personal memory. Only a legacy headless routine with no
+  destination and no channel (`rule_views.routine_mounts_personal_memory`) mounts
+  its owner's personal store read-only. DM routines run unattended: nobody watches
+  intermediate actions, and permitted tools retain ordinary DM side-effect risk.
 - **MCP**: the hub's `ask` and `start_turn` mount the caller's personal store. A hub
   caller is a person: the hub token comes from Daimon's OAuth proxy after a Discord or
   Slack sign-in, `HubIdentityMiddleware` checks its signature, issuer, audience and
@@ -2248,8 +2246,17 @@ reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
 the authenticated owner; the operator CLI has `routines create --destination dm`
 and a verifying dry-run. Slack and Teams explicitly reject DM writes.
 
-DM routine runs mount no personal memory; tenant memory remains read-only and
-tool authority is the same as for channel routines. Source channels and threads
+DM routines are scheduled owner messages through core's normal live-DM admission,
+binding and runner, with ordinary owner credentials, tools and personal/shared
+memory policy. Each run gets a fresh private scope and empty history. A shared
+PostgreSQL advisory owner guard skips a scheduled slot when a live DM turn is
+running. It does not change C8 selection or conversation history. Unattended
+execution uses S1 (`attended=False`) and only gateable Managed Agents runtimes;
+actual-session agent identity, endpoint rules and trusted annotations are checked
+on every send batch and rebuilt on replacement. Budget channels are accounting
+only and confer no tool-rule scope. Nobody watches intermediate actions; permitted
+tools retain normal DM side-effect risk. Crash and stop guarantees match live DMs,
+with no separate turn lifecycle ledger or durable stop-recovery notice. Source channels and threads
 are verified against the tenant's guild through core Discord REST transport.
 Source channel/thread provenance and its known/unknown marker are written once
 at creation and are immutable through every edit. Delivery and budget targets
@@ -2261,8 +2268,13 @@ provenance never becomes known during an edit. Private-scope origins resolve
 only the caller's current tenant-bound conversation and verify its saved guild
 source; source-free cold conversations require no guild-channel lookup.
 
-The scheduler runs a read-only headless turn and queues its final answer in
-the routine outbox. The Discord host checks live membership, tenant DM
+For an explicit owner DM, the scheduler submits the scheduled message through
+`direct_messages.run_dm_routine`; live and scheduled DMs share
+`_run_admitted_dm_turn`, `admit`, `bind_session` and `run_prepared_turn`. Channel
+routines retain their read-only headless path without personal memory. The final
+answer enters the routine outbox through an atomic captured producer/destination/
+revision fence. Private edits erase old previews, diagnostics and pending results;
+claimed deliveries recheck the same identity before every chunk and file. The Discord host checks live membership, tenant DM
 enablement, recipient policy and source restrictions before opening the
 owner's DM and before each chunk. Recipient IDs are never channel targets or
 budget sources. Notifications do not alter the selected cold-DM conversation
@@ -2271,7 +2283,7 @@ leases, with no public fallback or outbox replay after an uncertain send.
 A platform SDK may retry a single send after a server error or connection reset.
 
 Routine result delivery collects settled session outputs after the successful
-headless turn and stores a versioned text-and-file-reference envelope in the
+turn and stores a versioned text-and-file-reference envelope in the
 existing outbox payload. Adapters download and upload those references inside
 the claim/settle lease, rechecking destination and owner access before each
 file. Discord and Slack reuse their interactive upload paths; Teams routine

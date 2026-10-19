@@ -39,9 +39,9 @@ provenance is written once at creation and never changed by retargeting,
 clearing delivery, changing the budget, or selecting DM. Legacy routines with
 unknown provenance keep ordinary channel/thread edits, clearing and normal firing
 on every platform, but cannot select DM. Recreate the routine from its channel
-or thread to get DM delivery. DM routine runs mount no personal memory. Tenant memory remains read-only, and tool
-authority stays the same as for channel routines; selecting DM delivery does
-not restrict tools to private output.
+or thread to get DM delivery. DM routines run through the normal live-DM path,
+with the owner’s ordinary memory, credentials and tools. Execution is unattended;
+permitted tools retain ordinary DM side-effect risk, and nobody watches intermediate actions.
 
 The host queues the final reply through the outbox and sends chunks of at
 most 2,000 characters with mentions disabled. The notification includes the
@@ -246,7 +246,7 @@ credential vault, same env mount, same repo resource, same tenant metadata
 stamps — and then hands the drain to the same driver,
 `packages/core/daimon/core/turn/driver.py`. So a routine inherits the driver's
 whole liveness story: status-checked reconnects, the per-call read timeout,
-the cancel race. What it does not inherit is the chat chokepoint. It does not
+the cancel race. What it does not inherit is the chat chokepoint for channel routines. A channel routine does not
 call `admit()` or `bind_session()`, so there is no thread-session binding, no
 continuity or handoff, and no dead-session recovery. Nobody is there to
 click, so tool confirmations are answered without a person, by the same
@@ -531,16 +531,44 @@ Routine turns receive core unattended-run framing: avoid clarification questions
 verify evidence, and use delivery tools for requested output. Agents can customize
 it with `context_fragments.routine` in their YAML spec; see [architecture](architecture.md#invocation-context-fragments).
 
-Routine sessions always mount persistent agent memory read-only, regardless of the
-tenant's chat or DM policy. They can use saved memory but cannot change it. A routine
-with a channel/thread destination mounts only shared memory, since others may
-read its answer. Explicit owner-DM routines mount no personal memory and retain
-the same tool authority as channel routines. Only a legacy routine with neither
-destination nor channel may mount the owner's personal memory read-only.
-This is decided at every fire. Admins can manage DM routine metadata but do not
-receive its private output previews.
+Explicit owner-DM routines are normal live-DM turns: scheduled messages from the
+owner into their own DM. Each fire re-resolves membership, the invoker role gate
+and admin bypass switch, tenant DM controls, recipient policy, agent eligibility
+and immutable creation provenance. It uses the ordinary admission, binding and
+runner, including normal owner credentials, personal/shared memory and memory
+write policy. A memory outage degrades as it does for a live DM.
 
-A routine session is stamped like a turn in the channel it fires into: the
+Each fire owns a fresh private scope with empty history. It never changes the
+selected conversation or reads its physical DM history. A shared database owner
+guard serializes live and scheduled DMs across tenants and processes. If the
+owner already has a DM turn running, the scheduled slot is skipped with
+`owner_busy`; no prompt waits for later execution.
+
+DM routines support Managed Agents only and refuse other runtimes before session
+allocation. They run with `attended=False`: the shared S1 gate checks the actual
+session before each message or confirmation batch, including after replacement.
+Tool rules, trusted annotations and their credentials use that session's frozen
+agent and endpoints. DM execution has no channel tool-rule scope; its saved
+budget channel does not grant tool permissions. Card-only actions are refused,
+with safety enabled or disabled. **Nobody watches intermediate actions.** The
+owner accepts the ordinary DM side-effect risk of permitted tools running
+unattended; there is no approval inbox.
+
+Crash, cancellation, timeout and stop guarantees are exactly those of live DMs.
+A locally ended turn does not prove that remote work ceased. There is no durable
+stop ledger, restart recovery or guaranteed unresolved-stop notice. A successful
+turn queues its final result; a delivery failure does not change its execution
+outcome. Agent reassignment or any private routine edit clears old private
+previews, diagnostics and pending/claimed results. Late writes compare the
+captured producer, destination and revision; every chunk and file rechecks them.
+An old result cannot acquire a new agent's authority or move to a public target.
+
+Channel routine sessions mount persistent agent memory read-only. They never
+mount personal memory. A legacy routine with neither destination nor channel
+may mount its owner's personal memory read-only. Admins can manage DM routine
+metadata but do not gain access to its private results.
+
+A channel routine session is stamped like a turn in the channel it fires into: the
 destination's channel (a thread's parent), the thread, and the readers limits
 over them at fire time (`rule_views.routine_origin`). A routine with no
 destination is stamped with its saved channel: the channel it was made in,
