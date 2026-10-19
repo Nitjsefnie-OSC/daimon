@@ -359,7 +359,9 @@ async def test_concurrent_dm_claims_serialize_and_wrong_owner_has_no_route(
         await finish_message(session, conversation=winner, history=[])
 
 
-async def test_discord_ignores_unselected_dms_without_platform_or_model_calls(db_session_factory):
+async def test_discord_answers_an_unselected_dm_once_without_guild_or_model_calls(
+    db_session_factory,
+):
     bot = MagicMock()
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
@@ -369,9 +371,12 @@ async def test_discord_ignores_unselected_dms_without_platform_or_model_calls(db
     message.channel = MagicMock(spec=discord.DMChannel)
     message.channel.id = 99
     message.channel.send = AsyncMock()
-    await DirectMessageCog(bot).on_message(message)
+    cog = DirectMessageCog(bot)
+    await cog.on_message(message)
+    await cog.on_message(message)
     bot.get_guild.assert_not_called()
-    message.channel.send.assert_not_called()
+    message.channel.send.assert_awaited_once()
+    assert "/dm-me" in message.channel.send.await_args.args[0]
 
 
 async def test_discord_refuses_a_departed_member_before_running_a_dm(
