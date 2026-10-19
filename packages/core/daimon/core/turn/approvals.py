@@ -649,7 +649,11 @@ def headless_tool_confirmation(
         return AutoApprove()
     return PolicyApproval(
         decide=unattended_decider(
-            policy, trusted_servers=trusted_servers, rules_for=rules_for, daimon_rules=daimon_rules
+            policy,
+            trusted_servers=trusted_servers,
+            rules_for=rules_for,
+            daimon_rules=daimon_rules,
+            annotations_for=annotations_for,
         )
     )
 

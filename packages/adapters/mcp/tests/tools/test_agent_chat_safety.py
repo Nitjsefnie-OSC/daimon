@@ -9,9 +9,11 @@ or after a restart. The deciders, reducer and gate are the real ones.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -925,7 +927,9 @@ async def test_trusted_annotation_seam_feeds_the_unattended_verdict(
 
     monkeypatch.setattr(safety, "_annotations_for", lambda *_: lookup)
     fake = FakeSession(tool=tool)
-    runtime = _runtime(fake, factory, _ENABLED)
+    runtime = _runtime(
+        fake, factory, ToolSafetyPolicy(enabled=True, trusted_annotations=("linear",))
+    )
     await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
     await _settle(runtime)
     assert looked_up == [f"linear/{tool}"]
@@ -939,3 +943,93 @@ async def test_no_annotations_are_trusted_without_the_lookup(
     fake = FakeSession()
     runtime = _runtime(fake, factory, _ENABLED)
     assert safety._annotations_for(runtime, _auth(), fake.model) is None  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("entry", ["start", "continue", "resume"])
+@pytest.mark.parametrize(
+    ("trusted", "tool", "destructive", "expected"),
+    [
+        (True, "memory_flag_list", False, "allow"),
+        (False, "create_issue", False, "deny"),
+        (True, "memory_flag_list", True, "deny"),
+    ],
+)
+async def test_session_annotations_over_fake_http(
+    entry: str,
+    trusted: bool,
+    tool: str,
+    destructive: bool,
+    expected: str,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.mcp_oauth import discovery
+
+    fake = FakeSession(script=[[("linear", tool, {})], [("linear", tool, {})]])
+    runtime = _runtime(
+        fake,
+        factory,
+        ToolSafetyPolicy(enabled=True, trusted_annotations=("linear",) if trusted else ()),
+    )
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == _LINEAR_URL
+        assert request.headers.get("authorization") is None
+        body = json.loads(request.content)
+        seen.append(body["method"])
+        if body["method"] == "notifications/initialized":
+            return httpx.Response(204)
+        result = (
+            {
+                "tools": [
+                    {
+                        "name": tool,
+                        "annotations": {"readOnlyHint": True, "destructiveHint": destructive},
+                    }
+                ]
+            }
+            if (body["method"] == "tools/list")
+            else {}
+        )
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    original = httpx.AsyncClient
+
+    def client(**kwargs: Any) -> httpx.AsyncClient:
+        return original(transport=httpx.MockTransport(handle), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setattr(discovery, "assert_public_https_url", lambda *a, **k: None)
+    if entry == "resume":
+        boundary = fake.pause()
+        await _record(factory, boundary)
+        _restart()
+        await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    elif entry == "start":
+        await _start(runtime, fake, _auth())
+    else:
+        await _continue_turn_impl(runtime, _auth(), _SESSION, "hi")
+    await _settle(runtime)
+    assert [c["result"] for c in fake.confirmations] == [expected, expected]
+    assert seen.count("tools/list") == int(trusted)
+
+
+def test_annotation_credentials_use_the_sessions_agent(
+    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSession()
+    runtime = _runtime(
+        fake, factory, ToolSafetyPolicy(enabled=True, trusted_annotations=("linear",))
+    )
+    token_builder = MagicMock()
+    monkeypatch.setattr(safety, "agent_mcp_token_for", token_builder)
+    lookup_builder = MagicMock()
+    monkeypatch.setattr(safety, "mcp_annotation_lookup", lookup_builder)
+    # An agent key can belong to another agent than the session being continued.
+    auth = replace(_auth(), agent_id=uuid.uuid4())
+    safety._annotations_for(runtime, auth, fake.model)  # pyright: ignore[reportPrivateUsage]
+    token_builder.assert_called_once_with(
+        factory, fernet=runtime.fernet, tenant_id=_TENANT_ID, agent_id=_AGENT_UUID
+    )
+    assert lookup_builder.call_args.kwargs["server_urls"] == {"linear": _LINEAR_URL}

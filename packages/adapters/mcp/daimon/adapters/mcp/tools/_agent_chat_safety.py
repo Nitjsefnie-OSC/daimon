@@ -34,6 +34,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
 )
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.stores import session_settle_state
 from daimon.core.turn.approvals import (
     AnnotationLookup,
@@ -146,9 +148,21 @@ def _public_url(runtime: McpRuntime) -> str | None:
 def _annotations_for(
     runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession
 ) -> AnnotationLookup | None:
-    """Operator-trusted MCP hints for `session`'s calls; none on this build."""
-    del runtime, auth, session
-    return None
+    """Read only trusted catalogues from this session, using its agent's credential."""
+    policy = runtime.settings.tool_safety
+    if not policy.enabled or not policy.trusted_annotations:
+        return None
+    return mcp_annotation_lookup(
+        server_urls={
+            s.name: s.url for s in session.agent.mcp_servers if s.name in policy.trusted_annotations
+        },
+        token_for=agent_mcp_token_for(
+            runtime.session_factory,
+            fernet=runtime.fernet,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=session.agent.id),
+        ),
+    )
 
 
 @dataclass
@@ -234,10 +248,15 @@ async def _watch(
 ) -> bool:
     """True once the turn ended; False if it was left paused (it stays gated)."""
     answered: set[str] = set()
+    annotations_for: AnnotationLookup | None = None
+    annotations_bound = False
     try:
         async with asyncio.timeout(TURN_CEILING_S):
             while True:
                 session = await retrieve_session(runtime.client, handle, scope=mcp_scope(auth))
+                if not annotations_bound:
+                    annotations_for = _annotations_for(runtime, auth, session)
+                    annotations_bound = True
                 if session.status == "terminated" or session.archived_at is not None:
                     return True
                 if session.status == "idle":
@@ -249,7 +268,9 @@ async def _watch(
                     stop = turn.state.stop_reason
                     ids = pending_confirmation_ids(stop, confirmed=turn.confirmed | answered)
                     if ids:
-                        await _answer(runtime, auth, session, turn, ids, rules_channel_id)
+                        await _answer(
+                            runtime, auth, session, turn, ids, rules_channel_id, annotations_for
+                        )
                         answered.update(ids)
                     elif stop is not None and stop.type != "requires_action":
                         if answered:
@@ -269,6 +290,7 @@ async def _answer(
     turn: _Turn,
     ids: list[str],
     rules_channel_id: str | None,
+    annotations_for: AnnotationLookup | None,
 ) -> None:
     posture = unattended_posture(
         runtime.settings.tool_safety,
@@ -277,7 +299,7 @@ async def _answer(
         session_factory=runtime.session_factory,
         tenant_id=auth.tenant_id,
         channel_id=rules_channel_id,
-        annotations_for=_annotations_for(runtime, auth, session),
+        annotations_for=annotations_for,
     )
     decisions = [
         (call.tool_use_id, await posture.decide(call)) for call in tool_calls_for(turn.state, ids)
