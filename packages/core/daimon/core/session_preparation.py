@@ -909,6 +909,12 @@ async def _prepare_session_for_turn_locked(
             recorded=recorded,
             tool_safety=deps.tool_safety,
             public_url=deps.public_url,
+            requires_chat_session=(
+                admission.shared_owner is None
+                and deps.mcp.public_url is not None
+                and deps.mcp.jwt_secret is not None
+                and any(server.name == "daimon-mcp" for server in admission.agent.mcp_servers)
+            ),
             memory_read_only=admission.memory_read_only,
             asks_before_publishing=admission.asks_before_publishing,
             confirmed_tools=confirmed_tools_for_turn(deps),

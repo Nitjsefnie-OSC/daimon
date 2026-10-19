@@ -68,6 +68,7 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
             role=Role.USER,
             now=now,
             expires_at=now + dt.timedelta(minutes=-1 if origin_kind == "expired" else 10),
+            chat_session_id="test-session",
         )
     router = MARouter()
     router.add_agent_list(
@@ -106,6 +107,7 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
         platform=platform,
         is_admin=caller == "admin",
         chat_agent_id=executing,
+        chat_session_id="test-session",
     )
     if caller.endswith("key"):
         auth = replace(
@@ -180,6 +182,7 @@ async def test_agent_reads_withhold_setup_details_from_non_admin(
             role=Role.USER,
             now=now,
             expires_at=now + dt.timedelta(minutes=10),
+            chat_session_id="test-session",
         )
     router = MARouter()
     router.add_agent_list(
@@ -206,6 +209,7 @@ async def test_agent_reads_withhold_setup_details_from_non_admin(
         platform="slack",
         is_admin=admin,
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared"),
+        chat_session_id="test-session",
     )
     origin_id = str(origin.id)
 
@@ -294,6 +298,7 @@ async def test_routing_explanation_hides_draft_targets_and_other_threads_from_me
             role=Role.USER,
             now=now,
             expires_at=now + dt.timedelta(minutes=10),
+            chat_session_id="test-session",
         )
     router = MARouter()
     router.add_agent_list(
@@ -315,6 +320,7 @@ async def test_routing_explanation_hides_draft_targets_and_other_threads_from_me
         platform=platform,
         is_admin=admin,
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_setup"),
+        chat_session_id="test-session",
     )
     if deleted:
         with pytest.raises(ToolError, match="deleted") as error:

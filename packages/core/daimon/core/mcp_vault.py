@@ -29,7 +29,7 @@ from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_r
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
 from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
-from daimon.core.mcp_server_url import same_mcp_url
+from daimon.core.mcp_server_url import is_session_mcp_url, same_mcp_url
 from daimon.core.mux_compat import (
     create_vault,
     delete_credential,
@@ -167,6 +167,7 @@ async def chat_mcp_credential(
     public_url: str,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
 ) -> dict[str, Any]:
     """Build one vault payload and register its individually revocable JWT."""
     token, jti, expires_at = await mint_chat_mcp_token(
@@ -176,12 +177,15 @@ async def chat_mcp_credential(
         secret=jwt_secret,
         now=now,
         slack_turn_context_id=slack_turn_context_id,
+        chat_session_id=chat_session_id,
     )
     metadata = {
         "daimon_chat_identity": str(agent_id),
         "daimon_chat_jti": str(jti),
         "daimon_chat_expires_at": expires_at.isoformat(),
     }
+    if chat_session_id is not None:
+        metadata["daimon_chat_session"] = chat_session_id
     if slack_turn_context_id is not None:
         metadata["daimon_chat_context"] = str(slack_turn_context_id)
     return {
@@ -202,6 +206,7 @@ async def _refresh_chat_credential_locked(
     now: dt.datetime,
     scope: Scope,
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
     preserve_context: bool = False,
     registered_payload: dict[str, Any] | None = None,
     create_missing: bool = True,
@@ -212,10 +217,14 @@ async def _refresh_chat_credential_locked(
         if isinstance(cred.auth, BetaManagedAgentsEnvironmentVariableAuthResponse):
             continue
         if not same_server_url(cred.auth.mcp_server_url, public_url):
-            continue
+            if not (preserve_context and is_session_mcp_url(cred.auth.mcp_server_url, public_url)):
+                continue
+            public_url = cred.auth.mcp_server_url
         if cred.auth.type != "static_bearer":
             return  # A person's OAuth credential retains its slot and authority.
         metadata = cred.metadata or {}
+        if preserve_context:
+            chat_session_id = metadata.get("daimon_chat_session")
         if preserve_context and metadata.get("daimon_chat_context") is not None:
             slack_turn_context_id = uuid.UUID(metadata["daimon_chat_context"])
         raw_jti = metadata.get("daimon_chat_jti")
@@ -237,6 +246,7 @@ async def _refresh_chat_credential_locked(
             and row.expires_at is not None
             and row.expires_at > now + CHAT_TOKEN_REFRESH_MARGIN
             and metadata.get("daimon_chat_identity") == str(agent_id)
+            and metadata.get("daimon_chat_session") == chat_session_id
             and metadata.get("daimon_chat_context")
             == (None if slack_turn_context_id is None else str(slack_turn_context_id))
         ):
@@ -255,6 +265,7 @@ async def _refresh_chat_credential_locked(
             public_url=public_url,
             now=now,
             slack_turn_context_id=slack_turn_context_id,
+            chat_session_id=chat_session_id,
         )
         # A running session can observe the provider write before its response
         # returns. Commit first, then re-lock and re-read so another refresh or
@@ -272,6 +283,7 @@ async def _refresh_chat_credential_locked(
             now=now,
             scope=scope,
             slack_turn_context_id=slack_turn_context_id,
+            chat_session_id=chat_session_id,
             registered_payload=payload,
             create_missing=create_missing,
         )
@@ -281,7 +293,11 @@ async def _refresh_chat_credential_locked(
         await store_credential(client, vault_id, registered_payload, scope=scope)
         return
     registered_payload["metadata"] = {
-        **{key: value for key, value in metadata.items() if key != "daimon_chat_context"},
+        **{
+            key: value
+            for key, value in metadata.items()
+            if key not in {"daimon_chat_context", "daimon_chat_session"}
+        },
         **registered_payload["metadata"],
     }
     # Update in place: no empty slot and no cross-thread delete/recreate race.
@@ -358,9 +374,12 @@ async def _ensure_agent_mcp_vault_locked(
     public_url: str,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
     scope: Scope,
 ) -> str:
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
+    if chat_session_id is not None:
+        display_name += f":session:{chat_session_id}"
     if slack_turn_context_id is not None:
         display_name += f":slack-turn:{slack_turn_context_id}"
     oldest = await _find_vault_by_name(client, display_name=display_name)
@@ -376,6 +395,7 @@ async def _ensure_agent_mcp_vault_locked(
             now=now,
             scope=scope,
             slack_turn_context_id=slack_turn_context_id,
+            chat_session_id=chat_session_id,
         )
         return oldest.id
     vault = await create_vault(client, display_name, scope=scope)
@@ -387,6 +407,7 @@ async def _ensure_agent_mcp_vault_locked(
         public_url=public_url,
         now=now,
         slack_turn_context_id=slack_turn_context_id,
+        chat_session_id=chat_session_id,
     )
     await store_credential(client, vault.id, payload, scope=scope)
     return vault.id
@@ -412,9 +433,15 @@ async def ensure_agent_mcp_vault(
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
     scope: Scope | None = None,
 ) -> str:
     """Return the ``ma_vault_id`` for this agent's daimon-mcp vault.
+
+    `chat_session_id` selects an isolated identity vault and signed session grant.
+    Its URL has a distinct session selector; personal OAuth stays in the shared
+    vault and is mounted separately. It cannot lend origin authority to another
+    session of the same account and agent.
 
     A Slack DM execution ID selects a separate vault namespace and signed claim;
     it never modifies the shared agent vault. Only sessions for that logical turn
@@ -468,6 +495,7 @@ async def ensure_agent_mcp_vault(
             public_url=public_url,
             now=now,
             slack_turn_context_id=slack_turn_context_id,
+            chat_session_id=chat_session_id,
             scope=scope,
         )
 

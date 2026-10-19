@@ -133,6 +133,7 @@ def _auth_identity(
         external_id=external_id,
         platform_user_id=platform_user_id,
         is_admin=is_admin,
+        chat_session_id="test-session",
     )
 
 
@@ -420,6 +421,7 @@ async def test_request_agent_key_creates_row_and_posts_button(
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
     before = datetime.now(UTC)
     posted: dict[str, Any] = {}
@@ -492,6 +494,7 @@ async def test_request_mcp_token_creates_row_and_posts_button(
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
     posted: dict[str, Any] = {}
     _patch_successful_post(monkeypatch, message_id="9202", posted=posted)
@@ -547,6 +550,7 @@ async def test_request_mcp_oauth_creates_an_oauth_row_and_posts_the_connect_card
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
     posted: dict[str, Any] = {}
     _patch_successful_post(monkeypatch, message_id="9303", posted=posted)
@@ -715,6 +719,7 @@ async def test_request_agent_key_succeeds_for_non_admin_caller(
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
     _patch_successful_post(monkeypatch, message_id="9203")
 
@@ -859,6 +864,7 @@ async def test_request_agent_key_member_allowlist_but_admin_may_add_any_name(
             role=admin.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
     _patch_successful_post(monkeypatch, message_id="9301", posted={})
     result = await _request_agent_key_impl(
@@ -923,6 +929,7 @@ async def test_request_agent_key_rejects_unknown_agent(
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
     with pytest.raises(ToolError, match="missing"):
         await _request_agent_key_impl(
@@ -997,6 +1004,7 @@ async def test_request_agent_key_raises_when_button_post_fails(
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
 
     with pytest.raises(ToolError, match="posting the button failed"):
@@ -1134,6 +1142,7 @@ async def test_request_agent_key_posts_slack_button_carrying_the_token(
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
 
     with aioresponses() as m:
@@ -1221,6 +1230,7 @@ async def _seed_origin(
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
     return origin.id
 
@@ -1864,6 +1874,7 @@ async def test_second_slack_request_in_same_thread_supersedes_the_live_one_and_e
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
 
     with aioresponses() as m:
@@ -1975,6 +1986,7 @@ async def _teams_setup(
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
     return runtime, auth, str(origin.id), requests
 
@@ -2364,6 +2376,7 @@ async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
             role=auth.role,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
     _patch_successful_post(monkeypatch, message_id="9301")
     common: dict[str, Any] = {
@@ -2455,6 +2468,7 @@ async def test_an_admins_dm_turn_posts_a_credential_card_for_a_pinned_agent_into
             role=Role.ADMIN,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
 
     im = {"ok": True, "channel": {"id": "D0ADMIN1", "is_im": True, "user": _SLACK_USER_ID}}

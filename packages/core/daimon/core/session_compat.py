@@ -203,7 +203,11 @@ def identity_change_reasons(
             and recorded.personal_memory_store_id != desired.personal_memory_store_id,
             "personal_memory_store",
         ),
-        (recorded.vault_id != desired.vault_id, "vault"),
+        (
+            recorded.vault_id != desired.vault_id
+            or (desired.chat_session_id is not None and recorded.chat_session_id is None),
+            "vault",
+        ),
     )
     return tuple(reason for differs, reason in checks if differs)
 

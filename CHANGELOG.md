@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Native OpenAI sessions install isolated MCP session grants before creation, bind them to each executing origin on reuse, and revoke origin authority when the turn ends. Child preparation cannot inherit a parent origin grant.
+
+- Agent chat and hub mutations require a session opened on that headless surface. Same-account platform sessions and legacy sessions without proven headless provenance cannot be continued, cancelled or archived through it. Unauthorized callers are refused before waiting on a session mutation fence.
+
 - Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
 
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
@@ -30,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Origin-based MCP actions require the signed grant of the calling session.
+  Routines and timers cannot borrow a concurrent human origin, and empty origin
+  IDs refuse. Human handoffs retain their approval surfaces.
+
 - Fleet workers and unattended wakes re-gate Managed Agents sessions before every
   confirmation batch. Runtimes without session reads refuse unattended
   confirmations with a plain reason, including when tool safety is off.
@@ -49,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Continuing a routine session through the CLI, MCP or a checkpoint retains its conversation channel rules; its private transcript stamp no longer makes it execute as a DM.
 
-- Cancelling an unattended decision or reaching its turn ceiling leaves pending calls paused and interrupts the session; cleanup never sends confirmations after a failed or cancelled safety gate.
+- Stopping or cancelling an unattended decision, or reaching its turn ceiling, leaves pending calls paused and interrupts the session without sending confirmations, including on runtimes without a confirmation gate. Cancellation during decision-task or card cleanup also completes bounded interrupt cleanup before propagating. Normal decisions on those runtimes still refuse unattended confirmations.
 
 - Handoffs created by unattended wakes retain unattended tool safety on Discord, Slack and Teams; queueing a handoff no longer grants human approval surfaces.
 

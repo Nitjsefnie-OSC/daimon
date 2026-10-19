@@ -53,6 +53,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
     BetaManagedAgentsGitHubRepositoryResource,
 )
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
+from daimon.core.mcp_server_url import session_mcp_url
 from daimon.core.model_presets import model_choice_id
 from daimon.core.tool_safety import (
     ToolSafetyPolicy,
@@ -117,6 +118,7 @@ class SessionSnapshot(BaseModel):
         # stored and compared JSON unchanged while they are empty.
         data: dict[str, Any] = handler(self)
         for name in (
+            "chat_session_id",
             "unavailable_repos",
             "unavailable_notice_pending",
             "unavailable_notice_sent",
@@ -171,6 +173,7 @@ class SessionSnapshot(BaseModel):
     # session only to add it.
     personal_memory_store_id: str | None = None
     vault_id: str | None
+    chat_session_id: str | None = None
 
     # Mutable axis — a difference here can be applied to the live session.
     tools_sha256: str
@@ -458,6 +461,7 @@ def _snapshot_from_session(
         memory_read_only=memory_read_only,
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
+        chat_session_id=session.metadata.get("daimon_chat_session_id"),
         tools_sha256=hash_tools(agent.tools),
         mcp_servers_sha256=hash_mcp_servers(agent.mcp_servers),
         env_sha256=env_sha256,
@@ -531,6 +535,7 @@ def session_mcp_servers(
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
     confirmed_tools: frozenset[str] = frozenset(),
+    chat_session_id: str | None = None,
 ) -> Sequence[BetaManagedAgentsMCPServerURLDefinition]:
     """The MCP servers a session for this caller runs, a foreign `daimon-mcp` re-pointed."""
     visible = visible_mcp_servers(agent, hidden_mcp_server_names)
@@ -540,7 +545,15 @@ def session_mcp_servers(
         public_url=public_url,
         confirmed_tools=confirmed_tools,
     )
-    return visible if healed is None else _MCP_SERVERS.validate_python(healed)
+    servers = visible if healed is None else _MCP_SERVERS.validate_python(healed)
+    if public_url is not None and chat_session_id is not None:
+        return [
+            server.model_copy(update={"url": session_mcp_url(public_url, chat_session_id)})
+            if server.name == "daimon-mcp"
+            else server
+            for server in servers
+        ]
+    return servers
 
 
 def desired_snapshot(
@@ -559,6 +572,7 @@ def desired_snapshot(
     repo_branch: str | None,
     memory_store_id: str | None,
     vault_id: str | None,
+    chat_session_id: str | None = None,
     env_file_id: str | None = None,
     memory_read_only: bool = False,
     personal_memory_store_id: str | None = None,
@@ -611,6 +625,7 @@ def desired_snapshot(
         and (memory_store_id is not None or personal_memory_store_id is not None),
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id,
+        chat_session_id=chat_session_id,
         tools_sha256=hash_tools(
             session_tools(
                 agent,
@@ -629,6 +644,7 @@ def desired_snapshot(
                 tool_safety=tool_safety,
                 public_url=public_url,
                 confirmed_tools=confirmed_tools,
+                chat_session_id=chat_session_id,
             )
         ),
         env_sha256=env_sha256,

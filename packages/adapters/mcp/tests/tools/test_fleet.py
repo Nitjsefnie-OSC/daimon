@@ -67,6 +67,7 @@ AUTH = AuthIdentity(
     platform_user_id="requester",
     chat_agent_id=uuid.UUID(int=9005),
     token_jti=uuid.UUID(int=9006),
+    chat_session_id="test-session",
 )
 NAMES = {
     "fleet_spawn",
@@ -683,6 +684,7 @@ async def test_installed_bridge_requires_the_exact_active_origin(
             role=Role.USER,
             expires_at=now + timedelta(minutes=-1 if fault == "expired" else 10),
             now=now,
+            chat_session_id="test-session",
         )
     root = replace(
         root,
@@ -749,6 +751,7 @@ async def test_default_bridge_collects_the_original_run_from_a_real_completion_f
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
         keep_fleet_root=True,
+        chat_session_id="test-session",
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
         value = (*root_turn[:4], origin, *root_turn[5:])
@@ -780,6 +783,13 @@ async def test_default_bridge_collects_the_original_run_from_a_real_completion_f
     )
     async with wake_frame(value) as (intent, current):
         await run_root_input(value, intent_id=intent.id, completion=row)
+        # The test invokes MCP after the fake driver returns. Supply the
+        # current execution grant that the real prepared driver holds while
+        # an MCP call is in flight; retained root origins remain ungranted.
+        async with deps.sessionmaker.begin() as db:
+            await turn_origins.bind_origin_session(
+                db, origin_id=current.id, chat_session_id=caller.chat_session_id
+            )
         assert current.id != original.fleet.origin_id
         run, _ = await fleet.run_status(
             deps.sessionmaker, tenant_id=origin.tenant_id, run_id=original.fleet.run_id
@@ -804,7 +814,14 @@ async def test_default_bridge_collects_the_original_run_from_a_real_completion_f
             requests = tuple(transport.requests)
             for execution in (origin, current):
                 for tool in (bridge.status, bridge.collect):
-                    with pytest.raises(ToolError, match="root_unavailable"):
+                    with pytest.raises(
+                        ToolError,
+                        match=(
+                            "root_unavailable"
+                            if execution.id == current.id
+                            else "active_origin_required"
+                        ),
+                    ):
                         await tool(
                             caller,
                             run_id=original.fleet.run_id,

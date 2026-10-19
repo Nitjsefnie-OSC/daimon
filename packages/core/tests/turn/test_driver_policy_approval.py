@@ -1298,3 +1298,161 @@ async def test_unattended_stops_leave_calls_paused_and_interrupt(replay: bool, s
         for task in asyncio.all_tasks()
         if task.get_name().startswith("turn.") and not task.done()
     ]
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
+@pytest.mark.parametrize("stop", ["stop", "cancel", "ceiling", "normal"])
+async def test_ungated_unattended_abort_never_answers_pending_calls(
+    replay: bool, stop: str
+) -> None:
+    from daimon.core.turn.driver import unattended_sends
+    from daimon.core.turn.posture import ToolConfirmationResult
+    from daimon.core.turn.unattended import refuse_ungated_confirmation
+
+    fa = FakeAnthropic()
+    if replay:
+        _replay_script(fa)
+    else:
+        _script(fa, ("tu_write", "linear", "create_issue"))
+    fa.beta.sessions.events.stream_scripts.append(
+        [YieldEvent(make_status_idle(event_id="interrupt_ack", stop_reason=make_end_turn()))]
+    )
+    entered = asyncio.Event()
+    cancel = asyncio.Event()
+
+    async def decide(call: ToolCall) -> ToolConfirmationResult:
+        entered.set()
+        if stop != "normal":
+            await asyncio.Event().wait()
+        return await refuse_ungated_confirmation(call)
+
+    async def run():
+        # The actual non-gateable prepared context: there is no refresh gate,
+        # and the normal decision is always the plain refusal above.
+        with unattended_sends(None):
+            return await run_turn(
+                anthropic=_cast(fa),
+                session_id="sess_1",
+                user_message="wake up",
+                lifecycle=RecordingLifecycle(),
+                cancel=cancel,
+                render_interval_s=0.001,
+                interrupt_timeout_s=0.05,
+                billing=_EXEMPT,
+                tool_confirmation=PolicyApproval(decide=decide),
+                deadline=datetime.now(UTC) + timedelta(seconds=0.3) if stop == "ceiling" else None,
+            )
+
+    turn = asyncio.create_task(run())
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    if stop == "stop":
+        cancel.set()
+    elif stop == "cancel":
+        turn.cancel()
+    if stop == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+    else:
+        state = await asyncio.wait_for(turn, timeout=3)
+        if stop == "ceiling":
+            assert state.error is not None and state.error.kind == "ceiling"
+    if stop == "normal":
+        confirmations = _confirmations(fa)
+        assert confirmations and all(event["result"] == "deny" for event in confirmations)
+        assert all("cannot refresh" in str(event["deny_message"]) for event in confirmations)
+    else:
+        assert _confirmations(fa) == []
+        assert any(
+            event["type"] == "user.interrupt"
+            for _, batch in fa.beta.sessions.events.sent_events
+            for event in batch
+        ), "every unattended abort interrupts, whether or not a gate exists"
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name().startswith("turn.") and not task.done()
+    ]
+
+
+@pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
+async def test_outside_cancel_during_stop_drain_preserves_decider_cleanup(
+    monkeypatch: pytest.MonkeyPatch, replay: bool
+) -> None:
+    from daimon.core.turn import driver
+    from daimon.core.turn.posture import ToolConfirmationResult
+
+    fa = FakeAnthropic()
+    if replay:
+        _replay_script(fa)
+    else:
+        _script(fa, ("tu_write", "linear", "create_issue"))
+    fa.beta.sessions.events.stream_scripts.append(
+        [YieldEvent(make_status_idle(event_id="interrupt_ack", stop_reason=make_end_turn()))]
+    )
+    entered = asyncio.Event()
+    draining = asyncio.Event()
+    abort_joined = asyncio.Event()
+    release = asyncio.Event()
+    cancel = asyncio.Event()
+    retired = False
+    original_bounded = driver._bounded
+
+    async def bounded(task: asyncio.Task[object], *, what: str, session_id: str) -> None:
+        current = asyncio.current_task()
+        if (
+            what == "decide_task_join"
+            and current is not None
+            and current.get_name() == "turn.decision_abort"
+        ):
+            abort_joined.set()
+        await original_bounded(task, what=what, session_id=session_id)
+
+    monkeypatch.setattr(driver, "_bounded", bounded)
+
+    async def decide(call: ToolCall) -> ToolConfirmationResult:
+        nonlocal retired
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            draining.set()
+            await release.wait()
+            retired = True
+            raise
+        return ToolConfirmationResult(allow=False)
+
+    async def run() -> None:
+        with driver.unattended_sends(None):
+            await run_turn(
+                anthropic=_cast(fa),
+                session_id="sess_1",
+                user_message="wake up",
+                lifecycle=RecordingLifecycle(),
+                cancel=cancel,
+                render_interval_s=0.001,
+                interrupt_timeout_s=0.05,
+                billing=_EXEMPT,
+                tool_confirmation=PolicyApproval(decide=decide),
+            )
+
+    turn = asyncio.create_task(run())
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    cancel.set()
+    await asyncio.wait_for(draining.wait(), timeout=2)
+    turn.cancel()
+    await asyncio.wait_for(abort_joined.wait(), timeout=2)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    assert retired, "outside cancellation must not cancel the decider's cleanup again"
+    assert _confirmations(fa) == []
+    assert any(
+        event["type"] == "user.interrupt"
+        for _, batch in fa.beta.sessions.events.sent_events
+        for event in batch
+    )
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name().startswith("turn.") and not task.done()
+    ]

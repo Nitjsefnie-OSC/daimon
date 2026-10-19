@@ -25,6 +25,7 @@ async def test_a_missing_active_origin_never_resolves_or_previews(
         is_admin=True,
         platform="discord",
         platform_user_id="123",
+        chat_session_id="test-session",
     )
     runtime = MagicMock()
     origin = AsyncMock(return_value=None)
@@ -100,6 +101,7 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             role=Role.ADMIN,
             now=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            chat_session_id="test-session",
         )
     tools = [
         {
@@ -185,6 +187,7 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             platform="discord",
             platform_user_id="123",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_owned"),
+            chat_session_id="test-session",
         )
         service = make_backend_service(sessions, settings.turn)
         policy = await service.tenant_policy(tenant.id)

@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from daimon.core._models import TurnOrigin
 from daimon.core.stores.domain import Role, TurnOriginRow
-from sqlalchemy import CursorResult, delete, func, select, update
+from sqlalchemy import CursorResult, delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -29,12 +29,14 @@ async def create_origin(
     now: datetime,
     is_setup: bool = False,
     attended: bool = True,
+    chat_session_id: str | None = None,
 ) -> TurnOriginRow:
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
         id=uuid.uuid4(),
         is_setup=is_setup,
         attended=attended,
+        chat_session_id=chat_session_id,
         created_at=now,
         tenant_id=tenant_id,
         account_id=account_id,
@@ -119,6 +121,33 @@ async def update_origin_target(
     return TurnOriginRow.model_validate(origin)
 
 
+async def bind_origin_session(
+    session: AsyncSession,
+    *,
+    origin_id: uuid.UUID,
+    chat_session_id: str | None,
+    attended: bool | None = None,
+) -> None:
+    """Bind the live execution to its server-prepared session's signed grant."""
+    if chat_session_id is not None:
+        # Session reuse after a crashed turn must not retain its attended origin.
+        # Serialize binders for the grant so two origins cannot both gain it.
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"turn-origin-session:{chat_session_id}"},
+        )
+        await session.execute(
+            update(TurnOrigin)
+            .where(TurnOrigin.chat_session_id == chat_session_id, TurnOrigin.id != origin_id)
+            .values(chat_session_id=None)
+        )
+    values: dict[str, Any] = {"chat_session_id": chat_session_id}
+    if attended is not None:
+        # Binding can narrow trusted dispatch provenance, never upgrade it.
+        values["attended"] = TurnOrigin.attended & attended
+    await session.execute(update(TurnOrigin).where(TurnOrigin.id == origin_id).values(**values))
+
+
 async def delete_origin(
     session: AsyncSession,
     *,
@@ -129,7 +158,9 @@ async def delete_origin(
         await session.execute(
             update(TurnOrigin)
             .where(TurnOrigin.id == origin_id)
-            .values(expires_at=func.least(TurnOrigin.expires_at, retain_until))
+            .values(
+                expires_at=func.least(TurnOrigin.expires_at, retain_until), chat_session_id=None
+            )
         )
         return
     await session.execute(delete(TurnOrigin).where(TurnOrigin.id == origin_id))

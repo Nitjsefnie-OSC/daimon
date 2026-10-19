@@ -2910,6 +2910,14 @@ async def test_missing_legacy_source_is_not_retrieved_again_for_memory_replaceme
     assert len(transport.paths("GET", "/v1/sessions/sess_missing")) == 1
 
 
+def _mark_headless_handle(transport, session_id):
+    """The handle variant models an agent-chat-created session, with no human origin."""
+    native = transport.state.sessions[session_id]
+    transport.state.sessions[session_id] = native.model_copy(
+        update={"metadata": {**(native.metadata or {}), "daimon_agent_chat": "true"}}
+    )
+
+
 @pytest.mark.parametrize("entry", ["handle", "prepared"])
 async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     db_session, db_nullpool_engine, db_schema, monkeypatch, entry
@@ -2992,6 +3000,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
 
     async def send(index):
         if entry == "handle":
+            _mark_headless_handle(transport, first.ma_session_id)
             return await _continue_turn_impl(
                 runtime,
                 auth,
@@ -3168,6 +3177,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
         prepared = send_turns[index]
         message = f"send during {phase} {index}"
         if entry == "handle":
+            _mark_headless_handle(transport, prepared.ma_session_id)
             return await _continue_turn_impl(
                 runtime, auth, prepared.ma_session_id, message, recheck=recheck
             )
@@ -3328,6 +3338,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         prepared = replacement_turns[index % 2] if retired else send_turns[index]
         message = f"send during {phase} {index}"
         if entry == "handle":
+            _mark_headless_handle(transport, prepared.ma_session_id)
             return await _continue_turn_impl(
                 runtime, auth, prepared.ma_session_id, message, recheck=recheck
             )
@@ -4148,19 +4159,6 @@ async def test_handoff_waits_for_an_inflight_handle_send(
     client = build_fake_anthropic(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
-    runtime = SimpleNamespace(
-        client=client,
-        session_factory=factory,
-        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
-    )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="discord",
-        platform_user_id="user-1",
-        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
-    )
     entered, release = asyncio.Event(), asyncio.Event()
     real_send = client.beta.sessions.events.send
 
@@ -4174,13 +4172,20 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         return result
 
     monkeypatch.setattr(client.beta.sessions.events, "send", paused_send)
-    # The MCP send uses a single-attempt copy of the client; keep it the patched one.
-    monkeypatch.setattr(
-        "daimon.adapters.mcp.tools.agent_chat.single_attempt", lambda runtime: runtime.client
-    )
-    sending = asyncio.create_task(
-        _continue_turn_impl(runtime, auth, first.ma_session_id, "in flight")
-    )
+    from daimon.core.session_mutation import session_mutation_fence
+
+    async def platform_send():
+        # A human session is driven by its admitted platform driver, not by an
+        # external MCP handle. Exercise the same send/replacement fence here.
+        async with session_mutation_fence(factory, first.ma_session_id):
+            await client.beta.sessions.events.send(
+                first.ma_session_id,
+                events=[
+                    {"type": "user.message", "content": [{"type": "text", "text": "in flight"}]}
+                ],
+            )
+
+    sending = asyncio.create_task(platform_send())
     replacing = None
     entered_wait = asyncio.create_task(entered.wait())
     try:
