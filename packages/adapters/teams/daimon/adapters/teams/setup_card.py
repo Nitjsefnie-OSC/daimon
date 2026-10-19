@@ -254,8 +254,7 @@ def details_card(
             else "No working repo"
         )
         lines.append(
-            "Open Connect GitHub to add or remove repos and choose a working repo, or ask "
-            f"{details.name} in chat."
+            f"To add or remove repos or choose a working repo, ask {details.name} in chat."
         )
         body.append(_text("\n".join(lines)))
     body += _detail_lists(details, page=page, expanded=expanded)

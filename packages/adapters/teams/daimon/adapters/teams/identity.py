@@ -272,6 +272,15 @@ def _without_reply_quotes(text: str) -> str:
     return "".join(kept)
 
 
+def display_bot_name(name: str | None) -> str | None:
+    """The bot's name as a person reads it: runs of whitespace collapsed, ends trimmed.
+
+    Teams can hand a name such as "Daimon  Staging " back with padding; None when
+    nothing is left."""
+    cleaned = " ".join((name or "").split())
+    return cleaned or None
+
+
 def strip_typed_name(text: str, name: str | None) -> str:
     """`text` without the typed "@<name>", its entities read as `_typed_text` reads them.
 
@@ -390,7 +399,7 @@ def parse_inbound(
         activity_id=activity.id,
         text=text,
         service_url=service_url,
-        bot_name=activity.recipient.name,
+        bot_name=display_bot_name(activity.recipient.name),
         files=files,
         team_id=team_id,
         team_group_id=canonical_uuid(team.aad_group_id) if team is not None else None,

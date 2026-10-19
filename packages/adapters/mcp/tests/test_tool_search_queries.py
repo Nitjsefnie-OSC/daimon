@@ -30,6 +30,7 @@ from daimon.core.config import (
     SlackSettings,
 )
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.platform_words import words_for
 from daimon.core.scope import TenantScopeRef
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role
@@ -360,8 +361,8 @@ async def test_member_default_agent_edit_refuses_with_admin_handoff(
         },
     )
     text = _result_text(called)
-    assert "research-bot" in text and "admin" in text and "workspace or server admin" in text, (
-        f"handoff must preserve the target and the server or workspace admin requirement: {text}"
+    assert "research-bot" in text and words_for(platform).admin in text, (
+        f"handoff must preserve the target and the platform's admin requirement: {text}"
     )
     assert "/agent-setup" not in text and "DAIMON_" not in text, (
         "refusal must not disclose deployment internals"

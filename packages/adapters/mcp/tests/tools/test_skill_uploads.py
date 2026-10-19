@@ -318,7 +318,7 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
 
     preview = await add()
     summary = preview.summary
-    assert "content_hash=" not in summary and "/agent-setup" in summary
+    assert "content_hash=" not in summary and "open helper and use Add skill" in summary
     assert "this conversation can't show one" in summary
     assert _NO_CARD_REASONS[where] in summary, "the preview names why no card can show"
     assert "turned off on this deployment" not in summary, "the deployment has cards on"
@@ -468,7 +468,7 @@ async def test_a_member_cannot_change_an_unbound_agent_or_a_default(
 ) -> None:
     world = await _world(db_session_factory)
     member = world.auth(admin=False)
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs an admin"):
         await _add_skill_impl(
             world.runtime, member, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
         )
@@ -481,7 +481,7 @@ async def test_a_member_cannot_change_an_unbound_agent_or_a_default(
             agent_name="helper",
             mode="agent",
         )
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs an admin"):
         await _add_skill_impl(
             world.runtime, member, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
         )
@@ -705,7 +705,7 @@ async def test_with_approval_cards_off_the_preview_says_the_deployment_turned_th
 
     preview = await add()
     summary = preview.summary
-    assert "/agent-setup" in summary and "content_hash=" not in summary
+    assert "open helper and use Add skill" in summary and "content_hash=" not in summary
     assert "approval cards are turned off on this deployment" in summary
     assert "tool_safety.enabled" in summary, "the operator is told which setting"
     assert "this conversation can't show one" not in summary
@@ -757,7 +757,7 @@ async def test_a_member_cannot_change_an_agent_only_a_thread_uses(
             responder_name="helper",
             kind="handoff",
         )
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs a server admin"):
         await _add_skill_impl(
             world.runtime,
             world.auth(admin=False, platform="discord"),
@@ -1101,7 +1101,7 @@ async def test_a_member_cannot_version_a_skill_a_default_fork_shares(
             mode="agent",
         )
 
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs a server admin"):
         await _preview_then_confirm(world, admin=False, skill_md=_MD + "More.\n")
     assert len(world.created) == 1, "nothing new was uploaded"
 
@@ -1305,7 +1305,7 @@ async def test_with_cards_off_a_member_still_cannot_add_to_a_shared_agent(
         )
     auth, origin = await _cards_off_turn(world, owned=False)
 
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs a server admin"):
         await _add_from(world, auth, origin)
     assert world.created == []
 

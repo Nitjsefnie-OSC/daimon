@@ -1789,6 +1789,7 @@ async def test_turn_tools_refuse_over_balance_tenant_before_creating_session(
         "tenant_id": str(tenant_id),
         "role": "user",
         "agent_id": str(agent_uuid),
+        "platform": "discord",
         "platform_user_id": "discord-user-over-balance",
         "client_id": "test",
     }

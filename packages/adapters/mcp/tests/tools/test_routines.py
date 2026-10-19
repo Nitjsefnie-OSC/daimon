@@ -1463,7 +1463,7 @@ async def test_create_routine_refuses_a_member_scheduling_another_projects_agent
     runtime = _runtime(committing_sessionmaker, client=client)
     member = _auth_identity(tenant_id=tenant.id, talking_to="ag_clientb")
 
-    with pytest.raises(ToolError, match="only a workspace or server admin can schedule it"):
+    with pytest.raises(ToolError, match="only a server admin can schedule it"):
         await _create_routine_impl(
             runtime,
             member,
@@ -1517,7 +1517,7 @@ async def test_update_routine_refuses_a_member_moving_it_to_another_projects_age
     runtime = _runtime(committing_sessionmaker, client=client)
     member = _auth_identity(tenant_id=tenant.id, talking_to="ag_clientb")
 
-    with pytest.raises(ToolError, match="only a workspace or server admin"):
+    with pytest.raises(ToolError, match="only a server admin"):
         await _update_routine_impl(
             runtime, member, routine_id=created.id, agent_name="acme-project"
         )

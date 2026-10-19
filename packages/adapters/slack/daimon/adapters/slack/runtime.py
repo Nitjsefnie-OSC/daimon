@@ -66,9 +66,7 @@ def resolve_bot_display_name(settings: Settings) -> str:
     return settings.slack.bot_display_name if settings.slack is not None else "daimon"
 
 
-SLACK_REFUSAL_NOUNS = RefusalNouns(
-    scope="workspace", admin="a workspace admin", billing="`/billing`"
-)
+SLACK_REFUSAL_NOUNS = RefusalNouns.for_platform("slack")
 
 
 def admission_refusal_message(

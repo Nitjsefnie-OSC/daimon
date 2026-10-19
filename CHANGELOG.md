@@ -50,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Each platform's own words.** Help cards, refusals, usage-limit and routine failure notices, the here card and admin-only tool results now take their nouns and commands from one table (`daimon.core.platform_words`): a Discord server admin and `/agent-setup`, a Slack workspace admin and `/agent-setup`, a Teams admin and `setup` in a 1:1 chat. Teams text no longer names `/agent-setup`, `/billing` or a server admin, and from a Discord DM a server-only command says to use it in a server channel. Command descriptions are identical on Discord, Slack and Teams; Discord's `/privacy` description no longer includes the bot's name.
+- **Teams `help` shows what works where it was sent.** A channel card lists the commands answered there and points to the 1:1 chat for `setup` and `support`, a group chat card also lists `new`, and the card no longer says to type `/`. The Teams app manifest's descriptions match the other platforms (manifest 0.6.2; re-uploading is optional).
+- **Teams first use.** Shorter install welcomes, with an **Open chat** button on the team welcome; the setup card points to the chat for GitHub changes instead of a button it doesn't have; a setup conversation in the 1:1 chat opens with "This chat is about…"; the bot's name no longer carries stray spaces.
+
 - The agent GitHub repo picker groups accounts and orgs, keeps selections across owners, and saves additions and removals together. A GitHub owner whose repos cannot be listed leaves other owners available; stale grants remain removable.
 
 - One agent can now use repos from several GitHub accounts or orgs (up to 12); each gets its own token covering exactly the granted repos.

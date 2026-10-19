@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..harness import seed_tenant
 
-_ADMIN_REQUIRED = "requires a workspace or server admin"
+_ADMIN_REQUIRED = "requires an admin"
 
 
 # ---------------------------------------------------------------------------

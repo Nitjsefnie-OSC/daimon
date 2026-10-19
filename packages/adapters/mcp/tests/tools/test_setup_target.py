@@ -344,9 +344,7 @@ async def test_model_change_uses_specialist_identity_and_retains_admin_gate(
         assert result.id == "agent_specialist", "setup changes the selected specialist"
         assert updates == ["/v1/agents/agent_specialist"], "Daimon is never mutated"
     else:
-        with pytest.raises(
-            ToolError, match="Changing 'specialist' needs a workspace or server admin"
-        ):
+        with pytest.raises(ToolError, match="Changing 'specialist' needs a server admin"):
             await _update_agent_impl(
                 runtime,
                 auth,

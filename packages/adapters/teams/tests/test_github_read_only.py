@@ -35,10 +35,8 @@ def test_teams_details_lists_repos_and_working_repo_without_grant_actions() -> N
     assert "Helper's repos" in rendered
     assert "owner/work" in rendered and "owner/library" in rendered
     assert "Working repo: owner/work" in rendered
-    assert (
-        "Open Connect GitHub to add or remove repos and choose a working repo, or ask Helper in chat."
-        in rendered
-    )
+    assert "To add or remove repos or choose a working repo, ask Helper in chat." in rendered
+    assert "Connect GitHub" not in rendered, "the Teams panel has no such button"
     assert "Add repos" not in rendered
     assert "Remove from" not in rendered
     assert "Turn off GitHub" not in rendered

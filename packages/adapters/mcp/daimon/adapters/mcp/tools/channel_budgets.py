@@ -26,6 +26,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.authz import Action
 from daimon.core.channel_budget import (
@@ -89,12 +90,13 @@ class ClearChannelBudgetResult:
     """False when the channel had no budget to clear."""
 
 
-_NEEDS_BUDGET_ADMIN = (
-    "Changing a channel's budget needs a workspace or server admin, and the caller is not "
-    "one; a channel's own admins can't change it either. Tell them who can make it and give "
-    "them a sentence that admin can say, preserving the requested action and channel. "
-    "Do not retry."
-)
+def _needs_budget_admin(auth: AuthIdentity) -> str:
+    return (
+        f"Changing a channel's budget needs {admin_noun(auth.platform)}, and the caller is not "
+        "one; a channel's own admins can't change it either. Tell them who can make it and give "
+        "them a sentence that admin can say, preserving the requested action and channel. "
+        "Do not retry."
+    )
 
 
 def require_budget_write(auth: AuthIdentity, channel_id: str) -> None:
@@ -102,7 +104,7 @@ def require_budget_write(auth: AuthIdentity, channel_id: str) -> None:
     decision = may_set_channel_budget(mcp_subject(auth, is_admin=auth.is_admin), channel_id)
     if not decision:
         record_authz_denial(Action.SET_CHANNEL_BUDGET, decision.reason)
-        raise ToolError(_NEEDS_BUDGET_ADMIN)
+        raise ToolError(_needs_budget_admin(auth))
     record_policy_decision(Action.SET_CHANNEL_BUDGET, "allow")
 
 

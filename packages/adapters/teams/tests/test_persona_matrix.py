@@ -217,9 +217,11 @@ async def test_handler_persona_matrix(
     evidence = json.dumps(result, ensure_ascii=False) + _sent_text(fake)
     refusals = (
         "not available for this account",
-        "Only an admin",
-        "Only a server admin",
-        "Only an admin can",
+        "Only an admin can change this",  # not the skills note's "can change them"
+        "Only an admin can create",
+        "Only an admin can top up",
+        "Only an admin can look up",
+        "Only an admin can mint",
         "Only the owner",
         "Ask in a channel that uses its own agents.",
     )

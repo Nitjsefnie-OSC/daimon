@@ -145,7 +145,7 @@ from daimon.core.turn.errors import (
     TurnNotStarted,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
-from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, RefusalNouns, admission_refusal_text
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
@@ -196,10 +196,6 @@ CONTROLS_WAIT_S = 30.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats are in flight right now. Try again in a moment."
-# "Daimon can't answer here": the same words as Discord and Slack, with
-# Teams' `setup` command.
-_NOT_SET_UP = "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `setup`."
-_RESOLVER_MISS = "This channel's setup is out of date.\n\nAsk an admin to check `setup`."
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 _CANCELLING = "Cancelling…"
@@ -207,11 +203,13 @@ _CANCELLING = "Cancelling…"
 _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
 _DB_ERRORS = (SQLAlchemyError, OSError)
 _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
-TEAMS_REFUSAL_NOUNS = RefusalNouns(
-    scope="organisation",
-    admin="an admin",
-    billing=TEAMS_BILLING_COMMAND,
-    setup="`setup`",
+TEAMS_REFUSAL_NOUNS = RefusalNouns.for_platform("teams")
+# "Daimon can't answer here": the same words as Discord and Slack, with
+# Teams' `setup` command and where to send it.
+_SETUP = f"{TEAMS_REFUSAL_NOUNS.verb} {TEAMS_REFUSAL_NOUNS.setup}"
+_NOT_SET_UP = f"Daimon isn't set up in this channel yet.\n\nAsk an admin to {_SETUP}."
+_RESOLVER_MISS = (
+    f"This channel's setup is out of date.\n\nAsk an admin to check {TEAMS_REFUSAL_NOUNS.setup}."
 )
 # The log event each refusal is recorded under.
 _DENIALS: dict[AdmissionDenialReason, str] = {

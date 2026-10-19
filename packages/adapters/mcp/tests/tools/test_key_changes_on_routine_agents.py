@@ -124,7 +124,7 @@ async def test_self_delete_then_add_is_refused(
     tenant_id, me, agent_id = await _setup(db_session_factory, user=user)
     runtime, _agent_obj = _runtime(db_session_factory, tenant_id)
     auth = _member(tenant_id, me, agent_id)
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs a server admin"):
         await _self_delete_file_impl(runtime, auth, key="GITLAB_TOKEN")
     with pytest.raises(ToolError, match="would replace GITLAB_TOKEN"):
         await _self_write_file_impl(runtime, auth, key="GLAB_TOKEN", content="attacker")
@@ -137,7 +137,7 @@ async def test_remove_agent_key_is_refused(
 ) -> None:
     tenant_id, me, agent_id = await _setup(db_session_factory, user=user)
     runtime, _agent_obj = _runtime(db_session_factory, tenant_id)
-    with pytest.raises(ToolError, match="needs a workspace or server admin"):
+    with pytest.raises(ToolError, match="needs a server admin"):
         await _remove_agent_key_impl(
             runtime,
             _member(tenant_id, me, None),
