@@ -3589,7 +3589,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
     async def unused_provider_action(prompt: Any) -> None:
         raise AssertionError("unattended turns must never invoke a human provider-action hook")
 
-    outcome = await run_prepared_turn(
+    turn = run_prepared_turn(
         deps,
         prepared,
         tenant_id=tenant.id,
@@ -3606,14 +3606,18 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         provider_action=unused_provider_action,
         render_interval_s=0.001,
     )
+    if runtime == "mux-without-read":
+        # A Managed Agents session that cannot be read cannot be checked or
+        # constrained, so nothing is sent at all.
+        from daimon.core.turn.errors import AdmissionDenied
+
+        with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+            await turn
+        assert order == []
+        return
+    outcome = await turn
     if runtime == "non-anthropic":
         assert order == ["native denied"]
-    elif not gateable:
-        assert order == ["message", "deny", "deny"]
-        assert all(
-            "cannot refresh the session's tool safety gate" in event["deny_message"]
-            for event in confirmations
-        )
     elif failed_batch is None:
         assert outcome.state.error is None
         assert order == ["update", "message", "update", "allow", "update", "allow"]
@@ -3625,45 +3629,25 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         assert len(confirmations) == failed_batch - 1
 
 
-@pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
-@pytest.mark.parametrize(
-    "abort,boundary",
-    [
-        ("stop", "pending"),
-        ("cancel", "pending"),
-        ("ceiling", "pending"),
-        ("normal", "pending"),
-        ("cancel", "decision_join"),
-        ("ceiling", "decision_join"),
-        ("cancel", "stop_join"),
-        ("ceiling", "stop_join"),
-        ("cancel", "stop_retire"),
-        ("ceiling", "stop_retire"),
-        ("cancel_twice", "decision_join"),
-        ("cancel_twice", "stop_join"),
-        ("cancel_twice", "stop_retire"),
-    ],
-)
-async def test_prepared_runtime_without_session_reads_aborts_without_confirmations(
+@pytest.mark.parametrize("origin", ["chat", "worker"], ids=["wake", "fleet_worker"])
+@pytest.mark.parametrize("snapshot_kind", ["always_allow", "coordinator"])
+async def test_prepared_runtime_without_session_reads_refuses_before_the_message(
+    origin: Any,
+    snapshot_kind: str,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-    replay: bool,
-    abort: str,
-    boundary: str,
 ) -> None:
-    """Exercise the actual prepared non-gateable context and real driver/transport."""
+    """A Managed Agents runtime that cannot read its live session cannot check
+    or constrain it: an always_allow MCP write, or a coordinator roster, would
+    run on the first message. Nothing is sent, no confirmation, no recovery."""
     from daimon.core.mux_backend import managed_agents, resource_ref
-    from daimon.core.tool_safety import ToolCall
-    from daimon.core.turn import driver
-    from daimon.core.turn.posture import ToolConfirmationResult
+    from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.prepare import admitted_session_scope
-    from daimon.core.turn.unattended import refuse_ungated_confirmation
-    from daimon.testing.ma_models import ma_session
+    from daimon.testing.ma_models import ma_session, with_coordinator
     from mux.drivers.anthropic.sessions_lifecycle import SessionReads
     from mux.errors import UnsupportedCapability
-
-    from .conftest import make_end_turn, make_mcp_tool_use, make_requires_action
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -3676,44 +3660,38 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
         ma_session_id="sess_ungated",
     )
     await db_session.commit()
-    pre = make_mcp_tool_use(event_id="call", name="create_issue", mcp_server_name="linear")
-    pause = make_status_idle(event_id="pause", stop_reason=make_requires_action(event_ids=["call"]))
-    ack = make_status_idle(event_id="end", stop_reason=make_end_turn())
-    replay_events = [pre.model_dump(mode="json"), pause.model_dump(mode="json")]
-    sent: list[dict[str, Any]] = []
-    stream_calls = 0
+    agent = ma_agent(
+        id="ag_ungated",
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        ],
+        mcp_servers=[{"type": "url", "name": "linear", "url": "https://linear.example/mcp"}],
+    )
+    live = ma_session(id="sess_ungated", agent=agent)
+    if snapshot_kind == "coordinator":
+        live = with_coordinator(live)
+    requests: list[str] = []
     router = MARouter()
-    router.add(
-        "GET",
-        r"/v1/sessions/sess_ungated",
-        lambda _r, _m: httpx.Response(
-            200, json=ma_session(id="sess_ungated", status="idle").model_dump(mode="json")
-        ),
-    )
-    router.add(
-        "GET", r"/v1/sessions/sess_ungated/events", lambda _r, _m: list_response(replay_events)
-    )
 
-    def stream(_request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
-        nonlocal stream_calls
-        stream_calls += 1
-        events = (
-            replay_events[:1]
-            if replay and stream_calls == 1
-            else (replay_events if stream_calls == 1 else [ack.model_dump(mode="json")])
-        )
-        return sse_response(events)
-
-    def send(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
-        sent.extend(json.loads(request.content)["events"])
+    def record(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        requests.append(f"{request.method} {request.url.path}")
+        if request.method == "GET":
+            return httpx.Response(200, json=live.model_dump(mode="json"))
         return send_events_response()
 
-    router.add("GET", r"/v1/sessions/sess_ungated/events/stream", stream)
-    router.add("POST", r"/v1/sessions/sess_ungated/events", send)
+    router.add("GET", r"/v1/sessions/sess_ungated.*", record)
+    router.add("POST", r"/v1/sessions.*", record)
     deps = dataclasses.replace(
-        _deps(sessionmaker=db_session_factory, router=router), turn_path="mux"
+        _deps(sessionmaker=db_session_factory, router=router),
+        turn_path="mux",
+        tool_safety=ToolSafetyPolicy(enabled=True),
     )
-    admission = _admission(account_id=account.id, agent=ma_agent(), env=ma_environment())
+    admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
     prepared = _prepared_turn(
         deps=deps,
         admission=admission,
@@ -3740,36 +3718,9 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
         backend=backend,
         session_ref=resource_ref(backend, "session", mapping.ma_session_id, scope=scope),
     )
-    entered = asyncio.Event()
-    cancel = asyncio.Event()
-    joining = asyncio.Event()
-    abort_entered = asyncio.Event()
-    release_abort = asyncio.Event()
-    original_bounded = driver._bounded
 
-    async def bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> None:
-        step = "retire_unsent_confirmations" if boundary == "stop_retire" else "decide_task_join"
-        if boundary != "pending" and what == step and not joining.is_set():
-            # First outside cancellation lands after the decision race, while
-            # joining a completed refusal or a Stop winner, or retiring its cards.
-            joining.set()
-            await asyncio.Event().wait()
-        if abort == "cancel_twice" and what == "deadline_refusal":
-            abort_entered.set()
-            await release_abort.wait()
-        await original_bounded(task, what=what, session_id=session_id)
-
-    monkeypatch.setattr(driver, "_bounded", bounded)
-
-    async def refusal(call: ToolCall) -> ToolConfirmationResult:
-        entered.set()
-        if abort != "normal" and boundary != "decision_join":
-            await asyncio.Event().wait()
-        return await refuse_ungated_confirmation(call)
-
-    monkeypatch.setattr(run_module, "refuse_ungated_confirmation", refusal)
-    turn = asyncio.create_task(
-        run_prepared_turn(
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await run_prepared_turn(
             deps,
             prepared,
             tenant_id=tenant.id,
@@ -3778,49 +3729,15 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
             external_user_id="user",
             user_message="wake up",
             lifecycle=RecordingLifecycle(),
-            cancel=cancel,
+            cancel=asyncio.Event(),
             reseed_user_message=_reseed,
             recovery_lifecycle=_recovery_lifecycle,
+            origin=origin,
             attended=False,
             render_interval_s=0.001,
-            deadline=datetime.now(UTC) + timedelta(seconds=1) if abort == "ceiling" else None,
         )
-    )
-    await asyncio.wait_for(entered.wait(), timeout=5)
-    if abort == "stop" or boundary.startswith("stop_"):
-        cancel.set()
-    if boundary != "pending":
-        await asyncio.wait_for(joining.wait(), timeout=5)
-        assert not turn.done()
-    if abort in ("cancel", "cancel_twice"):
-        turn.cancel()
-    if abort == "cancel_twice":
-        await asyncio.wait_for(abort_entered.wait(), timeout=5)
-        turn.cancel()
-        release_abort.set()
-    if abort in ("cancel", "cancel_twice"):
-        with pytest.raises(asyncio.CancelledError):
-            await turn
-    else:
-        outcome = await asyncio.wait_for(turn, timeout=5)
-        if abort == "ceiling":
-            assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
-    confirmations = [event for event in sent if event["type"] == "user.tool_confirmation"]
-    if abort == "normal":
-        assert len(confirmations) == 1 and confirmations[0]["result"] == "deny"
-        assert "cannot refresh" in confirmations[0]["deny_message"]
-    else:
-        assert confirmations == []
-        assert any(event["type"] == "user.interrupt" for event in sent)
 
-    assert not [
-        task
-        for task in asyncio.all_tasks()
-        if task is not asyncio.current_task()
-        and task.get_name().startswith(
-            ("turn.decide", "turn.retire_unsent", "turn.refuse_blocked", "turn.decision_abort")
-        )
-    ]
+    assert not [r for r in requests if r.startswith("POST")], requests
 
 
 @pytest.mark.parametrize(

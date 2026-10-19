@@ -115,7 +115,7 @@ class _FutureModelConfig(BetaManagedAgentsModelConfig):
 
 def _sdk_recognized_field() -> BetaManagedAgentsSession:
     session = _root_session()
-    model = _FutureModelConfig.model_construct(id=session.agent.model.id, speed=None)
+    model = _FutureModelConfig.model_validate({"id": session.agent.model.id})
     return session.model_copy(update={"agent": session.agent.model_copy(update={"model": model})})
 
 

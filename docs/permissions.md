@@ -128,11 +128,11 @@ conversation belongs to (a Slack thread's parent channel; never the source
 channel of a DM). A routine's private transcript stamp keeps its channel
 rules when the session is continued through the CLI, MCP or a checkpoint.
 Before every message the session's tool settings are set
-again from the current policy, so a session created before tool safety was
-on, or one whose agent allowed a tool outright, still asks. The process that
+again, so every MCP call asks, whatever the session was created with and with
+tool safety on or off. The process that
 sent the turn answers its tool calls, deciding each one when it is made.
-With `DAIMON_TOOL_SAFETY__ENABLED` off, ordinary third-party calls the
-session still asks about are allowed.
+With `DAIMON_TOOL_SAFETY__ENABLED` off, ordinary third-party calls are
+allowed.
 
 Daimon's own actions that wait for a person's card in chat ask in these
 sessions and are refused there. Switching an agent's backend and sending
@@ -151,12 +151,23 @@ changed, when the session:
   roster's agents carry their own tools and MCP servers, which the gate cannot
   rewrite, and Managed Agents cannot remove a roster from a live session or
   override it when one is created.
-- carries an agent field, tool type, or tool or server setting this release
-  does not know.
+- carries a field this release has not reviewed, at any level that can grant
+  a capability: the session and its resources (files, repositories, memory
+  stores), the agent, its model, skills and MCP servers, each tool, a
+  toolset's default and per-tool settings, and their permission policies.
+  An unknown field is refused even when it is empty, and so is one a newer
+  SDK has started to parse. A tool type, resource type or permission policy
+  type it does not know is refused the same way.
 - carries skills on an entry point that does not allow them.
+- runs on a Managed Agents runtime that cannot read the live session, so the
+  checks above cannot be made. Nothing is sent, not even the first message.
 
-Every MCP server the session keeps, Daimon's own included, then goes through
-the unattended decider as described above. Built-in sandbox tools (bash, file
+Every MCP toolset the session keeps then asks on every call, on its default
+and on each per-tool setting: Daimon's own tools, and third-party tools with
+tool safety off, included. Each call therefore reaches the unattended decider,
+which answers as described above, with the agent's and the channel's rules:
+Daimon's ordinary tools and, with tool safety off, ordinary third-party calls
+are still allowed. Built-in sandbox tools (bash, file
 reads and edits, web fetch and the rest) and custom tools follow a policy set
 per entry point:
 
@@ -181,8 +192,9 @@ new session.
 In-process unattended runs leave pending calls paused and interrupt the session
 when a decision is cancelled, its turn ceiling expires, or its confirmation
 gate fails. Stop, cancellation and ceiling cleanup send no confirmations, including
-on runtimes without a confirmation gate. Those runtimes still refuse unattended
-confirmations during a normal, uninterrupted decision. Cancellation during decision-task
+on runtimes without a confirmation gate. A runtime other than Managed Agents
+without a confirmation gate still refuses unattended confirmations during a
+normal, uninterrupted decision. Cancellation during decision-task
 or card cleanup also finishes bounded interrupt cleanup before propagating.
 
 Reading a session never answers a tool call. If the service restarts while an

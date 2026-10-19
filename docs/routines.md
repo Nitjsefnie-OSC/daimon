@@ -254,8 +254,9 @@ unattended decider agent-chat turns use (`unattended_posture`): with
 `DAIMON_TOOL_SAFETY__ENABLED` off (the default) an ordinary paused call is
 allowed; with it on, reads from attached third-party MCP servers run, and a
 write is refused (the agent is told why) unless its server or `server/tool`
-is listed in `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`. Daimon's own tools are
-not affected, apart from an agent's `ask` or `deny` rule on one
+is listed in `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`. Every MCP call
+pauses for this decider, Daimon's own and with the policy off included, so
+none runs unasked. Daimon's own tools are allowed, apart from an agent's `ask` or `deny` rule on one
 (`daimon-mcp/<tool>`, with `DAIMON_TOOL_SAFETY__AGENT_RULES` on), which a
 routine refuses, and its card-only actions: a routine's session asks on a
 backend switch and Microsoft mail and invites, policy on or off, and on
@@ -267,7 +268,7 @@ message and records `AdmissionDenied: backend_unsupported`; see
 [permissions.md](permissions.md#what-an-unattended-session-may-carry). See
 [architecture.md](architecture.md). Stopping or cancelling a routine, or reaching
 its turn ceiling, leaves pending calls paused and interrupts without sending
-confirmations, including on runtimes without session reads. This also holds when
+confirmations, including on runtimes without a confirmation gate. This also holds when
 cancellation arrives while the driver drains a completed decision or a Stop
 winner, or retires confirmation cards.
 

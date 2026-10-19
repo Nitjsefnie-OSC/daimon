@@ -71,7 +71,7 @@ from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn, unattended_sends
-from daimon.core.turn.errors import SessionBusyError
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
     Acknowledgment,
@@ -1162,7 +1162,8 @@ async def run_prepared_turn_impl(
                 stack.enter_context(execution_origin(origin_id))
                 if unattended:
                     revision = admission.backend_revision
-                    gateable = revision is None or revision.profile == MANAGED_AGENTS.profile_id
+                    managed = revision is None or revision.profile == MANAGED_AGENTS.profile_id
+                    gateable = managed
                     read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None
                     injected = (backend or deps.backend) if selected_path == "mux" else None
                     gate_scope = admitted_session_scope(
@@ -1192,6 +1193,12 @@ async def run_prepared_turn_impl(
 
                                 read_session = read_injected_session
 
+                    if managed and not gateable:
+                        # A Managed Agents session that cannot be read cannot be
+                        # checked or constrained (`unattended_capabilities`):
+                        # a coordinator, or a tool that never pauses, would run
+                        # on its first message. Refuse before anything is sent.
+                        raise AdmissionDenied(reason="backend_unsupported")
                     if gateable:
                         stack.enter_context(
                             unattended_sends(
