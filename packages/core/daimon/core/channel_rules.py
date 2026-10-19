@@ -800,7 +800,7 @@ class AgentRuleChange:
             notes = [f"{self.agent_name} runs only in {', '.join(self.runs_in)}."]
         if self.answers_outside:
             notes.append(
-                "It is still set to answer outside them, where its turns are now refused; "
+                "It is still the default outside them, where it now won't answer; "
                 "change those defaults too."
             )
         return tuple(notes)

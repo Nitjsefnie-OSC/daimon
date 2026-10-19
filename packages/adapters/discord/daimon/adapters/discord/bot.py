@@ -4201,9 +4201,7 @@ class DaimonBot(commands.Bot):
                     now=datetime.now(UTC),
                 )
             if recovery_origin is None:
-                raise UserFacingError(
-                    "This turn's setup context expired. Mention me again to continue."
-                )
+                raise UserFacingError("This setup expired. Mention me again to continue.")
             return (
                 render_turn_origin(
                     recovery_origin,
@@ -5495,9 +5493,7 @@ class DaimonBot(commands.Bot):
                     now=datetime.now(UTC),
                 )
             if recovery_origin is None:
-                raise UserFacingError(
-                    "This turn's setup context expired. Mention me again to continue."
-                )
+                raise UserFacingError("This setup expired. Mention me again to continue.")
             return (
                 render_turn_origin(
                     recovery_origin,

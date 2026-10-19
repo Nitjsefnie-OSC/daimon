@@ -380,8 +380,8 @@ async def test_delete_impl_refuses_while_attached_naming_only_own_places(
 
     message = str(refused.value)
     assert "research-bot" in message and "discord channel 111" in message
-    assert "1 agent(s) in another workspace" in message
-    assert "1 channel(s) in another workspace" in message
+    assert "1 agent(s) elsewhere" in message
+    assert "1 channel(s) elsewhere" in message
     assert "secret-bot" not in message and "999" not in message, "no cross-workspace names"
     assert "other-bot" not in message
     assert "remove_skill" in message and "remove_channel_skill" in message

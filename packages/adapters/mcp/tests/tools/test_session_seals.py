@@ -525,11 +525,11 @@ async def test_a_chat_turn_cannot_start_ask_or_continue_through_agent_chat(
     runtime = world.runtime()
     chat_turn = world.auth(agent_id=world.agent_key_auth().agent_id)
 
-    with pytest.raises(ToolError, match="chat turn"):
+    with pytest.raises(ToolError, match="chat reply"):
         await _start_turn_impl(runtime, chat_turn, _SEALED_TOPIC)
-    with pytest.raises(ToolError, match="chat turn"):
+    with pytest.raises(ToolError, match="chat reply"):
         await _continue_turn_impl(runtime, chat_turn, "ses_open", _SEALED_TOPIC)
-    with pytest.raises(ToolError, match="chat turn"):
+    with pytest.raises(ToolError, match="chat reply"):
         await _ask_impl(runtime, chat_turn, _SEALED_TOPIC, handle="ses_open")
     assert world.sent == []
 

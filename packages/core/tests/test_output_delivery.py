@@ -993,7 +993,7 @@ def test_oversize_notice_names_the_file_the_limit_and_how_to_get_it() -> None:
     )
     assert notice == (
         "`big_report.csv` is 25 MB, over the 20 MB upload limit here, so I couldn't attach "
-        "it. It's still saved in my workspace: ask me for a smaller version, or to split it "
+        "it. It's still saved in my files: ask me for a smaller version, or to split it "
         "into parts under 20 MB, and I'll attach those."
     ), "notice text"
 

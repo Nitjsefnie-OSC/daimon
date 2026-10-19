@@ -90,8 +90,8 @@ REFUSALS: Final[dict[ChannelSkillRefusal, str]] = {
     ),
     "no_version": "That skill has no version to add yet. Nothing changed.",
     "too_many": (
-        f"The channel's agent would run with more than {AGENT_SKILL_CAP} skills, the most a "
-        "session may have. Remove one first. Nothing changed."
+        f"The channel's agent would run with more than {AGENT_SKILL_CAP} skills, the most "
+        "one conversation can have. Remove one first. Nothing changed."
     ),
     "mount_clash": (
         "That skill loads under the same name as one the channel's agent or this channel "

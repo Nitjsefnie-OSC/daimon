@@ -307,7 +307,7 @@ def test_render_fresh_start() -> None:
         "Leaves behind: this task's working files and unfinished work.\n"
         "Keeps: everything already posted here, and Ada's saved memory, "
         "keys and connections.\n"
-        "Nothing is removed until the new workspace is ready."
+        "Nothing is removed until the new working files are ready."
     ), "fresh start copy is fixed four lines naming the target"
 
 
@@ -328,9 +328,9 @@ def test_render_preparation_failed() -> None:
 
 def test_render_unexpected_loss_transcript() -> None:
     assert render_unexpected_loss("transcript") == (
-        "I lost the workspace this task was running in and started a new one.\n"
+        "I lost this task's working files and started with new ones.\n"
         "I have this conversation and the files that were saved to your task.\n"
-        "Anything unsaved in the old workspace is gone, and nothing that was running "
+        "Anything unsaved there is gone, and nothing that was running "
         "came across.\n"
         "Tell me what to re-check and I'll go from there."
     ), "transcript recovery should mention the saved task files"
@@ -338,9 +338,9 @@ def test_render_unexpected_loss_transcript() -> None:
 
 def test_render_unexpected_loss_history() -> None:
     assert render_unexpected_loss("history") == (
-        "I lost the workspace this task was running in and started a new one.\n"
+        "I lost this task's working files and started with new ones.\n"
         "I have what was posted here, but not the earlier conversation.\n"
-        "Anything unsaved in the old workspace is gone, and nothing that was running "
+        "Anything unsaved there is gone, and nothing that was running "
         "came across.\n"
         "Tell me what to re-check and I'll go from there."
     ), "history-only recovery should say the earlier conversation is missing"

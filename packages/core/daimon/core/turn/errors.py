@@ -148,9 +148,8 @@ class SessionAgentMismatch(DaimonError):
         destination_agent_id: str,
     ) -> None:
         super().__init__(
-            "This conversation's existing session belongs to another agent. "
-            "Continuing with a different responder currently requires a new conversation. "
-            "Your existing session and workspace have been kept."
+            "This conversation belongs to another agent. Your work is kept. "
+            "To use a different agent, start a new conversation."
         )
         self.mapping_id = mapping_id
         self.session_id = session_id

@@ -78,9 +78,8 @@ _OUR_SIDE = (
     "Try again. If it keeps happening, tell an admin.",
 )
 _SESSION_AGENT_MISMATCH = (
-    "This conversation's session belongs to another responder. "
-    "Your existing work is preserved. Continuing with this responder currently "
-    "requires a new conversation."
+    "This conversation belongs to another agent. Your work is kept. "
+    "To use a different agent, start a new conversation."
 )
 
 

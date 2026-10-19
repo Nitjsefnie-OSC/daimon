@@ -191,7 +191,7 @@ async def _teams_replace_file_impl(  # pyright: ignore[reportUnusedFunction]  # 
     origin = await get_verified_origin(runtime, auth, origin_context_id)
     if origin is None:
         raise ToolError(
-            "replace_channel_file needs this turn's origin_context_id from turn_controls, so "
+            "replace_channel_file needs your origin_context_id from turn_controls, so "
             "nothing was changed"
         )
     if origin.parent_channel_id != channel:

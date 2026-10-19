@@ -823,7 +823,7 @@ async def _dispatch_panel_action(
                 client,
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
-                text="Model backend wasn't changed. Ask a workspace admin to open the panel.",
+                text="Model provider wasn't changed. Ask a workspace admin to open the panel.",
             )
             return
         if action_id == panel_views.ACTION_BACKEND_CANCEL:
@@ -849,7 +849,7 @@ async def _dispatch_panel_action(
                 client,
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
-                text="That preview is no longer available. Choose a model backend again.",
+                text="That preview is no longer available. Choose a model provider again.",
             )
             return
         if action_id == panel_views.ACTION_BACKEND_SELECT:
@@ -878,7 +878,7 @@ async def _dispatch_panel_action(
                 client,
                 channel_id=meta.channel_id or user_id,
                 user_id=user_id,
-                text="Model backend preview is unavailable. Nothing was changed.",
+                text="That preview isn't available. Nothing was changed; choose again.",
             )
             return
         preview = selection.preview

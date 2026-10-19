@@ -141,38 +141,39 @@ NoCardReason = Literal[
     "session_unreadable",
 ]
 
-_PASS_ORIGIN = "Call add_skill again with this turn's origin_context_id."
+_PASS_ORIGIN = "Call add_skill again with your origin_context_id."
 
 #: Why no card can show, and what lets the person get one, if anything does.
 _NO_CARD: dict[NoCardReason, tuple[str, str | None]] = {
     "cards_off": (
-        "approval cards are turned off on this deployment (tool safety is disabled); an "
-        "operator can turn them on with the tool_safety.enabled setting",
+        "approval cards are turned off here (tool safety is disabled); whoever runs Daimon "
+        "can turn them on with the tool_safety.enabled setting",
         None,
     ),
-    "agent_key": ("this call runs on an agent key, not in a person's chat turn", None),
+    "agent_key": ("this call runs on an agent key, not in a person's chat", None),
     "not_a_chat_turn": (
-        "this call does not come from a chat turn (a direct MCP connection, for example)",
+        "this call does not come from a chat (a direct connection, for example)",
         None,
     ),
-    "no_origin_context": ("the call did not pass this turn's origin_context_id", _PASS_ORIGIN),
+    "no_origin_context": ("the call did not pass its origin_context_id", _PASS_ORIGIN),
     "unverified_origin": (
-        "the origin_context_id it passed is not this turn's (expired, malformed, or another "
-        "turn's or caller's)",
+        "the origin_context_id it passed is not this chat's (expired, malformed, or someone "
+        "else's)",
         _PASS_ORIGIN,
     ),
-    "no_live_session": ("this thread has no live session for the person", None),
+    "no_live_session": ("this thread has no live conversation for the person", None),
     "other_agents_session": (
-        "this thread's live session runs a different agent from the one answering",
+        "this thread's live conversation runs a different agent from the one answering",
         None,
     ),
     "session_not_gated": (
-        "this thread's session does not ask before add_skill yet (it started before approval "
-        "cards were turned on, or its tools have not been updated)",
-        "The person's next message in this thread updates the session; preview again after it.",
+        "this thread's conversation does not ask before add_skill yet (it started before "
+        "approval cards were turned on, or its tools have not been updated)",
+        "The person's next message in this thread updates the conversation; preview again "
+        "after it.",
     ),
     "session_unreadable": (
-        "Daimon could not read this thread's session to check for the card",
+        "Daimon could not read this thread's conversation to check for the card",
         "Try again in a moment.",
     ),
 }
@@ -205,10 +206,7 @@ async def _no_card_reason(
 def _no_card_text(reason: NoCardReason) -> tuple[str, str | None]:
     why, fix = _NO_CARD[reason]
     if reason != "cards_off":
-        why = (
-            "approval cards are on for this deployment, but this conversation can't show "
-            f"one: {why}"
-        )
+        why = f"approval cards are on, but this conversation can't show one: {why}"
     return why, fix
 
 
@@ -581,9 +579,9 @@ async def _add_skill_impl(
                 minutes = int(PENDING_SKILL_ADD_TTL.total_seconds() // 60)
                 then = (
                     "To add it, they reply with just `yes` as their next message in this "
-                    f"thread, within {minutes} minutes; any other reply cancels it. In the turn "
-                    "that reply starts, call add_skill again with the same arguments, "
-                    f"content_hash='{bound}' and that turn's origin_context_id. Daimon checks "
+                    f"thread, within {minutes} minutes; any other reply cancels it. When "
+                    "they reply, call add_skill again with the same arguments, "
+                    f"content_hash='{bound}' and your origin_context_id. Daimon checks "
                     "their reply itself."
                 )
             elif no_card is None:
@@ -620,7 +618,7 @@ async def _add_skill_impl(
                 )
             if not confirmed:
                 raise ToolError(
-                    "Nothing was added: this turn did not start with the person replying "
+                    "Nothing was added: this message is not the person replying "
                     "`yes` to this preview (they have not replied yet, replied something "
                     "else, it expired, a newer preview replaced it, or it was already used). "
                     "Do not retry this confirmation; preview it again if they ask."

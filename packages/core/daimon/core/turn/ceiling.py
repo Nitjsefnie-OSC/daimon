@@ -75,9 +75,7 @@ def remaining_s(deadline: datetime, *, now: datetime, refuse_expired: bool = Fal
 # which truncate to `str(err)[:100]`. `TurnError.__str__` is `f"{kind}: {msg}"`,
 # so this message must leave room for the "ceiling: " prefix -- see
 # `ceiling_error` and the length invariant pinned in test_ceiling.py.
-CEILING_MESSAGE: str = (
-    "this turn stopped responding and was abandoned — start fresh with a new message"
-)
+CEILING_MESSAGE: str = "this reply stopped responding and was dropped — send a new message"
 
 
 def ceiling_error() -> TurnError:

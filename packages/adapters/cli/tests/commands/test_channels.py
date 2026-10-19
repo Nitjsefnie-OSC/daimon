@@ -547,7 +547,7 @@ async def test_agents_rule_set_limits_where_an_agent_runs(
     console = _console()
     await agents_rule_set(**args, console=console, runs_in=[CHANNEL])
     assert f"shared runs only in {CHANNEL}" in _out(console), _out(console)
-    assert "still set to answer outside" in _out(console), "it is OTHER_CHANNEL's default"
+    assert "still the default outside" in _out(console), "it is OTHER_CHANNEL's default"
     async with db_session_factory() as s:
         policy = await load_access_policy(s, tenant_id=tenant_id)
     assert policy.agent_rules == {"shared": AgentRule(runs_in=(CHANNEL,))}

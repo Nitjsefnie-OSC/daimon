@@ -248,17 +248,17 @@ async def _build_fire(
                     s,
                     row.id,
                     tail=None,
-                    error="routine has no created_by_user_id",
+                    error="This routine has no owner. Create it again.",
                 )
             return
 
         async with sm() as s, s.begin():
             tenant = await get_tenant(s, row.tenant_id)
             if tenant is None:
-                await record_result(s, row.id, tail=None, error="routine tenant not found")
+                await record_result(s, row.id, tail=None, error="Daimon was removed from here.")
                 return
             if tenant.archived_at is not None:
-                await record_result(s, row.id, tail=None, error="routine tenant archived")
+                await record_result(s, row.id, tail=None, error="Daimon was removed from here.")
                 return
             platform = tenant.platform
             principal = await get_or_create_platform_principal(

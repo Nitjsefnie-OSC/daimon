@@ -256,7 +256,7 @@ def _defaults_block(
     else:
         lines.append("-# no server default")
     if deployment_default is not None:
-        lines.append(f"Deployment default → **{deployment_default}**")
+        lines.append(f"Daimon-wide default → **{deployment_default}**")
         if not deployment_in_effect:
             lines.append(f"\n-# {DEPLOYMENT_NOT_IN_EFFECT}")
     return "\n".join(lines)
@@ -273,7 +273,7 @@ def build_environments_block(
     tenant, deployment = answering_map.tenant_environment, answering_map.deployment_environment
     defaults = [f"{SERVER_DEFAULT_LABEL} → **{tenant}**" if tenant else "-# no server default"]
     if deployment is not None:
-        defaults.append(f"Deployment default → **{deployment}**")
+        defaults.append(f"Daimon-wide default → **{deployment}**")
         if tenant is not None:
             defaults.append(f"\n-# {DEPLOYMENT_NOT_IN_EFFECT}")
     fixed = len("\n".join([heading, *defaults]))

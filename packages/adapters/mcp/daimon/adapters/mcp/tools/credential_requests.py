@@ -197,7 +197,7 @@ def _require_requestable_platform(auth: AuthIdentity) -> str:
     if auth.platform_user_id is None:
         raise ToolError("credential requests require a platform-bound identity")
     if auth.platform == "slack" and auth.external_id is None:
-        raise ToolError("credential requests require a workspace context")
+        raise ToolError("credential requests require a chat context")
     return auth.platform_user_id
 
 
@@ -305,7 +305,7 @@ async def _require_key_replacement_allowed(
     if outcome in ("managed_agent", "needs_admin") and adding is not None:
         raise ToolError(
             f"'{ma_agent.name}' {shared}, and adding '{adding}' "
-            f"{env_shadow_phrase(adding, key)}. That needs a server or workspace "
+            f"{env_shadow_phrase(adding, key)}. That needs an "
             "admin, and the caller is not "
             f"one. Nothing changed: the existing '{key}' is still in use and no card "
             f"was posted. Tell them an admin can ask Daimon to replace '{key}' on "
@@ -438,9 +438,7 @@ async def _mint_and_post(
             for_update=True,
         )
         if active_origin is None:
-            raise ToolError(
-                "This turn origin expired before the request; retry in that conversation."
-            )
+            raise ToolError("That conversation timed out before the request. Ask again there.")
         retired = await _supersede_live_siblings(
             session,
             tenant_id=auth.tenant_id,
@@ -582,7 +580,7 @@ async def _request_agent_key_impl(
         # Fail closed before anyone is asked for a value that could not be stored
         # encrypted. Tell the model plainly so it relays the operator step.
         raise ToolError(
-            "This deployment has no encryption keys (DAIMON_CRYPTO__KEYS), so agent keys "
+            "Daimon has no encryption keys (DAIMON_CRYPTO__KEYS), so agent keys "
             "can't be saved and no card was posted. Tell them the operator must set "
             "DAIMON_CRYPTO__KEYS first. Do not ask for the value in chat."
         )
@@ -669,9 +667,9 @@ async def _request_mcp_token_impl(
 ) -> RequestCredentialResult:
     requester = _require_requestable_platform(auth)
     if urlparse(url).scheme not in ("http", "https"):
-        raise ToolError("mcp server url must be http or https")
+        raise ToolError("connection URL must be http or https")
     try:
-        assert_public_host(url, what="mcp server url")
+        assert_public_host(url, what="connection URL")
     except McpUrlError as err:
         raise ToolError(str(err)) from err
     _reject_reserved_server(runtime, server_name=server_name, url=url)
@@ -705,7 +703,7 @@ async def _request_mcp_token_impl(
         ma_agent=ma_agent,
         requester_platform_user_id=requester,
         agent_name=agent_name,
-        purpose=f"connecting the MCP server '{server_name}'",
+        purpose=f"connecting '{server_name}'",
         channel_id=channel_id,
         origin=origin,
         requested_work=_bounded_pending_task(pending_task, echoes=(agent_name, server_name)),
@@ -729,9 +727,9 @@ async def _request_mcp_oauth_impl(
     # browser and the callback, and no authorization server accepts a plain
     # http redirect target.
     if urlparse(url).scheme != "https":
-        raise ToolError("an OAuth MCP server url must be https")
+        raise ToolError("an OAuth connection URL must be https")
     try:
-        assert_public_host(url, what="mcp server url")
+        assert_public_host(url, what="connection URL")
     except McpUrlError as err:
         raise ToolError(str(err)) from err
     _reject_reserved_server(runtime, server_name=server_name, url=url)
@@ -759,7 +757,7 @@ async def _request_mcp_oauth_impl(
         ma_agent=ma_agent,
         requester_platform_user_id=requester,
         agent_name=agent_name,
-        purpose=f"connecting the MCP server '{server_name}' with your account",
+        purpose=f"connecting '{server_name}' with your account",
         channel_id=channel_id,
         origin=origin,
         requested_work=_bounded_pending_task(pending_task, echoes=(agent_name, server_name)),

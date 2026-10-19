@@ -88,8 +88,8 @@ _WRONG_WORKSPACE = (
 
 
 _UNCONFIGURED_OAUTH = (
-    "This deployment cannot sign you in yet. Ask the operator to finish the daimon-mcp "
-    "setup, then ask again. Nothing was saved."
+    "Sign-in isn't set up yet. Ask whoever runs Daimon to finish it, "
+    "then ask again. Nothing was saved."
 )
 
 

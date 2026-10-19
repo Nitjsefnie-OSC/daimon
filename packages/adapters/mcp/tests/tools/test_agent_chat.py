@@ -7,7 +7,7 @@ Covers:
    list_events exposes the transcript, while ask folds the same flow.
 3. Isolation: a handle whose session agent is not the caller's agent — whether
    cross-tenant or a same-tenant sibling (WR-03) — raises
-   ToolError("session not found"); list_sessions is scoped to the caller's agent.
+   ToolError("conversation not found"); list_sessions is scoped to the caller's agent.
 4. Confused-deputy: no tool accepts an agent_id parameter (identity is read
    server-side from the verified claim).
 """
@@ -904,7 +904,7 @@ async def test_ask_surfaces_terminal_non_idle_status_without_waiting(db_session,
             "daimon.adapters.mcp.tools.agent_chat._list_events_impl",
             new=AsyncMock(),
         ) as list_events,
-        pytest.raises(ToolError, match=r"terminal status 'terminated'.*ses_terminated001"),
+        pytest.raises(ToolError, match=r"final status 'terminated'.*ses_terminated001"),
     ):
         await _ask_impl(runtime, auth, "Question", sleep=sleep)
 
@@ -1055,7 +1055,7 @@ async def test_deliver_turn_charts_bounds_the_transcript_walk() -> None:
             new=AsyncMock(side_effect=endless_page),
         ) as list_events,
         patch("daimon.adapters.mcp.tools.agent_chat._MAX_EVENT_PAGES", 2),
-        pytest.raises(ToolError, match="no completed turn boundary"),
+        pytest.raises(ToolError, match="no start of the finished reply"),
     ):
         await _deliver_turn_charts_impl(runtime, auth, "ses_endless001")
 
@@ -1209,7 +1209,7 @@ async def test_deliver_turn_charts_rejects_session_without_completed_reply() -> 
             "daimon.adapters.mcp.tools.agent_chat._list_events_impl",
             new=AsyncMock(return_value=events),
         ),
-        pytest.raises(ToolError, match="no completed turn"),
+        pytest.raises(ToolError, match="no finished reply"),
     ):
         await _deliver_turn_charts_impl(runtime, auth, "ses_no_reply")
 
@@ -1432,7 +1432,7 @@ async def test_get_session_raises_session_not_found_for_cross_tenant_handle() ->
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(runtime, auth, "ses_cross")
 
 
@@ -1501,7 +1501,7 @@ async def test_get_session_raises_session_not_found_for_same_tenant_other_agent_
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(runtime, auth, "ses_sibling")
 
 
@@ -1535,7 +1535,7 @@ async def test_continue_turn_raises_session_not_found_for_same_tenant_other_agen
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _continue_turn_impl(runtime, auth, "ses_sibling", "hi")
 
 
@@ -2367,7 +2367,7 @@ async def test_start_turn_with_bundle_when_jwt_secret_unset_is_refused(
     auth = _auth()
     handle = _mint_bundle()
 
-    with pytest.raises(ToolError, match="not configured"):
+    with pytest.raises(ToolError, match="not set up"):
         await _start_turn_impl(runtime, auth, "hi", handle)
 
 
@@ -2584,7 +2584,7 @@ async def test_continue_turn_rejects_a_closed_app_vault_before_send() -> None:
             "daimon.adapters.mcp.tools.agent_chat.touch_unmapped_app_session",
             new=AsyncMock(return_value=False),
         ),
-        pytest.raises(ToolError, match="session is closed"),
+        pytest.raises(ToolError, match="conversation is closed"),
     ):
         await _continue_turn_impl(runtime, _auth(), "ses_test001", "again")
     assert sent == []
@@ -2763,7 +2763,7 @@ async def test_archive_my_session_rejects_a_sibling_agents_session_and_issues_no
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _archive_my_session_impl(runtime, auth, "ses_sibling")
 
     assert archive_calls == [], "a rejected ownership check must issue no archive call"
@@ -2892,7 +2892,7 @@ async def test_cancel_turn_rejects_a_sibling_agents_session_and_issues_zero_send
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _cancel_turn_impl(runtime, auth, "ses_sibling")
 
     assert send_calls == [], "a rejected ownership check must issue no interrupt send"
@@ -3129,7 +3129,7 @@ async def test_get_turn_cost_rejects_a_sibling_agents_session_and_lists_no_event
     runtime = _runtime(client)
     auth = _auth()
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_turn_cost_impl(
             runtime, auth, "ses_sibling", "2026-09-01T10:00:00Z", "sevt_boundary"
         )
@@ -3340,7 +3340,7 @@ async def test_list_sessions_omits_other_accounts_sessions_of_the_same_agent() -
 async def test_get_my_session_rejects_another_accounts_session_of_the_same_agent() -> None:
     runtime = _runtime(build_fake_anthropic(_other_accounts_session_router().dispatch))
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(runtime, _auth(), "ses_other")
 
 
@@ -3354,7 +3354,7 @@ async def test_list_events_rejects_another_accounts_session_and_reads_no_transcr
     router = _other_accounts_session_router(on_events=on_events)
     runtime = _runtime(build_fake_anthropic(router.dispatch))
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _list_events_impl(runtime, _auth(), "ses_other", None, 100, "asc")
 
     assert event_reads == []
@@ -3372,9 +3372,9 @@ async def test_continue_and_cancel_reject_another_accounts_session_with_zero_sen
     router = _other_accounts_session_router(on_send=on_send)
     runtime = _runtime(build_fake_anthropic(router.dispatch))
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _continue_turn_impl(runtime, _auth(), "ses_other", "hi")
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _cancel_turn_impl(runtime, _auth(), "ses_other")
 
     assert send_calls == []
@@ -3390,7 +3390,7 @@ async def test_archive_my_session_rejects_another_accounts_session_with_no_archi
     router = _other_accounts_session_router(on_archive=on_archive)
     runtime = _runtime(build_fake_anthropic(router.dispatch))
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _archive_my_session_impl(runtime, _auth(), "ses_other")
 
     assert archive_calls == []

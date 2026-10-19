@@ -125,8 +125,8 @@ def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:
 
 
 SEALED_SOURCE_MESSAGE = (
-    "Only turns inside this channel read it, so its conversation can't be moved to a DM. "
-    "Keep working here instead."
+    "Only conversations inside this channel can read it, so this one can't move to a DM. "
+    "Keep working here."
 )
 
 
@@ -373,7 +373,7 @@ async def reply_to_dm(
             tenant = await get_tenant(session, conversation.tenant_id)
         if tenant is None or tenant.archived_at is not None or tenant.provision_status != "ready":
             raise UserFacingError(
-                f"This {space_for(platform)} is not available. No DM turn was started."
+                f"This {space_for(platform)} isn't available, so no DM was started. Ask an admin."
             )
         await _require_source_still_unsealed(deps, conversation)
         admission = await admit(
@@ -487,7 +487,7 @@ async def reply_to_dm(
             raise outcome.state.error
         answer = (
             extract_final_response(outcome.state.content)
-            or "The turn completed without a text reply."
+            or "The agent finished without a text reply."
         )
         turns = bounded_turns(
             [

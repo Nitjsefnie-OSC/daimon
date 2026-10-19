@@ -60,7 +60,7 @@ async def _channel(
 async def _agent(runtime: McpRuntime, auth: AuthIdentity, name: str) -> BetaManagedAgentsAgent:
     agent = await find_agent_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
     if agent is None:
-        raise ToolError(f"No agent named {name!r} in this workspace.")
+        raise ToolError(f"No agent named {name!r} here.")
     return agent
 
 
@@ -71,7 +71,7 @@ def _server_url(agent: BetaManagedAgentsAgent, tool_key: str) -> str:
     for entry in agent.mcp_servers:
         if entry.name == server:
             return entry.url
-    raise ToolError(f"Agent does not have an MCP server named {server!r}.")
+    raise ToolError(f"Agent has no connection named {server!r}.")
 
 
 def _active(runtime: McpRuntime) -> bool:

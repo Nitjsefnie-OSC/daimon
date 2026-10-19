@@ -472,7 +472,7 @@ def list_price_preview(model: str, rates: ModelRates | ProviderPrice | None) -> 
     rates describe the supplied request tier only; no prices are discovered or
     synthesized here. A context/output limit alone cannot bound a whole turn.
     """
-    bound = "Worst-case per turn: unknown; request count, tools and hosted runtime are not bounded."
+    bound = "Worst case per reply: unknown; requests, tools and hosted time have no cap."
     exclusions = "Excludes billing markup, hosted runtime, external tools and cache storage."
     if rates is None:
         return f"{model}: list price unknown. {bound} {exclusions}"

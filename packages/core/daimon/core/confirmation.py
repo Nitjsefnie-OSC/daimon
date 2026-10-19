@@ -243,7 +243,7 @@ def prompt_for_tool_call(
         # No model-supplied compatibility text is accepted. The host hook must
         # reload and verify the preview before displaying this opt-in prompt.
         return ConfirmationPrompt(
-            title="Confirm model backend change?",
+            title="Change the model provider?",
             requester_platform_user_id=requester_platform_user_id,
             expires_at=now + timeout,
             admin=True,
@@ -441,7 +441,7 @@ def backend_switch_callbacks(
         agent, preview = await verified(prompt, prompt.requester_platform_user_id)
         details = (
             "Unsupported skills: " + (", ".join(preview.unsupported_skills) or "None"),
-            "Unsupported MCPs: " + (", ".join(preview.unsupported_mcps) or "None"),
+            "Unsupported connections: " + (", ".join(preview.unsupported_mcps) or "None"),
             "Unsupported capabilities: " + (", ".join(preview.unsupported_capabilities) or "None"),
             "Shared-thread limits: " + ("; ".join(preview.shared_thread_limits) or "None"),
             preview.cost_line,
@@ -456,11 +456,11 @@ def backend_switch_callbacks(
             update={
                 "title": action + "?",
                 "action": action + (". " + unavailable if unavailable else ""),
-                "denied_action": "Model backend unchanged",
+                "denied_action": "Model provider unchanged",
                 "detail_lines": details,
                 "consequence": (
-                    "Existing threads keep their backend; "
-                    "channel overrides still apply to new threads."
+                    "Existing threads keep their provider; "
+                    "channel settings still apply to new threads."
                     + (
                         "\n" + unavailable + ". Revert any time; nothing is deleted."
                         if unavailable

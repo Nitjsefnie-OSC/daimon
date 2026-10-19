@@ -411,8 +411,8 @@ def render_handoff_refused(refusal: HandoffRefused, *, channel: str) -> str:
         "admin_required": (
             f"{name} isn't an agent of {channel}. An admin can hand this conversation to it."
         ),
-        "not_a_reader": f"Only turns inside {channel} read it and {name} isn't one of its "
-        "agents, so only an admin can hand this conversation to it.",
+        "not_a_reader": f"Only conversations inside {channel} can read it and {name} isn't "
+        "one of its agents, so only an admin can hand this conversation to it.",
     }
     return f"{reasons[refusal.reason]} Nothing was changed."
 

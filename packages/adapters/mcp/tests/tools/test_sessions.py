@@ -360,7 +360,7 @@ async def test_get_session_raises_when_session_belongs_to_other_tenant() -> None
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(_runtime(client), auth, "ses_x")
 
 
@@ -499,7 +499,7 @@ async def test_get_session_refuses_a_session_opened_by_another_member() -> None:
 
     auth = AuthIdentity(account_id=other_account, tenant_id=tenant_id, role=Role.USER)
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(_runtime(client), auth, "ses_1")
 
 
@@ -522,7 +522,7 @@ async def test_get_session_refuses_another_members_session_even_for_an_admin() -
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
     )
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(_runtime(client), admin, "ses_1")
 
 
@@ -540,7 +540,7 @@ async def test_get_session_refuses_an_unattributable_session() -> None:
 
     auth = AuthIdentity(account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER)
 
-    with pytest.raises(ToolError, match="session not found"):
+    with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(_runtime(client), auth, "ses_1")
 
 
@@ -655,7 +655,7 @@ async def test_session_reads_do_not_cross_executing_agent(role, claim, agent_nam
             lambda: _get_session_impl(runtime, auth, "sess_other"),
             lambda: _list_session_events_impl(runtime, auth, "sess_other", None, None, None),
         ):
-            with pytest.raises(ToolError, match="session not found"):
+            with pytest.raises(ToolError, match="conversation not found"):
                 await read()
         assert events == []
     finally:

@@ -95,8 +95,7 @@ _ATTACHMENT_LINK_REJECTED_MSG = (
     "again to get a fresh one"
 )
 _ATTACHMENT_LINKS_UNCONFIGURED_MSG = (
-    "this deployment cannot resolve file links — use create_file_upload_url and "
-    "file_handles instead"
+    "Daimon cannot resolve file links here — use create_file_upload_url and file_handles instead"
 )
 _FILES_NEED_CONTENT_MSG = "Slack files need a short caption — content cannot be empty"
 _MISSING_FILES_SCOPE_MSG = (

@@ -36,7 +36,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 log = structlog.get_logger()
 
-NOT_CONFIGURED_MESSAGE: Final = "Operator tokens need the MCP server's signing key."
+NOT_CONFIGURED_MESSAGE: Final = "Operator tokens aren't set up yet. Ask whoever runs Daimon."
 
 
 @dataclasses.dataclass(frozen=True)

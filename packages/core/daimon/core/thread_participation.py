@@ -214,10 +214,10 @@ def decide_post_classifier(verdict: ClassifierVerdict) -> ParticipationDecision:
 
 def tier_word(tier: str, platform: str | None) -> str:
     """The tier as this platform's people name it: the workspace tier is a server on
-    Discord and an organisation on Teams. Other tiers read the same everywhere."""
+    Discord and an organisation on Teams, and the deployment tier is Daimon-wide."""
     if tier == "workspace" and platform in CHAT_PLATFORMS:
         return words_for(platform).space
-    return tier
+    return "Daimon-wide" if tier == "deployment" else tier
 
 
 def scope_label(
@@ -242,17 +242,17 @@ def build_participation_explanation(
     where = f"thread {thread_id}" if thread_id is not None else "here"
     if effective.mode is ParticipationMode.ON:
         return (
-            f"I follow {where}: the {tier} tier is set to on, so I may reply "
+            f"I follow {where}: the {tier} setting is on, so I may reply "
             "to messages that call for it without being addressed first."
         )
     if effective.mode is ParticipationMode.DISABLED:
         return (
-            f"I only reply in {where} when @mentioned: the {tier} tier is "
-            "disabled, and no narrower scope can turn it back on."
+            f"I only reply in {where} when @mentioned: the {tier} setting is "
+            "disabled, and no narrower setting can turn it back on."
         )
     return (
-        f"I only reply in {where} when @mentioned: the {tier} tier is the "
-        "narrowest one with a setting, and it is off."
+        f"I only reply in {where} when @mentioned: the {tier} setting is the "
+        "narrowest one with a value, and it is off."
     )
 
 

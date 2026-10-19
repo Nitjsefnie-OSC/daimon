@@ -451,7 +451,7 @@ async def test_a_polite_reply_is_read_by_the_shared_matcher(
             added = await case.call(origin=reply, content_hash=preview.preview.content_hash)
             assert added.status == "added" and added.added is not None
         else:
-            with pytest.raises(ToolError, match="did not start with the person replying"):
+            with pytest.raises(ToolError, match="is not the person replying"):
                 await case.call(origin=reply, content_hash=preview.preview.content_hash)
             assert not case.wire.requests
     assert case.world.created == [], "the Anthropic upload path was not entered"
@@ -480,7 +480,7 @@ async def test_returned_foreign_host_refuses_before_catalog_read_or_write(
         raise AssertionError("foreign returned host must be refused before catalog read")
 
     monkeypatch.setattr(NeutralResourceHost, "find", forbidden_find)
-    with pytest.raises(ToolError, match="different tenant, account or workspace"):
+    with pytest.raises(ToolError, match="belong to someone else"):
         await case.call()
     assert not case.wire.requests and await case.pending() == 0
 

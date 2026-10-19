@@ -1117,6 +1117,7 @@ class TurnOriginRow(BaseModel):
     role: Role
     created_at: datetime
     expires_at: datetime
+    sender_foreign: bool = False
 
 
 class _Facts(BaseModel):

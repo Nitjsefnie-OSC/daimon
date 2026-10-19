@@ -224,7 +224,7 @@ async def test_a_confirmed_delete_purges_and_edits_the_card_in_place(
     assert DELETING in json.dumps(response, ensure_ascii=False), "the click answers at once"
     [edit] = [r for r in teams_api_fake.activity_requests if r.method == "PUT"]
     assert edit.url.endswith("/activities/m-7"), "the outcome replaces the confirmation card"
-    assert "account row removed" in json.dumps(edit.body), "the outcome lists what went"
+    assert "account removed" in json.dumps(edit.body), "the outcome lists what went"
     assert not await _has_principal(db_session_factory, AAD_OBJECT_ID), "the account is purged"
 
 

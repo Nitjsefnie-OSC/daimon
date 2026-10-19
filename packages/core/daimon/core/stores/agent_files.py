@@ -36,7 +36,7 @@ class AgentEnvEncryptionRequiredError(StoreError):
 
     def __init__(self) -> None:
         super().__init__(
-            "This deployment has no encryption keys, so agent keys can't be saved. "
+            "Daimon has no encryption keys, so agent keys can't be saved. "
             "Ask the operator to set DAIMON_CRYPTO__KEYS. Nothing was saved."
         )
 

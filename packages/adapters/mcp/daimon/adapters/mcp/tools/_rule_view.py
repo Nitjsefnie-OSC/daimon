@@ -46,7 +46,7 @@ from daimon.core.stores.user_skills import list_user_skills_for_tenant
 from fastmcp.exceptions import ToolError
 
 _UNREADABLE_MSG = (
-    "This workspace's access policy could not be read, so daimon can't tell which agents "
+    "The access settings here could not be read, so daimon can't tell which agents "
     "this conversation may reach. Nothing was changed."
 )
 

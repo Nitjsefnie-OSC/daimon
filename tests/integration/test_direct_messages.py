@@ -1119,7 +1119,7 @@ async def test_dm_from_a_sealed_source_is_refused_before_any_dm_exists(
         now=datetime.now(UTC),
     )
     assert admission.source_sealed is True
-    with pytest.raises(DaimonError, match="Only turns inside"):
+    with pytest.raises(DaimonError, match="Only conversations inside"):
         await _start(tenant, deps, admission)
     assert created == [], "no DM session may be created for a sealed source"
     async with db_session_factory() as session:
@@ -1222,7 +1222,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         ):
             result = await call_mcp_tool(app, token=token, name=name, arguments=args)
             rendered = json.dumps(result)
-            assert ("session not found" not in rendered) is allowed, rendered
+            assert ("conversation not found" not in rendered) is allowed, rendered
             if "events" in name:
                 assert ("private transcript sentinel" in rendered) is allowed, rendered
         if agent:
@@ -1240,12 +1240,12 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
                 ),
             ):
                 result = await call_mcp_tool(app, token=token, name=name, arguments=args)
-                assert "session not found" in json.dumps(result), result
+                assert "conversation not found" in json.dumps(result), result
         else:
             result = await call_mcp_tool(
                 app, token=token, name="hub_session_probe", arguments={"handle": handle}
             )
-            assert "session not found" in json.dumps(result), result
+            assert "conversation not found" in json.dumps(result), result
 
     async def observe(request):
         session_index = int(request.url.path.split("/")[3].rsplit("_", 1)[1]) - 1
@@ -1627,7 +1627,7 @@ async def test_discord_dm_move_from_thread_under_sealed_parent_refuses_with_real
 
     thread.history.assert_not_called()
     member.create_dm.assert_not_called()
-    assert "Only turns inside" in interaction.followup.send.await_args.args[0]
+    assert "Only conversations inside" in interaction.followup.send.await_args.args[0]
 
 
 async def test_slack_dm_move_withholds_a_thread_sealed_on_its_own_with_real_admission(

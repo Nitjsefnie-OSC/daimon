@@ -44,8 +44,8 @@ RULE_EXTRAS: Final[Mapping[RuleExtra, str]] = {
     "release": "Release its agents",
 }
 PERMISSIONS_NOTE: Final = (
-    "Who can read it: anyone; only this channel, so only turns here read its messages and "
-    "conversations; or only its own agents, so also only agents kept here run and show here, "
+    "Who can read it: anyone; only this channel, so only conversations here can read "
+    "it; or only its own agents, so also only agents kept here run and show here, "
     "and nowhere else. Its default agent becomes one, or a copy of the agent answering now. "
     "Who can post: anyone; only its own agents; or nobody, daimon included. Releasing its "
     "agents lets them run elsewhere, bringing what they remembered here."

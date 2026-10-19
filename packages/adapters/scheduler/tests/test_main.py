@@ -1141,7 +1141,7 @@ async def test_fire_records_error_and_skips_run_turn_when_created_by_user_id_is_
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_fire records 'routine has no created_by_user_id' and does NOT call run_turn
+    """_fire records 'This routine has no owner. Create it again.' and does NOT call run_turn
     when the RoutineRow has created_by_user_id=None (main.py:152-160 bail branch)."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
 
@@ -1185,8 +1185,8 @@ async def test_fire_records_error_and_skips_run_turn_when_created_by_user_id_is_
     async with db_session_factory() as s:
         fetched = await get_routine(s, row.id, tenant_id=tenant.id)
     assert fetched is not None, "routine row must still exist after bail"
-    assert fetched.last_error == "routine has no created_by_user_id", (
-        f"routine must record 'routine has no created_by_user_id'; got {fetched.last_error!r}"
+    assert fetched.last_error == "This routine has no owner. Create it again.", (
+        f"routine must record 'This routine has no owner. Create it again.'; got {fetched.last_error!r}"
     )
 
     await fake_client.close()
@@ -1230,7 +1230,7 @@ async def test_fire_rejects_tenant_archived_after_claim(
     run_turn.assert_not_called()
     async with db_session_factory() as session:
         saved = await get_routine(session, row.id, tenant_id=tenant.id)
-    assert saved is not None and saved.last_error == "routine tenant archived"
+    assert saved is not None and saved.last_error == "Daimon was removed from here."
     await client.close()
 
 

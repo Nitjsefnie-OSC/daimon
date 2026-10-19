@@ -30,7 +30,7 @@ class AccessPolicyUnreadable(UserFacingError):
     def __init__(self, *, tenant_id: uuid.UUID) -> None:
         # Adapters render this text as-is, so it names no tenant id.
         super().__init__(
-            "the access settings here can't be read, so no turn was started; "
+            "the access settings here can't be read, so Daimon can't reply; "
             "ask an admin to fix them"
         )
         self.tenant_id = tenant_id

@@ -31,18 +31,18 @@ async def require_turn_origin(
     origin_context_id: str | None,
 ) -> TurnOriginRow:
     if auth.platform not in CHAT_PLATFORMS:
-        raise ToolError("Use the origin_context_id from this active platform turn.")
+        raise ToolError("Use the origin_context_id from the current chat.")
     if not origin_context_id:
         # Smaller models sometimes drop the argument. The caller's own single
         # running turn for this responder is unambiguous; anything else refuses.
         origin_context_id = await _sole_running_origin_id(runtime, auth)
         if origin_context_id is None:
-            raise ToolError("Use the origin_context_id from this active platform turn.")
+            raise ToolError("Use the origin_context_id from the current chat.")
     try:
         origin_id = uuid.UUID(origin_context_id)
     except ValueError as exc:
         raise ToolError(
-            "The turn origin is invalid; retry from the originating conversation."
+            "The origin_context_id is invalid; retry from the originating conversation."
         ) from exc
     async with runtime.session_factory() as session:
         origin = await get_active_origin(
@@ -54,15 +54,34 @@ async def require_turn_origin(
             now=datetime.now(UTC),
         )
     if origin is None:
-        raise ToolError("This turn origin is unavailable or expired; retry in that conversation.")
+        raise ToolError(
+            "The origin_context_id is unavailable or expired; retry in that conversation."
+        )
     # A chat turn's credential names its agent as chat_agent_id, as
     # `get_verified_origin` reads it: it may claim only its own responder's origin.
     executing_agent = auth.agent_id or auth.chat_agent_id
     if executing_agent is not None and executing_agent != derive_agent_uuid(
         tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
     ):
-        raise ToolError("This turn origin belongs to another responder.")
+        raise ToolError("That origin_context_id belongs to another agent.")
     return origin
+
+
+async def caller_is_foreign(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """Whether the caller is a person from another organisation (Teams), who has no
+    1:1 chat with Daimon. It is a fact about the person, so any of their running turns
+    says it; False when they have none."""
+    if auth.platform is None:
+        return False
+    async with runtime.session_factory() as session:
+        running = await list_active_origins(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            platform=auth.platform,
+            now=datetime.now(UTC),
+        )
+    return any(origin.sender_foreign for origin in running)
 
 
 async def _sole_running_origin_id(runtime: McpRuntime, auth: AuthIdentity) -> str | None:
@@ -167,14 +186,10 @@ async def _set_setup_target_impl(
     )
     target = next((agent for agent in agents if agent.id == agent_id), None)
     if target is None or not caller.sees_agent(target):
-        raise ToolError(
-            "That agent is missing from this tenant. Which current agent should I configure?"
-        )
+        raise ToolError("That agent is missing here. Which current agent should I configure?")
     target_name = target.metadata.get(MA_METADATA_KEY_NAME)
     if not target_name:
-        raise ToolError(
-            "That agent has no configuration name. Select a named agent in this tenant."
-        )
+        raise ToolError("That agent has no configuration name. Select a named agent here.")
     async with runtime.session_factory.begin() as session:
         active_origin = await get_active_origin(
             session,
@@ -186,7 +201,7 @@ async def _set_setup_target_impl(
             for_update=True,
         )
         if active_origin is None:
-            raise ToolError("This turn origin expired; retry in the setup conversation.")
+            raise ToolError("The origin_context_id expired; retry in the setup conversation.")
         binding = await get_binding(
             session,
             tenant_id=origin.tenant_id,

@@ -902,7 +902,7 @@ async def run_mcp_credential_submission(
             channel_id=channel_id,
             user_id=user_id,
             text=(
-                "This deployment is not finished being set up. Ask the operator to finish "
+                "Daimon isn't fully set up yet. Ask the operator to finish "
                 "setup, then try again. Nothing was saved."
             ),
         )
@@ -1719,7 +1719,7 @@ async def run_repo_bind_credential_submission(
                 thread_ts=thread_ts,
                 channel_id=channel_id,
                 user_id=user_id,
-                text=("Binding the working repo failed. Try again using the same form."),
+                text=("Linking the working repo failed. Try again using the same form."),
             )
             return
 

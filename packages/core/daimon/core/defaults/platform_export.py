@@ -93,7 +93,7 @@ async def export_platform(client: AsyncAnthropic, destination: Path) -> None:
                         "completed_at": datetime.now(UTC).isoformat(),
                         "sha256": checksums,
                         "excluded": [
-                            "session transcripts and sandbox files",
+                            "conversation transcripts and sandbox files",
                             "credential secrets and vault contents",
                             "historical agent/environment/memory versions",
                         ],

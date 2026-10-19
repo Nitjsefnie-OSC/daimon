@@ -1,7 +1,7 @@
 # serializer version: 1
 # name: test_rendered_hub_tool_schema_matches_snapshot
   dict({
-    'instructions': 'Every daimon reachable here lives in a workspace. Call list_daimons first; every other tool takes a daimon_id from that list.',
+    'instructions': 'Every daimon reachable here belongs to a chat space. Call list_daimons first; every other tool takes a daimon_id from that list.',
     'tools': dict({
       'ask': dict({
         'description': '''
@@ -5799,7 +5799,7 @@
         From the next message here, the agent works in a new empty workspace. It leaves
         behind this task's working files and unfinished work. It keeps everything
         already posted in this thread, and the agent's saved memory, keys and
-        connections. Nothing is removed until the new workspace is ready. Who answers
+        connections. Nothing is removed until the new working files are ready. Who answers
         here does not change.
       ''',
       'parameters': dict({

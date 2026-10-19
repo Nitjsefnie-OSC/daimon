@@ -77,11 +77,11 @@ _RUNS_IN_SEND_MSG = (
     "threads under them). Tell the caller and offer to post in one of them. Do not retry."
 )
 _UNREADABLE_MSG = (
-    "this workspace's access policy could not be read, so daimon won't read or post channels"
+    "the access settings here could not be read, so daimon won't read or post channels"
 )
 _INSIDE_MSG = (
-    "this channel's readers are limited to turns inside it: it can only be read from a "
-    "conversation there. If you are answering in that channel, pass this turn's "
+    "this channel's readers are limited to conversations inside it: it can only be read from a "
+    "conversation there. If you are answering in that channel, pass your "
     "origin_context_id; otherwise tell the caller. Do not retry."
 )
 _HELD_READ_MSG = (
@@ -268,8 +268,8 @@ async def require_agent_creatable(
     refusal = await _held_refusal(runtime, auth, Action.CREATE_AGENT, origin)
     if refusal == "origin_missing":
         raise ToolError(
-            "create_agent needs a verified origin_context_id from a chat turn while a "
-            "channel in this workspace is kept to its own agents, and this call has none. "
+            "create_agent needs a verified origin_context_id from a chat while a "
+            "channel here is kept to its own agents, and this call has none. "
             "Nothing was created. Tell the caller to create the agent from a chat conversation. "
             "Do not retry."
         )
@@ -372,7 +372,7 @@ def _raise_refusal(refusal: str | None, *, what: str, nothing: str) -> None:
         return
     if refusal == "origin_missing":
         raise ToolError(
-            f"{what} needs this turn's origin_context_id while a channel in this workspace "
+            f"{what} needs your origin_context_id while a channel here "
             f"is kept to its own agents, and this call has none. {nothing} Pass it and "
             "retry once."
         )

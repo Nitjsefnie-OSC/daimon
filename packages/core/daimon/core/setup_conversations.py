@@ -90,7 +90,7 @@ async def get_setup_responder(
         responder = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
     except DaimonError as error:
         raise UserFacingError(
-            "This setup conversation's Daimon responder is missing. "
+            "This setup conversation's Daimon agent is missing. "
             "Ask the operator to restore it, then open a new setup conversation."
         ) from error
     if (
@@ -98,7 +98,7 @@ async def get_setup_responder(
         or responder.metadata.get(MA_METADATA_KEY_NAME) != "daimon"
     ):
         raise UserFacingError(
-            "This conversation's responder is no longer the built-in Daimon. "
+            "This conversation's agent is no longer the built-in Daimon. "
             "Open a new setup conversation."
         )
     return responder

@@ -493,7 +493,7 @@ async def test_bind_replaced_after_loss_never_fires_before_the_turn(
         await bot.on_message(message)
 
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
-    assert not any("lost the workspace this task was running in" in t for t in sent_texts), (
+    assert not any("lost this task's working files" in t for t in sent_texts), (
         f"prepared.continuity alone must never trigger the loss notice, got {sent_texts}"
     )
 
@@ -569,7 +569,7 @@ async def test_outcome_replaced_after_loss_prepends_exactly_one_loss_notice_to_t
         "the loss notice must be the answer's first paragraph, exactly once"
     )
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
-    assert not any("lost the workspace this task was running in" in t for t in sent_texts), (
+    assert not any("lost this task's working files" in t for t in sent_texts), (
         f"the loss notice must not also be sent as its own message, got {sent_texts}"
     )
 
@@ -624,7 +624,7 @@ async def test_ordinary_turn_posts_no_loss_notice(
         await bot.on_message(message)
 
     sent_texts = [c.args[0] for c in message.channel.send.call_args_list if c.args]
-    assert not any("lost the workspace this task was running in" in t for t in sent_texts), (
+    assert not any("lost this task's working files" in t for t in sent_texts), (
         f"an ordinary turn must post no loss notice, got {sent_texts}"
     )
 

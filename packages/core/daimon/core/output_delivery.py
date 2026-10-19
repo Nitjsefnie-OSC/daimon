@@ -126,7 +126,7 @@ def render_oversize_notice(skipped: SkippedFile, *, max_bytes: int = MAX_BYTES_P
     return (
         f"`{sanitize_title(skipped.filename)}` is {_mb(skipped.size_bytes)} MB, over the "
         f"{limit} MB upload limit here, so I couldn't attach it. It's still saved in my "
-        "workspace: ask me for a smaller version, or to split it into parts under "
+        "files: ask me for a smaller version, or to split it into parts under "
         f"{limit} MB, and I'll attach those."
     )
 

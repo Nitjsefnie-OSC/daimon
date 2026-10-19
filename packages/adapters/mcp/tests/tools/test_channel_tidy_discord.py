@@ -872,7 +872,7 @@ async def test_the_per_turn_limit_stops_the_eleventh_action(
             origin_context_id=origin,
         )
 
-    with pytest.raises(ToolError, match="this turn's tidy limit"):
+    with pytest.raises(ToolError, match="this reply's tidy limit"):
         await _edit_message_impl(
             world.runtime,
             auth,
@@ -1195,7 +1195,7 @@ async def test_an_agent_key_has_one_turn_bucket_whatever_origins_it_names(
             origin_context_id=first,
         )
 
-    with pytest.raises(ToolError, match="this turn's tidy limit"):
+    with pytest.raises(ToolError, match="this reply's tidy limit"):
         await _edit_message_impl(
             world.runtime,
             key,

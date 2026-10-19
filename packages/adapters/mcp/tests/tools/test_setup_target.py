@@ -250,7 +250,7 @@ async def test_origin_refuses_agent_scoped_token_for_another_responder(
             platform="discord",
             **{credential: uuid.uuid4()},
         )
-        with pytest.raises(ToolError, match="another responder"):
+        with pytest.raises(ToolError, match="another agent"):
             await require_turn_origin(runtime, auth, str(origin.id))
 
 

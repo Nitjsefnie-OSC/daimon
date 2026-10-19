@@ -136,7 +136,7 @@ async def test_missing_mcp_server_is_refused(
 ) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker, tenant)
-    with pytest.raises(ToolError, match="does not have an MCP server named"):
+    with pytest.raises(ToolError, match="has no connection named"):
         await _set(
             runtime, _auth(tenant, account_id, admin=True), "shared", "missing/append_note", "allow"
         )

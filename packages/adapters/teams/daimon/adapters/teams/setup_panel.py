@@ -101,7 +101,7 @@ from mux.contracts.ids import Provider
 log = structlog.get_logger()
 
 GONE = "That agent is no longer available. It may have been deleted."
-NOT_CONFIGURED = "This deployment is not set up for coding-tool access yet. Ask the operator."
+NOT_CONFIGURED = "Coding-tool access isn't set up yet. Ask the operator."
 #: The panel is outside channels, so minting requires a server admin.
 NEEDS_ADMIN = (
     "You can't create this token.\n\n"
@@ -109,7 +109,7 @@ NEEDS_ADMIN = (
 )
 NOT_MINTER = "Only the person who minted this token can revoke it."
 OPERATOR_NEEDS_ADMIN = "Only an admin can mint or revoke operator tokens."
-OPERATOR_NOT_CONFIGURED = "This deployment has no MCP signing key, so it mints no operator tokens."
+OPERATOR_NOT_CONFIGURED = "Operator tokens aren't set up yet. Ask whoever runs Daimon."
 DM_ONLY = "Open setup from our 1:1 chat to start a setup conversation."
 STARTED = "Setup conversation started. Reply in this chat."
 ALREADY_ENDED = "This setup conversation has already ended."
@@ -537,7 +537,7 @@ class SetupPanel:
                     reason="needs_admin" if not actor.is_admin else "feature_disabled",
                     agent_name=name,
                 )
-                return toast("Model backend wasn't changed. Ask an organisation admin.")
+                return toast("Model provider wasn't changed. Ask an organisation admin.")
             if op == "backend_cancel":
                 card = await self._details(actor, name, page)
                 return replace_card(card) if card is not None else toast(GONE)
@@ -565,7 +565,7 @@ class SetupPanel:
                     reason="selection_unavailable",
                     agent_name=name,
                 )
-                return toast("Model backend preview is unavailable. Nothing was changed.")
+                return toast("That preview isn't available. Nothing was changed; choose again.")
             if op == "backend_preview":
                 preview = selection.preview
                 return replace_card(
@@ -579,7 +579,7 @@ class SetupPanel:
                 or not isinstance(digest, str)
                 or not digest
             ):
-                return toast("That preview is no longer available. Choose a model backend again.")
+                return toast("That preview is no longer available. Choose a model provider again.")
             account_id = await get_or_create_account(self._runtime, actor)
             live_actor = await card_actor(self._runtime, activity)
             if live_actor is None:

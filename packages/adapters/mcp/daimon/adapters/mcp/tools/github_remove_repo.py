@@ -45,7 +45,7 @@ async def remove_repo_impl(
     confirmed: bool = False,
 ) -> RemoveRepoResult:
     if auth.platform not in ("discord", "slack", "teams") or not auth.platform_user_id:
-        raise ToolError("GitHub setup needs a member of this workspace.")
+        raise ToolError("GitHub setup needs a person in a chat.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     target_name = agent_name or origin.configuration_target_name or origin.responder_name
     target_id = expected_ma_agent_id

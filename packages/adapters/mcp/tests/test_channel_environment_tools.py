@@ -202,7 +202,7 @@ async def test_explain_reports_each_tiers_environment(
         "default",
         "deployment",
     ), "with nothing set the deployment default decides"
-    assert "deployment default" in before.environment_explanation, "the note names the tier"
+    assert "Daimon-wide default" in before.environment_explanation, "the note names the tier"
     assert (after.channel_environment, after.tenant_environment, after.deployment_environment) == (
         "science",
         "shared",

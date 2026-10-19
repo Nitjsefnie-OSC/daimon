@@ -43,7 +43,8 @@ PIN_WRITE_REFUSAL = (
     "admin. Nothing was changed."
 )
 POLICY_UNREADABLE_REFUSAL = (
-    "The access policy here could not be read, so nothing was changed. Ask an admin to check it."
+    "The access settings here could not be read, so nothing was changed. "
+    "Ask an admin to check them."
 )
 
 

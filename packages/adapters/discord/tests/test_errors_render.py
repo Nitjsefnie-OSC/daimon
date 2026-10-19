@@ -239,7 +239,7 @@ async def test_missing_setup_responder_keeps_shared_helper_guidance(status: int)
     with pytest.raises(UserFacingError) as caught:
         await get_setup_responder(client, tenant_id=uuid.uuid4(), ma_agent_id="ag_private")
     assert render_error(caught.value, request_id=TEST_RID) == (
-        "This setup conversation's Daimon responder is missing. "
+        "This setup conversation's Daimon agent is missing. "
         "Ask the operator to restore it, then open a new setup conversation."
         f"\n\n{REF}"
     )
@@ -249,7 +249,7 @@ def test_an_unreadable_access_policy_keeps_its_words_and_the_ref() -> None:
     """A class whose every message is written for people subclasses UserFacingError."""
     error = AccessPolicyUnreadable(tenant_id=uuid.uuid4())
     assert render_error(TurnError(kind="upstream", cause=error), request_id=TEST_RID) == (
-        "the access settings here can't be read, so no turn was started; "
+        "the access settings here can't be read, so Daimon can't reply; "
         f"ask an admin to fix them\n\n{REF}"
     )
 

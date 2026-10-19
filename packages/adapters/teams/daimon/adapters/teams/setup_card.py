@@ -166,7 +166,7 @@ def roster_card(
 def _place(place: AnsweringPlace, *, here: str) -> str:
     if place.tier == "channel" and place.channel_id is not None:
         return "this chat" if place.channel_id == here else f"channel `{place.channel_id}`"
-    return "the organisation default" if place.tier == "tenant" else "the deployment default"
+    return "the organisation default" if place.tier == "tenant" else "the Daimon-wide default"
 
 
 def _answers_in(places: Sequence[str]) -> str:
@@ -269,7 +269,7 @@ def details_card(
             [
                 ChoiceSetInput(
                     id="model_backend",
-                    label="Model backend",
+                    label="Model provider",
                     value=backend_selection or "clear",
                     choices=[
                         Choice(title=channel_backend.DEFAULT_BACKEND_LABEL, value="clear"),
@@ -287,7 +287,7 @@ def details_card(
         data = OpenDialogData(TOKEN_DIALOG, {"agent": details.name})
         actions.append(SubmitAction(title="🧰 Use from your coding tools", data=data))
     elif is_admin:
-        body.append(_text("Coding-tool access is not configured for this deployment.", subtle=True))
+        body.append(_text("Coding-tool access isn't set up yet.", subtle=True))
     actions.append(_button("Back", "agents", page=page))
     return _card(details.name, body, actions)
 
@@ -296,10 +296,10 @@ def backend_preview_card(
     preview: channel_backend.CompatibilityPreview, *, agent_name: str, clear: bool
 ) -> AdaptiveCard:
     selection = "Use default" if clear else preview.target_backend
-    lines = [f"Model backend: {selection}"]
+    lines = [f"Model provider: {selection}"]
     for label, items in (
         ("Unsupported skills", preview.unsupported_skills),
-        ("Unsupported MCPs", preview.unsupported_mcps),
+        ("Unsupported connections", preview.unsupported_mcps),
         ("Unsupported capabilities", preview.unsupported_capabilities),
         ("Shared-thread limits", preview.shared_thread_limits),
     ):
@@ -307,10 +307,10 @@ def backend_preview_card(
         shown = names if len(names) <= 500 else names[:500] + "… (truncated)"
         lines.append(f"{label}: {shown}")
     lines.extend(
-        [preview.cost_line, "Existing threads keep their backend; channel overrides still apply."]
+        [preview.cost_line, "Existing threads keep their provider; channel settings still apply."]
     )
     if not preview.allowed:
-        lines.append("This backend is not enabled for this organisation.")
+        lines.append("This provider is off for this organisation. Pick another.")
     actions: list[Action] = [_button("Cancel", "backend_cancel", agent=agent_name)]
     if preview.allowed:
         actions.insert(
@@ -325,7 +325,7 @@ def backend_preview_card(
                 digest=preview.digest,
             ),
         )
-    return _card("Model backend", [_text("\n".join(lines)[:3000])], actions)
+    return _card("Model provider", [_text("\n".join(lines)[:3000])], actions)
 
 
 def routing_card(
@@ -347,9 +347,9 @@ def routing_card(
     default = tenant.agent_name if tenant else "Not assigned"
     body.append(_text(f"**Organisation default:** {default}"))
     if answering_map.deployment_default is None:
-        body.append(_text("No deployment default.", subtle=True))
+        body.append(_text("No Daimon-wide default.", subtle=True))
     else:
-        line = f"**Deployment default:** {answering_map.deployment_default}"
+        line = f"**Daimon-wide default:** {answering_map.deployment_default}"
         if answering_map.tenant_consumes_fallthrough:
             line += " (not in effect while an organisation default is set)"
         body.append(_text(line))
@@ -387,7 +387,7 @@ def _environments_text(answering_map: AnsweringMap) -> str:
     lines.append(f"**Organisation default:** {tenant or 'Not assigned'}")
     if deployment is not None:
         note = " (not in effect while an organisation default is set)" if tenant else ""
-        lines.append(f"**Deployment default:** {deployment}{note}")
+        lines.append(f"**Daimon-wide default:** {deployment}{note}")
     return "**Environments**\n\n" + "\n\n".join(lines)
 
 
@@ -490,7 +490,7 @@ def token_channel_form(
     Panels live in the 1:1 chat, so the channel the token binds to is chosen
     here rather than read from where the button was pressed.
     """
-    choices = [Choice(title="Not bound to a channel", value=UNBOUND)] if allow_unbound else []
+    choices = [Choice(title="Not tied to a channel", value=UNBOUND)] if allow_unbound else []
     choices += [
         Choice(title=f"Channel {channel_id}", value=channel_id) for channel_id in channel_ids
     ]
@@ -505,7 +505,7 @@ def token_channel_form(
                 value=choices[0].value,
                 choices=choices,
             ),
-            _text("A bound token runs under that channel's rules and budget.", subtle=True),
+            _text("A token tied to a channel runs under its rules and budget.", subtle=True),
         ],
         actions=[SubmitAction(title="Mint token", data=submit)],
         fallback_text=f"Use {agent_name} from your coding tools",
@@ -551,7 +551,7 @@ def operator_tokens_card(rows: Sequence[McpTokenRow], *, notice: str | None = No
         ),
         TextInput(id="label", label="Label", placeholder="what it is for", max_length=100),
         _text(
-            f"An operator token lets an integration call daimon's tenant tools as you, for "
+            f"An operator token lets an integration use Daimon as you for "
             f"{PANEL_TTL_DAYS} days. It is shown once.",
             subtle=True,
         ),

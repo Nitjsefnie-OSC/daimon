@@ -2184,7 +2184,7 @@ their existing behavior.
 ### Agent backend selection surfaces
 
 With `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
-workspace admins can select **Model backend** in an agent's setup Details on
+admins can select **Model provider** in an agent's setup Details on
 Discord, Slack or Teams. Only the tenant's enabled backends are offered. Preview
 shows unsupported attachments and capabilities, shared-thread restrictions,
 and the shared service's list-price estimate or explicit unknown values. Confirm

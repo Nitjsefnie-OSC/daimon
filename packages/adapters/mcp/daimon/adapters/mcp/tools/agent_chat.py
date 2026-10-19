@@ -399,7 +399,7 @@ async def _verify_agent_owns_session(
     caller's account: every member of a workspace talks to the same agent, and
     a member's session runs with that member's vault, so an agent match alone
     would let one member read, drive or stop another's conversation. Raises
-    ``ToolError("session not found")`` — same message as a genuinely missing
+    ``ToolError("conversation not found")`` — same message as a genuinely missing
     session, so existence isn't leaked across agents or accounts.
 
     A conversation that ran in a sealed channel is then refused outright: these
@@ -411,20 +411,20 @@ async def _verify_agent_owns_session(
     try:
         s = await retrieve_session(runtime.client, handle, scope=mcp_scope(auth))
     except ScopeViolation:
-        raise ToolError("session not found") from None
+        raise ToolError("conversation not found") from None
     derived = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(s.agent.id))
     if auth.agent_id is None or derived != auth.agent_id:
-        raise ToolError("session not found")
+        raise ToolError("conversation not found")
     if not _owned_by_caller(s, auth) and s.id not in await admin_readable_legacy_sessions(
         runtime, auth, [s]
     ):
-        raise ToolError("session not found")
+        raise ToolError("conversation not found")
     await require_session_outside_seals(runtime, auth, s)
     return s
 
 
 _CHAT_TURN_REFUSED = (
-    "a chat turn can't open or drive another conversation through agent chat. "
+    "a chat reply can't open or drive another conversation through agent chat. "
     "Answer in this conversation instead. Do not retry."
 )
 
@@ -588,7 +588,7 @@ async def _start_turn_impl(
         if not is_isolated:
             raise ToolError("bundle requires an isolated agent")
         if runtime.settings.mcp.jwt_secret is None:
-            raise ToolError("bundle upload is not configured on this deployment")
+            raise ToolError("bundle upload is not set up")
         claims = (
             bundle_handle.verify(
                 runtime.settings.mcp.jwt_secret.get_secret_value(),
@@ -755,11 +755,11 @@ async def _continue_turn_impl(
         if not await _bound_seal(runtime, auth) <= seal_ids(session.metadata):
             raise ToolError(_SEALED_SINCE_START_MSG)
         if session.archived_at is not None:
-            raise ToolError("This session is archived.")
+            raise ToolError("This conversation is archived.")
         async with runtime.session_factory.begin() as db:
             touched = await touch_unmapped_app_session(db, session_id=handle)
             if touched is False:
-                raise ToolError("This session is closed.")
+                raise ToolError("This conversation is closed.")
         mcp = runtime.settings.mcp
         if mcp.public_url is not None and mcp.jwt_secret is not None:
             mounted = await _verify_agent_owns_session(runtime, auth, handle)
@@ -1047,7 +1047,7 @@ async def _deliver_turn_charts_impl(
     session = await _get_session_impl(runtime, auth, handle)
     if session.status not in {"idle", "terminated"}:
         raise ToolError(
-            f"session {handle} is {session.status!r}; deliver charts only after "
+            f"conversation {handle} is {session.status!r}; deliver charts only after "
             "get_my_session reports 'idle' or 'terminated'"
         )
 
@@ -1068,9 +1068,9 @@ async def _deliver_turn_charts_impl(
         page = events.next_page
 
     if final_text is None:
-        raise ToolError(f"no completed turn found for session {handle}")
+        raise ToolError(f"no finished reply found for conversation {handle}")
     if turn_started_at is None:
-        raise ToolError(f"no completed turn boundary found for session {handle}")
+        raise ToolError(f"no start of the finished reply found for conversation {handle}")
 
     cache_key = (handle, turn_started_at.isoformat())
     cached = _delivery_cache.get(cache_key)
@@ -1152,7 +1152,7 @@ async def _ask_impl(
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.SESSION_TERMINATED)
             raise ToolError(
-                f"Daimon turn reached terminal status {current.status!r}; "
+                f"The reply reached final status {current.status!r}; "
                 f"resume or inspect events with handle {handle}"
             )
         if current.status == "idle":
@@ -1204,7 +1204,7 @@ async def _ask_impl(
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.CEILING)
             raise ToolError(
-                f"Daimon turn did not become idle with a reply within "
+                f"Daimon did not finish a reply within "
                 f"{timeout_seconds:g} seconds; resume with handle {handle}"
             )
         await sleep(min(poll_interval_seconds, remaining))

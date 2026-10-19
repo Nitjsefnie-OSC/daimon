@@ -110,7 +110,7 @@ def _answers_line(places: tuple[AnsweringPlace, ...]) -> str:
         elif place.tier == "tenant":
             parts.append("the server default")
         else:
-            parts.append("the deployment default")
+            parts.append("the Daimon-wide default")
     shown: list[str] = []
     for part in parts:
         candidate = "\n".join((*shown, part))
@@ -374,10 +374,10 @@ class DetailsView(PanelViewBase):
         self.backend_clear = backend_clear
         if backend_preview is not None:
             selection = "Use default" if backend_clear else backend_preview.target_backend
-            lines = [f"**Model backend: {selection}**"]
+            lines = [f"**Model provider: {selection}**"]
             for label, items in (
                 ("Unsupported skills", backend_preview.unsupported_skills),
-                ("Unsupported MCPs", backend_preview.unsupported_mcps),
+                ("Unsupported connections", backend_preview.unsupported_mcps),
                 ("Unsupported capabilities", backend_preview.unsupported_capabilities),
                 ("Shared-thread limits", backend_preview.shared_thread_limits),
             ):
@@ -387,11 +387,11 @@ class DetailsView(PanelViewBase):
             lines.extend(
                 [
                     backend_preview.cost_line,
-                    "Existing threads keep their backend; channel overrides still apply.",
+                    "Existing threads keep their provider; channel settings still apply.",
                 ]
             )
             if not backend_preview.allowed:
-                lines.append("This backend is not enabled for this server.")
+                lines.append("This provider is off for this server. Pick another.")
             preview_text: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
                 "\n".join(lines)[:3000]
             )
@@ -477,7 +477,7 @@ class DetailsView(PanelViewBase):
         ):
             backend_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
             select: discord.ui.Select[discord.ui.LayoutView] = discord.ui.Select(
-                placeholder="Model backend",
+                placeholder="Model provider",
                 options=[
                     discord.SelectOption(
                         label=channel_backend.DEFAULT_BACKEND_LABEL,
@@ -498,7 +498,7 @@ class DetailsView(PanelViewBase):
                 self._on_backend_select, select=select
             )
             backend_row.add_item(select)
-            container.add_item(discord.ui.TextDisplay("**Model backend**"))
+            container.add_item(discord.ui.TextDisplay("**Model provider**"))
             container.add_item(backend_row)
 
         nav_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
@@ -524,7 +524,7 @@ class DetailsView(PanelViewBase):
             or not channel_backend.backend_selection_enabled(self.runtime.settings.turn)
         ):
             await interaction.response.send_message(
-                "Model backend wasn't changed. Open the panel again.", ephemeral=True
+                "Model provider wasn't changed. Open the panel again.", ephemeral=True
             )
             return False
         return True
@@ -569,7 +569,7 @@ class DetailsView(PanelViewBase):
         if selection is None:
             await self._backend_audit(interaction, outcome="denied", reason="selection_unavailable")
             await interaction.followup.send(
-                "Model backend preview is unavailable. Nothing was changed.", ephemeral=True
+                "That preview isn't available. Nothing was changed; choose again.", ephemeral=True
             )
             return
         preview = selection.preview

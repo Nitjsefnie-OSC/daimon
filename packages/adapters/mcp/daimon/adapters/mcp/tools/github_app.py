@@ -58,7 +58,7 @@ async def _post_app_install_link_impl(
     slug = runtime.settings.github_app.app_slug
     if slug is None:
         raise ToolError(
-            "this deployment has no GitHub App install link configured — "
+            "Daimon has no GitHub App install link set up — "
             "for repo access call github_connect instead, which posts the Connect GitHub "
             "button and needs no install link"
         )

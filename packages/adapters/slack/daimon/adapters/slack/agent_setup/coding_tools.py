@@ -64,7 +64,7 @@ __all__ = [
 log = structlog.get_logger()
 
 NOT_CONFIGURED_MESSAGE: Final[str] = (
-    "This deployment is not set up for coding-tool access yet. Ask the operator to finish "
+    "Coding-tool access isn't set up yet. Ask the operator to finish "
     "setup, then try again. Nothing was saved."
 )
 

@@ -88,7 +88,7 @@ from pydantic import BaseModel
 log = structlog.get_logger(__name__)
 
 _NOT_FOUND = "daimon not found"
-_SESSION_NOT_FOUND = "session not found"
+_SESSION_NOT_FOUND = "conversation not found"
 
 
 class DaimonSummary(BaseModel):

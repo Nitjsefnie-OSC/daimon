@@ -1040,7 +1040,7 @@ async def _require_reassignment_admission(
                 )
             else:
                 remedy = (
-                    "would exceed the 15-credential session limit. "
+                    "would exceed the 15-credential limit for one conversation. "
                     "Remove a repo or an account first, then reconnect."
                 )
             failures.append(f"{moved_repo.full_name} moved to {owner}. {name} {remedy}")

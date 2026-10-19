@@ -80,7 +80,7 @@ class Preview(BaseModel):
     unsupported_mcps: tuple[str, ...] = ("private connector",)
     unsupported_capabilities: tuple[str, ...] = ("native schedules",)
     shared_thread_limits: tuple[str, ...] = ("per caller only",)
-    cost_line: str = "List price: unknown. Worst-case per turn: unknown."
+    cost_line: str = "List price: unknown. Worst case per reply: unknown."
     allowed: bool = True
     digest: str = "d" * 64
     # Mirrors `_BackendConsentFacts` on the real `CompatibilityPreview`: no
@@ -281,7 +281,7 @@ async def test_flag_off_panels_and_mcp_registration_do_not_expose_backend_contro
     seam.settings.turn = TurnSettings(path=path, channel_backends=enabled)
     view = discord_view(seam)
     assert not any(
-        isinstance(item, discord.ui.Select) and item.placeholder == "Model backend"
+        isinstance(item, discord.ui.Select) and item.placeholder == "Model provider"
         for item in view.walk_children()
     )
     mcp = FastMCP()
@@ -412,7 +412,7 @@ async def test_discord_preview_renders_all_shared_facts(seam):
         "native schedules",
         "per caller only",
         "List price",
-        "Worst-case",
+        "Worst case",
     ):
         assert fact in text
 
@@ -549,8 +549,8 @@ def test_slack_teams_unconfigured_renderers_keep_backend_control_absent():
         attribution=None,
     )
     teams = tc.details_card(details(), here="chat", page=0, coding_tools=False, is_admin=True)
-    assert "Model backend" not in json.dumps(slack)
-    assert "Model backend" not in teams.model_dump_json()
+    assert "Model provider" not in json.dumps(slack)
+    assert "Model provider" not in teams.model_dump_json()
 
 
 @pytest.fixture
@@ -879,7 +879,7 @@ async def test_large_preview_lists_keep_cost_and_thread_limits_visible(seam):
         assert "truncated" in text
         assert "List price: unknown" in text
         assert "per caller only" in text
-        assert "Existing threads keep their backend" in text
+        assert "Existing threads keep their provider" in text
 
 
 async def test_missing_actual_sdk_agent_is_a_typed_mcp_refusal(persisted):
@@ -1057,7 +1057,7 @@ async def test_discord_stale_selection_refuses_without_losing_details(seam):
     view.swap_to = AsyncMock()
     await view._on_backend_select(event, select=selected)
     event.followup.send.assert_awaited_once()
-    assert "unavailable" in event.followup.send.await_args.args[0]
+    assert "isn't available" in event.followup.send.await_args.args[0]
     view.swap_to.assert_not_awaited()
     assert seam.calls == []
 
@@ -1079,7 +1079,7 @@ async def test_slack_stale_selection_refuses_without_mutating_or_replacing_modal
     )
     client.views_update.assert_not_awaited()
     sa.post_ephemeral.assert_awaited_once()
-    assert "unavailable" in sa.post_ephemeral.await_args.kwargs["text"]
+    assert "isn't available" in sa.post_ephemeral.await_args.kwargs["text"]
     assert seam.calls == []
 
 
@@ -1097,7 +1097,7 @@ async def test_teams_stale_selection_returns_toast_without_mutation(seam, monkey
         )
     )
     response = await tp.SetupPanel(seam.runtime)._act(ctx)
-    assert "unavailable" in str(response)
+    assert "isn't available" in str(response)
     assert seam.calls == []
 
 

@@ -331,14 +331,14 @@ def _recipients(addresses: list[str], field: str) -> list[dict[str, object]]:
 
 
 _GAP_TEXT = {
-    "no_origin": "this call is not from the person's own chat turn",
-    "no_live_session": "this chat has no live session for the person",
-    "other_agents_session": "this chat's session runs another agent",
+    "no_origin": "this call is not from the person's own chat",
+    "no_live_session": "this chat has no live conversation for the person",
+    "other_agents_session": "this chat's conversation runs another agent",
     "session_not_gated": (
-        "this chat's session started before sending was set up; their next message updates it"
+        "this chat's conversation started before sending was set up; their next message updates it"
     ),
-    "session_unreadable": "Daimon could not read this chat's session; try again in a moment",
-    "source_context_unavailable": "this chat's session could not be checked",
+    "session_unreadable": "Daimon could not read this chat's conversation; try again in a moment",
+    "source_context_unavailable": "this chat's conversation could not be checked",
 }
 
 
@@ -370,7 +370,7 @@ async def microsoft_send_impl(
     if gap is not None:
         raise ToolError(
             "Nothing was sent: sending needs the person's Approve on a card, and "
-            f"{_GAP_TEXT[gap]}. Do not retry this turn."
+            f"{_GAP_TEXT[gap]}. Do not retry in this reply."
         )
     if not to or len(to) + len(cc) > _MAX_RECIPIENTS:
         raise ToolError(f"Pass between 1 and {_MAX_RECIPIENTS} recipients.")

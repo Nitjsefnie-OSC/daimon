@@ -323,7 +323,7 @@ async def test_handle_started_by_another_account_is_indistinguishable_from_unkno
     assert isinstance(payload, dict) and payload.get("isError"), (
         f"{tool} must reject a handle another account started, got {payload!r}"
     )
-    assert "session not found" in str(payload.get("content")), f"got {payload!r}"
+    assert "conversation not found" in str(payload.get("content")), f"got {payload!r}"
 
 
 @pytest.mark.parametrize("tool", ["ask", "start_turn", "continue_turn"])

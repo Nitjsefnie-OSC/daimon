@@ -178,7 +178,7 @@ def test_routing_orders_channels_then_server_default_then_deployment_default() -
     assert text.index("#data") < text.index("#growth") < text.index("Server default"), (
         "channels come before the server default"
     )
-    assert text.index("Server default") < text.index("Deployment default"), (
+    assert text.index("Server default") < text.index("Daimon-wide default"), (
         "the server default comes before the deployment fall-through"
     )
     assert "-# set by <@77>" in text, "the server default carries its audit line"

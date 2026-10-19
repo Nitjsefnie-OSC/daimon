@@ -160,7 +160,7 @@ def test_environment_notes_name_the_scope_and_the_tier() -> None:
     assert "nothing changed" in build_clear_environment_note(channel="c1", cleared=False), (
         "a clear with nothing set says so"
     )
-    assert "falls through" in build_clear_environment_note(channel="c1", cleared=True), (
+    assert "falls back" in build_clear_environment_note(channel="c1", cleared=True), (
         "a clear says where the channel goes"
     )
     assert "workspace default" in build_environment_resolution_note(

@@ -476,7 +476,8 @@ def _build_create_spec(
     except ValidationError as exc:
         raise ToolError(
             "create_agent: invalid agent configuration; check the supplied fields "
-            "and ensure every MCP server has a matching mcp_toolset entry. Nothing was saved."
+            "and ensure every mcp_servers entry has a matching mcp_toolset entry. "
+            "Nothing was saved."
         ) from exc
 
 
@@ -705,9 +706,9 @@ async def _update_agent_impl(
             merged_mcp_count = len(patch["mcp_servers"] or [])
             if merged_mcp_count > AGENT_MCP_CAP:
                 raise ToolError(
-                    f"Cannot attach MCP servers: the merged server set ({merged_mcp_count}) "
-                    f"exceeds this organization's per-agent MCP-server limit ({AGENT_MCP_CAP}). "
-                    f"No servers were changed on '{name}'. Attach fewer servers, or use "
+                    f"Cannot attach connections: the merged set ({merged_mcp_count}) "
+                    f"exceeds this organization's per-agent connection limit ({AGENT_MCP_CAP}). "
+                    f"Nothing was changed on '{name}'. Attach fewer, or use "
                     "detach_mcp_server before adding more."
                 )
         if tools is not None:
@@ -1037,7 +1038,7 @@ async def _set_agent_backend_impl(
 ) -> dict[str, JsonValue]:
     _require_admin(auth)
     if auth.agent_id is not None:
-        raise ToolError("An agent key cannot change model backends.")
+        raise ToolError("An agent key cannot change the model provider.")
     try:
         require_outside_chat_turn(auth)
     except ToolError as exc:
@@ -1045,7 +1046,7 @@ async def _set_agent_backend_impl(
             "Use request_agent_backend_switch in chat so the admin can confirm the preview."
         ) from exc
     if not channel_backend.backend_selection_enabled(runtime.settings.turn):
-        raise ToolError("Model backend selection is disabled on this deployment.")
+        raise ToolError("Choosing a model provider is turned off. Nothing changed.")
     service = channel_backend.make_backend_service(
         runtime.session_factory,
         runtime.settings.turn,
@@ -1152,7 +1153,7 @@ async def _request_agent_backend_switch_impl(
             capture_source=partial(_capture_backend_source, runtime, auth, origin),
         )
         if not service.enabled:
-            raise ToolError("Model backend selection is disabled. Nothing changed.")
+            raise ToolError("Choosing a model provider is turned off. Nothing changed.")
         gap = await session_card_gap(
             runtime, auth, origin, tool_name="request_agent_backend_switch"
         )
@@ -1168,9 +1169,7 @@ async def _request_agent_backend_switch_impl(
         )
         preview = await service.preview(agent, target_backend)
         if not preview.allowed:
-            raise ToolError(
-                "That model backend is not enabled for this workspace. Nothing changed."
-            )
+            raise ToolError("That model provider isn't turned on here. Nothing changed.")
         status: Literal["preview", "changed"] = "preview"
         summary = (
             "Show this compatibility and cost preview. If they want to proceed, call "
@@ -1213,8 +1212,8 @@ async def _request_agent_backend_switch_impl(
             )
             status = "changed"
             summary = (
-                "Model backend changed. Existing threads keep their backend; "
-                "channel overrides still take priority in new threads."
+                "Model provider changed. Existing threads keep their provider; "
+                "channel settings still win in new threads."
             )
         return AgentBackendSwitchInfo(
             status=status,
@@ -1247,12 +1246,12 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             expected_revision: int | None = None,
             preview_only: bool = False,
         ) -> dict[str, JsonValue]:
-            """Set an enabled model backend, or clear the agent setting with backend=null.
+            """Set an enabled model provider, or clear the agent setting with backend=null.
 
             Admin only, for direct coding-tool or API requests. Chat turns use
             request_agent_backend_switch so the admin confirms the preview.
             The returned preview names compatibility limits and list prices.
-            Existing threads keep their backend; channel overrides still apply.
+            Existing threads keep their provider; channel settings still apply.
             expected_revision refuses a setting changed since it was read.
             preview_only returns the compatibility and cost preview without applying it.
             """

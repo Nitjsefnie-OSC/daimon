@@ -353,7 +353,7 @@ def build_decision_events(
 def refusal_message(call: ToolCall, verdict: ToolVerdict) -> str:
     """What the model is told when `call` is refused without a person."""
     if verdict.reason == "denied_by_operator":
-        return f"Refused: the operator does not allow {call.key}. Do not retry it."
+        return f"Refused: an admin does not allow {call.key}. Do not retry it."
     if verdict.reason == "agent_rule_deny":
         return f"Refused: this agent's tool rule denies {call.key}. Do not retry it."
     if verdict.reason == "agent_rule_ask":
@@ -367,7 +367,7 @@ def refusal_message(call: ToolCall, verdict: ToolVerdict) -> str:
             "requester approves it, and nobody is here to approve. Do not retry it in this run."
         )
     return (
-        f"Refused: {call.key} changes data outside this session and nobody is here to "
+        f"Refused: {call.key} changes data outside this conversation and nobody is here to "
         "approve it, so it did not run. Do not retry it in this run; report what you "
         "would have written instead."
     )
