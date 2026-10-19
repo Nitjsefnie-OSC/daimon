@@ -53,6 +53,7 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
     mark_turn_active,
 )
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import prepare as prepare_mod
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
@@ -228,6 +229,7 @@ def _deps(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 

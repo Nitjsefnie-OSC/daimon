@@ -449,6 +449,7 @@ async def queue_connect_followup(
             target_ma_agent_id=row.origin_ma_agent_id,
             target_name=row.origin_responder_name,
             reason="github_access_ready",
+            attended=True,
             idempotency_key=uuid.uuid5(uuid.NAMESPACE_URL, f"github-connect:{row.token_hash}"),
             requested_work=row.requested_work,
             available_at=datetime.now(UTC),

@@ -31,6 +31,7 @@ from daimon.core.stores import (
 )
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
@@ -194,6 +195,7 @@ async def root_turn(
             account_id=account.id,
             resource_scope=scope,
             memory_read_only=True,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
         acknowledged = await create_session_record(
             client,
@@ -851,6 +853,7 @@ async def another_account_root(value):
             account_id=account.id,
             resource_scope=scope,
             memory_read_only=True,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
         acknowledged = await create_session_record(
             client,

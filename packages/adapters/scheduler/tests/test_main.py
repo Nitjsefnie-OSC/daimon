@@ -3283,6 +3283,16 @@ async def test_fire_collects_outputs_from_real_headless_turn(
         ),
     )
     router.add(
+        "GET",
+        r"/v1/sessions/[^/]+$",
+        lambda r, m: httpx.Response(
+            200,
+            json=ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
+                mode="json"
+            ),
+        ),
+    )
+    router.add(
         "POST", r"/v1/sessions/[^/]+/events", lambda r, m: httpx.Response(200, json={"data": None})
     )
     now = datetime.now(UTC)
