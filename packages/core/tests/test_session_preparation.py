@@ -102,6 +102,7 @@ from daimon.testing.ma import (
 )
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from daimon.testing.membership import FixtureMembershipResolver
 from sqlalchemy import Connection, event, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -282,6 +283,7 @@ async def _settle_every_session(
 
 def _deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport) -> TurnDeps:
     return TurnDeps(
+        membership_resolver=FixtureMembershipResolver("user-1"),
         anthropic=transport.client(),
         sessionmaker=sessionmaker,
         deployment_default=DeploymentDefault(),
@@ -2955,7 +2957,11 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     real_recheck = _admission_recheck(
-        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -3045,7 +3051,9 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         tasks.extend(asyncio.create_task(send(i)) for i in range(1, 15))
         # All peers must attempt the real PostgreSQL fence before releasing
         # the holder. Try-lock contenders now back off outside the pool/gate.
-        await asyncio.wait_for(peers_entered.wait(), 3)
+        # Membership and ownership reads precede the fence; allow loaded hosts
+        # to complete them without changing the bounded pool-contention proof.
+        await asyncio.wait_for(peers_entered.wait(), 15)
         tasks.append(asyncio.create_task(compatible_preparation()))
         tasks.append(asyncio.create_task(replacement()))
         release.set()
@@ -3149,7 +3157,11 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
         settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     recheck = _admission_recheck(
-        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
 
     async def send(index, phase):
@@ -3305,7 +3317,11 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     recheck = _admission_recheck(
-        auth, sessionmaker=factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
 
     async def send(index, phase, retired=False):
@@ -3888,7 +3904,11 @@ async def test_old_session_cannot_be_written_after_successor_exists(db_session, 
         agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=first.admission.agent.id),
     )
     recheck = _admission_recheck(
-        auth, sessionmaker=db_session_factory, tool_name="continue_turn", agent_names=None
+        auth,
+        sessionmaker=db_session_factory,
+        membership_resolver=deps.membership_resolver,
+        tool_name="continue_turn",
+        agent_names=None,
     )
     before = len(transport.state.events.get(first.ma_session_id, []))
     from daimon.core.session_mutation import SessionRetired
@@ -4162,8 +4182,14 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         _continue_turn_impl(runtime, auth, first.ma_session_id, "in flight")
     )
     replacing = None
+    entered_wait = asyncio.create_task(entered.wait())
     try:
-        await asyncio.wait_for(entered.wait(), 5)
+        done, _ = await asyncio.wait(
+            {entered_wait, sending}, timeout=5, return_when=asyncio.FIRST_COMPLETED
+        )
+        if sending in done:
+            await sending  # Surface an early send failure rather than timing out on entered.
+        assert entered_wait in done, "the send must enter while holding its mutation fence"
         replacing = asyncio.create_task(
             _prepare(
                 deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
@@ -4180,8 +4206,12 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         assert await _count_live_rows(factory, tenant=tenant, account=account) == 1
     finally:
         release.set()
+        entered_wait.cancel()
         await asyncio.gather(
-            sending, *([replacing] if replacing is not None else []), return_exceptions=True
+            entered_wait,
+            sending,
+            *([replacing] if replacing is not None else []),
+            return_exceptions=True,
         )
 
 

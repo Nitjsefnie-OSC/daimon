@@ -354,3 +354,43 @@ async def test_continuing_a_created_routine_session_keeps_channel_deny(
         ToolSafetyPolicy(enabled=True, agent_rules=True),
     )
     assert _confirmations(session) == ["deny"]
+
+
+@pytest.mark.parametrize(
+    ("trusted", "destructive", "expected"),
+    [(True, False, "allow"), (False, False, "deny"), (True, True, "deny")],
+)
+async def test_cli_uses_only_trusted_session_annotations(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    trusted: bool,
+    destructive: bool,
+    expected: str,
+) -> None:
+    from daimon.core import mcp_tool_annotations
+
+    catalogues: list[str] = []
+
+    async def catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
+        catalogues.append(url)
+        return [
+            {
+                "name": "memory_flag_list",
+                "annotations": {
+                    "readOnlyHint": True,
+                    "destructiveHint": destructive,
+                },
+            }
+        ]
+
+    monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", catalogue)
+    session = _Session([_toolset("linear")], [_LINEAR])
+    await _run(
+        monkeypatch,
+        db_session_factory,
+        session,
+        _events("linear", "memory_flag_list"),
+        ToolSafetyPolicy(enabled=True, trusted_annotations=("linear",) if trusted else ()),
+    )
+    assert _confirmations(session) == [expected]
+    assert catalogues == ([str(_LINEAR["url"])] if trusted else [])

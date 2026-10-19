@@ -107,5 +107,24 @@ services:
     command: ["wipe"]
     restart: "no"
 
+  preview-parity-mcp:
+    image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
+    profiles: ["preview-parity"]
+    labels:
+      org.opencontainers.image.revision: ${DAIMON_LANE_SHA:?DAIMON_LANE_SHA is required}
+    environment:
+      # No lane DB, model credentials or other secrets enter this fixture.
+      PYTHONPATH: /app/packages/testing
+      DAIMON_PARITY_LANE: ${DAIMON_PARITY_LANE:-disabled}
+      DAIMON_PREVIEW_PARITY_MCP_TOKEN: ${DAIMON_PREVIEW_PARITY_MCP_TOKEN:-}
+      DAIMON_PARITY_CALL_LOG: /home/daimon/calls.jsonl
+    entrypoint: ["uvicorn"]
+    command: ["daimon.testing.preview_parity_mcp:create_app", "--factory", "--host", "0.0.0.0", "--port", "8766", "--workers", "1", "--no-access-log"]
+    ports: ["127.0.0.1:18766:8766"]
+    volumes:
+      - preview-parity-calls:/home/daimon
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  preview-parity-calls:

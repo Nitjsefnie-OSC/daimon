@@ -18,12 +18,15 @@ allowed to invoke the agent gets nothing — no post and no direct message.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import structlog
+from anthropic import AsyncAnthropic
 from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
+from daimon.adapters.slack.output_delivery import SLACK_MAX_BYTES_PER_FILE, build_output_poster
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
@@ -39,8 +42,11 @@ from daimon.core.routine_delivery import (
     resolve_routine_identity,
     slack_creator_may_post,
 )
+from daimon.core.routine_files import deliver_routine_files, payload_for
 from daimon.core.rule_views import keeps_routine_inside
+from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenants import get_tenant
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -63,11 +69,15 @@ async def _dm_fallback(
     *,
     team_id: str,
     policy: DirectMessagePolicy,
+    output_client: AsyncAnthropic,
+    may_post: Callable[[], Awaitable[bool]],
 ) -> DeliveryOutcome:
     creator = row.created_by_user_id
     if creator is None or not policy.allows(creator):
         return DeliveryOutcome(status="skipped", note=reason)
     try:
+        if not await may_post():
+            return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
         info = await client.users_info(user=creator)  # pyright: ignore[reportUnknownMemberType]
         user = cast("dict[str, object]", info["user"])
         if (
@@ -81,9 +91,25 @@ async def _dm_fallback(
         channel = cast("dict[str, str]", opened["channel"])["id"]
         text = escape_mrkdwn_preserving_mentions(render_fallback_dm(row, reason))
         for chunk in split_fenced(text, 11800, word_boundary=True):
+            if not await may_post():
+                return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
             await client.chat_postMessage(channel=channel, text=chunk)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+
+        async def notice(text: str) -> None:
+            await client.chat_postMessage(channel=channel, text=text)  # pyright: ignore[reportUnknownMemberType]
+
+        await deliver_routine_files(
+            output_client,
+            payload_for(row),
+            max_bytes=SLACK_MAX_BYTES_PER_FILE,
+            post=build_output_poster(client, channel_id=channel, thread_ts=None),
+            notice=notice,
+            may_post=may_post,
+        )
     except SlackApiError as err:
-        log.info("routine.delivery_dm_failed", routine_id=str(row.id), error=str(err))
+        log.info(
+            "routine.delivery_dm_failed", routine_id=str(row.id), error_type=type(err).__name__
+        )
         return DeliveryOutcome(status="skipped", note=reason)
     return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
@@ -157,6 +183,10 @@ def make_slack_routine_poster(
     runtime: SlackRuntime,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
     async def _post(row: RoutineRow) -> DeliveryOutcome:
+        if row.destination_kind == "dm":
+            return DeliveryOutcome(
+                status="skipped", note="DM routines are supported only on Discord."
+            )
         async with runtime.sessionmaker() as session:
             tenant = await get_tenant(session, row.tenant_id)
         if tenant is None or tenant.archived_at is not None:
@@ -176,11 +206,68 @@ def make_slack_routine_poster(
             return DeliveryOutcome(status="skipped", note=cleared)
         keep_inside = keeps_routine_inside(cleared, row)
 
+        async def creator_current() -> bool:
+            async with runtime.sessionmaker() as session:
+                current = await get_routine(session, row.id, tenant_id=row.tenant_id)
+            if current is None or (current.destination_kind, current.destination_id) != (
+                row.destination_kind,
+                row.destination_id,
+            ):
+                return False
+            if row.delivery_status == "claimed" and (
+                current.delivery_status != "claimed"
+                or current.delivery_lease_owner != row.delivery_lease_owner
+                or current.delivery_lease_expires_at is None
+                or current.delivery_lease_expires_at <= datetime.now(UTC)
+            ):
+                return False
+            return isinstance(
+                await clear_creator(runtime.sessionmaker, row, platform="slack"), TenantAccessPolicy
+            )
+
+        async def fallback_guard() -> bool:
+            if not await creator_current():
+                return False
+            async with runtime.sessionmaker() as session:
+                tenant_now = await get_tenant(session, row.tenant_id)
+                if (
+                    tenant_now is None
+                    or tenant_now.archived_at is not None
+                    or tenant_now.external_id != tenant.external_id
+                    or not await dm_enabled(session, tenant_id=row.tenant_id)
+                ):
+                    return False
+            creator = row.created_by_user_id
+            current_dm_policy = runtime.settings.direct_message_policies.get(
+                row.tenant_id, DirectMessagePolicy()
+            )
+            if creator is None or not current_dm_policy.allows(creator):
+                return False
+            current_policy = await clear_creator(runtime.sessionmaker, row, platform="slack")
+            if not isinstance(current_policy, TenantAccessPolicy) or keeps_routine_inside(
+                current_policy, row
+            ):
+                return False
+            info = await client.users_info(user=creator)  # pyright: ignore[reportUnknownMemberType]
+            user = cast("dict[str, object]", info["user"])
+            return (
+                user.get("team_id") == tenant.external_id
+                and not user.get("deleted")
+                and not user.get("is_bot")
+                and not user.get("is_stranger")
+            )
+
         async def fallback(reason: str) -> DeliveryOutcome:
             if keep_inside:  # an isolated channel's result never leaves it, not even by DM
                 return DeliveryOutcome(status="skipped", note=reason)
             return await _dm_fallback(
-                client, row, reason, team_id=tenant.external_id, policy=dm_policy
+                client,
+                row,
+                reason,
+                team_id=tenant.external_id,
+                policy=dm_policy,
+                output_client=runtime.anthropic,
+                may_post=fallback_guard,
             )
 
         target = delivery_target(row, platform="slack")
@@ -225,6 +312,38 @@ def make_slack_routine_poster(
             if error in _UNUSABLE_DESTINATION:
                 return await fallback("destination_unavailable")
             raise
+
+        async def may_post() -> bool:
+            if not await creator_current():
+                return False
+            policy = await clear_creator(runtime.sessionmaker, row, platform="slack")
+            return bool(
+                isinstance(policy, TenantAccessPolicy)
+                and authorize(
+                    policy,
+                    subject=Subject(),
+                    action=Action.POST,
+                    surface=Surface.ROUTINE,
+                    place=Place(channel_id=target.channel_id),
+                )
+                and await _destination_refusal(client, row, target) is None
+            )
+
+        async def notice(text: str) -> None:
+            await post_as_agent(
+                client, identity, text=escape_mrkdwn_preserving_mentions(text), **place
+            )
+
+        await deliver_routine_files(
+            runtime.anthropic,
+            payload_for(row),
+            max_bytes=SLACK_MAX_BYTES_PER_FILE,
+            post=build_output_poster(
+                client, channel_id=target.channel_id, thread_ts=target.thread_ts
+            ),
+            notice=notice,
+            may_post=may_post,
+        )
         return DeliveryOutcome(status="delivered")
 
     return _post

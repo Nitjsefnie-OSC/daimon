@@ -49,11 +49,12 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.config import Settings, load_settings
+from daimon.core.config import DirectMessagePolicy, Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
+from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_app_session import (
     archive_app_vault,
     effective_repo_state,
@@ -77,6 +78,8 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
+from daimon.core.membership import MembershipResolver
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
@@ -93,10 +96,12 @@ from daimon.core.routine_delivery import (
     record_failure,
     render_routine_controls,
 )
+from daimon.core.routine_files import collect_routine_files
 from daimon.core.rule_views import (
-    routine_answers_only_owner,
+    keeps_routine_inside,
     routine_destination_channel,
     routine_destination_place,
+    routine_mounts_personal_memory,
     routine_origin,
 )
 from daimon.core.runtime_health import current_turn_counts, runtime_health
@@ -110,6 +115,7 @@ from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
+from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.github_issued_tokens import (
@@ -222,6 +228,7 @@ async def _build_fire(
     settings: Settings,
     deployment_default: DeploymentDefault,
     resolver_cache: ResolverCache,
+    membership_resolver: MembershipResolver | None = None,
 ) -> FireFn:
     """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
 
@@ -240,6 +247,12 @@ async def _build_fire(
     Errors propagate out of this callable into the guarded gather member's
     named error boundary, which records ``last_error``.
     """
+
+    membership_resolver = membership_resolver or (
+        DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
+        if settings.discord is not None
+        else None
+    )
 
     async def _fire(row: RoutineRow) -> None:
         if row.created_by_user_id is None:
@@ -261,6 +274,20 @@ async def _build_fire(
                 await record_result(s, row.id, tail=None, error="routine tenant archived")
                 return
             platform = tenant.platform
+            if row.destination_kind == "dm" and (
+                platform != "discord"
+                or not await dm_enabled(s, tenant_id=row.tenant_id)
+                or not settings.direct_message_policies.get(
+                    row.tenant_id, DirectMessagePolicy()
+                ).allows(row.created_by_user_id)
+            ):
+                await record_result(
+                    s,
+                    row.id,
+                    tail=None,
+                    error="routine DMs are disabled or the owner is not allowed",
+                )
+                return
             principal = await get_or_create_platform_principal(
                 s,
                 tenant_id=row.tenant_id,
@@ -273,8 +300,8 @@ async def _build_fire(
 
             # Invoker policy at fire time: someone taken off the allowlist
             # stops running headless turns through routines they created. The
-            # stored role is the only admin signal a fire has. Unreadable
-            # policy fails closed.
+            # creator facts come from live Discord membership, never a saved
+            # Discord admin role. Unreadable policy fails closed.
             direct_post: DirectPost = "allowed"
             fire_policy: TenantAccessPolicy | None = None
             fire_channel_id: str | None = None
@@ -306,17 +333,42 @@ async def _build_fire(
                         policy, platform=platform, kind=row.destination_kind
                     ):
                         direct_post = "unverified"
-                account = await get_account(s, account_id)
-                is_admin = account is not None and account.role is Role.ADMIN
+                account = await get_account(s, account_id) if platform != "discord" else None
+                is_admin = (
+                    account is not None and account.role is Role.ADMIN and platform != "discord"
+                )
+                subject = build_subject(is_admin=is_admin, platform_user_id=row.created_by_user_id)
+                if platform == "discord" and (
+                    policy.invoker_role_ids
+                    or membership_resolver is not None
+                    or row.destination_kind == "dm"
+                ):
+                    subject = await resolve_subject(
+                        sm,
+                        membership_resolver,
+                        tenant_id=row.tenant_id,
+                        user_id=row.created_by_user_id,
+                        require_fresh=True,
+                        session=s,
+                    )
                 allowed = authorize(
                     policy,
-                    subject=build_subject(
-                        is_admin=is_admin, platform_user_id=row.created_by_user_id
-                    ),
+                    subject=subject,
                     action=Action.ACT_FOR_CREATOR,
                     surface=Surface.ROUTINE,
                 )
-                policy_error = None if allowed else "invoker_not_allowed"
+                membership_required = platform == "discord" and (
+                    bool(policy.invoker_role_ids)
+                    or membership_resolver is not None
+                    or row.destination_kind == "dm"
+                )
+                policy_error = (
+                    None
+                    if allowed and (not membership_required or subject.verified_membership is True)
+                    else "invoker_not_allowed"
+                )
+                if row.destination_kind == "dm" and keeps_routine_inside(policy, row):
+                    policy_error = "restricted source cannot deliver by DM"
                 # A pinned agent fires only when it posts straight into one of
                 # its pinned channels; `_check_agent_pin` refuses anything else
                 # at save time, and this holds for a pin added since. Isolation
@@ -507,6 +559,7 @@ async def _build_fire(
                 + row.trigger_message
             )
         final_state: list[TurnState] = []
+        output_sessions: list[str] = []
 
         result = await run_turn(
             anthropic=client,
@@ -514,6 +567,7 @@ async def _build_fire(
             environment_id=resolved_env_id,
             trigger_message=trigger_message,
             on_state=final_state.append,
+            on_session=output_sessions.append,
             mcp_settings=settings.mcp,
             account_id=account_id,
             usage_record_factory=usage_record_factory,
@@ -534,9 +588,9 @@ async def _build_fire(
                 if fire_policy is not None
                 else None
             ),
-            # The owner's personal memory, read-only, only for a routine whose
-            # result goes to nobody else; decided again from the row each fire.
-            personal_memory=routine_answers_only_owner(row),
+            # Explicit DM delivery retains ordinary tool authority and must not
+            # load personal memory. Preserve the legacy owner-only behavior.
+            personal_memory=routine_mounts_personal_memory(row),
         )
 
         if row.destination_kind is None:
@@ -547,14 +601,25 @@ async def _build_fire(
         # Fallback post: only when the agent did not deliver to the
         # destination itself. The chat adapter for `platform` posts it.
         posted = bool(final_state) and agent_posted_to(final_state[0], row)
+        payload = result
+        needs_delivery = not posted
+        if output_sessions:
+            payload = await collect_routine_files(
+                client, session_id=output_sessions[-1], text="" if posted else result
+            )
+            # A messaging tool can have posted the text while leaving generated
+            # outputs behind. Deliver those without repeating the final reply.
+            needs_delivery = needs_delivery or bool(payload)
         async with sm() as s, s.begin():
             await record_result(
                 s,
                 row.id,
                 tail=result,
+                delivery_payload=payload,
                 error=None,
-                delivery="skipped" if posted else "pending",
-                delivery_note="agent_posted" if posted else None,
+                delivery="pending" if needs_delivery else "skipped",
+                delivery_note=None if needs_delivery else "agent_posted",
+                expected_destination=(row.destination_kind, row.destination_id),
             )
 
     return _fire

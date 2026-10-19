@@ -609,7 +609,7 @@ conversation ids):
 
 | Field | Empty means | Enforced by |
 | --- | --- | --- |
-| `invoker_user_ids` | anyone may start a turn; admins always may | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
+| `invoker_user_ids` | anyone may start a turn; admins may when `invoker_admin_bypass` is true (default) | `admit()`, the MCP turn tools (`_admit` in `tools/_ctx.py`), routine fires |
 | `channel_rules`, `category_rules` | every channel open | `authorize()`, asked by `admit()` (every path: mention, follow-up, wizard submit, continuation) and `reauthorize`, every Discord, Slack and Teams write tool (`require_channel_writable` in `packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_policy.py`), the channel read tools via `ChannelReadPolicy`, the session transcript tools via `tools/_session_access.py`, the routine save and fire checks, every channel default bind, and visibility in the agent, skill, routine, routing and handoff tools, the hub, the setup panel and `/memory` |
 | `agent_rules` | every agent runs wherever the cascade sends it | `admit()` after the agent is retrieved (every turn path, DM included), the MCP and hub turn tools, `hand_off_task` via `decide_handoff`, `fork_agent`, and routines at save (`_check_agent_pin`) and at every fire (scheduler) |
 | `dm_memory_read_only` (default `false`) | DM turns get writable memory | `admit(is_dm=True)` sets `Admission.memory_read_only` |
@@ -700,6 +700,7 @@ daimon channels rule set discord GUILD_ID CHANNEL_ID --readers own --writers own
 daimon channels rule set discord GUILD_ID CHANNEL_ID --readers inside
 daimon channels rule set discord GUILD_ID CHANNEL_ID --readers any [--release-agents]
 daimon channels rule set discord GUILD_ID CATEGORY_ID --category --writers none
+daimon channels answerable discord GUILD_ID [--expect FILE] [--json]   # read-only check
 daimon agents rule set discord GUILD_ID AGENT --runs-in CHANNEL_ID [--runs-in ...]
 daimon agents rule set discord GUILD_ID AGENT --anywhere | --nowhere
 daimon tenants access-policy rules discord GUILD_ID [--json]
@@ -995,26 +996,35 @@ the wait finishes or fails.
 After a tool-using Discord or Slack turn, the adapter starts a detached,
 per-MA-session-chained sweep of downloadable session files through
 `daimon.core.output_delivery`. It delivers each file before deleting its MA
-listing entry. Failed deliveries stay listed for a later sweep. Slack posts
-each file into the conversation thread. Discord attaches each file to the
-turn's answer: the message carrying the summary line and the 👍 👎 🙋 emoji
-(the last chunk of a long answer, or the "Done." card of a tool-only turn).
-It edits that message once per file through the turn's post transport,
-passing the attachments already on it back, and never reposts the answer when
-a webhook message cannot be edited. Any edit error that reached Discord (a
-timeout, a 5xx, or a 4xx after discord.py's own retry of a 5xx) may follow an
-applied edit, so the sweep reads the answer back: the file counts as delivered
-only if a new attachment holds its exact bytes, and the next edit starts from
-what is there. A file the answer cannot take (Discord's
-10-attachment limit, or a failed edit) is posted on its own below it, and a
-turn that ended without an answer (stopped or failed) gets its files as
-separate posts. Discord uses the guild's upload limit (10 MB, up to 100 MB
-for a boosted server; 10 MB where there is no guild) and checks the
-channel's writers before posting. No limit goes above 200 MB, because each
-file is read into memory whole. A file over the limit (the guild's on
-Discord, 200 MB on Slack, 20 MB on Teams) is never deleted: it stays listed and in the
-agent's workspace, and the thread gets one notice naming the file, its size
-and the limit, and offering a smaller version or parts under the limit.
+listing entry. Failed deliveries stay listed for a later sweep. The sweep runs
+after the turn has released the thread, so in a shared thread another person's
+turn may have started by the time a file lands; every post the sweep makes
+therefore names the person whose turn made the file. Slack posts each file
+into the conversation thread; the sweep's first post carries a "For @name"
+mention, and the rest do not repeat it, since a Slack mention always pings.
+Files are labelled, not reordered: they can still land after a later turn's
+answer. Discord attaches each file to the turn's answer: the message carrying
+the summary line and the 👍 👎 🙋 emoji (the last chunk of a long answer, or the
+"Done." card of a tool-only turn). It edits that message once per file through
+the turn's post transport, passing the attachments already on it back, and
+never reposts the answer when a webhook message cannot be edited. Any edit
+error that reached Discord (a timeout, a 5xx, or a 4xx after discord.py's own
+retry of a 5xx) may follow an applied edit, so the sweep reads the answer
+back: the file counts as delivered only if a new attachment holds its exact
+bytes, and the next edit starts from what is there. A file the answer cannot
+take (Discord's 10-attachment limit, or a failed edit) is posted on its own,
+and a turn that ended without an answer (stopped or failed) gets its files as
+separate posts. Such a post, and an oversize notice, is a reply to the
+person's own message (or to the answer, when that message is not in the
+thread) and says "For @name" without pinging anyone. Discord uses the guild's
+upload limit (10 MB, up to 100 MB for a boosted server; 10 MB where there is
+no guild) and checks the channel's writers before posting. No limit goes above
+200 MB, because each file is read into memory whole. A file over the limit
+(the guild's on Discord, 200 MB on Slack, 20 MB on Teams) is never deleted: it
+stays listed and in the agent's workspace, and the thread gets one notice
+naming the file, its size and the limit, and offering a smaller version or
+parts under the limit; on Discord, and on Slack when it is the sweep's first
+post, it starts "For @name", since only that person's session holds the file.
 Each adapter remembers which kept files it has announced (bounded, per
 process), so later sweeps that list the file again stay quiet; a restart can
 announce a kept file once more. Teams only logs an oversize file and keeps
@@ -1088,15 +1098,24 @@ third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is
 refused unless the operator allowed it there, and a write in chat waits for
 the requester to press Approve on a confirmation card. Read or write comes
-from an operator `DAIMON_TOOL_SAFETY__EFFECTS` pin, then the tool's MCP
-annotations, then its name: a plainly-read leading verb (`get_`, `search_`,
+from an operator `DAIMON_TOOL_SAFETY__EFFECTS` pin, then, for a server the
+operator lists in `DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS`, the tool's MCP
+annotations (`destructiveHint: true` or `readOnlyHint: false` is a write;
+`readOnlyHint: true` alone is a read), then its name: a plainly-read leading verb (`get_`, `search_`,
 `list_` and the like, or the report noun `briefing`) with no write or chaining
 word anywhere is a read, and everything else is a write. `ask` and `verify`
 read only in a question-and-answer shape (`ask_wiki_question`,
 `eap_verify_answer`); a bare `ask`, such as another Daimon's agent_chat `ask`,
 which starts a turn in that agent, stays a write. Managed Agents does not
-forward third-party annotations, so for attached servers the name and the
-operator pins are what decide; a misnamed write needs a pin. The card is a platform
+forward third-party annotations, so the decider reads them itself
+(`packages/core/daimon/core/mcp_tool_annotations.py`), only for trusted servers
+(the list is empty by default, and an unlisted server is never asked): on the
+first paused call to such a server in a turn it lists that server's tools once, with the agent-wide
+token stored for its URL or with none (never for a caller from another
+organisation). A failed or slow read, or a tool that sends no hints, leaves the
+name to decide; each annotation-based allow is logged at info. A `denied`
+entry still refuses the call, and a misnamed write on an untrusted server or
+one without hints needs a pin. The card is a platform
 hook: `run_prepared_turn(confirm_write=...)` takes a `ConfirmationHook`
 (`packages/core/daimon/core/confirmation.py`), Discord, Slack and Teams each draw the
 shared card from `packages/core/daimon/core/posted_controls/confirmation.py`,
@@ -1440,7 +1459,12 @@ Each caller has their own row per thread. A channel configured for shared
 threads (`thread_mode="shared"`, with `DAIMON_TURN__CHANNEL_BACKENDS` on)
 instead keys the row on an owner derived from the thread, so everyone in it
 uses one session with the agent's own credentials, and records the binding
-in the state store (`packages/core/daimon/core/shared_threads.py`).
+in the state store (`packages/core/daimon/core/shared_threads.py`). That
+session mounts no caller's vault; it mounts a vault of the thread's own,
+`daimon-shared:<owner>:<agent>`, holding only the agent-wide MCP tokens.
+Each turn in the thread by a member of the organisation brings that vault
+up to date, so a token added, rotated or removed reaches the running session
+on that turn.
 
 What MA holds is the agent, the environment, the skills and the session
 transcript. What Postgres holds is metadata: identity, the mapping above, the
@@ -1534,7 +1558,8 @@ admission before any of this runs.
   same driver under the same ceiling — but it calls neither `admit()` nor
   `bind_session()`. The scheduler runs the balance, cap and channel budget
   gates itself before each fire. A routine with a destination is told where its result
-  goes; if the agent does not post there, the row's outbox goes `pending` and
+  goes; owner-DM results always use the outbox. For a channel/thread destination,
+  the outbox is used when the agent does not post there itself. It goes `pending` and
   the chat adapter for the tenant's platform posts the result tail through
   its delivery poller (`daimon.core.routine_delivery`), after the access
   policy's writers and invoker checks. See [routines.md](routines.md).
@@ -1830,13 +1855,14 @@ limited readers and in DMs under `dm_memory_read_only`. A session without a pers
 store gets shared-store instructions saying that no personal memory is mounted and
 nothing personal is to be recorded. Who else gets one:
 
-- **Routines**: only a routine whose result reaches nobody but its owner
-  (`rule_views.routine_answers_only_owner`: no destination and no channel, so made in a
-  DM or with no origin) mounts its owner's personal store, read-only like all routine
-  memory. Any routine with a destination posts where others read it and gets the shared
-  store alone. The scheduler decides this from the routine row at every fire, so adding
-  a destination stops it at the next run. The agent can still call a posting tool itself;
-  its instructions say not to quote personal memory where others will read it.
+- **Routines**: only a legacy routine with no destination and no channel
+  (`rule_views.routine_mounts_personal_memory`) mounts its owner's personal store,
+  read-only like all routine memory. Every routine with a destination,
+  including an owner-DM destination, gets the shared store alone. DM delivery retains ordinary tool authority and
+  mounts no personal memory. The scheduler decides this from the routine row
+  at every fire, so adding a destination stops it at the next run. The agent can
+  still call a posting tool itself; its instructions say not to quote personal
+  memory where others will read it.
 - **MCP**: the hub's `ask` and `start_turn` mount the caller's personal store. A hub
   caller is a person: the hub token comes from Daimon's OAuth proxy after a Discord or
   Slack sign-in, `HubIdentityMiddleware` checks its signature, issuer, audience and
@@ -2074,12 +2100,59 @@ Discord uses a live guild-member lookup and Slack checks the current workspace
 membership and role. No stored admin role grants access.
 
 `/dm-me` in a server/channel moves recent text context into a new private scope. This
-selects the workspace explicitly; unselected DMs remain ignored. The scope uses a
+selects the workspace explicitly. The scope uses a
 normal thread-agent binding, config cascade and per-account session mapping. Each
 new selection resets the scope, so a physical Discord DM shared across servers
 never contributes the previous server's private history. The live membership check
 is bound to that scope to prevent a concurrent selection from changing its authority.
 The context is escaped with the existing handoff builder and includes a source link.
+Discord also accepts a first text DM when a ready, unarchived registered tenant has
+DMs enabled and a non-null `dm_agent_name` in its durable DM policy. Null leaves
+cold DMs off without disabling `/dm-me` moves. Admins select or clear the name with
+`/dm-me action:agent agent_name:NAME` and `/dm-me action:clear-agent`; operators can
+inspect or update it with `daimon tenants dm-policy discord GUILD_ID`,
+`--agent NAME --enabled`, and `--clear-agent`. The agent must already exist in that
+tenant; there is no fallback to the server-default agent or automatic provisioning.
+
+Discovery checks fresh membership, invoker access, recipient restrictions and the
+selected agent's rules before exposing any server. One eligible server starts a
+new private scope and answers the original message. Several produce a requester-only,
+route-bound server selector, including pagination for more than 25 servers. It retains
+the original message for five minutes and rechecks eligibility on selection. Later
+messages on that route are silently ignored while selection is pending. After expiry,
+the next message discovers again. Unknown membership asks for a retry rather than
+presenting an incomplete choice. No eligible tenant means no reply and a structured
+reason log. Discovery and server switching share a per-user bucket of three attempts,
+refilling one every 20 seconds; exhaustion is silent. Ordinary active replies do not
+consume this bucket. Pending controls and rate buckets are process-local; a restart
+invalidates selectors, so the person sends a new message.
+
+A cold scope binds its own agent without changing the physical DM channel's config.
+Its context and history start empty, its source channel/thread are absent, and its
+origin label is `Private conversation`. This explicit provenance is distinct from
+old moved conversations that lack recorded sources. The opening notice names the
+server and agent and offers **Switch server**. Only the latest switch control for
+each user/DM route remains active; a later reply or switch stops its predecessor.
+Controls expire absolutely after fifteen minutes, and adapter unload stops all
+controls and pending selectors. Send another message to renew an expired switch
+control. Switching creates a fresh scope, retires the previous session mapping and
+never replays the previous prompt or history.
+An active conversation always wins over discovery, even if access to its tenant is
+revoked; revoked access is silent and never reroutes the message to another server.
+Route writes serialize even before a conversation exists, and message claims deduplicate
+turns. Distinct simultaneous first messages may each run once as successive turns
+in the same newly created scope; duplicate gateway events and concurrent selector
+clicks never answer a message twice. The reply result carries the exact admitted
+agent grant. Immediately before each private output chunk, delivery rechecks fresh
+membership, current tenant/invoker policy, recipient restrictions, the answering
+agent's `RUN_AGENT` and `DIRECT_MESSAGE` permissions without an admin exemption,
+and moved-source sealing. Unavailable bound identities and unreadable private
+policies are typed core denials that Discord logs without sending a reply.
+Routine notifications deliver through their transport without calling
+`start_dm`, `start_cold_dm` or `start_conversation`. The active route is exposed by
+`stores.direct_messages.get_conversation(platform, route_key, external_user_id)`;
+routine delivery neither replaces it nor appends to its private model history.
+
 `/dm-me` refuses in a channel with limited readers or a Discord thread that has
 or sits under one, before any history is read: the DM sits outside the rule
 and can reach open channels. Admission reports this as `source_sealed`, and
@@ -2121,7 +2194,7 @@ The provenance thread ID remains the private scope ID, matching session mapping.
 The first version delivers text replies after completion. Attachments, streaming
 cards, cancellation controls, and moving Slack thread replies are deferred; Slack's
 slash command carries recent channel messages. Run `/dm-me` again to reset or select
-another channel. Disabling DMs prevents new turns, without cancelling a running turn.
+another channel. Disabling DMs prevents new turns; Discord also suppresses private result delivery. Disabling DMs does not cancel a model turn already running.
 
 Slack consumes the same optional neutral-event tap for alternate-provider drafts. Its render task retains debounce and Cancel registration, and terminal callbacks replace the progress card and deregister Cancel. Foreign provider observations never become Anthropic display meters.
 
@@ -2161,3 +2234,64 @@ existing progress card while it waits behind the tenant cap. The same card
 returns to ordinary progress when the slot is granted. Stop, queue limits and
 FIFO admission are unchanged, and the card displays no tenant identities or
 queue counts. Drained follow-up turns keep their existing card wording.
+
+## Current Discord membership evidence
+
+The pure authorization subject carries platform role IDs and verified tenant
+membership. Admission and reauthorization use these facts for the tenant's
+invoker policy. `daimon.core.membership.MembershipResolver.resolve(tenant_id,
+guild_id, user_id, require_fresh=False)` is the shared asynchronous boundary.
+`Membership` reports membership (true, false, or unknown), current role IDs,
+and current server-admin permissions. Callers select a registered tenant's
+guild; internal account UUIDs never substitute for Discord user IDs.
+
+The Discord adapter timestamps gateway facts at ingress, before queue waits;
+queued or replayed message snapshots cannot restore revoked roles. Its live
+SDK fetch refreshes guild role/owner metadata as well as the member. MCP and scheduler hosts use the core Discord REST transport
+with the existing bot credential, without importing the Discord adapter.
+The shared cache keys by tenant, guild, and user, shares concurrent fetches,
+and discards results invalidated while in flight. `require_fresh=True` bypasses
+completed cache entries. Unknown evidence cannot satisfy a role gate.
+
+
+### Owner-DM routine delivery
+
+Discord `/routines` includes an owner-only delivery choice and delivery failure
+reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
+the authenticated owner; the operator CLI has `routines create --destination dm`
+and a verifying dry-run. Slack and Teams explicitly reject DM writes.
+
+DM routine runs mount no personal memory; tenant memory remains read-only and
+tool authority is the same as for channel routines. Source channels and threads
+are verified against the tenant's guild through core Discord REST transport.
+Source channel/thread provenance and its known/unknown marker are written once
+at creation and are immutable through every edit. Delivery and budget targets
+may change independently. Legacy routines with unknown provenance retain ordinary
+channel/thread edits, clearing and firing on all platforms, but cannot select DM;
+they must be recreated from the source to get DM delivery. DM conversion, fire
+and every delivery chunk check the immutable creation-time source pair. Unknown
+provenance never becomes known during an edit. Private-scope origins resolve
+only the caller's current tenant-bound conversation and verify its saved guild
+source; source-free cold conversations require no guild-channel lookup.
+
+The scheduler runs a read-only headless turn and queues its final answer in
+the routine outbox. The Discord host checks live membership, tenant DM
+enablement, recipient policy and source restrictions before opening the
+owner's DM and before each chunk. Recipient IDs are never channel targets or
+budget sources. Notifications do not alter the selected cold-DM conversation
+or its model history. Delivery uses the existing at-most-once claim/settle
+leases, with no public fallback or outbox replay after an uncertain send.
+A platform SDK may retry a single send after a server error or connection reset.
+
+Routine result delivery collects settled session outputs after the successful
+headless turn and stores a versioned text-and-file-reference envelope in the
+existing outbox payload. Adapters download and upload those references inside
+the claim/settle lease, rechecking destination and owner access before each
+file. Discord and Slack reuse their interactive upload paths; Teams routine
+posts explain that attachments are unsupported. Failure notices remain text
+only, and an uncertain send is settled without replay by later polls. Platform
+SDKs may retry a single send after a server error or connection reset.
+Fallback-DM files recheck current DM controls, isolation (including a resolved
+Discord parent) and recipient eligibility before each file and after download.
+Delivery error logs record the error type without arbitrary exception text,
+which may contain signed upload URLs.

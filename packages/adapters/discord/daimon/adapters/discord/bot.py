@@ -9,7 +9,7 @@ import io
 import uuid
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -51,6 +51,7 @@ from daimon.adapters.discord.lifecycle import (
     drain_retained_card_tasks,
     edit_recovered_card,
 )
+from daimon.adapters.discord.membership import GatewayMembershipResolver, member_facts
 from daimon.adapters.discord.names import remember_guild_user
 from daimon.adapters.discord.output_delivery import deliver_session_outputs
 from daimon.adapters.discord.permissions import check_missing_permissions
@@ -99,6 +100,7 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
+from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import DirectMessagePolicy, Settings
@@ -136,6 +138,7 @@ from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma import ORPHAN_INTERRUPT_TIMEOUT_S, interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.membership import Membership
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
@@ -155,6 +158,7 @@ from daimon.core.stores.discord_message_admissions import (
 from daimon.core.stores.domain import (
     CredentialRequestRow,
     Role,
+    RoutineRow,
     TaskContinuationRow,
     TenantRow,
     ThreadSessionRow,
@@ -702,6 +706,11 @@ class DaimonBot(commands.Bot):
         self.runtime = with_budget_notifier(
             runtime, self.open_member_dm, self.is_closed, client=self
         )
+        self.membership_resolver = GatewayMembershipResolver(self)
+        self.runtime = replace(
+            self.runtime,
+            turn_deps=replace(self.runtime.turn_deps, membership_resolver=self.membership_resolver),
+        )
         # The SDK routes slash commands, buttons, and modals before dispatching
         # on_interaction, so filter their gateway payload before those callbacks.
         parse_interaction = self._connection.parsers["INTERACTION_CREATE"]
@@ -712,6 +721,18 @@ class DaimonBot(commands.Bot):
                 parse_interaction(data)
 
         self._connection.parsers["INTERACTION_CREATE"] = parse_allowed_interaction
+
+        # discord.py's on_member_update only fires for SDK-cached members.
+        # Invalidate raw updates too: REST-fetched DM members need not be cached.
+        parse_member_update = self._connection.parsers["GUILD_MEMBER_UPDATE"]
+
+        def invalidate_member_update(data: dict[str, Any]) -> None:
+            guild_id = str(data["guild_id"])
+            tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+            self.membership_resolver.invalidate(tenant_id, guild_id, str(data["user"]["id"]))
+            parse_member_update(data)
+
+        self._connection.parsers["GUILD_MEMBER_UPDATE"] = invalidate_member_update
         # Per-thread concurrency state. _processing: thread IDs with an active turn.
         # _pending: mentions queued behind an in-flight turn for that thread.
         # Drained after the current turn finishes into a single composite follow-up
@@ -844,6 +865,14 @@ class DaimonBot(commands.Bot):
         if self._output_sweeps.get(session_id) is task:
             del self._output_sweeps[session_id]
 
+    async def _routine_agent_names(self, row: RoutineRow) -> tuple[str | None, ...]:
+        agent = await find_agent_by_daimon_tag(
+            self.runtime.anthropic, tenant_id=row.tenant_id, name=row.agent_name
+        )
+        if agent is None or agent.id != row.agent_id:
+            return ()
+        return (row.agent_name, *agent_pin_names(agent.name, agent.metadata))
+
     async def _sweep_session_outputs(
         self,
         previous: asyncio.Task[None] | None,
@@ -866,6 +895,8 @@ class DaimonBot(commands.Bot):
                 noticed_files=self._noticed_output_files,
                 turn_window=lifecycle.turn_window if lifecycle is not None else None,
                 answer=lifecycle.answer_message if lifecycle is not None else None,
+                requester_id=lifecycle.requester_id if lifecycle is not None else None,
+                reply_to=lifecycle.files_reply_to(thread.id) if lifecycle is not None else None,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -1180,6 +1211,9 @@ class DaimonBot(commands.Bot):
                             row.tenant_id, DirectMessagePolicy()
                         ),
                         client=self,
+                        output_client=self.runtime.anthropic,
+                        membership_resolver=self.membership_resolver,
+                        resolve_agent_names=self._routine_agent_names,
                         resolve_identity=lambda row, guild_id: resolve_routine_identity(
                             self.runtime.sessionmaker,
                             self.runtime.anthropic,
@@ -2305,6 +2339,7 @@ class DaimonBot(commands.Bot):
         self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
+        self.membership_resolver.invalidate_guild(str(guild.id))
         """Soft-archive: stamp archived_at=now(). NO row delete."""
         if not self._allows_guild(guild.id):
             return
@@ -2816,6 +2851,28 @@ class DaimonBot(commands.Bot):
         )
         if self.draining:
             return
+        if (
+            not startup_replay
+            and not resume_admitted
+            and message.guild is not None
+            and isinstance(message.author, discord.Member)
+            and not message.author.bot
+        ):
+            # Timestamp actual ingress, before routing/queue waits. A queued
+            # message's old Member snapshot must never restore a revoked role.
+            guild_id = str(message.guild.id)
+            self.membership_resolver.observe(
+                derive_tenant_uuid(platform="discord", workspace_id=guild_id),
+                guild_id,
+                str(message.author.id),
+                Membership(
+                    is_member=True,
+                    role_ids=tuple(member_role_ids(message.author)),
+                    is_admin=is_member_guild_admin(
+                        message.author, guild_owner_id=message.guild.owner_id
+                    ),
+                ),
+            )
         is_webhook_post = isinstance(message.webhook_id, int)
         if not bot_mentioned and is_plain_text_mention_candidate(
             author_is_bot=message.author.bot,
@@ -4209,12 +4266,29 @@ class DaimonBot(commands.Bot):
             await self._archive_after_outputs(outcome, thread)
 
     async def on_guild_role_update(self, before: discord.Role, after: discord.Role) -> None:
+        self.membership_resolver.invalidate_guild(str(after.guild.id))
         if not self._allows_guild(after.guild.id):
             return
         if before.permissions != after.permissions:
             clear_webhook_backoff(after.guild)
 
+    async def on_raw_member_remove(self, payload: discord.RawMemberRemoveEvent) -> None:
+        guild_id = str(payload.guild_id)
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+        self.membership_resolver.invalidate(tenant_id, guild_id, str(payload.user.id))
+
+    async def on_member_remove(self, member: discord.Member) -> None:
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(member.guild.id))
+        self.membership_resolver.invalidate(tenant_id, str(member.guild.id), str(member.id))
+
+    async def on_guild_unavailable(self, guild: discord.Guild) -> None:
+        self.membership_resolver.invalidate_guild(str(guild.id))
+
     async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(after.guild.id))
+        self.membership_resolver.observe(
+            tenant_id, str(after.guild.id), str(after.id), member_facts(after)
+        )
         if not self._allows_guild(after.guild.id):
             return
         if self.user is not None and after.id == self.user.id and before.roles != after.roles:

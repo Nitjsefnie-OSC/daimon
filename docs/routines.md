@@ -7,7 +7,7 @@ routine row.
 For an agent in GitHub App mode, a routine has no human asker and receives only
 the agent's baseline repository grants.
 
-A routine may name a **destination**: a channel or a thread. With one, the run
+A routine may name a **destination**: a channel, a thread, or its owner’s Discord DM. With one, the run
 is told where its result goes, and if the agent does not post there itself,
 Daimon posts its full final reply there after the run (see
 [Delivery](#delivery)). Without one — every routine created before this
@@ -18,6 +18,58 @@ prompt has to tell the agent to call `send_message` itself (see
 interactive Slack turn uploads to the thread, are **not** swept for a routine
 either way; [slack.md](slack.md) says so, and the code agrees: the headless
 path installs a no-op lifecycle with nothing to render to.
+
+For Discord private delivery, set `destination_kind="dm"` and omit
+`destination_id`. Daimon resolves it to the authenticated owner's Discord
+user ID. A supplied ID must match that owner exactly; admins cannot redirect
+private delivery. Slack and Teams reject DM destinations. The user ID never
+passes through channel lookup or channel budget resolution: an optional
+source channel remains the budget source, otherwise normal tenant/account
+billing applies. A routine created from a moved private conversation inherits
+that conversation's saved guild channel/thread source, rather than its private
+scope or physical DM channel. Source-free cold conversations remain source-free;
+missing or restricted moved-conversation provenance cannot create DM delivery.
+
+Both the tenant's inbound DM enablement and outbound recipient policy apply.
+Daimon checks current owner membership and invoker permissions at fire and
+again before each delivery chunk. Restricted sources cannot be converted to
+DM delivery; source restrictions and agent rules are checked again at fire
+and delivery, including the original source thread and its parent. Source
+provenance is written once at creation and never changed by retargeting,
+clearing delivery, changing the budget, or selecting DM. Legacy routines with
+unknown provenance keep ordinary channel/thread edits, clearing and normal firing
+on every platform, but cannot select DM. Recreate the routine from its channel
+or thread to get DM delivery. DM routine runs mount no personal memory. Tenant memory remains read-only, and tool
+authority stays the same as for channel routines; selecting DM delivery does
+not restrict tools to private output.
+
+The host queues the final reply through the outbox and sends chunks of at
+most 2,000 characters with mentions disabled. The notification includes the
+routine label and run identity. It neither selects a cold-DM tenant nor adds
+the notification to an active conversation's model history. Blocked DMs,
+revoked access, interrupted claims and uncertain or partial sends are visible
+in `delivery_status` / `delivery_note` and the Discord routines panel. There
+is no public fallback and no automatic resend; a later scheduled run may try
+again. The first failure in a failing streak uses the same private checks.
+Destination changes cancel queued results; a destination changed during a
+run prevents that run's result from being queued to the new destination.
+
+Operators can create an owner-DM routine with:
+
+```bash
+daimon routines create --tenant TENANT_UUID --owner DISCORD_USER_ID \
+  --agent daimon --schedule '0 9 * * *' --timezone UTC \
+  --trigger 'Summarize my tasks' --destination dm --dry-run
+```
+
+Remove `--dry-run` to write it. Dry-run still verifies the live owner and
+agent, and prints the resolved recipient and budget source. An optional
+`--source-channel` must resolve to a supported channel or thread in the selected
+tenant's Discord guild. Threads retain their parent for budgeting and their own
+ID for source restriction checks. Dry-run performs the same source verification
+and sealing checks as a save. There is no independent recipient option. Use MCP or the owner-only delivery choice in `/routines`
+for interactive edits; list/get include the resolved owner ID and delivery
+status. `clear_destination=true` retains its existing meaning.
 
 A one-off "remind me in two hours" or "check back tomorrow at nine" is not a
 routine. Use a timer (`create_timer`, see [mcp-tools.md](mcp-tools.md#timers))
@@ -41,10 +93,10 @@ through `packages/core/daimon/core/stores/routines.py`:
 | `last_skipped_from` / `last_skipped_until` / `last_skip_reason` | most recent skipped range of scheduled slots and why (`stale` or `in_flight`) |
 | `next_fire_at` | the claim key — `NULL` means claimed or paused |
 | `last_fired_at`, `last_error`, `last_result_tail` | what the last run did |
-| `destination_kind` / `destination_id` | optional: `channel` or `thread` and its id, set together or not at all. On Slack a thread is `<channel id>:<thread ts>`, on Teams `<channel id>;messageid=<root id>` |
+| `destination_kind` / `destination_id` | optional: `channel`, `thread` or `dm` and its id, set together or not at all. On Slack a thread is `<channel id>:<thread ts>`, on Teams `<channel id>;messageid=<root id>` |
 | `channel_id` | the channel whose budget a run's spend counts against: the destination's parent channel, set when the destination is; without a destination, the channel the routine was made in (MCP `origin_context_id`, or the Slack panel's channel); `NULL` from a DM or with no origin. Clearing the destination keeps it |
 | `delivery_status`, `delivery_note`, `delivered_at` | the outbox for the last result: `pending` → `claimed` → `delivered` or `skipped` (with why); `NULL` for a routine without a destination |
-| `delivery_payload` | the text a pending post carries: that fire's result, copied so a writer that only knows `last_result_tail` (an older scheduler) cannot change what gets posted |
+| `delivery_payload` | versioned full reply and generated file references (legacy rows contain plain text): that fire's result, copied so a writer that only knows `last_result_tail` (an older scheduler) cannot change what gets posted |
 | `delivery_lease_owner` / `delivery_lease_expires_at` | the poster holding a `claimed` row |
 
 Slot arithmetic lives in `packages/core/daimon/core/cron.py`, whose
@@ -70,10 +122,10 @@ pausing is `update_routine(enabled=False)`. Set missed-run behavior with
 permission applies to updates. The last run is read off the
 `last_*` fields that `get_routine` returns.
 
-A destination is set with `destination_kind` + `destination_id` on
+A channel/thread destination is set with `destination_kind` + `destination_id` on
 `create_routine` or `update_routine`, and removed with
 `update_routine(clear_destination=true)`. Before anything is saved the tool
-checks that the pair comes together, that the id has the platform's shape (a
+checks channel/thread destinations as a pair, that the id has the platform's shape (a
 Discord id is a number; a Slack channel is `C…`, a Slack thread
 `<channel>:<ts>`; a Teams channel `19:…@thread.tacv2`, a Teams thread
 `<channel>;messageid=<root>`), that the channel exists in the caller's own server or
@@ -240,7 +292,9 @@ non-error `send_message` on Daimon's own server — called directly or through
 the MCP search interface's `call_tool(name="send_message", arguments=…)` —
 whose `channel_id` is exactly the destination (a Slack thread counts only as
 `<channel>:<ts>`; a top-level post in its channel is not the thread). If the
-agent posted there, the outbox is `skipped` with note `agent_posted`.
+agent posted there and left no generated files to deliver, the outbox is
+`skipped` with note `agent_posted`. Remaining files are queued without
+repeating the final reply.
 Otherwise it is `pending`, with the complete reply copied into `delivery_payload`.
 Discord, Slack and Teams split long results across messages at word or line
 boundaries and preserve code fences. Creator fallback messages also keep the
@@ -254,15 +308,17 @@ the tenant's platform: Discord, Slack and Teams each run `run_delivery_poller`
 next to their wake poller (Teams for its one organisation). Each poll claims `pending` rows for its platform
 (`FOR UPDATE SKIP LOCKED`, with a two-minute lease), posts, and settles:
 
-- **At most once.** A claim whose lease runs out is settled
-  `skipped/interrupted`, never posted again: the poster may have posted before
-  it died. A poster that raises is settled `skipped/post_failed`, not retried.
+- **No outbox replay across polls.** A claim whose lease runs out is settled
+  `skipped/interrupted`, never claimed again: the poster may have posted before
+  it died. A poster that raises is settled `skipped/post_failed`, not requeued.
+  This is an outbox guarantee: a platform SDK may retry a single send after
+  a server error or connection reset, including an uncertain response.
 - **The newest result only.** A new fire replaces whatever is still in the
   outbox, so a backlog never posts a run of stale results.
 - **Creator first.** Before resolving or sending anything, the poster reads
   the tenant access policy and checks the creator: if the policy cannot be
   read (`skipped/access_policy_unreadable`) or the creator may no longer
-  invoke the agent (`skipped/invoker_not_allowed`; admins always pass),
+  invoke the agent (`skipped/invoker_not_allowed`; admins pass when `invoker_admin_bypass` is true),
   nothing is sent anywhere — not to the destination and not by direct
   message. Everything below applies only to a cleared result.
 - **Policy, at post time.** The adapter resolves where the destination
@@ -477,11 +533,12 @@ it with `context_fragments.routine` in their YAML spec; see [architecture](archi
 
 Routine sessions always mount persistent agent memory read-only, regardless of the
 tenant's chat or DM policy. They can use saved memory but cannot change it. A routine
-with a destination (or a channel) mounts the agent's shared memory only: it posts where
-other people may read it, with nobody there to ask. A routine with neither, made in a DM
-or with no origin, answers its owner alone and also mounts its owner's personal memory,
-read-only. This is decided from the routine at every fire, so giving it a destination
-stops the personal mount at its next run.
+with a channel/thread destination mounts only shared memory, since others may
+read its answer. Explicit owner-DM routines mount no personal memory and retain
+the same tool authority as channel routines. Only a legacy routine with neither
+destination nor channel may mount the owner's personal memory read-only.
+This is decided at every fire. Admins can manage DM routine metadata but do not
+receive its private output previews.
 
 A routine session is stamped like a turn in the channel it fires into: the
 destination's channel (a thread's parent), the thread, and the readers limits
@@ -555,3 +612,39 @@ persisted 30-minute expiry, actual card identity/readback and the native/root
 oracle context. A component test's store creation/renderer proves host expiry,
 not native credential-target ingress. Routine jobs and ordinary product defaults
 are unchanged.
+
+## Discord creator membership
+
+Discord scheduled fires check the creator's current server membership, role
+IDs, and native admin permissions against the tenant invoker policy. Stored
+account admin status cannot satisfy a configured role gate. The Discord
+poster checks again with a live membership lookup before delivery, including
+a private fallback. A departed creator, revoked role, or unavailable lookup
+refuses the result; no destination post or private fallback is authorized
+by stale evidence. User exceptions and current server admins retain their
+invoker-policy bypass; destination and agent restrictions remain separate.
+
+### Generated files
+
+After a successful run, Daimon collects its downloadable session outputs with
+the same settled-listing collector used by interactive turns. The delivery
+outbox stores the full reply and file references, never file bytes. Discord
+channels, threads and owner DMs receive attachments; Slack uses its existing
+file uploader for channels, threads and creator fallback DMs. Teams routine
+posts include a plain notice that files are not supported there.
+
+A delivery includes at most ten files. Files above Daimon's 200 MB ceiling,
+or the destination's upload limit (Discord's guild limit, 10 MB in DMs;
+200 MB on Slack), are reported in text and remain in the workspace. Files
+beyond the count limit are reported too. Internal workspace handoff bundles
+and empty files are excluded. Provider copies remain subject to normal
+workspace retention; an unavailable reference stops delivery with a failure.
+
+Files share the result's at-most-once outbox claim: a partial or uncertain
+send is not replayed by a later poll. The platform SDK may retry a single send
+after a server error or connection reset. Changing the destination cancels pending
+payloads, including their files. Each file send rechecks the saved destination
+and live owner access. Creator fallback DMs also recheck current DM controls,
+recipient eligibility and isolation, including a resolved Discord thread parent,
+before each file and after download. Owner DM delivery retains the same privacy and
+no-personal-memory rules as text. Run-failure notices never carry files.

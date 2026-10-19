@@ -337,16 +337,30 @@ async def test_admit_attributes_the_channel_and_a_dm_to_its_source(
 
     await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
     await db_session.commit()
-    dm = await admit(deps, **args, channel_id="dm-chan", is_dm=True, now=_NOW)
+    dm = await admit(
+        deps, **args, channel_id="dm-chan", is_dm=True, verified_membership=True, now=_NOW
+    )
     assert dm.budget_channel_id is None, "a DM with no source channel is unattributed"
     moved = await admit(
-        deps, **args, channel_id="dm-chan", is_dm=True, dm_source_channel_id="chan-2", now=_NOW
+        deps,
+        **args,
+        channel_id="dm-chan",
+        is_dm=True,
+        verified_membership=True,
+        dm_source_channel_id="chan-2",
+        now=_NOW,
     )
     assert moved.budget_channel_id == "chan-2", "a moved DM counts toward the channel it came from"
     assert moved.origin_channel_id == "dm-chan", "the seal still sees the DM, not its source"
     with pytest.raises(AdmissionDenied) as exc_info:
         await admit(
-            deps, **args, channel_id="dm-chan", is_dm=True, dm_source_channel_id="chan-1", now=_NOW
+            deps,
+            **args,
+            channel_id="dm-chan",
+            is_dm=True,
+            verified_membership=True,
+            dm_source_channel_id="chan-1",
+            now=_NOW,
         )
     assert exc_info.value.reason == "channel_budget_exceeded", "and is gated by its budget"
 
@@ -1113,6 +1127,7 @@ async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
         external_user_id="user-1",
         channel_id="chan-1",
         is_dm=is_dm,
+        verified_membership=True,
         now=_NOW,
     )
 
@@ -1422,6 +1437,7 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
         now=_NOW,
         role=Role.USER,
         is_dm=is_dm,
+        verified_membership=True,
     )
 
     assert admission.memory_read_only is expected, "memory_read_only must follow the policy"
@@ -1609,6 +1625,7 @@ async def test_admit_holds_an_isolated_teams_channel_to_its_own_agent(
             now=_NOW,
             role=Role.USER,
             is_dm=True,
+            verified_membership=True,
         )
     assert exc_info.value.reason == "runs_elsewhere", "the isolated agent never answers a 1:1 chat"
 
@@ -1898,6 +1915,7 @@ async def test_admit_refuses_a_pinned_agent_outside_its_channels(
             now=_NOW,
             role=role,
             is_dm=is_dm,
+            verified_membership=True,
         )
 
     assert exc_info.value.reason == "runs_elsewhere"
@@ -1982,6 +2000,7 @@ async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
         now=_NOW,
         role=Role.USER,
         is_dm=is_dm,
+        verified_membership=True,
     )
 
     assert admission.source_sealed is expected
@@ -2122,6 +2141,7 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
         now=_NOW,
         role=Role.ADMIN,
         is_dm=True,
+        verified_membership=True,
     )
 
     assert isinstance(admission, Admission)
@@ -2149,6 +2169,7 @@ async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budge
         "external_user_id": "boss",
         "channel_id": "dm-1",
         "is_dm": True,
+        "verified_membership": True,
         "role": Role.ADMIN,
     }
 
@@ -2187,6 +2208,7 @@ async def _admit_as(
         now=_NOW,
         role=role,
         is_dm=is_dm,
+        verified_membership=True,
     )
 
 

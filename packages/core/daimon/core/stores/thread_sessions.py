@@ -853,3 +853,20 @@ async def lock_orphaned_turn(
     ):
         return None
     return ThreadSessionRow.model_validate(orm)
+
+
+async def retire_dm_scope(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, platform: str, scope_id: str
+) -> None:
+    """Retire provider mappings when an explicit private server switch resets its scope."""
+    await session.execute(
+        update(ThreadSession)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == scope_id,
+            ThreadSession.status == "live",
+        )
+        .values(status="dead")
+    )
+    await session.flush()

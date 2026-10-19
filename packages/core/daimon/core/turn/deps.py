@@ -24,6 +24,7 @@ from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget_notice import BudgetNotifier
 from daimon.core.channel_skills import PlatformSkillMemory
 from daimon.core.config import (
+    DiscordSettings,
     GithubAppSettings,
     McpSettings,
     Settings,
@@ -31,8 +32,10 @@ from daimon.core.config import (
     load_turn_settings,
 )
 from daimon.core.defaults.loader import load_platform_skills
+from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
+from daimon.core.membership import MembershipResolver
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.native_admins import ServerAdminIds
 from daimon.core.scope import DeploymentDefault
@@ -78,6 +81,7 @@ class TurnDeps:
     github_app_id: str | None
     github_app_private_key: str | None
     public_url: str | None
+    membership_resolver: MembershipResolver | None = None
     agent_github_app: GithubAppSettings | None = None
     # Required: safety off is the explicit `enabled=False` policy from settings.
     tool_safety: ToolSafetyPolicy = field(kw_only=True)
@@ -173,6 +177,11 @@ def build_turn_deps(
     turn_settings = cast(object, settings.turn)
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     return TurnDeps(
+        membership_resolver=(
+            DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
+            if isinstance(settings.discord, DiscordSettings)
+            else None
+        ),
         anthropic=anthropic,
         messages=anthropic,
         turn_runtime_factory=build_channel_runtime,

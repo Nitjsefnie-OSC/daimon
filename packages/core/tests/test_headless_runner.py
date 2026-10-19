@@ -1483,14 +1483,13 @@ async def test_headless_result_callback_only_receives_completed_turns(reason):
     assert seen == ([state] if reason == "completed" else [])
 
 
-@pytest.mark.parametrize("answers_only_owner", [False, True])
+@pytest.mark.parametrize("destination_kind", [None, "channel", "dm"])
 async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
-    answers_only_owner: bool,
+    destination_kind,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A routine that posts where others read runs on the shared store alone; one
-    whose result reaches only its owner also reads the owner's store, read-only."""
+    """A DM routine mounts only tenant memory, even when the owner has a store."""
     from daimon.core.stores.agent_memory_stores import (
         insert_memory_store,
         insert_personal_memory_store,
@@ -1511,6 +1510,22 @@ async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
         memory_store_id="memstore_owner",
     )
     await db_session.commit()
+    from daimon.core.rule_views import routine_mounts_personal_memory
+    from daimon.core.stores.routines import create_routine
+
+    async with db_session_factory.begin() as session:
+        row = await create_routine(
+            session,
+            tenant_id=tenant.id,
+            created_by_user_id="123",
+            agent_id="agent_x",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="hi",
+            destination_kind=destination_kind,
+            destination_id="456" if destination_kind == "channel" else None,
+        )
     bodies: list[dict[str, Any]] = []
     client = _build_client(_idle_events(), session_create_capture=bodies)
     await run_turn(
@@ -1523,7 +1538,7 @@ async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
         agent_uuid=agent_id,
         session_factory=db_session_factory,
         origin="routine",
-        personal_memory=answers_only_owner,
+        personal_memory=routine_mounts_personal_memory(row),
         tool_safety=OPEN_TOOL_SAFETY,
     )
     mounts = {
@@ -1532,6 +1547,6 @@ async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
         if r["type"] == "memory_store"
     }
     expected = {"memstore_shared": "read_only"}
-    if answers_only_owner:
+    if destination_kind is None:
         expected["memstore_owner"] = "read_only"
     assert mounts == expected

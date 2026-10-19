@@ -282,7 +282,9 @@ publishes.
 - **Server admins** are exempt where the output reaches them alone: their own
   DM and hub turns, and hub reads of sessions inside limited channels. They
   configure agents with rules from anywhere and see every agent listed.
-  Agent rules and `readers: own` still hold for them in channels, threads,
+  Discord cold-DM admission and all private Discord delivery enforce agent
+  pins and isolation even for admins. Agent rules and `readers: own` still
+  hold for them in channels, threads,
   routines and handoffs. Nothing writes where `writers` is `none`.
 - A **setup thread** under a `readers: own` channel answers as the built-in
   agent.
@@ -297,7 +299,8 @@ Rules are server or workspace admins' calls, :
 - chat: `set_channel_rule` and `set_agent_rule` ([MCP tools](mcp-tools.md));
 - panels: the channel's **Permissions** screen, from Who answers where in the
   Discord and Slack setup panels, and the Channel settings dialog on Teams;
-- CLI: `daimon channels rule set` and `daimon agents rule set`.
+- CLI: `daimon channels rule set` and `daimon agents rule set`;
+  `daimon channels answerable` checks the result (below).
 
 Setting `readers: own` makes the channel's default agent its own (a custom
 agent answering nowhere else), or copies an agent for it (`copy_from`).
@@ -308,6 +311,37 @@ enforce. `archive_channel_copy` retires a copy when its channel closes.
 
 `daimon tenants access-policy rules PLATFORM WORKSPACE_ID [--json]` lists
 every channel, category and agent rule, and each agent's home.
+
+**Where Daimon may answer.** `daimon channels answerable discord GUILD_ID
+[--expect FILE] [--json]` lists the server's channels where Daimon may answer
+at all: every channel where the turn gate would let a turn start, that is one
+not under a `writers: none` rule, its own or its category's. It reads
+Discord's channel list for the server with the bot token, so a channel with
+no stored config counts too, and it writes nothing. Agent rules (`--runs-in`,
+`--anywhere`, `--nowhere`) are not considered: they choose which agent
+answers, not whether Daimon may.
+
+It also lists every thread bound to an agent (setup or handoff, archived and
+locked threads included) and whether it answers. A bound thread passes the
+same gate, so under a `writers: none` channel it is refused like the channel
+and adds nothing to the set.
+
+Use `--expect` when another bot shares the server and hands some channels
+to Daimon. The file lists the channels that bot does not answer, one id per
+line (`#` starts a comment); Daimon's answerable set must equal it exactly.
+The command prints the ids Daimon may answer in that the file lacks, the ids
+the file lists where Daimon may not answer, and every answering bound thread
+whose parent the file does not list; any difference, either way, exits 1.
+It reports threads only through their bindings, and DMs not at all.
+
+It fails closed: what it cannot tell is answerable or an error, never
+silent. A channel the bot cannot view still counts by its rules alone,
+because the view permission can be granted later without touching a rule.
+A channel whose category is missing from the server's channel list counts
+as answerable unless its own rule is `writers: none`, and is reported as an
+error (exit 1). A thread binding whose parent channel is not in the list is
+reported as an error and not counted. A server the bot cannot see, or a failed Discord call, is an
+error and prints no set.
 
 **Stored policy.** The policy row holds `channel_rules`, `category_rules` and
 `agent_rules`. A row an older build wrote (lists of protected, sealed and
@@ -326,3 +360,83 @@ only after that session check and only when its stored origin is attended;
 routines and timer turns cannot acquire human approval surfaces this way.
 Legacy sessions using a shared caller credential are replaced at their next
 bind. Personal OAuth connections remain in the caller's shared vault.
+
+## Discord invoker roles
+
+A tenant's durable access policy can contain `invoker_role_ids`. A current
+server admin (when `invoker_admin_bypass` is true), a user listed in
+`invoker_user_ids`, or a verified member with any listed role may start turns.
+The user and role lists form a union. Both lists empty means open. Writer and agent rules still apply independently.
+Private guild-bound access also requires current server membership. Role
+matching uses IDs, so renaming a role does not change access.
+
+Set roles with repeatable `daimon tenants access-policy set discord GUILD_ID
+--invoker-role ROLE_ID`. This replaces the role list; `--clear-invoker-roles`
+clears only that list. `access-policy get` and its `--json` output show IDs.
+IDs must be Discord snowflakes; the guild's own ID (`@everyone`) is refused.
+Slack and Teams reject nonempty role lists, including invalid stored policies;
+their user allowlists retain their existing behaviour.
+
+Ordinary checks cache positive membership for at most 30 seconds and absence
+for five seconds. Member updates/removals invalidate gateway evidence
+immediately. Without member events, role revocation can take up to 30 seconds
+to affect an ordinary cached check. Lookup failures never extend a grant;
+expired evidence fails closed. Private result delivery requires a live lookup, including Discord MCP replies
+and transcript reads.
+
+
+### Discord cold direct messages
+
+Cold DMs require a ready, unarchived tenant with DMs enabled and an explicit
+`dm_agent_name`. Membership is mandatory even for an explicitly allowed user ID;
+unknown membership is never a grant. Discovery and selector clicks require fresh
+membership through the shared resolver, then check the invoker policy, configured
+recipient restrictions and the tenant-owned agent. Pinned agents and agents held
+inside an isolated channel cannot run in a cold DM, including for server admins.
+The live admin bypass for the invoker allowlist still applies.
+
+No eligible tenant, revoked membership or role access, disabled DMs and denied
+recipient access produce no reply and no model turn, with a structured reason log.
+Revocation during a running turn suppresses its private result. The active server
+is retained; sending another DM never falls through into a different tenant.
+An unknown membership lookup during discovery can ask for a retry without naming
+servers. Server selection belongs only to the requester and their physical DM route,
+expires after five minutes, and rechecks access before creating a scope.
+
+Cold conversations copy no public history and grant no additional channel access.
+They mount the tenant's and caller's personal memory under ordinary private-turn
+rules. `dm_memory_read_only` keeps its false default; enabling it makes those mounts
+read-only, including when changed between admission and session preparation.
+Explicit server switching starts empty private history in a new scope and retires
+the old session mapping. Routine notifications do not select a tenant or become
+history in the active DM conversation. `/dm-me` remains the explicit channel-context
+move, with its source sealing and budget checks.
+
+
+Private Discord delivery checks the answering agent's retained admission grant
+against the current `RUN_AGENT` and `DIRECT_MESSAGE` rules before every output
+chunk, with no admin exemption for agent pins or isolation. This applies to moved
+conversations too, whose source sealing remains independently enforced. Archiving,
+deleting or transferring the bound agent to another tenant, or an unreadable
+private access policy, suppresses replies without choosing a different tenant.
+Billing and operational notices remain separate from these silent access denials.
+
+DM routine delivery derives the recipient from the owner but grants no extra
+private tool authority: these runs use the same tool permissions as channel
+routines and mount no personal memory. Tenant memory is read-only. A source
+thread and its parent are captured at creation and never changed by an edit;
+Daimon checks both at save, fire and before each delivery chunk. Operator source
+IDs must resolve to supported channels or threads in the selected tenant's guild,
+including during dry-run. Private-conversation origins inherit their verified
+saved source. Legacy routines with unknown creation-time provenance retain
+ordinary channel/thread edits, clearing and normal firing on every platform,
+but must be recreated from their source to get DM delivery. No edit promotes
+unknown provenance to known.
+
+
+The platform-neutral `invoker_admin_bypass` defaults to true, including for old
+policies. Set `--no-invoker-admin-bypass` to require admins on Discord, Slack,
+and Teams to match the same invoker lists as other members; restore the pass
+with `--invoker-admin-bypass`. Both empty lists still mean open. This does not
+change writer rules or agent pin/isolation admin exemptions. Text and JSON
+`access-policy get` output include the switch.

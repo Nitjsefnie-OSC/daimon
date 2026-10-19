@@ -295,6 +295,7 @@ def register_hub_tools(
         admitted = await _admit(
             auth,
             sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
             billing_config=billing_config,
             tool_name=tool_name,
             agent_names=names,
@@ -303,6 +304,7 @@ def register_hub_tools(
         recheck = _admission_recheck(
             admitted,
             sessionmaker=runtime.session_factory,
+            membership_resolver=runtime.membership_resolver,
             tool_name=tool_name,
             agent_names=names,
             pin_exempt=hub_exempt,
@@ -338,7 +340,8 @@ def register_hub_tools(
 
         Runs as you, in that Daimon's workspace: it reads only what you can see
         and spends that workspace's credit. Pass ``handle`` from a previous
-        result to continue the same conversation. On timeout the error carries
+        result to continue the same conversation. Discord replies require live membership
+        and invoker-policy access at delivery. On timeout the error carries
         the handle; resume with it rather than asking again.
         """
         auth, subject, recheck = await _admitted(ctx, daimon_id, "ask")
@@ -412,7 +415,10 @@ def register_hub_tools(
         limit: int | None = None,
         order: Literal["asc", "desc"] | None = None,
     ) -> Page[SessionEventOut]:
-        """A session's transcript. The Daimon's reply is in ``agent.message`` events."""
+        """A session's transcript. The Daimon's reply is in ``agent.message`` events.
+
+        Discord callers must still pass a live membership and invoker-policy check.
+        """
         _, _, auth = await _identity(runtime, ctx, daimon_id)
         with hub_session_access(await load_hub_subject(runtime, auth), "read"):
             await _verify_account_owns_session(runtime, auth, handle)

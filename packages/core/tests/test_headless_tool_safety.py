@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 from typing import Any
 
 import httpx
@@ -242,6 +243,96 @@ async def test_without_a_daimon_endpoint_the_reserved_name_is_gated_like_any_ser
     servers = {s["name"]: s["url"] for s in agent["mcp_servers"]}
     assert servers["daimon-mcp"] == "https://third-party.example/mcp"
     assert _policies(agent) == {"daimon-mcp": "always_ask", "linear": "always_ask"}
+
+
+@pytest.mark.parametrize("trusted", [("linear",), ()], ids=["trusted", "untrusted"])
+async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
+    monkeypatch: pytest.MonkeyPatch, trusted: tuple[str, ...]
+) -> None:
+    """The production wiring: a routine's decider reads a trusted server's
+    catalogue, so a noun-first read the server marks `readOnlyHint` runs where
+    its name alone would have been refused. With no database the read is
+    anonymous. A server outside `trusted_annotations` is never listed and its
+    name decides."""
+    from daimon.core import mcp_tool_annotations
+    from daimon.core.mcp_oauth import discovery
+
+    tokens: list[str | None] = []
+
+    async def _catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
+        assert url == "https://mcp.linear.app/mcp"
+        tokens.append(token)
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            assert str(request.url) == url
+            assert request.headers.get("authorization") is None
+            body = json.loads(request.content)
+            if body["method"] == "notifications/initialized":
+                return httpx.Response(204)
+            result = (
+                {
+                    "tools": [
+                        {"name": "memory_flag_list", "annotations": {"readOnlyHint": True}},
+                        {"name": "create_issue", "annotations": {"readOnlyHint": False}},
+                    ]
+                }
+                if body["method"] == "tools/list"
+                else {}
+            )
+            return httpx.Response(200, json={"id": body["id"], "result": result})
+
+        original = httpx.AsyncClient
+
+        def client(**kwargs: Any) -> httpx.AsyncClient:
+            return original(transport=httpx.MockTransport(handle), **kwargs)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(httpx, "AsyncClient", client)
+            scoped.setattr(discovery, "assert_public_https_url", lambda *a, **k: None)
+            return list(await discovery.read_mcp_catalogue(url, token))
+
+    monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", _catalogue)
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    router = _router(creates=creates, sends=sends)
+    events = _events()
+    events[0] = {**events[0], "name": "memory_flag_list", "input": {}}
+    # The session freezes the agent with its servers, which is where the
+    # decider finds the URL to read.
+    frozen = ma_session(
+        id="ses_1",
+        agent=ma_agent(
+            id="agent_x",
+            tools=[_LINEAR_TOOLSET],
+            mcp_servers=[{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
+        ),
+        environment_id="env_x",
+    ).model_dump(mode="json")
+    router.routes[:0] = [
+        ("POST", re.compile(r"/v1/sessions$"), lambda r, m: httpx.Response(200, json=frozen)),
+        (
+            "GET",
+            re.compile(r"/v1/sessions/[^/]+/events/stream"),
+            lambda r, m: sse_response(events),
+        ),
+    ]
+    client = build_fake_anthropic(router.dispatch)
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="list the flags",
+        tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=trusted),
+    )
+
+    (sent,) = _confirmations(sends)
+    if trusted:
+        assert sent["result"] == "allow", "readOnlyHint made memory_flag_list a read"
+        assert tokens == [None]
+    else:
+        assert sent["result"] == "deny", "the name decides: a noun-first read is a write"
+        assert tokens == [], "no tools/list for an untrusted server"
 
 
 async def _create_with_rules(

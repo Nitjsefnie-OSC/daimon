@@ -252,7 +252,7 @@
             "active_seconds": null,
             "duration_seconds": null
           },
-          "status": "running",
+          "status": "terminated",
           "title": null,
           "type": "session",
           "updated_at": "<time:epoch-24278400s>",

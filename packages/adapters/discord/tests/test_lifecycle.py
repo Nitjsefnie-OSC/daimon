@@ -2006,7 +2006,9 @@ async def test_terminal_footer_shows_prepaid_balance_only(
     assert "left" not in _terminal_footer(edits)
 
 
-def _window_fixture() -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, Any]]]]:
+def _window_fixture(
+    **lifecycle_kwargs: Any,
+) -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, Any]]]]:
     """A lifecycle whose card is message 100 and whose sends post messages 101, 102, ..."""
     edits: list[tuple[Any, dict[str, Any]]] = []
     next_id = 100
@@ -2021,7 +2023,9 @@ def _window_fixture() -> tuple[DiscordTurnLifecycle, list[tuple[Any, dict[str, A
         edits.append((ref, kwargs))
         return types.SimpleNamespace(id=ref.id, edited_at=datetime.now(UTC))
 
-    lc = DiscordTurnLifecycle(send=send, edit=edit, agent_name="test-agent", model_id="m")
+    lc = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="test-agent", model_id="m", **lifecycle_kwargs
+    )
     return lc, edits
 
 
@@ -2079,6 +2083,30 @@ async def test_a_stopped_turn_has_no_answer_for_files() -> None:
     await lc.on_terminal_success(TurnState(content=[]))
 
     assert lc.answer_message is None, "the sweep posts files on their own"
+
+
+@pytest.mark.asyncio
+async def test_files_posted_apart_reply_to_the_persons_own_message() -> None:
+    """#788: a file that cannot go on the answer replies to the message that asked
+    for it, so in a shared thread it reads as that person's, not the latest turn's."""
+    trigger = types.SimpleNamespace(id=55, channel=types.SimpleNamespace(id=123))
+    lc, _edits = _window_fixture(requester_id=7, trigger_message=trigger)
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(_make_success_state())
+
+    assert lc.requester_id == 7
+    assert lc.files_reply_to(123) == 55, "the person's own message, in this thread"
+    assert lc.files_reply_to(999) == 100, "a message in another channel falls back to the answer"
+
+
+@pytest.mark.asyncio
+async def test_without_an_answer_or_a_message_in_the_thread_files_reply_to_nothing() -> None:
+    lc, _edits = _window_fixture()
+    await lc.on_sse_event(_thinking_event())
+    await lc.on_terminal_success(TurnState(content=[]))
+
+    assert lc.requester_id is None
+    assert lc.files_reply_to(123) is None
 
 
 @pytest.mark.asyncio

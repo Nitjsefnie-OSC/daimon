@@ -6,8 +6,8 @@ downgrade: destructive
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0113_origin_session_grants"
-down_revision: str | None = "0112_turn_attendance"
+revision: str = "0115_origin_session_grants"
+down_revision: str | None = "0114_turn_attendance"
 branch_labels: str | None = None
 depends_on: str | None = None
 

@@ -46,8 +46,13 @@ Files an agent saves under `/mnt/session/outputs` are uploaded to the Slack
 thread after an interactive turn completes (scheduled routines deliver
 nothing). Delivery runs in the background after the reply is posted — the
 adapter waits for Managed Agents to index newly written files, so files may
-arrive a few seconds after the reply. A successfully posted file is deleted
-from the session's file listing, so the listing only ever holds undelivered
+arrive a few seconds after the reply. Every delivery is labelled with the
+person whose turn made the files, in every thread, whether one person uses
+it or several: the first file posted (or the first oversize notice, if that
+comes first) carries "For @name", a mention, so that person is notified
+once per delivery. Files are labelled, not reordered: in a thread several
+people use, they can still appear after a later turn's answer. A
+successfully posted file is deleted from the session's file listing, so the listing only ever holds undelivered
 work and there is no delivery-receipt store to go stale. An interrupted
 delivery (a deploy restart mid-sweep) leaves the file listed and it goes out
 on the next turn; a crash between posting and deleting can re-post a file
@@ -389,3 +394,12 @@ new URL. Pictures are public: anyone who sees a message can open its image, and
 platform caches can keep a copy after the picture changes.
 
 For explicitly configured alternate providers, progress cards display neutral message snapshots and ordered draft previews. Terminal callbacks replace the card with the authoritative answer and retire Cancel. A provider cost is omitted until a verified display tariff is available; the default Anthropic display and price calculation are unchanged.
+
+Scheduled routine deliveries use the same file uploader as interactive turns,
+including thread destinations and creator fallback DMs. Each delivery includes
+up to ten generated files, with a 200 MB per-file limit; skipped files are
+reported in text. File uploads share the routine result's at-most-once claim,
+so partial or uncertain delivery is not replayed across polls. The Slack SDK
+may retry a single send after a server error or connection reset. Fallback-DM
+files recheck tenant DM controls, recipient eligibility and channel isolation
+before each file and after download.

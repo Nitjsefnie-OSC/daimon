@@ -72,7 +72,8 @@ async def test_posture_is_always_the_unattended_decider(
     assert (await posture.decide(_call(tool))).allow is allowed
 
 
-async def test_posture_reads_annotations_only_through_its_seam() -> None:
+@pytest.mark.parametrize("trusted", [True, False])
+async def test_posture_reads_annotations_only_through_its_seam(trusted: bool) -> None:
     seen: list[str] = []
 
     async def lookup(call: ToolCall) -> ToolAnnotations | None:
@@ -80,15 +81,15 @@ async def test_posture_reads_annotations_only_through_its_seam() -> None:
         return ToolAnnotations(read_only_hint=True)
 
     posture = unattended_posture(
-        ToolSafetyPolicy(enabled=True),
+        ToolSafetyPolicy(enabled=True, trusted_annotations=("linear",) if trusted else ()),
         session=_session(),
         public_url=None,
         session_factory=MagicMock(),
         tenant_id=uuid.uuid4(),
         annotations_for=lookup,
     )
-    assert (await posture.decide(_call("memory_flag_list"))).allow
-    assert seen == ["linear/memory_flag_list"]
+    assert (await posture.decide(_call("memory_flag_list"))).allow is trusted
+    assert seen == (["linear/memory_flag_list"] if trusted else [])
 
 
 def test_a_destructive_hint_wins_over_read_only() -> None:

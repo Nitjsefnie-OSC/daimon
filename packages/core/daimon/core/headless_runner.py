@@ -180,6 +180,7 @@ async def run_turn(
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy,
     on_state: Callable[[TurnState], None] | None = None,
+    on_session: Callable[[str], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
@@ -210,6 +211,7 @@ async def run_turn(
             deadline=deadline,
             tool_safety=tool_safety,
             on_state=on_state,
+            on_session=on_session,
             budget_channel_id=budget_channel_id,
             origin_place=origin_place,
             model_override=model_override,
@@ -240,6 +242,7 @@ async def run_turn(
                 deadline=deadline,
                 tool_safety=tool_safety,
                 on_state=on_state,
+                on_session=on_session,
                 budget_channel_id=budget_channel_id,
                 origin_place=origin_place,
                 model_override=model_override,
@@ -274,6 +277,7 @@ async def run_turn_impl(
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy,
     on_state: Callable[[TurnState], None] | None = None,
+    on_session: Callable[[str], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
@@ -320,7 +324,8 @@ async def run_turn_impl(
        the hardened render error policy — instead of a bespoke bare drain
        loop with no reconnect and stream-end-as-success.
     4. After the driver returns: ``extract_final_response(state.content)``.
-       ``on_state``, when given, is called first with the final ``TurnState``
+       ``on_session`` receives the successful session id for output collection.
+       ``on_state``, when given, is called with the final ``TurnState``
        of a successful turn, for a caller that needs the tool trail too (the
        scheduler checks whether the agent posted a routine's result itself).
 
@@ -355,8 +360,8 @@ async def run_turn_impl(
 
     ``personal_memory`` also mounts ``account_id``'s personal store, with the
     same (read-only, for a routine) access as the shared one. The scheduler
-    sets it only for a routine whose result reaches nobody but its owner,
-    decided again at every fire (`rule_views.routine_answers_only_owner`).
+    sets it only for a legacy routine with no destination or channel; explicit
+    DM destinations never enable it (`rule_views.routine_mounts_personal_memory`).
     """
     turn_scope: Scope | None = None
     if load_turn_settings().path == "mux":
@@ -442,8 +447,8 @@ async def run_turn_impl(
             requester_is_headless=True,
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",
-            # Only a routine whose result reaches nobody but its owner
-            # (`rule_views.routine_answers_only_owner`); read-only like the
+            # Only a legacy owner-only routine, never an explicit DM destination
+            # (`rule_views.routine_mounts_personal_memory`); read-only like the
             # shared mount, since a routine's memory is always read-only.
             personal_memory=personal_memory,
             tool_safety=tool_safety,
@@ -523,6 +528,8 @@ async def run_turn_impl(
                 tool_confirmation=unattended_posture(
                     tool_safety,
                     session=session,
+                    fernet=fernet,
+                    agent_id=agent_uuid,
                     public_url=public_url,
                     session_factory=session_factory,
                     tenant_id=tenant_id,
@@ -536,6 +543,8 @@ async def run_turn_impl(
         if state.error is not None:
             raise state.error
 
+        if on_session is not None:
+            on_session(session.id)
         if on_state is not None:
             on_state(state)
         return extract_final_response(state.content)

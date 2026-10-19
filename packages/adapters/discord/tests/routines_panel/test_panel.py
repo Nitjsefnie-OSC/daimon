@@ -747,3 +747,143 @@ def test_panel_container_empty_roster_returns_container_with_hint() -> None:
         "empty-roster container must show the no-routines hint"
     )
     assert container.accent_colour is None, "empty-roster container must have no accent"
+
+
+@pytest.mark.parametrize("clicker", [123, 999])
+async def test_private_delivery_choice_belongs_to_owner_only(
+    db_session_factory, monkeypatch, clicker
+):
+    from daimon.adapters.discord.routines_panel import panel as panel_mod
+    from daimon.core.stores.routines import create_routine, get_routine
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        row = await create_routine(
+            session,
+            tenant_id=tenant.id,
+            created_by_user_id="123",
+            agent_id="ag",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="summary",
+        )
+    glyph, color = derive_state(row)
+    entry = RoutineEntry(
+        routine=row, agent_name="daimon", glyph=glyph, color=color, label="summary"
+    )
+    runtime = _make_runtime()
+    runtime.sessionmaker = db_session_factory
+    view = RoutinesPanelView(_make_state([entry]), runtime=runtime, allowed_user_id=clicker)
+    picker = next(
+        child for child in view.walk_children() if isinstance(child, panel_mod._DestinationPicker)
+    )
+    picker._values = ["dm"]
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.user.id = clicker
+    interaction.response.send_message = AsyncMock()
+    monkeypatch.setattr(panel_mod, "_rerender", AsyncMock())
+    await picker.callback(interaction)
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    assert after.destination_kind == ("dm" if clicker == 123 else None)
+    if clicker == 123:
+        assert after.destination_id == "123"
+    else:
+        assert "Only the routine owner" in interaction.response.send_message.await_args.args[0]
+
+
+@pytest.mark.parametrize("clear_first", [False, True])
+@pytest.mark.parametrize("restricted", [False, True])
+async def test_panel_thread_dm_conversion_retains_and_checks_thread(
+    db_session_factory, monkeypatch, restricted, clear_first
+):
+    from daimon.adapters.discord.routines_panel import panel as panel_mod
+    from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.routines import create_routine, get_routine
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id="424242")
+        row = await create_routine(
+            session,
+            tenant_id=tenant.id,
+            created_by_user_id="123",
+            agent_id="ag",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="summary",
+            destination_kind="thread",
+            destination_id="789",
+            channel_id="456",
+        )
+        if restricted:
+            await set_access_policy(
+                session,
+                tenant_id=tenant.id,
+                policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
+            )
+
+    glyph, color = derive_state(row)
+    entry = RoutineEntry(
+        routine=row, agent_name="daimon", glyph=glyph, color=color, label="summary"
+    )
+    runtime = _make_runtime()
+    runtime.sessionmaker = db_session_factory
+    runtime.settings = MagicMock()
+    view = RoutinesPanelView(_make_state([entry]), runtime=runtime, allowed_user_id=123)
+    picker = next(
+        child for child in view.walk_children() if isinstance(child, panel_mod._DestinationPicker)
+    )
+    picker._values = ["dm"]
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.user.id = 123
+    interaction.response.send_message = AsyncMock()
+    monkeypatch.setattr(panel_mod, "_rerender", AsyncMock())
+    if clear_first:
+        picker._values = ["none"]
+        await picker.callback(interaction)
+        async with db_session_factory.begin() as session:
+            cleared = await get_routine(session, row.id, tenant_id=tenant.id)
+            assert cleared is not None and cleared.destination_kind is None
+            assert (cleared.source_channel_id, cleared.source_thread_id) == ("456", "789")
+            await set_access_policy(
+                session,
+                tenant_id=tenant.id,
+                policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
+            )
+        picker._values = ["dm"]
+    await picker.callback(interaction)
+    async with db_session_factory() as session:
+        saved = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert saved is not None
+    assert saved.destination_kind == (None if clear_first else "thread" if restricted else "dm")
+    assert saved.delivery_payload is None
+    if restricted or clear_first:
+        assert "restricted source" in interaction.response.send_message.await_args.args[0]
+    else:
+        assert (saved.channel_id, saved.source_thread_id) == ("456", "789")
+        async with db_session_factory.begin() as session:
+            await set_access_policy(
+                session,
+                tenant_id=tenant.id,
+                policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
+            )
+        await picker.callback(interaction)
+        assert "restricted source" in interaction.response.send_message.await_args.args[0]
+
+    from daimon.core.routine_delivery import poll_deliveries_once
+
+    async def unexpected_dm_post(row):
+        raise AssertionError("clearing/converting delivery must not perform DM I/O")
+
+    assert (
+        await poll_deliveries_once(
+            db_session_factory, platform="discord", post=unexpected_dm_post, now=_NOW
+        )
+        == 0
+    )

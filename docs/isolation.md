@@ -96,11 +96,11 @@ configuration, not shared storage.
 
 Files an agent writes for delivery are listed by session:
 `files.list(scope_id=session_id)`
-(`packages/core/daimon/core/output_delivery.py:167-168`). A sweep only ever
+(`packages/core/daimon/core/output_delivery.py:200-202`). A sweep only ever
 reads the session of the turn it follows, and sweeps are serialised per
-session (`packages/adapters/discord/daimon/adapters/discord/bot.py:786-812`).
+session (`packages/adapters/discord/daimon/adapters/discord/bot.py:1022-1046`).
 A delivered file is then **posted into the thread**
-(`packages/adapters/discord/daimon/adapters/discord/output_delivery.py:99-104`),
+(`packages/adapters/discord/daimon/adapters/discord/output_delivery.py:148-154`),
 where everyone in the thread can see it, and later turns, including other
 callers' turns, can receive it through replayed history, subject to the
 limits in the next section.
@@ -351,9 +351,10 @@ boundary is explicit.
    (`packages/adapters/teams/daimon/adapters/teams/context.py:315-325`).
 2. **Delivered outputs.** A file the first person's session produced is
    posted into the thread
-   (`packages/adapters/discord/daimon/adapters/discord/output_delivery.py:99-104`),
+   (`packages/adapters/discord/daimon/adapters/discord/output_delivery.py:148-154`),
    so it is visible to both, and reaches the second person's session by
-   path 1.
+   path 1. Each such post names the person whose turn made it, because the
+   sweep can finish after the second person's turn has started.
 3. **Published notebook links.** A notebook link Daimon posts for one person
    carries its access token
    (`apps/notebook-host/src/notebook_host/lifecycle.py:102-110`), so the

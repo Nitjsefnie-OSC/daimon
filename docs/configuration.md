@@ -1418,9 +1418,24 @@ remain editable but inactive until enabled.
 `dict[str, 'read' | 'write']` · optional · default `{}`
 
 Override the read/write class, e.g. {"linear/get_team": "read", "notion": "write"}. Keys
-are a server name or server/tool. Unlisted tools are classified from their name: a plain
-get_, list_, search_ ... is a read; a compound name (get_or_create, search_and_replace,
-run_query) and anything unknown is a write.
+are a server name or server/tool. Unlisted tools are classified from the server's own
+MCP annotations when the server is listed in trusted_annotations and sends them
+(readOnlyHint true is a read unless destructiveHint is also true), otherwise from their
+name: a plain get_, list_, search_ ... is a read; a compound name (get_or_create,
+search_and_replace, run_query) and anything unknown is a write.
+
+### `DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS`
+
+`tuple[str, ...]` · optional · default unset
+
+MCP server names whose own tool annotations count, e.g. ["bridge"]. For a listed server
+Daimon lists its tools once per turn and runs a tool marked readOnlyHint true (without
+destructiveHint true) as a read, and one marked destructiveHint true or readOnlyHint
+false as a write; each such auto-allow is logged. An effects pin or a denied entry still
+wins. An unlisted server's annotations are never read, so its tools are classified by
+name. Empty (the default) reads none. Trust is by server name across every agent in the
+deployment: any agent that attaches a server with a listed name has its hints counted,
+so list only names you control. Names are matched exactly; there is no '*' wildcard.
 
 ### `DAIMON_TOOL_SAFETY__DENIED`
 

@@ -15,7 +15,9 @@ state, and `build_decision_events` sends each call's own allow/deny.
 The decider builders are the policy shells over
 `daimon.core.tool_safety.decide_tool_call`. `unattended_decider` never waits
 on anyone; `interactive_decider` hands `ask` verdicts to the adapter's
-`ConfirmationHook`. Neither does I/O of its own — the hook is the only thing
+`ConfirmationHook`. Each takes optional lookups for the call's agent rule and
+the call's own MCP annotations (`daimon.core.mcp_tool_annotations`), read only
+when they could change the verdict. Neither does I/O of its own — the hook is the only thing
 that talks to a platform, and a hook that raises counts as a refusal."""
 
 from __future__ import annotations
@@ -45,8 +47,10 @@ from daimon.core.tool_safety import (
     ToolCall,
     ToolSafetyPolicy,
     ToolVerdict,
+    classify_tool,
     decide_tool_call,
     is_publish_call,
+    needs_annotations,
     proxy_refusal,
     stricter_agent_tool_rule,
     unwrap_daimon_call,
@@ -196,6 +200,54 @@ async def _rule_for(
     except Exception as err:
         log.warning("tool_safety.rule_read_failed", tool=call.key, error=str(err))
         return None, True
+
+
+async def _annotations(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    trusted_servers: frozenset[str],
+    annotations_for: AnnotationLookup | None,
+) -> ToolAnnotations | None:
+    """The call's own MCP hints, only when they could change the verdict.
+
+    A lookup that raises answers `None`: the name decides, as without hints.
+    """
+    if annotations_for is None or not needs_annotations(
+        policy, call, trusted_servers=trusted_servers
+    ):
+        return None
+    try:
+        return await annotations_for(call)
+    except Exception as err:
+        log.warning("tool_safety.annotations_unavailable", tool=call.key, error=str(err))
+        return None
+
+
+def _log_annotation_allow(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    verdict: ToolVerdict,
+    hints: ToolAnnotations | None,
+    *,
+    attended: bool,
+) -> None:
+    """Record each call that runs as a read because its server said `readOnlyHint`.
+
+    `by_name` is what the name alone would have made it, so an audit can find
+    the calls the hint let through that would otherwise have asked.
+    """
+    if verdict.outcome != "allow" or verdict.reason != "read" or hints is None:
+        return
+    if hints.read_only_hint is not True or hints.destructive_hint is True:
+        return
+    log.info(
+        "tool_safety.annotation_read_allowed",
+        server=call.server_name,
+        tool=call.tool_name,
+        attended=attended,
+        hint="readOnlyHint",
+        by_name=classify_tool(policy, server_name=call.server_name or "", tool_name=call.tool_name),
+    )
 
 
 def _skips_daimon_rules(
@@ -400,17 +452,12 @@ async def tool_call_verdict(
 ) -> ToolVerdict:
     """Decide one attended or unattended call; both deciders come through here.
 
-    `annotations_for` must answer only for servers the operator trusts. A
-    lookup that fails leaves the name to decide, which never reads more
-    loosely than the hints would.
+    `needs_annotations` checks operator trust before invoking the callback,
+    even if that callback was built for an untrusted server. A missing or
+    failed catalogue leaves the name to decide.
     """
-    hints: ToolAnnotations | None = None
-    if policy.enabled and annotations_for is not None and call.server_name not in trusted_servers:
-        try:
-            hints = await annotations_for(call)
-        except Exception as err:
-            log.warning("tool_safety.annotation_read_failed", tool=call.key, error=str(err))
-    return decide_tool_call(
+    hints = await _annotations(policy, call, trusted_servers, annotations_for)
+    verdict = decide_tool_call(
         policy,
         call,
         attended=attended,
@@ -419,6 +466,8 @@ async def tool_call_verdict(
         agent_rule=agent_rule,
         annotations=hints,
     )
+    _log_annotation_allow(policy, call, verdict, hints, attended=attended)
+    return verdict
 
 
 def unattended_decider(
@@ -596,6 +645,7 @@ def chat_tool_confirmation(
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
     rule_card_for: RuleCardFor | None = None,
+    annotations_for: AnnotationLookup | None = None,
     daimon_rules: bool = False,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
@@ -616,6 +666,7 @@ def chat_tool_confirmation(
             confirmed_tools=confirmed_tools,
             rules_for=rules_for,
             rule_card_for=rule_card_for,
+            annotations_for=annotations_for,
             daimon_rules=daimon_rules,
         )
         if attended
@@ -624,6 +675,7 @@ def chat_tool_confirmation(
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
             rules_for=rules_for,
+            annotations_for=annotations_for,
             daimon_rules=daimon_rules,
         )
     )

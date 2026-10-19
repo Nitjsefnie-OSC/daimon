@@ -2465,6 +2465,7 @@ async def _fire_with_fake_turn(
     destination: tuple[str, str] | None,
     agent_posts_to: str | None,
     policy: object | None = None,
+    membership_resolver=None,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.turn.state import ToolUseBlock, TurnState
 
@@ -2523,6 +2524,7 @@ async def _fire_with_fake_turn(
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
+        membership_resolver=membership_resolver,
     )
 
     async def fake_resolve(*args: object, **kwargs: object) -> str:
@@ -2959,7 +2961,9 @@ async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) 
     assert calls == expected, f"usage pass ran {calls} times with enabled={enabled}"
 
 
-async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_memory(
+@pytest.mark.parametrize("explicit_dm", [False, True])
+async def test_explicit_dm_never_reads_personal_memory_and_legacy_owner_only_can(
+    explicit_dm: bool,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -2971,15 +2975,20 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     row = await create_routine(
         db_session,
-        created_by_user_id="u-owner",
+        created_by_user_id="123",
         agent_id="agent_z",
         agent_name="daimon",
         cron_expr="* * * * *",
         timezone_="UTC",
         trigger_message="trigger",
+        destination_kind="dm" if explicit_dm else None,
         next_fire_at=now - timedelta(minutes=1),
         tenant_id=tenant.id,
     )
+    if explicit_dm:
+        from daimon.core.stores.direct_messages import set_dm_enabled
+
+        await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
     await db_session.commit()
     fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
     calls: list[dict[str, object]] = []
@@ -2991,12 +3000,18 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
     async def fake_resolve(*args: object, **kwargs: object) -> str:
         return "agent_z"
 
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    async def member(tenant_id, guild_id, user_id):
+        return Membership(is_member=True)
+
     fire = await _build_fire(
         client=fake_client,
         sm=db_session_factory,
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
+        membership_resolver=CachedMembershipResolver(member) if explicit_dm else None,
     )
     posting = row.model_copy(
         update={"destination_kind": "channel", "destination_id": "chan-9", "channel_id": "chan-9"}
@@ -3012,7 +3027,7 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
         await fire(posting)
     await fake_client.close()
 
-    assert [call["personal_memory"] for call in calls] == [True, False]
+    assert [call["personal_memory"] for call in calls] == [not explicit_dm, False]
     assert calls[0]["account_id"] is not None, "the owner's account selects the store"
 
 
@@ -3066,3 +3081,333 @@ async def test_fleet_deadline_sweep_uses_store_owner_and_isolates_tick_failures(
     sessions = object()
     await _sweep_fleet_deadlines(sessions)
     assert calls == [sessions]
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+async def test_role_gated_fire_fetches_fresh_creator_facts(
+    db_session, db_session_factory, monkeypatch, allowed
+):  # type: ignore[no-untyped-def]
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    calls = []
+
+    async def fetch(tenant_id, guild_id, user_id):  # type: ignore[no-untyped-def]
+        calls.append(user_id)
+        return Membership(is_member=True, role_ids=("123",) if allowed else ())
+
+    resolver = CachedMembershipResolver(fetch)
+    after, seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=None,
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(invoker_role_ids=("123",)),
+        membership_resolver=resolver,
+    )
+    assert calls == ["U_DEST"]
+    if allowed:
+        assert seen and after.last_result_tail == "Weekly summary: all green."
+    else:
+        assert not seen and after.last_error == "invoker_not_allowed"
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["tenant_disabled", "outbound_disabled", "revoked", "unknown", "sealed", "thread_sealed"],
+)
+async def test_dm_fire_refuses_disabled_or_unverified_private_access(
+    db_session, db_session_factory, monkeypatch, mode
+):
+    from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        destination_kind="dm",
+        channel_id="456",
+        source_thread_id="789",
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=mode != "tenant_disabled")
+    if mode in ("sealed", "thread_sealed"):
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(
+                channel_rules={
+                    "789" if mode == "thread_sealed" else "456": ChannelRule(readers="inside")
+                }
+            ),
+        )
+    await db_session.commit()
+    settings = _make_test_settings(monkeypatch).model_copy(
+        update={
+            "direct_message_policies": {
+                tenant.id: DirectMessagePolicy(
+                    mode="disabled" if mode == "outbound_disabled" else "members"
+                )
+            }
+        }
+    )
+
+    async def member(*args):
+        return Membership(is_member=None if mode == "unknown" else mode != "revoked")
+
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=settings,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        membership_resolver=CachedMembershipResolver(member),
+    )
+    with unittest.mock.patch("daimon.adapters.scheduler.main.run_turn") as turn:
+        await fire(row)
+        turn.assert_not_called()
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None and after.last_error and after.delivery_status is None
+    await client.close()
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+@pytest.mark.parametrize("kind", ["channel", "thread"])
+async def test_legacy_public_routines_still_fire_with_unknown_creation_source(
+    db_session, db_session_factory, monkeypatch, platform, kind
+):
+    tenant = await make_tenant(db_session, platform=platform)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    target = "789"
+    if kind == "thread" and platform == "slack":
+        target = "456:1710000000.000001"
+    elif kind == "thread" and platform == "teams":
+        target = "19:channel@thread.tacv2;messageid=789"
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        destination_kind=kind,
+        destination_id=target,
+        channel_id="456",
+        source_provenance_known=False,
+    )
+    await db_session.commit()
+    client = AsyncAnthropic(api_key="offline", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+
+    async def resolve(*args, **kwargs):
+        return "agent_z"
+
+    with (
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", return_value="tail") as turn,
+    ):
+        await fire(row)
+        turn.assert_called_once()
+    async with db_session_factory() as session:
+        saved = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert saved is not None and saved.delivery_status == "pending"
+    assert not saved.source_provenance_known
+    await client.close()
+
+
+@pytest.mark.parametrize("agent_posted", [False, True])
+async def test_fire_collects_outputs_from_real_headless_turn(
+    db_session, db_session_factory, monkeypatch, agent_posted
+):
+    """Exercise scheduler → headless SSE reducer → settled output listing → outbox."""
+    from anthropic.types.beta import FileMetadata
+    from daimon.core.routine_files import decode_payload
+    from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, sse_response
+    from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+
+    tenant = await make_tenant(db_session, platform="slack")
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="U1",
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="0 9 * * 1",
+        timezone_="UTC",
+        trigger_message="go",
+        destination_kind="channel",
+        destination_id="C123",
+    )
+    await db_session.commit()
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda r, m: httpx.Response(200, json=ma_agent(id="ag").model_dump(mode="json")),
+    )
+    router.add(
+        "GET",
+        r"/v1/environments/([^/]+)",
+        lambda r, m: httpx.Response(200, json=ma_environment(id="env").model_dump(mode="json")),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions",
+        lambda r, m: httpx.Response(
+            200,
+            json=ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
+                mode="json"
+            ),
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+$",
+        lambda r, m: httpx.Response(
+            200,
+            json=ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
+                mode="json"
+            ),
+        ),
+    )
+    router.add(
+        "POST", r"/v1/sessions/[^/]+/events", lambda r, m: httpx.Response(200, json={"data": None})
+    )
+    now = datetime.now(UTC)
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events/stream",
+        lambda r, m: sse_response(
+            [
+                *(
+                    [
+                        {
+                            "id": "evt_tool",
+                            "type": "agent.mcp_tool_use",
+                            "name": "send_message",
+                            "mcp_server_name": "daimon-mcp",
+                            "input": {"channel_id": "C123", "content": "Report"},
+                            "processed_at": now.isoformat(),
+                        },
+                        {
+                            "id": "evt_result",
+                            "type": "agent.mcp_tool_result",
+                            "mcp_tool_use_id": "evt_tool",
+                            "content": [{"type": "text", "text": "posted"}],
+                            "is_error": False,
+                            "processed_at": now.isoformat(),
+                        },
+                    ]
+                    if agent_posted
+                    else []
+                ),
+                {
+                    "id": "evt_msg",
+                    "type": "agent.message",
+                    "processed_at": now.isoformat(),
+                    "content": [{"type": "text", "text": "Here is the report."}],
+                },
+                {
+                    "id": "evt_end",
+                    "type": "session.status_idle",
+                    "processed_at": now.isoformat(),
+                    "stop_reason": {"type": "end_turn"},
+                },
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/files",
+        lambda r, m: list_response(
+            [
+                FileMetadata(
+                    id="file_report",
+                    created_at=now,
+                    filename="report.csv",
+                    mime_type="text/csv",
+                    size_bytes=4,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET", r"/v1/vaults", lambda r, m: httpx.Response(200, json={"data": [], "has_more": False})
+    )
+    router.add(
+        "POST",
+        r"/v1/vaults",
+        lambda r, m: httpx.Response(
+            200,
+            json={
+                "id": "vlt_session",
+                "type": "vault",
+                "display_name": "test",
+                "metadata": None,
+                "archived_at": None,
+                "created_at": now.isoformat(),
+            },
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/vaults/[^/]+/archive",
+        lambda r, m: httpx.Response(200, json={"id": "vlt_session", "type": "vault"}),
+    )
+    router.add(
+        "GET",
+        r"/v1/vaults/[^/]+/credentials",
+        lambda r, m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.resolve_agent", unittest.mock.AsyncMock(return_value="ag")
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.resolve_environment",
+        unittest.mock.AsyncMock(return_value="env"),
+    )
+    settings = _make_test_settings(monkeypatch)
+    settings = settings.model_copy(
+        update={"mcp": settings.mcp.model_copy(update={"public_url": None})}
+    )
+    fire = await _build_fire(
+        client=build_fake_anthropic(router.dispatch),
+        sm=db_session_factory,
+        settings=settings,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    await fire(row)
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    assert after.last_error is None
+    assert after.delivery_status == "pending"
+    payload = decode_payload(after.delivery_payload)
+    assert payload.text == ("" if agent_posted else "Here is the report.")
+    assert [file.file_id for file in payload.files] == ["file_report"]
+    assert after.last_result_tail == "Here is the report."

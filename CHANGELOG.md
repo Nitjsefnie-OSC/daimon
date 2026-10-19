@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
+
+- Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
+
+- Discord routines can deliver privately to their owner through MCP, the routines panel, or `daimon routines create --destination dm`. Delivery rechecks live access, respects tenant DM controls, and exposes failures without public fallback or outbox replay across polls. Platform SDKs may retry a single send after a server error or connection reset. DM routine runs mount no personal memory; tenant memory stays read-only and tool authority stays the same as for channel routines. Creation-time source channels, threads and provenance status are immutable across retargeting, clearing and DM conversion. Legacy unknown-source routines retain ordinary edits and firing, but must be recreated from their source to get DM delivery. Routines created from a private conversation verify its saved guild source; cold conversations remain source-free, and unknown provenance refuses DM delivery. CLI source IDs are verified against the selected tenant's guild, including in dry-run.
+- Private Discord replies recheck the answering agent's current pin and isolation rules before delivery. Unavailable bound agents and unreadable private policies are silent, and superseded server-switch controls are retired.
+
+- Discord can answer a first DM using an explicitly configured tenant agent, with a private server chooser when several servers qualify. Cold starts copy no channel history. Ineligible senders and revoked private access receive no reply; server switches reset the private scope.
+
+
+- Add per-tenant `invoker_admin_bypass` and CLI flags to require server admins to match invoker user/role lists.
+
+- Gate Discord turns and routine owners by configured role IDs, with current membership checks for MCP, scheduled fires, and private delivery. Configure roles with `daimon tenants access-policy set --invoker-role`.
+
+### Fixed
+
+- Access policies that keep the default admin bypass remain readable by older deployments during rolling upgrades.
+
+- Discord private conversations retain operational and billing notices while access denials stay silent. Discovery failures after membership and invoker checks show a generic notice without server or agent names.
+
+
 ### Security
 
 - Origin-based MCP actions require the signed grant of the calling session.
@@ -69,6 +90,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Third-party MCP tools that say they only read can stop asking for
+  approval, on servers you trust.** List a server in
+  `DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS` (e.g. `["bridge"]`) and, with tool
+  safety on, Daimon reads that server's own tool annotations (once per turn,
+  on the first paused call to it) and runs a tool marked `readOnlyHint: true`
+  as a read, so a noun-first read such as `memory_flag_list` no longer needs a
+  `DAIMON_TOOL_SAFETY__EFFECTS` pin; each such allow is logged. A tool also
+  marked `destructiveHint: true`, one marked `readOnlyHint: false`, and one
+  without the hint are never let through by annotations; an `effects` pin or a
+  `denied` entry still wins, and when the server cannot be read the tool name
+  decides as before. The list is empty by default: an unlisted server's
+  annotations are never fetched and its tools are classified by name only.
 - The GitHub repo editor now refuses saves over 256 KiB, gives up listing your GitHub repos after 60 seconds, and keeps your ticked repos when Try again follows a GitHub error.
 - A Teams channel command whose "answered in your 1:1 chat" notice Teams refuses is still answered in the 1:1 chat. Failed sends now log Teams' error code.
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
@@ -194,6 +227,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP servers connected agent-wide now work in shared threads.** A shared
+  thread's session mounted no vault holding the agent's shared MCP tokens,
+  so such a server failed authentication there and every reply carried an
+  "unavailable this turn" notice. The thread now has a vault of its own
+  holding those tokens and nothing else; a token added, rotated or removed
+  reaches it on the thread's next turn. The shared workspace still holds
+  the agent's own credentials only, never anyone's personally connected MCP
+  servers. A shared thread whose session was created before this change
+  picks the tokens up once that session is replaced.
+
+- **Delivered files say whose they are.** Files an agent saves arrive a few seconds after its reply, and in a Slack or Discord thread several people use, the next person's turn has often started by then, so one person's files looked like part of someone else's turn. Every delivery is now labelled with the person whose turn made the files, in every thread, not only shared ones. On Slack the first file (or oversize notice) of each delivery says "For @name", so that person is notified once. On Discord, a file that cannot go on the answer, and every oversize notice, replies to the person's own message and says "For @name" without pinging. Files are labelled, not reordered: they can still appear after a later turn's answer (#788).
+
 - A GitHub App token mint rejected for one repository group now leaves other groups available, queues an installation refresh, and tells the next turn which repositories are unavailable, including after token rotation or reconciliation. Each repository's first refusal starts a 60-minute exclusion; rotation skips fully excluded groups, and a later turn retries with a replacement session after expiry. Notices survive reconciliation and are sent once per continuous refusal. Authentication and transient failures still stop session setup and close pending token rows.
 
 - GitHub App grants stop covering repositories removed from an installation, suspended installations, and installations GitHub confirms deleted. A refreshed GitHub repository snapshot is intersected with the tenant's confirmed Connect set; webhook changes, Connect saves, and existing installations queue a refresh. Connect cannot clear a suspension recorded by reconciliation.
@@ -293,7 +338,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   analyse its data, write it up. Manifest 1.30, template version 0.6.0:
   rebuild and upload the package to get them.
 - Explicit Gemini agent deployments can retain full default skill bundles through scoped external deployment receipts and caller-bound remote MCP, with fresh source-byte verification and native readback before execution.
-
+- `daimon channels answerable discord GUILD_ID` lists the Discord channels where Daimon may answer at all: every channel the turn gate admits, that is one not under a `writers: none` channel or category rule, with each bound thread checked the same way. With `--expect FILE`, a list of the channels another bot sharing the server does not answer, it checks that Daimon's set equals that list, prints the ids missing on each side and any answering bound thread under an unlisted channel, and exits 1 on any difference. Read-only, and it fails closed: a channel it cannot place is answerable or an error, never silent.
 - **Fleet roots now run against one retained original reservation.** A fleet root is admitted once against a scoped hold that it keeps for its whole run: pending financial state is settled before any funding check, each original input the root sends is counted against that hold, and a native root carries its explicit budget into the session. A root is an ordinary agent session, so it keeps the agent's personal memory store, which is neither counted nor funded. Off by default: fleet roots run only with `DAIMON_FLEET__ENABLED=true`. No migration.
 - Explicitly authorized OpenAI fleet workers can run without a workspace, tools, MCP, memory or skills. Their initial task is counted and sent with session creation; retries reuse the acknowledged input and uncertain delivery requires reconciliation.
 

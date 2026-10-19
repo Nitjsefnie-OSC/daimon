@@ -17,8 +17,10 @@ from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.artifacts import ArtifactStore
-from daimon.core.config import Settings
+from daimon.core.config import DiscordSettings, Settings
+from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
+from daimon.core.membership import MembershipResolver
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from google import genai
@@ -67,6 +69,16 @@ class McpRuntime:
 
     # The explicit operator deployment capability for OpenAI agents. None (the
     # default) keeps every tool on its existing Anthropic path.
+    membership_resolver: MembershipResolver | None = None
+
+    def __post_init__(self) -> None:
+        if self.membership_resolver is None and isinstance(self.settings.discord, DiscordSettings):
+            object.__setattr__(
+                self,
+                "membership_resolver",
+                DiscordRestMembershipResolver(self.settings.discord.bot_token.get_secret_value()),
+            )
+
     resource_hosts: McpResourceHostFactory | None = field(default=None)
 
     # Separate explicit capability; absent/disabled keeps existing dispatch.

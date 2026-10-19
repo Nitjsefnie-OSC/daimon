@@ -12,8 +12,8 @@ downgrade: destructive
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0111_unattended_turn_provenance"
-down_revision: str | None = "0110_microsoft_accounts"
+revision: str = "0113_unattended_turn_provenance"
+down_revision: str | None = "0112_routine_dm_destination"
 branch_labels: str | None = None
 depends_on: str | None = None
 

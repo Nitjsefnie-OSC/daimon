@@ -28,7 +28,14 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_session_agent_update_param import (
     BetaManagedAgentsSessionAgentUpdateParam,
 )
+from cryptography.fernet import MultiFernet
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL, MA_METADATA_KEY_PRIVATE_DM
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_tool_annotations import (
+    agent_mcp_token_for,
+    mcp_annotation_lookup,
+    no_mcp_token,
+)
 from daimon.core.session_ports_compat import retrieve_session_record, update_session_record
 from daimon.core.tool_safety import (
     ToolCall,
@@ -128,6 +135,34 @@ async def gate_session_snapshot(
     )
 
 
+def session_annotations(
+    policy: ToolSafetyPolicy,
+    session: BetaManagedAgentsSession,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    tenant_id: uuid.UUID | None,
+    fernet: MultiFernet | None = None,
+    agent_id: uuid.UUID | None = None,
+) -> AnnotationLookup | None:
+    """Bind trusted catalogues and credentials to the session being executed."""
+    if not policy.enabled or not policy.trusted_annotations:
+        return None
+    return mcp_annotation_lookup(
+        server_urls={
+            s.name: s.url for s in session.agent.mcp_servers if s.name in policy.trusted_annotations
+        },
+        token_for=agent_mcp_token_for(
+            session_factory,
+            fernet=fernet,
+            tenant_id=tenant_id,
+            agent_id=agent_id
+            or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=session.agent.id),
+        )
+        if session_factory is not None and tenant_id is not None
+        else no_mcp_token,
+    )
+
+
 def unattended_posture(
     policy: ToolSafetyPolicy,
     *,
@@ -137,6 +172,8 @@ def unattended_posture(
     tenant_id: uuid.UUID | None,
     channel_id: str | None = None,
     annotations_for: AnnotationLookup | None = None,
+    fernet: MultiFernet | None = None,
+    agent_id: uuid.UUID | None = None,
 ) -> PolicyApproval:
     """How an unattended turn on `session` answers its pauses.
 
@@ -164,7 +201,15 @@ def unattended_posture(
             if session_factory is not None and tenant_id is not None
             else None,
             daimon_rules=True,
-            annotations_for=annotations_for,
+            annotations_for=annotations_for
+            or session_annotations(
+                policy,
+                session,
+                session_factory=session_factory,
+                tenant_id=tenant_id,
+                fernet=fernet,
+                agent_id=agent_id,
+            ),
         )
     )
 

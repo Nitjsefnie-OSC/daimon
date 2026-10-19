@@ -40,6 +40,7 @@ from daimon.core.agent_mcp_credentials import (
     mirror_credentials_into_vault,
     resolve_agent_mcp_credentials,
     resolve_hidden_mcp_server_names,
+    sync_shared_mcp_credentials,
 )
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import (
@@ -189,6 +190,17 @@ def _agent_mcp_mirror_required(
     )
 
 
+def _shared_mcp_vault_required(
+    *,
+    account_id: uuid.UUID | None,
+    hide_personal_for: uuid.UUID | None,
+    fernet: MultiFernet | None,
+) -> bool:
+    """A shared thread's session (no account, a synthetic owner) mounts a vault
+    of the thread's own for the agent's shared tokens."""
+    return account_id is None and hide_personal_for is not None and fernet is not None
+
+
 def _session_mcp_credential(url: str, *, app_mode: bool) -> bool:
     return not app_mode or url != GITHUB_COPILOT_MCP_URL
 
@@ -290,13 +302,23 @@ async def project_session_resources(
             await credential_store.list_credential_revisions(
                 session, tenant_id=tenant_id, agent_id=agent_uuid
             )
-            if _agent_mcp_mirror_required(
-                vault_available=caller_vault,
-                account_id=account_id,
-                tenant_id=tenant_id,
-                agent_uuid=agent_uuid,
-                session_factory=session_factory,
-                fernet=fernet,
+            if (
+                _agent_mcp_mirror_required(
+                    vault_available=caller_vault,
+                    account_id=account_id,
+                    tenant_id=tenant_id,
+                    agent_uuid=agent_uuid,
+                    session_factory=session_factory,
+                    fernet=fernet,
+                )
+            )
+            or (
+                app_mode
+                and _shared_mcp_vault_required(
+                    account_id=account_id,
+                    hide_personal_for=hide_personal_for,
+                    fernet=fernet,
+                )
             )
             else ()
         )
@@ -608,10 +630,11 @@ async def create_session(
     handling. Only a caller whose session belongs to one verified person
     passes it: an interactive chat turn (keyed on the caller's account), a hub
     `ask`/`start_turn` (platform sign-in, owner-only handles) and a routine
-    whose result reaches only its owner (`rule_views.routine_answers_only_owner`,
-    read-only). Every other caller (agent keys, operator and CLI tokens, routines
-    with a destination) leaves it off and mounts the shared store alone, with
-    instructions that forbid recording personal facts.
+    with neither destination nor channel (`rule_views.routine_mounts_personal_memory`,
+    read-only). Explicit DM routines never enable this mount. Every other caller
+    (agent keys, operator and CLI tokens, routines with a destination) leaves it
+    off and mounts the shared store alone, with instructions that forbid
+    recording personal facts.
 
     GitHub repository resources and credentials come from the agent's usable
     GitHub App grants. ``prepare_app_access`` mints installation tokens and
@@ -737,6 +760,15 @@ async def create_session(
         agent_uuid=agent_uuid,
         session_factory=session_factory,
     )
+    shared_vault = (
+        worker is None
+        and app_mode
+        and _shared_mcp_vault_required(
+            account_id=account_id,
+            hide_personal_for=hide_personal_for,
+            fernet=fernet,
+        )
+    )
     vault_id: str | None = None
     caller_vault_id: str | None = None
     chat_session_id = (
@@ -765,6 +797,18 @@ async def create_session(
                         if mcp_settings is not None and mcp_settings.jwt_secret is not None
                         else None
                     ),
+                )
+            if shared_vault:
+                assert hide_personal_for is not None and fernet is not None
+                # A shared thread's own vault: the agent's shared tokens only.
+                caller_vault_id = await sync_shared_mcp_credentials(
+                    anthropic,
+                    sessionmaker=session_factory,
+                    fernet=fernet,
+                    tenant_id=tenant_id,
+                    agent_id=agent_uuid,
+                    owner=hide_personal_for,
+                    exclude_github_copilot=True,
                 )
             if caller_vault:
                 assert account_id is not None and session_factory is not None

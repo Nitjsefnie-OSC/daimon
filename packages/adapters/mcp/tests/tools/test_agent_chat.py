@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import re
@@ -2378,8 +2379,25 @@ async def test_start_turn_with_bundle_when_jwt_secret_unset_is_refused(
         await _start_turn_impl(runtime, auth, "hi", handle)
 
 
+@pytest.fixture
+def sender_workers(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.Task[bool]]:
+    """Capture the real sender workers so each oracle scenario drains its own tasks."""
+    from daimon.adapters.mcp.tools import _agent_chat_safety
+
+    workers: list[asyncio.Task[bool]] = []
+
+    def watch(*args: Any, **kwargs: Any) -> asyncio.Task[bool]:
+        worker = _agent_chat_safety.watch_turn(*args, **kwargs)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr("daimon.adapters.mcp.tools.agent_chat.watch_turn", watch)
+    return workers
+
+
 async def test_start_turn_returns_the_accepted_events_boundary(
     db_session_factory: async_sessionmaker[AsyncSession],
+    sender_workers: list[asyncio.Task[bool]],
 ) -> None:
     """turn_event_id comes from events.send's data[0]; turn_started_at from the
     caller's own clock, captured before the send, not from the echo.
@@ -2420,8 +2438,11 @@ async def test_start_turn_returns_the_accepted_events_boundary(
 
     router.add(
         "GET",
-        r"/v1/sessions/ses_test001",
-        lambda request, match: httpx.Response(200, json=fake_session.model_dump(mode="json")),
+        r"/v1/sessions/([^/]+)$",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=fake_session.model_copy(update={"status": "terminated"}).model_dump(mode="json"),
+        ),
     )
 
     with patch(
@@ -2429,6 +2450,8 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         new=AsyncMock(return_value=fake_session),
     ) as mock_create_session:
         result = await _start_turn_impl(runtime, auth, "hi", now=now)
+        (worker,) = sender_workers
+        assert await asyncio.wait_for(worker, 5), "the sender's worker must finish before recording"
 
     assert result["turn_event_id"] == "sevt_boundary_001", (
         f"turn_event_id should be the send response's accepted event id; got {result!r}"
@@ -2525,6 +2548,7 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bo
 @pytest.mark.parametrize("touch_result", [None, True], ids=["mapped-vault", "unmapped-vault"])
 async def test_continue_turn_returns_boundary_from_its_own_send(
     touch_result: bool | None,
+    sender_workers: list[asyncio.Task[bool]],
 ) -> None:
     """continue_turn's turn_event_id is THIS send's accepted event, not session
     history; turn_started_at is the caller's own clock, captured before THIS
@@ -2537,15 +2561,20 @@ async def test_continue_turn_returns_boundary_from_its_own_send(
         call_order.append("now")
         return own_clock_at
 
+    sent = False
     router = MARouter()
     router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add(
         "GET",
         r"/v1/sessions/([^/]+)",
-        lambda _r, _m: httpx.Response(200, json=_session_json(status="idle")),
+        lambda _r, _m: httpx.Response(
+            200, json=_session_json(status="terminated" if sent else "idle")
+        ),
     )
 
     def on_send(_r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        nonlocal sent
+        sent = True
         call_order.append("send")
         return send_events_response(
             data=[
@@ -2568,6 +2597,8 @@ async def test_continue_turn_returns_boundary_from_its_own_send(
         new=AsyncMock(return_value=touch_result),
     ) as touch_app:
         result = await _continue_turn_impl(runtime, auth, "ses_test001", "again", now=now)
+        (worker,) = sender_workers
+        assert await asyncio.wait_for(worker, 5), "the sender's worker must finish before recording"
 
     assert result == {
         "handle": "ses_test001",

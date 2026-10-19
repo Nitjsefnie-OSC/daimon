@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -559,9 +560,12 @@ def _print_policy(
         return
     if policy == OPEN_ACCESS_POLICY:
         console.print(f"{label} access policy: open (anyone may invoke; no rules)")
+        console.print("  invoker_admin_bypass: true")
         return
     console.print(f"{label} access policy:")
+    console.print(f"  invoker_role_ids: {', '.join(policy.invoker_role_ids) or '-'}")
     console.print(f"  invoker_user_ids: {', '.join(policy.invoker_user_ids) or '-'}")
+    console.print(f"  invoker_admin_bypass: {str(policy.invoker_admin_bypass).lower()}")
     console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
     rules = len(policy.channel_rules) + len(policy.category_rules) + len(policy.agent_rules)
     console.print(f"  rules: {rules or '-'} (see access-policy rules)")
@@ -694,7 +698,26 @@ def tenants_access_policy_set_command(
     invoker: Annotated[
         list[str] | None,
         typer.Option(
-            help="Platform user id allowed to start turns (repeatable). Admins always may."
+            help=(
+                "Platform user id allowed to start turns (repeatable). "
+                "Admins bypass the lists only while invoker_admin_bypass is on."
+            )
+        ),
+    ] = None,
+    invoker_role: Annotated[
+        list[str] | None,
+        typer.Option(
+            help="Discord role id allowed to start turns (repeatable). Replaces the role list."
+        ),
+    ] = None,
+    clear_invoker_roles: Annotated[
+        bool, typer.Option("--clear-invoker-roles", help="Clear the Discord invoker role list.")
+    ] = False,
+    invoker_admin_bypass: Annotated[
+        bool | None,
+        typer.Option(
+            "--invoker-admin-bypass/--no-invoker-admin-bypass",
+            help="Allow server admins to bypass the invoker user/role lists.",
         ),
     ] = None,
     dm_memory_read_only: Annotated[
@@ -734,6 +757,9 @@ def tenants_access_policy_set_command(
                 platform=platform,
                 external_id=external_id,
                 invoker=invoker,
+                invoker_role=invoker_role,
+                clear_invoker_roles=clear_invoker_roles,
+                invoker_admin_bypass=invoker_admin_bypass,
                 dm_memory_read_only=dm_memory_read_only,
                 drop_agent_rules=drop_agent_rules,
                 clear=clear,
@@ -767,6 +793,9 @@ async def tenants_access_policy_set(
     platform: str,
     external_id: str,
     invoker: list[str] | None = None,
+    invoker_role: list[str] | None = None,
+    clear_invoker_roles: bool = False,
+    invoker_admin_bypass: bool | None = None,
     dm_memory_read_only: bool | None = None,
     drop_agent_rules: bool = False,
     clear: bool = False,
@@ -774,8 +803,30 @@ async def tenants_access_policy_set(
 ) -> None:
     validated_platform = _validate_platform(platform)
     changes: dict[str, object] = {}
+    if invoker_role is not None and clear_invoker_roles:
+        raise typer.BadParameter("--invoker-role cannot be combined with --clear-invoker-roles")
+    if invoker_role is not None:
+        if validated_platform != "discord":
+            raise typer.BadParameter("invoker_role_ids are supported only for Discord")
+        roles = tuple(value.strip() for value in invoker_role)
+        if any(
+            not value.isascii()
+            or not value.isdecimal()
+            or not 0 < int(value) < 2**64
+            or str(int(value)) != value
+            or value == external_id
+            for value in roles
+        ):
+            raise typer.BadParameter(
+                "invoker_role_ids: expected Discord snowflakes excluding @everyone (guild id)"
+            )
+        changes["invoker_role_ids"] = tuple(dict.fromkeys(roles))
+    if clear_invoker_roles:
+        changes["invoker_role_ids"] = ()
     if invoker is not None:
         changes["invoker_user_ids"] = _parse_invokers(invoker, platform=validated_platform)
+    if invoker_admin_bypass is not None:
+        changes["invoker_admin_bypass"] = invoker_admin_bypass
     if dm_memory_read_only is not None:
         changes["dm_memory_read_only"] = dm_memory_read_only
     if drop_agent_rules and not clear:
@@ -827,3 +878,70 @@ async def tenants_access_policy_set(
     if not as_json:
         for name in dropped:
             console.print(f"  {name} has no rule now (runs anywhere)")
+
+
+@tenants_app.command("dm-policy")
+def tenants_dm_policy_command(
+    platform: str,
+    external_id: str,
+    agent: Annotated[
+        str | None, typer.Option("--agent", help="Tenant-owned cold DM agent name.")
+    ] = None,
+    clear_agent: Annotated[
+        bool, typer.Option("--clear-agent", help="Disable cold DM discovery.")
+    ] = False,
+    enabled: Annotated[bool | None, typer.Option("--enabled/--disabled")] = None,
+    json_output: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Inspect or update tenant DMs; an unset agent leaves /dm-me moves available."""
+
+    console = Console()
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime:
+            result = await tenants_dm_policy(
+                rt=runtime,
+                platform=platform,
+                external_id=external_id,
+                agent=agent,
+                clear_agent=clear_agent,
+                enabled=enabled,
+            )
+        console.print(json.dumps(result) if json_output else result, markup=False)
+
+    run_cli(run(), console=console)
+
+
+async def tenants_dm_policy(
+    *,
+    rt: CliRuntime,
+    platform: str,
+    external_id: str,
+    agent: str | None = None,
+    clear_agent: bool = False,
+    enabled: bool | None = None,
+) -> dict[str, str | bool | None]:
+    from daimon.core.stores.direct_messages import (
+        dm_enabled,
+        get_dm_agent_name,
+        set_dm_agent_name,
+        set_dm_enabled,
+    )
+
+    if agent is not None and clear_agent:
+        raise typer.BadParameter("--agent and --clear-agent are mutually exclusive")
+    tenant_id = derive_tenant_uuid(platform=_validate_platform(platform), workspace_id=external_id)
+    async with rt.sessionmaker.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        if tenant is None:
+            raise typer.BadParameter("tenant not found")
+        if agent is not None and tenant.platform != "discord":
+            raise typer.BadParameter("cold DMs currently require Discord")
+        if agent is not None or clear_agent:
+            await set_dm_agent_name(session, tenant_id=tenant_id, agent_name=agent)
+        if enabled is not None:
+            await set_dm_enabled(session, tenant_id=tenant_id, enabled=enabled)
+        return {
+            "enabled": await dm_enabled(session, tenant_id=tenant_id),
+            "dm_agent_name": await get_dm_agent_name(session, tenant_id=tenant_id),
+        }

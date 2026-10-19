@@ -61,6 +61,7 @@ from anthropic.types.beta import (
 from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )
+from cryptography.fernet import MultiFernet
 from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
     CHECKPOINT_OUTPUTS_DIR,
@@ -437,6 +438,7 @@ async def transfer_workspace(
     channel_id: str | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     account_id: uuid.UUID | None = None,
+    fernet: MultiFernet | None = None,
 ) -> TransferOutcome:
     """Walk the ladder for one replacement and report how far it got.
 
@@ -568,6 +570,7 @@ async def transfer_workspace(
             tool_confirmation=unattended_posture(
                 tool_safety,
                 session=old_session,
+                fernet=fernet,
                 public_url=public_url,
                 session_factory=sessionmaker,
                 tenant_id=tenant_id,
@@ -789,6 +792,7 @@ class WorkspaceTransferRunner:
     """The channel the checkpoint turn's spend is attributed to (not its tool rules)."""
     from_agent_name: str | None = None
     """Override for the source agent's display name; defaults to the snapshot's."""
+    fernet: MultiFernet | None = None
     account_id: uuid.UUID | None = None
     """The account from the caller's existing tenant authorization decision."""
 
@@ -819,6 +823,7 @@ class WorkspaceTransferRunner:
             checkpoint_deadline=deadline,
             from_agent_name=from_agent_name,
             tool_safety=self.tool_safety,
+            fernet=self.fernet,
             public_url=self.public_url,
             platform=self.platform,
             reason=_checkpoint_reason(

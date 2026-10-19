@@ -58,7 +58,7 @@ class Action(StrEnum):
     # notice around a turn, or a routine's delivery post.
     POST = "post"
     # Run or deliver a routine on its creator's behalf: only while the creator
-    # may still start a turn (the invoker allowlist; admins always may). A
+    # may still start a turn (the invoker allowlist and optional admin bypass). A
     # routine with no recorded creator speaks for no one.
     ACT_FOR_CREATOR = "act_for_creator"
     # Send a direct message to a workspace member as the executing agent.
@@ -161,6 +161,8 @@ class Subject:
     # The caller holds an agent-scoped key: never exempt as an admin, whoever
     # minted it, because the key is long-lived and its role may be stale.
     via_agent_key: bool = False
+    role_ids: tuple[str, ...] = ()
+    verified_membership: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -461,14 +463,22 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         if _writers_none(place):
             return _deny("writers_none")
         if subject.platform_user_id is not None and not is_invoker_allowed(
-            policy, external_user_id=subject.platform_user_id, is_admin=subject.is_admin
+            policy,
+            external_user_id=subject.platform_user_id,
+            is_admin=subject.is_admin,
+            role_ids=subject.role_ids,
+            verified_membership=subject.verified_membership,
         ):
             return _deny("invoker_not_allowed")
         return ALLOW
 
     if req.action is Action.ACT_FOR_CREATOR:
         if subject.platform_user_id is None or not is_invoker_allowed(
-            policy, external_user_id=subject.platform_user_id, is_admin=subject.is_admin
+            policy,
+            external_user_id=subject.platform_user_id,
+            is_admin=subject.is_admin,
+            role_ids=subject.role_ids,
+            verified_membership=subject.verified_membership,
         ):
             return _deny("invoker_not_allowed")
         return ALLOW
@@ -714,11 +724,20 @@ def agent_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | No
 
 
 def build_subject(
-    *, is_admin: bool, platform_user_id: str | None, via_agent_key: bool = False
+    *,
+    is_admin: bool,
+    platform_user_id: str | None,
+    via_agent_key: bool = False,
+    role_ids: tuple[str, ...] = (),
+    verified_membership: bool | None = None,
 ) -> Subject:
     """Who is acting. The one place a caller's identity becomes a `Subject`."""
     return Subject(
-        is_admin=is_admin, platform_user_id=platform_user_id, via_agent_key=via_agent_key
+        is_admin=is_admin,
+        platform_user_id=platform_user_id,
+        via_agent_key=via_agent_key,
+        role_ids=role_ids,
+        verified_membership=verified_membership,
     )
 
 
