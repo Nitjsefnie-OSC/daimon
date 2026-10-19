@@ -1,0 +1,329 @@
+"""Durable intake application coordinator; provider I/O is supplied through ports."""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
+from typing import Protocol
+from uuid import UUID
+
+from daimon.core.lead_intake import (
+    IntakeConfig,
+    IntakeRecord,
+    IntakeResolution,
+    LeadDraft,
+    LeadEvidence,
+    LeadSource,
+    LeadSubmission,
+    verify_lead_evidence,
+)
+from daimon.core.stores.lead_intake import IntakeStore
+from pydantic import BaseModel
+
+
+class VerifiedSource(BaseModel):
+    source: LeadSource
+    text: str
+    recipients: tuple[str, ...] = ()
+    # Reconstructed headers/text only; attachments are never retained.
+    raw: str | None = None
+
+
+class ReviewRequired(Exception):
+    """A human must select records or reconcile an uncertain write."""
+
+
+class EffectRequest(BaseModel):
+    step: str
+    key: str
+    payload: dict[str, str]
+
+
+class IntakePorts(Protocol):
+    async def source(
+        self, config: IntakeConfig, source: LeadSource, actor_id: str | None
+    ) -> VerifiedSource: ...
+    async def recover(self, config: IntakeConfig, effect: EffectRequest) -> str | None: ...
+    async def write(self, config: IntakeConfig, effect: EffectRequest) -> str: ...
+    async def scan(
+        self, config: IntakeConfig, start: datetime, end: datetime, cursor: str | None
+    ) -> tuple[list[str], str | None]: ...
+
+
+type Reauthorize = Callable[[], Awaitable[None]]
+
+
+class IntakeService:
+    def __init__(self, store: IntakeStore, ports: IntakePorts, reauthorize: Reauthorize) -> None:
+        self.store, self.ports, self.reauthorize = store, ports, reauthorize
+
+    async def submit(self, draft: LeadDraft, actor_id: str | None) -> IntakeRecord:
+        await self.reauthorize()
+        config, _ = await self.store.configuration()
+        verified = await self.ports.source(config, draft.source, actor_id)
+        if verified.source != draft.source:
+            raise ValueError("source_identity_mismatch")
+        if (
+            draft.source.kind == "gmail"
+            and draft.classification != "other"
+            and not (
+                {x.casefold() for x in verified.recipients}
+                & {x.casefold() for x in config.recipients}
+            )
+        ):
+            raise ValueError("recipient_mismatch")
+        evidence = verify_lead_evidence(
+            LeadEvidence(
+                original_text=verified.text,
+                raw_source=verified.raw,
+                **draft.model_dump(
+                    exclude={
+                        "source",
+                        "classification",
+                        "opportunity_description",
+                        "thread_title",
+                        "thread_content",
+                    }
+                ),
+            )
+        )
+        submission = LeadSubmission(
+            source=verified.source,
+            evidence=evidence,
+            classification=draft.classification,
+            opportunity_description=draft.opportunity_description,
+            thread_title=evidence.company_name or evidence.enquirer_name or draft.thread_title,
+            thread_content=draft.thread_content,
+        )
+        record = await self.store.accept(config, submission, actor_id)
+        async with self.store.claim(f"mailbox:{config.source_connection_id}"):
+            state = await self.store.mailbox(config.source_connection_id)
+            state.discovered = [x for x in state.discovered if x != draft.source.message_id]
+            await self.store.save_mailbox(config.source_connection_id, state)
+        return await self.resume(record.id)
+
+    async def _effect(
+        self,
+        config: IntakeConfig,
+        record: IntakeRecord,
+        step: str,
+        payload: dict[str, str],
+        identity: str | None = None,
+    ) -> str:
+        await self.reauthorize()
+        current, _ = await self.store.configuration()
+        if current != config:
+            raise ValueError("configuration_changed")
+        key = hashlib.sha256(
+            (
+                f"{record.tenant_id}:{config.crm_connection_id}:{config.portal_id}:"
+                f"{identity or record.id}:{step}"
+            ).encode()
+        ).hexdigest()
+        request = EffectRequest(step=step, key=key, payload=payload)
+        saved = await self.store.effect(record.id, step)
+        if saved and saved.state == "completed":
+            return saved.remote_id or ""
+        recovered = await self.ports.recover(config, request)
+        if recovered is not None:
+            await self.store.intent(record.id, step, key)
+            await self.store.finish(record.id, step, recovered)
+            return recovered
+        if saved:
+            # An empty search is not proof a timed-out create did not happen.
+            raise ReviewRequired("uncertain_write")
+        await self.store.intent(record.id, step, key)
+        remote_id = await self.ports.write(config, request)
+        await self.store.finish(record.id, step, remote_id)
+        return remote_id
+
+    async def resume(self, intake_id: UUID) -> IntakeRecord:
+        await self.reauthorize()
+        await self.store.purge(datetime.now(UTC))
+        async with self.store.claim(f"source:{intake_id}"):
+            record = await self.store.get(intake_id)
+            config, _ = await self.store.configuration()
+            if record.status in {"completed", "rejected", "expired"} or config.mode == "capture":
+                return record
+            if record.config_revision != config.revision:
+                # Target/connection changes cannot silently redirect accepted evidence.
+                record.error_code = "config_revision_review"
+                await self.store.save(record)
+                return record
+            submission = record.submission
+            if submission is None:
+                return record
+            p = record.progress
+            try:
+                p.discord_message_id = await self._effect(
+                    config, record, "starter", {"content": submission.thread_title}
+                )
+                p.discord_thread_id = await self._effect(
+                    config,
+                    record,
+                    "thread",
+                    {"starter": p.discord_message_id, "title": submission.thread_title},
+                )
+                content = submission.thread_content
+                for index, offset in enumerate(range(0, len(content), 1900)):
+                    await self._effect(
+                        config,
+                        record,
+                        f"dossier:{index}",
+                        {"thread": p.discord_thread_id, "content": content[offset : offset + 1900]},
+                    )
+                    p.discord_dossier_chunks_posted = index + 1
+                if submission.source.kind == "gmail":
+                    await self._effect(
+                        config, record, "archive", {"message": submission.source.message_id}
+                    )
+                if config.mode == "crm_paused":
+                    record.status = "pending"
+                    await self.store.save(record)
+                    return record
+                e = submission.evidence
+                if not e.identity_verified and not (
+                    p.selected_company_id and p.selected_contact_id
+                ):
+                    raise ReviewRequired("identity_review")
+                company_key = e.company_domain or f"selected:{p.selected_company_id}"
+                async with self.store.claim(
+                    f"company:{config.crm_connection_id}:{config.portal_id}:{company_key}"
+                ):
+                    p.company_id = await self._effect(
+                        config,
+                        record,
+                        "company",
+                        {
+                            "name": e.company_name or "",
+                            "domain": e.company_domain or "",
+                            "selected": p.selected_company_id or "",
+                        },
+                        company_key,
+                    )
+                    # Aliases resolving to one company share the opportunity claim.
+                    async with self.store.claim(
+                        f"crm-company:{config.crm_connection_id}:{config.portal_id}:{p.company_id}"
+                    ):
+                        p.contact_id = await self._effect(
+                            config,
+                            record,
+                            "contact",
+                            {
+                                "email": e.enquirer_email or "",
+                                "selected": p.selected_contact_id or "",
+                            },
+                            e.enquirer_email,
+                        )
+                        project = " ".join(submission.opportunity_description.casefold().split())
+                        deal_identity = (
+                            str(record.id)
+                            if p.separate_opportunity_confirmed
+                            else f"{p.company_id}:{project}"
+                        )
+                        p.deal_id = await self._effect(
+                            config,
+                            record,
+                            "deal",
+                            {
+                                "description": submission.opportunity_description,
+                                "name": f"{e.company_name}: {submission.opportunity_description}"[
+                                    :200
+                                ],
+                                "company": p.company_id,
+                                "contact": p.contact_id,
+                                "domain": e.company_domain or "",
+                                "company_name": e.company_name or "",
+                                "selected": p.selected_deal_id or "",
+                                "separate": str(p.separate_opportunity_confirmed),
+                                "thread_url": f"https://discord.com/channels/{config.guild_id}/{p.discord_thread_id}",
+                            },
+                            deal_identity,
+                        )
+                        for kind, remote in (
+                            ("companies", p.company_id),
+                            ("contacts", p.contact_id),
+                        ):
+                            await self._effect(
+                                config,
+                                record,
+                                f"association:{kind}",
+                                {"deal": p.deal_id, "target": remote},
+                            )
+                record.status, record.error_code = "completed", None
+                p.review_reason = None
+            except ReviewRequired as exc:
+                record.status, record.error_code = "review", str(exc)
+                p.review_reason = record.error_code
+            except Exception:
+                # Provider bodies can contain customer data and credentials.
+                record.status, record.error_code = "pending", "provider_unavailable"
+            await self.store.save(record)
+            return record
+
+    async def resolve(
+        self, intake_id: UUID, resolution: IntakeResolution, actor_id: str
+    ) -> IntakeRecord:
+        await self.reauthorize()
+        async with self.store.claim(f"source:{intake_id}"):
+            record = await self.store.get(intake_id)
+            if record.status not in {"pending", "review"}:
+                raise ValueError("intake_not_resolvable")
+            p = record.progress
+            before = p.model_dump_json()
+            if resolution.deal_id and resolution.separate_opportunity_confirmed:
+                raise ValueError("conflicting_resolution")
+            for step in ("company", "contact", "deal"):
+                selected = getattr(resolution, f"{step}_id")
+                effect = await self.store.effect(intake_id, step)
+                if (
+                    effect
+                    and effect.state != "completed"
+                    and (selected or (step == "deal" and resolution.separate_opportunity_confirmed))
+                ):
+                    raise ValueError("recover_uncertain_create_first")
+                completed = getattr(p, f"{step}_id")
+                if completed and selected and completed != selected:
+                    raise ValueError("completed_identity_immutable")
+                if selected:
+                    setattr(p, f"selected_{step}_id", selected)
+            p.separate_opportunity_confirmed = resolution.separate_opportunity_confirmed
+            p.resolved_by, p.resolution_evidence = actor_id, resolution.evidence
+            p.review_reason, record.error_code = None, None
+            await self.store.audit(intake_id, actor_id, before, p.model_dump_json())
+            await self.store.save(record)
+        return await self.resume(intake_id)
+
+    async def scan(self) -> dict[str, object]:
+        await self.reauthorize()
+        config, _ = await self.store.configuration()
+        async with self.store.claim(f"mailbox:{config.source_connection_id}"):
+            state = await self.store.mailbox(config.source_connection_id)
+            anchor = state.checkpoint or config.reconciliation_start
+            now = datetime.now(UTC)
+            end = min(now, anchor + timedelta(days=7))
+            start = max(config.reconciliation_start, anchor - timedelta(days=2))
+            cursor: str | None = None
+            seen: set[str] = set()
+            try:
+                while True:
+                    ids, cursor = await self.ports.scan(config, start, end, cursor)
+                    state.discovered = list(dict.fromkeys([*state.discovered, *ids]))
+                    await self.store.save_mailbox(config.source_connection_id, state)
+                    if not cursor:
+                        break
+                    if cursor in seen:
+                        raise ValueError("repeated_cursor")
+                    seen.add(cursor)
+                state.checkpoint, state.error_code = end, None
+            except Exception:
+                state.error_code = "mailbox_scan_failed"
+            await self.store.save_mailbox(config.source_connection_id, state)
+            return dict(
+                checkpoint=state.checkpoint,
+                discovered=state.discovered[:100],
+                has_more_discovered=len(state.discovered) > 100,
+                caught_up=state.error_code is None and end == now,
+                error_code=state.error_code,
+            )

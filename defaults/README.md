@@ -30,3 +30,7 @@ The default environment installs `gh` for repository work in GitHub App sessions
 the same way, so the agent and Slack and Discord sessions never carry it,
 and `requires: microsoft_accounts` keeps it off Teams sessions too until
 Microsoft accounts are set up.
+
+`skills/lead-intake` provides opt-in Gmail qualification and dossier guidance for
+native lead intake. It rejects unsolicited selling and operational mail before
+any delivery. Recipient addresses, sales users and CRM settings are tenant-owned.
