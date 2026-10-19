@@ -16,7 +16,10 @@ from types import MappingProxyType
 from typing import Literal
 from urllib.parse import urlsplit
 
+import structlog
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
+
+log = structlog.get_logger()
 
 #: Where a message was sent: a private chat with Daimon, a channel, or a group chat.
 Place = Literal["dm", "channel", "group"]
@@ -318,59 +321,65 @@ _NAMES: Mapping[ChatPlatform, str] = MappingProxyType(
 # Letters and digits end a word; an underscore does not, so `discord_send_message` is caught.
 _NOT_AFTER_WORD = r"(?<![^\W_])"
 _NOT_BEFORE_WORD = r"(?![^\W_])"
-_URL_TAIL = r"(?::\d+)?(?:/(?:[^\s<>()\[\]]*[^\s<>()\[\].,;:!?'\"*_`~])?)?"
-# The host ends here: "discord.com@github.com" and "discord.com.example" are other hosts.
-_URL_END = r"(?![\w@-]|\.\w)"
+# "Discord.com" is a host, not the name followed by a full stop: the URL token takes it.
+_NOT_A_HOST = r"(?!\.(?:com|net|gg|media|microsoft|live)\b)"
 _SEPARATOR = r"(?P<sep>\s*,\s*(?:(?i:and|or)\s+)?|\s+(?i:and|or)\s+|\s*[/&]\s*)"
 # Labels forbid brackets and are bounded, so a stray "[" costs a bounded look, never a rescan.
 _LABEL = r"[^\[\]\n]{0,500}"
 _TITLE = r"[^)\n]{0,200}"
-#: A URL anywhere (bare, a Markdown target, Slack's `<url|label>`): opaque to the name matcher.
-_OPAQUE_URL = (
+_SCHEME = r"(?i:[a-z][a-z0-9+.-]{1,15}):"
+_TRAILING_PUNCTUATION = r"[^\s<>()\[\].,;:!?'\"*_`~]"
+#: Every URL is one opaque token, bare, as a Markdown target or as Slack's `<url|label>`. Only
+#: afterwards, from its parsed host, is it replaced whole or kept byte for byte.
+_URL_TOKEN = (
     rf"(?P<markdown>!?\[(?P<markdown_label>{_LABEL})\]"
-    rf"\(\s*<?(?P<markdown_url>https?://[^\s<>)]+)>?{_TITLE}\))"
-    r"|(?P<angle><(?P<angle_url>https?://[^\s<>|]+)(?:\|(?P<angle_label>[^>\n]{0,500}))?>)"
-    r"|(?P<bare>https?://[^\s<>()\[\]]*[^\s<>()\[\].,;:!?'\"*_`~])"
+    rf"\(\s*<?(?P<markdown_url>{_SCHEME}//[^\s<>)]+)>?{_TITLE}\))"
+    rf"|(?P<angle><(?P<angle_url>{_SCHEME}//[^\s<>|]+)(?:\|(?P<angle_label>[^>\n]{{0,500}}))?>)"
+    rf"|(?<![\w+.-])(?P<bare>{_SCHEME}//[^\s<>()\[\]]*{_TRAILING_PUNCTUATION})"
 )
 
 
-def _item_pattern(platform: ChatPlatform) -> str:
-    """One mention of `platform`: a link to its host, a bare URL on it, or its name."""
-    url = (
-        rf"(?<![\w./-])(?i:(?:https?://)?(?:[a-z0-9-]+\.)*{_HOSTS[platform]}){_URL_TAIL}{_URL_END}"
+def _name_pattern(platform: ChatPlatform) -> str:
+    return rf"{_NOT_AFTER_WORD}{_NAMES[platform]}{_NOT_BEFORE_WORD}{_NOT_A_HOST}"
+
+
+def _schemeless_host_pattern(hosts: str) -> str:
+    """`slack.com/help`, with no scheme: only a host that is another app's can be told apart."""
+    return (
+        rf"(?<![\w.-])(?P<schemeless>(?i:(?:[a-z0-9-]+\.)*(?:{hosts}))(?::\d+)?"
+        rf"(?![\w@-]|:\w|\.\w)(?:[/?#](?:[^\s<>()\[\]]*{_TRAILING_PUNCTUATION})?)?)"
     )
-    markdown_link = rf"!?\[{_LABEL}\]\(\s*<?{url}(?:\s{_TITLE})?\)"
-    angle_link = rf"<{url}(?:\|[^>\n]{{0,500}})?>"
-    name = rf"{_NOT_AFTER_WORD}{_NAMES[platform]}{_NOT_BEFORE_WORD}"
-    return f"(?:{markdown_link}|{angle_link}|{url}|{name})"
 
 
 @dataclass(frozen=True, slots=True)
 class _Patterns:
     text: re.Pattern[str]
-    """Either a run of the other apps' names (what gets replaced) or another URL (kept)."""
+    """Either a URL token or a run of the other apps' names (what gets replaced)."""
     step: re.Pattern[str]
     """One separator and the name after it, to read the separators out of a run."""
     host: re.Pattern[str]
     """A host name that belongs to one of the other apps."""
+    domain: re.Pattern[str]
+    """One of the other apps' domains anywhere in a string."""
 
 
 @cache
 def _patterns(platform: ChatPlatform) -> _Patterns:
     others: list[ChatPlatform] = [other for other in CHAT_PLATFORMS if other != platform]
-    item = "(?:" + "|".join(_item_pattern(other) for other in others) + ")"
+    name = "(?:" + "|".join(_name_pattern(other) for other in others) + ")"
     hosts = "|".join(_HOSTS[other] for other in others)
     text = re.compile(
-        rf"(?P<article>{_NOT_AFTER_WORD}(?i:an?|the)\s+)?"
-        rf"(?P<first>{item})"
-        rf"(?P<more>(?:{_SEPARATOR}{item})*)"
+        rf"{_URL_TOKEN}|{_schemeless_host_pattern(hosts)}"
+        rf"|(?P<article>{_NOT_AFTER_WORD}(?i:an?|the)\s+)?"
+        rf"(?P<first>{name})"
+        rf"(?P<more>(?:{_SEPARATOR}{name})*)"
         r"(?P<possessive>['’]s\b)?"
-        rf"|{_OPAQUE_URL}"
     )
     return _Patterns(
         text=text,
-        step=re.compile(_SEPARATOR + item),
+        step=re.compile(_SEPARATOR + name),
         host=re.compile(rf"(?:^|\.)(?:{hosts})$", re.IGNORECASE),
+        domain=re.compile(hosts, re.IGNORECASE),
     )
 
 
@@ -401,14 +410,33 @@ def _plain_name(match: re.Match[str], text: str, step: re.Pattern[str]) -> str:
     return _opening(name, text, match.start()) + possessive
 
 
+def _host_of(url: str) -> str:
+    """The lowercased host `url` really points at, without userinfo, port or trailing dot.
+
+    Raises `ValueError` for a URL that cannot be parsed. A host that is not ASCII is read
+    in its IDNA form, so full-width letters do not hide a name."""
+    host = (urlsplit(url).hostname or "").rstrip(".")
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
+
+
 def _is_other_app_url(url: str, patterns: _Patterns) -> bool:
-    return patterns.host.search(urlsplit(url).hostname or "") is not None
+    """Whether `url` is on another app's host; a URL that cannot be parsed is judged by
+    whether it contains one of their domains anywhere."""
+    try:
+        return patterns.host.search(_host_of(url)) is not None
+    except ValueError:
+        return patterns.domain.search(url) is not None
 
 
 def _other_url(match: re.Match[str], text: str, patterns: _Patterns) -> str:
     """A URL token: replaced whole if its host is another app's, else kept byte for byte.
 
     A kept link still has its visible label scrubbed."""
+    if match.group("schemeless") is not None:
+        return _opening(OTHER_APP, text, match.start())
     for group, url, label in (
         ("markdown", "markdown_url", "markdown_label"),
         ("angle", "angle_url", "angle_label"),
@@ -424,7 +452,7 @@ def _other_url(match: re.Match[str], text: str, patterns: _Patterns) -> str:
         label_start, label_end = match.span(label)
         shown = _scrub(match.group(label), patterns)
         return whole[: label_start - start] + shown + whole[label_end - start :]
-    raise AssertionError("an opaque URL matched no form")  # pragma: no cover
+    raise AssertionError("a URL token matched no form")  # pragma: no cover
 
 
 def _scrub(text: str, patterns: _Patterns) -> str:
@@ -434,6 +462,59 @@ def _scrub(text: str, patterns: _Patterns) -> str:
         return _other_url(match, text, patterns)
 
     return patterns.text.sub(replace, text)
+
+
+#: Names the blunt fallback removes; Discord in any case, the others as capitalised.
+_BLUNT: Mapping[ChatPlatform, tuple[tuple[str, bool], ...]] = MappingProxyType(
+    {
+        "discord": (("discord", True),),
+        "slack": (
+            ("slack.com", True),
+            ("slack-edge.com", True),
+            ("slack-files.com", True),
+            ("slack-imgs.com", True),
+            ("Slack", False),
+            ("SLACK", False),
+        ),
+        "teams": (
+            ("teams.microsoft.com", True),
+            ("teams.live.com", True),
+            ("Microsoft Teams", True),
+            ("MS Teams", False),
+            ("Teams", False),
+        ),
+    }
+)
+
+
+def _replace_blunt(text: str, needle: str, ignore_case: bool) -> str:
+    if not ignore_case:
+        return text.replace(needle, OTHER_APP)
+    # Lowercase one character at a time so positions in `lowered` are positions in `text`.
+    lowered = "".join(c.lower() if len(c.lower()) == 1 else c for c in text)
+    needle = needle.lower()
+    parts: list[str] = []
+    start = 0
+    while (found := lowered.find(needle, start)) != -1:
+        parts.append(text[start:found])
+        start = found + len(needle)
+    parts.append(text[start:])
+    return OTHER_APP.join(parts)
+
+
+def blunt_scrub_other_platforms(text: str, platform: str | None) -> str:
+    """The fallback when the scrub itself fails: replace the other apps' names, nothing smarter.
+
+    Total and regex-free (`str.replace` and `str.find`), so it cannot fail on any input; it
+    ignores word boundaries, URLs and grammar ("Discordant" becomes "another appant"), and
+    it is idempotent. A reply posted through it is ugly, never lost and never leaking."""
+    if platform not in CHAT_PLATFORMS:
+        return text
+    for other in CHAT_PLATFORMS:
+        if other != platform:
+            for needle, ignore_case in _BLUNT[other]:
+                text = _replace_blunt(text, needle, ignore_case)
+    return text
 
 
 def scrub_other_platforms(text: str, platform: str | None) -> str:
@@ -447,12 +528,17 @@ def scrub_other_platforms(text: str, platform: str | None) -> str:
       ("Slack", "Microsoft Teams", "Teams"), so the lowercase English "slack", "team" and
       "teams" stay. A sentence that opens with "Slack" or "Teams" in its other sense is
       replaced too, a false positive accepted over a leak.
-    - A URL is opaque: the name matcher never runs inside one, so a working link is never
-      corrupted. A URL or link whose host is another app's (`discord.com`, `discord.gg`,
-      `slack.com`, `*.slack.com`, `teams.microsoft.com`), bare or as `[text](url)`, `<url>`
-      or Slack's `<url|text>`, is replaced whole. Any other URL is kept byte for byte and
-      only a link's visible label is scrubbed. Accepted residual: a bare URL on another
-      host whose path names an app (`github.com/discord/...`) stays as written.
+    - A URL is opaque: it is matched whole first (any scheme, in any case), so the name
+      matcher never runs inside one and a working link is never corrupted. Then its parsed,
+      lowercased host decides: a URL or link on another app's host (`discord.com`,
+      `discord.gg`, `slack.com`, `*.slack.com`, `teams.microsoft.com`, the port, userinfo,
+      query and fragment included), bare or as `[text](url)`, `<url>` or Slack's
+      `<url|text>`, is replaced whole; any other is kept byte for byte and only a link's
+      visible label is scrubbed. A URL that cannot be parsed is replaced whole if it holds
+      one of those domains, else kept. A scheme-less `slack.com/help` is replaced too.
+      Accepted residuals: a bare URL on another host whose path names an app
+      (`github.com/discord/...`) stays as written, and a scheme-less link to another host is
+      not recognised as a URL.
     - A run of names reads as one name: "Discord or Slack" is "another app", "Discord and
       Slack" and "Discord, Slack" are "other apps". A leading "a" or "the" goes with it
       ("a Slack channel" is "another app channel").
@@ -461,8 +547,14 @@ def scrub_other_platforms(text: str, platform: str | None) -> str:
       cannot give.
 
     Idempotent, linear in the length of `text` (labels, titles and the sentence look-back
-    are bounded), and the identity when nothing matches.
+    are bounded), and the identity when nothing matches. It never raises: on an unexpected
+    error it logs `outbound_scrub.failed` (the exception type only, never the text) and
+    falls back to `blunt_scrub_other_platforms`, so a reply is neither lost nor leaked.
     """
     if platform not in CHAT_PLATFORMS:
         return text
-    return _scrub(text, _patterns(platform))
+    try:
+        return _scrub(text, _patterns(platform))
+    except Exception as err:
+        log.error("outbound_scrub.failed", error_type=type(err).__name__)
+        return blunt_scrub_other_platforms(text, platform)

@@ -202,7 +202,9 @@ apps' names replaced by "another app" before it is posted
 (`platform_words.scrub_other_platforms`, a plain-text pass that leaves lowercase
 "slack" and "teams" alone). A URL is opaque to the pass: one on another app's
 host is replaced whole, any other is kept byte for byte and only a link's label
-is scrubbed. `run_prepared_turn` wraps each chat turn's lifecycle
+is scrubbed, judged by the parsed host. A scrub that fails logs
+`outbound_scrub.failed` and falls back to a blunt name replacement, so a reply is
+never lost or leaked. `run_prepared_turn` wraps each chat turn's lifecycle
 so the card, the answer and any sealed answer arrive scrubbed on all three
 platforms, and the status card does the same for its draft and tool lines. The
 render loop hands over the whole turn state about every two seconds, so the

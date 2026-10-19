@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import time
 
+import daimon.core.platform_words as platform_words
 import pytest
-from daimon.core.platform_words import scrub_other_platforms
+import structlog
+from daimon.core.platform_words import blunt_scrub_other_platforms, scrub_other_platforms
 
 
 @pytest.mark.parametrize(
@@ -268,3 +270,125 @@ def test_two_hundred_kilobytes_of_everything_is_scrubbed_quickly() -> None:
 )
 def test_a_sentence_start_is_read_from_a_bounded_look_back(text: str, expected: str) -> None:
     assert scrub_other_platforms(text, "teams") == expected
+
+
+# The real host decides, not the first thing in the URL that looks like one.
+@pytest.mark.parametrize(
+    ("platform", "text"),
+    [
+        ("teams", "See https://discord.com:secret@github.com/a now"),
+        ("teams", "See https://discord.com:80@github.com/a now"),
+        ("teams", "See https://discord.com@github.com/Discord/x?next=Slack#Discord now"),
+        ("teams", "See HTTPS://github.com/Discord/x now"),
+        ("teams", "See Https://GitHub.com/Discord/x now"),
+        ("teams", "See https://github.com:8080/Discord/x now"),
+        ("teams", "See https://discord.com.example.org/x now"),
+        ("teams", "See https://notdiscord.com/x now"),
+        ("slack", "See <https://discord.com:1@github.com|x> now"),
+        ("slack", "See <HTTPS://github.com/Discord|x> now"),
+        ("teams", "See [x](https://discord.com:1@github.com/a) now"),
+        ("teams", "See [x](HTTPS://discord.com.example.org/a) now"),
+    ],
+)
+def test_the_parsed_host_keeps_a_url_on_another_host_exact(platform: str, text: str) -> None:
+    assert scrub_other_platforms(text, platform) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("See https://discord.com?x=1 now", "See another app now"),
+        ("See https://discord.com#frag now", "See another app now"),
+        ("See https://discord.com/a?x=1#frag. Then", "See another app. Then"),
+        ("See https://discord.com:8080/x now", "See another app now"),
+        ("See https://discord.com:8080 now", "See another app now"),
+        ("See HTTPS://DISCORD.COM/x now", "See another app now"),
+        ("See https://Cdn.DiscordApp.Com/a.png now", "See another app now"),
+        ("See https://user:pw@discord.gg/x now", "See another app now"),
+        ("See https://discord.com./x now", "See another app now"),
+        ("See https://\uff44\uff49\uff53\uff43\uff4f\uff52\uff44.com/x now", "See another app now"),
+        ("See [label](https://discord.com?x=1) now", "See another app now"),
+        ("See [label](HTTPS://Discord.com/#a 'title') now", "See another app now"),
+        ("See <https://discord.com:1/x|label> now", "See another app now"),
+        ("See <https://discord.com?x=1> now", "See another app now"),
+        ("See slack.com/help?x=1 now", "See another app now"),
+        ("See Slack.com now", "See another app now"),
+        ("See the Slack.com site", "See the another app site"),
+        ("See acme.slack.com:443/x#y now", "See another app now"),
+        ("mail me@slack.com now", "mail me@another app now"),
+    ],
+)
+def test_a_url_on_another_apps_host_is_replaced_with_all_of_it(text: str, expected: str) -> None:
+    assert scrub_other_platforms(text, "teams") == expected
+
+
+def test_a_slack_url_on_another_apps_host_is_replaced_in_slack_markup() -> None:
+    text = "See <https://discord.com/x?y=1|the Discord docs> now"
+    assert scrub_other_platforms(text, "slack") == "See another app now"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Kept as written; only what is shown is scrubbed.
+        ("See [docs](https://[broken) now", "See [docs](https://[broken) now"),
+        ("See [Slack docs](https://[broken) now", "See [Another app docs](https://[broken) now"),
+        ("See https://[broken now", "See https://[broken now"),
+        ("See <https://[x|Slack> now", "See <https://[x|Another app> now"),
+        # A broken URL that holds another app's domain goes whole.
+        ("See [docs](https://[broken.discord.com/a) now", "See another app now"),
+        ("See https://[Slack.COM now", "See https://[another app now"),
+        ("See https://[broken/slack.com/x now", "See https://[broken/another app now"),
+    ],
+)
+def test_a_url_that_cannot_be_parsed_never_blocks_the_answer(text: str, expected: str) -> None:
+    assert scrub_other_platforms(text, "teams") == expected
+
+
+def test_a_failing_scrub_falls_back_to_the_blunt_one_and_logs_only_the_error_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(_text: str, _patterns: object) -> str:
+        raise RuntimeError("secret reply text")
+
+    monkeypatch.setattr(platform_words, "_scrub", broken)
+    with structlog.testing.capture_logs() as logs:
+        out = scrub_other_platforms("Use DISCORD, Slack and Microsoft Teams. Cut slack.", "teams")
+
+    assert out == "Use another app, another app and Microsoft Teams. Cut slack."
+    assert logs == [
+        {"event": "outbound_scrub.failed", "error_type": "RuntimeError", "log_level": "error"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("platform", "text", "expected"),
+    [
+        ("teams", "Discord, DISCORD and discordant", "another app, another app and another appant"),
+        (
+            "teams",
+            "See https://acme.SLACK.com/x and Slack",
+            "See https://acme.another app/x and another app",
+        ),
+        (
+            "discord",
+            "Microsoft Teams, teams.microsoft.com and Teams",
+            "another app, another app and another app",
+        ),
+        ("discord", "cut some slack, my teams, a TEAMS", "cut some slack, my teams, a TEAMS"),
+        ("slack", "SLACK and Slack", "SLACK and Slack"),
+        ("teams", "", ""),
+        ("cli", "Discord", "Discord"),
+    ],
+)
+def test_the_blunt_fallback_replaces_names_without_a_regex(
+    platform: str, text: str, expected: str
+) -> None:
+    out = blunt_scrub_other_platforms(text, platform)
+    assert out == expected
+    assert blunt_scrub_other_platforms(out, platform) == out
+
+
+def test_the_blunt_fallback_survives_text_whose_lowercase_changes_its_length() -> None:
+    text = "\u0130 DISCORD \u0130"
+    assert blunt_scrub_other_platforms(text, "teams") == "\u0130 another app \u0130"

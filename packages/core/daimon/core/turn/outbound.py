@@ -15,11 +15,14 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+import structlog
 from anthropic.types import RawMessageStreamEvent
-from daimon.core.platform_words import scrub_other_platforms
+from daimon.core.platform_words import blunt_scrub_other_platforms, scrub_other_platforms
 from daimon.core.stores.domain import CHAT_PLATFORMS
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.state import ContentBlock, TextBlock, TurnState
+
+log = structlog.get_logger()
 
 
 def scrub_turn_state(
@@ -49,6 +52,17 @@ def scrub_turn_state(
     return dataclasses.replace(state, content=content) if changed else state
 
 
+def _blunt_turn_state(state: TurnState, platform: str | None) -> TurnState:
+    """`state` with the other apps' names removed bluntly: total, for when the scrub fails."""
+    content: list[ContentBlock] = [
+        dataclasses.replace(block, text=blunt_scrub_other_platforms(block.text, platform))
+        if isinstance(block, TextBlock)
+        else block
+        for block in state.content
+    ]
+    return dataclasses.replace(state, content=content)
+
+
 class OtherAppsScrubbedLifecycle:
     """A `TurnLifecycle` that hands `inner` scrubbed turn state.
 
@@ -62,7 +76,13 @@ class OtherAppsScrubbedLifecycle:
 
     def _for_adapter(self, state: TurnState) -> TurnState:
         # The render loop hands over the whole state every ~2 s: scrub what grew, not all of it.
-        return scrub_turn_state(state, self._platform, known=self._scrubbed)
+        try:
+            return scrub_turn_state(state, self._platform, known=self._scrubbed)
+        except Exception as err:
+            # A reply is never lost to the scrub, and never posted unscrubbed.
+            log.error("outbound_scrub.failed", error_type=type(err).__name__)
+            self._scrubbed.clear()
+            return _blunt_turn_state(state, self._platform)
 
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401
         return getattr(self._inner, name)

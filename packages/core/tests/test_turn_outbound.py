@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 import pytest
+import structlog
 from daimon.core.turn.card_state import CardEvent, CardState, update, update_activity
 from daimon.core.turn.lifecycle import TurnLifecycle, acknowledge, stop_rendering
 from daimon.core.turn.outbound import (
@@ -174,3 +175,33 @@ async def test_a_render_tick_scrubs_only_the_block_that_grew(
     assert calls == [sealed, "Dis", "Discord is", "Discord is done"]
     assert inner.succeeded[0].content[2] == _text("Another app is done")
     assert inner.rendered[1].content[0].text.count("another app") == 50  # type: ignore[union-attr]
+
+
+async def test_a_failing_scrub_still_delivers_the_reply_with_the_names_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daimon.core.turn.outbound as outbound
+
+    def broken(*_args: object, **_kwargs: object) -> TurnState:
+        raise RuntimeError("the reply text must not be logged")
+
+    monkeypatch.setattr(outbound, "scrub_turn_state", broken)
+    inner = _Recorder()
+    lifecycle = OtherAppsScrubbedLifecycle(inner, "teams")
+    state = TurnState(content=[_text("Ask DISCORD or Slack."), _tool("bash"), _text("Done.")])
+
+    with structlog.testing.capture_logs() as logs:
+        await lifecycle.on_render(state)
+        await lifecycle.on_terminal_success(state)
+        await lifecycle.on_terminal_failure(state, RuntimeError("x"))
+
+    for delivered in (inner.rendered[0], inner.succeeded[0], inner.failed[0][0]):
+        assert delivered.content == [
+            _text("Ask another app or another app."),
+            state.content[1],
+            _text("Done."),
+        ]
+    assert [(log["event"], log["error_type"]) for log in logs] == [
+        ("outbound_scrub.failed", "RuntimeError")
+    ] * 3
+    assert "must not be logged" not in str(logs)
