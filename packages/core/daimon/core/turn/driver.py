@@ -172,7 +172,24 @@ async def _decide_blocked(
                 answered[call.tool_use_id] = result
                 return result
 
-            results = await asyncio.gather(*(decide_one(call) for call in calls))
+            tasks = [
+                asyncio.create_task(decide_one(call), name="turn.decide_call") for call in calls
+            ]
+            try:
+                results = await asyncio.gather(*tasks)
+            except BaseException:
+                # One failed or cancelled call ends the decision: no sibling
+                # outlives it holding a card. Let a call already being
+                # cancelled finish its cleanup undisturbed.
+                for task in tasks:
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
+                if pending := [task for task in tasks if not task.done()]:
+                    await asyncio.wait(pending)
+                for task in tasks:
+                    if not task.cancelled():
+                        task.exception()  # retrieved; the first error propagates
+                raise
             return build_decision_events(zip(fresh, results, strict=True))
 
 
@@ -269,15 +286,16 @@ class _UnattendedAbort:
     """The one interrupt an unattended run sends when it aborts.
 
     A denial resumes execution as surely as an allow, so an unattended run
-    that ends at a pending confirmation answers nothing: its calls stay
-    paused and the session is interrupted. The first abort signal (Stop,
-    outside cancellation, the ceiling, a failed or cancelled gate, a failed
-    decision or send), live or on replay, with or without a gate, starts the
-    interrupt in a task this object owns. Later signals and the normal Stop
+    that ends early answers nothing: pending calls stay paused and the
+    session is interrupted. The first abort signal anywhere in the turn
+    (Stop, outside cancellation, the ceiling, a failed or cancelled gate, a
+    failed decision or send, any other failure that ends the turn), live or on
+    replay, with or without a gate, starts the interrupt in a task this object
+    owns, before any teardown is awaited. Later signals and the normal Stop
     handler reuse that task, so no cleanup await and no repeated cancellation
-    can skip it or send a second one. `_pump` joins it before it returns.
-    Attended runs never start it: they refuse on abort and the Stop handler
-    interrupts inline, as before.
+    can skip it or send a second one. `_pump` joins it, bounded, before it
+    returns. Attended runs never start it: they refuse on abort and the Stop
+    handler interrupts inline, as before.
     """
 
     def __init__(self, io: TurnIO, *, session_id: str, stop_timeout_s: float) -> None:
@@ -286,16 +304,16 @@ class _UnattendedAbort:
         self._session_id = session_id
         self._stop_timeout_s = stop_timeout_s
         self._task: asyncio.Task[StopObservation | None] | None = None
-        # Wall-clock bound on joining the task; `None` while only a Stop
-        # started it, which waits as long as the Stop handler always has.
+        # Wall-clock bound on joining the task; `None` while only a Stop the
+        # Stop handler reports started it, which waits as long as it always has.
         self._join_by: float | None = None
         self._reported = False
 
     def start(self, *, stopped: bool) -> None:
         """Begin the interrupt on the first abort signal; later calls change nothing.
 
-        A Stop gets the turn's full interrupt wait, which the Stop handler
-        then reports; any other abort gets the cleanup budget.
+        A Stop that the Stop handler reports gets the turn's full interrupt
+        wait; any other abort gets the cleanup budget.
         """
         if not self.unattended or self._task is not None:
             return
@@ -305,6 +323,18 @@ class _UnattendedAbort:
         self._task = asyncio.create_task(
             self._io.interrupt(timeout_s=timeout_s), name="turn.unattended_abort"
         )
+
+    def start_on(self, error: BaseException) -> None:
+        """Start the interrupt for `error` unless it is not an abort.
+
+        Not aborts: a stream generation ending (the driver reconnects), a
+        provider failure (the turn finalizes it upstream) and a session
+        waiting on old confirmations (the driver recovers it).
+        """
+        if isinstance(error, _InterruptInConsume):
+            self.start(stopped=True)
+        elif not isinstance(error, _NOT_ABORTS):
+            self.start(stopped=False)
 
     async def interrupt(self) -> StopObservation | None:
         """The normal Stop handler's interrupt: the owned one when unattended."""
@@ -319,8 +349,10 @@ class _UnattendedAbort:
     async def join(self) -> None:
         """Wait for the interrupt, through repeated cancellation, within the budget.
 
-        Once the turn is being cancelled the wait is bounded by
-        `CLEANUP_BUDGET_S`; after that the interrupt is cancelled and joined.
+        Once the turn is being cancelled, or the abort was not a reported
+        Stop, the wait is bounded by `CLEANUP_BUDGET_S`. Past it the interrupt
+        is cancelled and gets one more budget to unwind; an interrupt still
+        running after that is abandoned and logged, never waited on unbounded.
         """
         task = self._task
         if task is None:
@@ -329,6 +361,7 @@ class _UnattendedAbort:
         requested = seen = _cancel_requests()
         if requested:
             self._bound(loop.time() + CLEANUP_BUDGET_S)
+        cancelled = False
         while not task.done():
             timeout = None if self._join_by is None else max(0.0, self._join_by - loop.time())
             with contextlib.suppress(asyncio.CancelledError):
@@ -336,13 +369,29 @@ class _UnattendedAbort:
             if (now_requested := _cancel_requests()) > seen:
                 seen = now_requested
                 self._bound(loop.time() + CLEANUP_BUDGET_S)
-            elif not task.done():
+            elif task.done():
+                break
+            elif not cancelled:
                 log.warning(
                     "turn.cleanup_timed_out", session_id=self._session_id, step="abort_interrupt"
                 )
                 task.cancel()
-                self._join_by = None
-        if not task.cancelled() and (error := task.exception()) is not None and not self._reported:
+                cancelled = True
+                self._join_by = loop.time() + CLEANUP_BUDGET_S
+            else:
+                log.warning(
+                    "turn.cleanup_abandoned", session_id=self._session_id, step="abort_interrupt"
+                )
+                # Retrieve whatever it ends with, so it never logs
+                # "exception was never retrieved".
+                task.add_done_callback(lambda t: t.cancelled() or t.exception())
+                break
+        if (
+            task.done()
+            and not task.cancelled()
+            and (error := task.exception()) is not None
+            and not self._reported
+        ):
             log.warning(
                 "turn.cleanup_failed",
                 session_id=self._session_id,
@@ -508,7 +557,11 @@ async def _send_decision_batch(
             cancel_task = asyncio.create_task(cancel.wait(), name="turn.gate_cancel_waiter")
             try:
                 await _await_or_cancel(
-                    run_gate(), cancel_task=cancel_task, phase="confirmation-gate"
+                    run_gate(),
+                    cancel_task=cancel_task,
+                    phase="confirmation-gate",
+                    abort=abort,
+                    stop_reported=True,
                 )
             except _InterruptedDuringRecovery:
                 raise _InterruptInConsume() from None
@@ -625,6 +678,8 @@ async def _await_or_cancel[T](
     *,
     cancel_task: asyncio.Task[bool],
     phase: InterruptPhase,
+    abort: _UnattendedAbort,
+    stop_reported: bool = False,
     on_cancel_win_result: Callable[[T], Awaitable[None]] | None = None,
 ) -> T:
     """Race a setup await (`coro`) against `cancel_task` (`FIRST_COMPLETED`).
@@ -646,6 +701,9 @@ async def _await_or_cancel[T](
 
     On the normal path (work task wins), returns the work task's result —
     keeps both call sites one line each.
+
+    Either abort starts the unattended interrupt (`abort`) before the work
+    task is drained; `stop_reported` says the Stop handler will report it.
     """
     work_task: asyncio.Task[T] = asyncio.create_task(coro, name=f"turn.{phase.replace('-', '_')}")
     try:
@@ -653,6 +711,7 @@ async def _await_or_cancel[T](
             {work_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
         )
     except BaseException:
+        abort.start(stopped=False)
         # An OUTER cancellation landed on the race itself -- the ceiling's
         # `asyncio.wait_for` in `run_turn`, or an adapter tearing the turn task
         # down -- so neither branch below ever runs. Without this, `work_task`
@@ -675,6 +734,7 @@ async def _await_or_cancel[T](
                 await on_cancel_win_result(work_task.result())
         raise
     if cancel_task in done:
+        abort.start(stopped=stop_reported)
         if work_task in done:
             if (
                 not work_task.cancelled()
@@ -962,6 +1022,17 @@ _UNWEDGE_SETTLE_S = 15.0
 
 class _SessionAwaitingConfirmations(Exception):
     """MA refused the turn's user.message: the session waits on confirmations."""
+
+
+#: Exceptions that end a stream generation or a turn without being an abort
+#: an unattended run interrupts for (`_UnattendedAbort.start_on`).
+_NOT_ABORTS = (
+    _EventlessCycle,
+    _SessionAwaitingConfirmations,
+    *_CONNECTION_LOST,
+    _anthropic.APIError,
+    ProviderError,
+)
 
 
 async def _interrupt_and_settle(
@@ -1347,6 +1418,7 @@ async def _pump(
                                 pass  # fall through -- unchanged interactive behavior
                     break
         except _InterruptedDuringRecovery as err:
+            abort.start_on(err)
             await _cancel_render()
             return await _finalize_interrupted(
                 state_cell=state_cell,
@@ -1356,7 +1428,8 @@ async def _pump(
                 phase=err.phase,
                 renders_failed=renders_failed_cell[0],
             )
-        except _InterruptInConsume:
+        except _InterruptInConsume as err:
+            abort.start_on(err)
             await _cancel_render()
             return await _handle_interrupt_in_consume(
                 abort=abort,
@@ -1403,6 +1476,12 @@ async def _pump(
                 retry_after_s=None,
                 renders_failed=renders_failed_cell[0],
             )
+        except BaseException as err:
+            # Any other end of the loop -- an outside cancel or the ceiling,
+            # a failed gate or decision, a failure in replay preprocessing --
+            # is an abort: start the interrupt before the finally's teardown.
+            abort.start_on(err)
+            raise
 
         # Normal termination path.
         await _cancel_render()
@@ -1708,8 +1787,13 @@ async def _consume_with_reconnect(
     stream_read_timeout_s: float,
     abort: _UnattendedAbort,
 ) -> None:
-    """One attempt at the consume leg. On retry, replay + re-fold first."""
+    """One attempt at the consume leg. On retry, replay + re-fold first.
+
+    Any abort leaving the attempt starts the unattended interrupt before the
+    attempt's own teardown (waiter drains, the stream close) is awaited.
+    """
     if cancel.is_set():
+        abort.start(stopped=False)
         raise _InterruptedDuringRecovery(phase="pre-stream")
 
     # One waiter task for the whole attempt: races the stream-open and
@@ -1771,6 +1855,7 @@ async def _consume_with_reconnect(
             _open_stream(),
             cancel_task=cancel_task,
             phase="stream-open",
+            abort=abort,
             # A stream that opened anyway on the losing side of the race
             # must not leak the underlying SSE connection.
             on_cancel_win_result=lambda s: s.close(),
@@ -1788,7 +1873,7 @@ async def _consume_with_reconnect(
 
             try:
                 await _await_or_cancel(
-                    _send_initial(), cancel_task=cancel_task, phase="send-initial"
+                    _send_initial(), cancel_task=cancel_task, phase="send-initial", abort=abort
                 )
             except _InterruptedDuringRecovery:
                 # The stream (opened above, on the WINNING side of that
@@ -1814,6 +1899,7 @@ async def _consume_with_reconnect(
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if cancel_task in done:
+                abort.start(stopped=True)
                 next_task.cancel()
                 with _suppress_task_exc():
                     await next_task
@@ -1974,27 +2060,46 @@ async def _consume_with_reconnect(
                         pass  # fall through -- unchanged interactive behavior
             if stop is not None:
                 return
+    except BaseException as err:
+        abort.start_on(err)
+        raise
     finally:
-        if not cancel_task.done():
-            cancel_task.cancel()
+        # Teardown runs to the end even if the turn is cancelled meanwhile,
+        # each step bounded; that cancellation propagates afterwards.
+        await _run_to_end(
+            _close_attempt(cancel_task, next_task, opened_stream, session_id=session_id),
+            name="turn.consume_teardown",
+        )
+
+
+async def _close_attempt(
+    cancel_task: asyncio.Task[bool],
+    next_task: asyncio.Task[Any] | None,
+    opened_stream: TurnStream | None,
+    *,
+    session_id: str,
+) -> None:
+    """Drain one consume attempt's waiters and close the stream it opened."""
+    for task in (cancel_task, next_task):
+        if task is not None and not task.done():
+            task.cancel()
             with _suppress_task_exc():
-                await cancel_task
-        if next_task is not None and not next_task.done():
-            next_task.cancel()
-            with _suppress_task_exc():
-                await next_task
-        if opened_stream is not None:
-            # Unconditional close of any stream this attempt opened, on
-            # every exit path -- clean close, read timeout, mid-consume
-            # cancel, and (new) a ceiling `wait_for` cancellation landing
-            # here all leave an open SSE response otherwise.
-            # `httpx.Response.aclose()` is idempotent, so this is safe even
-            # when an explicit path above already closed it. Cleanup
-            # boundary (guideline:architecture): a transport that is
-            # already broken must not replace the real exception with a
-            # close failure.
-            with contextlib.suppress(Exception):
-                await opened_stream.close()
+                await task
+    if opened_stream is not None:
+        # Unconditional close of any stream this attempt opened, on
+        # every exit path -- clean close, read timeout, mid-consume
+        # cancel, and a ceiling `wait_for` cancellation landing
+        # here all leave an open SSE response otherwise.
+        # `httpx.Response.aclose()` is idempotent, so this is safe even
+        # when an explicit path above already closed it. Cleanup
+        # boundary (guideline:architecture): a transport that is
+        # already broken must not replace the real exception with a
+        # close failure; `_bounded` logs it.
+        await _bounded(
+            asyncio.create_task(opened_stream.close(), name="turn.stream_close"),
+            what="stream_close",
+            session_id=session_id,
+        )
 
 
 # --- Finalizers ----------------------------------------------------------
@@ -2281,15 +2386,22 @@ async def _handle_interrupt_in_consume(
 
 
 @contextlib.contextmanager
-def _suppress_task_exc():
-    """Swallow any exception (including CancelledError) raised while
-    awaiting a cancelled task. Used only to drain the render task.
+def _suppress_task_exc() -> Iterator[None]:
+    """Swallow whatever a cancelled child task ends with while draining it.
+
+    A cancellation of the draining task itself, requested meanwhile, is not
+    the child's and propagates: an outside cancel or the ceiling must never be
+    lost in a drain and let the turn carry on (to a confirmation send, say).
 
     This is the sole permitted drain point for
     `BaseException` in the driver.
     """
-    with contextlib.suppress(BaseException):
+    requested = _cancel_requests()
+    try:
         yield
+    except BaseException:
+        if _cancel_requests() > requested:
+            raise
 
 
 def _compute_rate_limit(
