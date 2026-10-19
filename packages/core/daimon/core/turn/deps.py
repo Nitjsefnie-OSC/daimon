@@ -83,7 +83,9 @@ class TurnDeps:
     github_app_private_key: str | None
     public_url: str | None
     membership_resolver: MembershipResolver | None = None
-    direct_message_policies: Mapping[uuid.UUID, DirectMessagePolicy] = field(default_factory=dict)
+    direct_message_policies: Mapping[uuid.UUID, DirectMessagePolicy] = field(
+        default_factory=dict[uuid.UUID, DirectMessagePolicy]
+    )
     agent_github_app: GithubAppSettings | None = None
     # Required: safety off is the explicit `enabled=False` policy from settings.
     tool_safety: ToolSafetyPolicy = field(kw_only=True)

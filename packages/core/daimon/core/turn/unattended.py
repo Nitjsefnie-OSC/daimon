@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 from anthropic import AsyncAnthropic
@@ -309,6 +310,14 @@ async def dm_session_authority(
         or metadata.get(MA_METADATA_KEY_ACCOUNT) != str(admission.account_id)
     ):
         raise AdmissionDenied(reason="invoker_not_allowed")
+    if admission.grant is not None:
+        grant = admission.grant
+        admission = replace(
+            admission,
+            grant=replace(
+                grant, agent=replace(grant.agent, names=(*grant.agent.names, actual.agent.name))
+            ),
+        )
     urls = {server.name: server.url for server in actual.agent.mcp_servers}
     posture = unattended_posture(
         deps.tool_safety,
@@ -326,6 +335,7 @@ async def dm_session_authority(
         if (
             current.id != actual.id
             or current.agent.id != actual.agent.id
+            or current.agent.name != actual.agent.name
             or current.metadata != actual.metadata
             or {server.name: server.url for server in current.agent.mcp_servers} != urls
         ):

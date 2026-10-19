@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 import pytest
+from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.sessions.beta_managed_agents_agent_mcp_tool_use_event import (
     BetaManagedAgentsAgentMCPToolUseEvent,
 )
@@ -864,8 +865,11 @@ async def test_attached_owner_credentials_are_nonempty_distinct_and_scope_checke
         )
 
 
-async def test_protected_final_action_is_refused_through_the_driver(harness: Harness):
-    harness.with_safety(ToolSafetyPolicy(enabled=True))
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_protected_final_action_is_refused_through_the_driver(
+    harness: Harness, enabled: bool
+):
+    harness.with_safety(ToolSafetyPolicy(enabled=enabled))
     harness.upstream.pause_call = ("daimon-mcp", "microsoft_send", {"action": "send_mail"})
     harness.upstream.scripts = [pause_on_public_send]
     reply = await harness.routine()
@@ -1327,7 +1331,7 @@ async def test_cached_agent_hints_cannot_authorize_actual_session_endpoint(
         }
     ]
     agent["mcp_servers"] = [dict(SLACK_SERVER)]
-    cached = ma_agent(**{key: value for key, value in agent.items() if key != "type"})
+    cached = BetaManagedAgentsAgent.model_validate(agent)
     actual_url = "https://actual.example/mcp"
     for server in agent["mcp_servers"]:
         server["url"] = actual_url
@@ -1494,10 +1498,12 @@ async def test_minimum_work_pool_retains_turn_headroom(harness: Harness, db_sche
         async_sessionmaker(engine, expire_on_commit=False), harness.tenant, harness.upstream
     )
     try:
-        a, b = await asyncio.wait_for(
-            asyncio.gather(small.routine(OWNER_A), small.routine(OWNER_B)), 50
-        )
-        assert a.text == b.text == "private answer"
+        a = await _routine_row(small, owner=OWNER_A)
+        b = await _routine_row(small, owner=OWNER_B)
+        await asyncio.wait_for(small.fire(a), 50)
+        async with small.factory() as db:
+            results = [await get_routine(db, row.id, tenant_id=row.tenant_id) for row in (a, b)]
+        assert all(row is not None and row.last_result_tail == "private answer" for row in results)
     finally:
         await small.dispatcher.close()
         await engine.dispose()

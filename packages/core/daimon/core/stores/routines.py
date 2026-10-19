@@ -340,7 +340,12 @@ async def update_routine(
     stmt = (
         update(Routine)
         .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(**values, updated_at=func.clock_timestamp())
+        .values(
+            **values,
+            updated_at=func.greatest(
+                func.clock_timestamp(), Routine.updated_at + timedelta(microseconds=1)
+            ),
+        )
         .returning(Routine)
         .execution_options(synchronize_session=False)
     )
