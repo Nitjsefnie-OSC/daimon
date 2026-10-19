@@ -122,6 +122,10 @@ file lands in exactly one shard without any edit.
 The pre-commit hooks from the setup above run the linters and the generator
 checks on `git commit`; `pytest` stays a manual step.
 
+`tests/platform_contract/` checks every Slack and Discord payload offline, and against the real
+platform validators when you opt in with `pytest -m platform_contract` and QA bot tokens (see its
+README); the opt-in half never runs in CI.
+
 ### Production comments
 
 Explain invariants and causal reasons in product comments and docstrings. Keep
