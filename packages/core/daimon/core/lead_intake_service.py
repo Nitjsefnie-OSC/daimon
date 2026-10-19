@@ -17,6 +17,7 @@ from daimon.core.lead_intake import (
     LeadDraft,
     LeadEvidence,
     LeadSource,
+    LeadSourceKind,
     LeadSubmission,
     split_dossier,
     verify_lead_evidence,
@@ -81,7 +82,9 @@ class IntakeService:
     async def read_source(self, message_id: str) -> VerifiedSource:
         """Fetch an unexpired discovery for classification without retaining it."""
         config, _ = await self.store.configuration()
-        source = LeadSource(kind="gmail", mailbox=config.gmail_mailbox, message_id=message_id)
+        source = LeadSource(
+            kind=LeadSourceKind.GMAIL, mailbox=config.gmail_mailbox, message_id=message_id
+        )
         await self.reauthorize(IntakeAccess(source=source, write=False))
         if not await self.store.is_discovered(config, message_id):
             raise ValueError("unexpired_discovery_required")

@@ -7,6 +7,7 @@ from email import policy
 from email.message import Message
 from email.parser import BytesParser
 from email.utils import getaddresses
+from typing import cast
 
 
 @dataclass(frozen=True)
@@ -36,9 +37,9 @@ def decode_email(raw: str) -> EmailEvidence:
         if part.is_multipart():
             children = part.get_payload()
             if isinstance(children, list):
-                for child in children:
+                for child in cast("list[object]", children):
                     if isinstance(child, Message):
-                        collect(child)
+                        collect(cast("Message", child))
             return
         if part.get_content_type() in ("text/plain", "text/html"):
             payload = part.get_payload(decode=True)
