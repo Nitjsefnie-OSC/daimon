@@ -659,6 +659,7 @@ async def create_ma_session(
             before_create=fence,
             on_app_access=capture_app_access,
             channel_skills=skills,
+            model_override=admission.model_override,
             resource_source=preparation.source
             if preparation is not None and preparation.worker is not None
             else None,

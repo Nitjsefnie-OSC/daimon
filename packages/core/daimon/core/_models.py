@@ -2352,6 +2352,32 @@ class ThreadParticipationScope(Base):
     )
 
 
+class ThreadModelSetting(Base):
+    """The model someone in a conversation chose for it (`/model`, or asking in words).
+
+    One row per (tenant, platform, thread); no row means the agent's own
+    model. `daimon.core.thread_models` applies it when a turn is admitted.
+    """
+
+    __tablename__ = "thread_model_settings"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "platform", "thread_id", name="pk_thread_model_settings"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    platform: Mapped[str] = mapped_column(Text)
+    thread_id: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ThreadAutoResponse(Base):
     """One row per reply the agent posted in a thread unprompted.
 

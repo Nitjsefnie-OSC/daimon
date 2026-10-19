@@ -32,6 +32,7 @@ def _body(bot_display_name: str) -> str:
 /github connect  Connect GitHub repos
 /github home     Your repos, GitHub account and waiting requests
 /memory          What the agent remembers
+/model           This conversation's model
 /routines        Scheduled jobs
 /dm-me           Continue privately (an admin turns it on)
 /billing         Your usage and credit

@@ -92,6 +92,7 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.tenant_balance import is_over_balance
+from daimon.core.thread_models import apply_thread_model, conversation_key
 from daimon.core.turn.approvals import daimon_rule_set_for
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
@@ -231,6 +232,12 @@ class Admission:
     backend_agent_revision: AgentBackendRevision | None = field(
         default=None, compare=False, repr=False
     )
+    # The model this conversation's people chose (`daimon.core.thread_models`),
+    # already in `agent`; the session is created with it. None runs the agent's own.
+    model_override: str | None = None
+    # A choice was kept but can't run here, so this turn runs the agent's own
+    # model and says so.
+    model_fell_back: bool = False
 
     def __post_init__(self) -> None:
         if self.backend_revision is not None and self.backend_revision_origin not in (
@@ -983,6 +990,21 @@ async def admit_impl(
     )
     channel_skills = (*platform_skills, *channel_skills)
 
+    # The model this conversation's people chose, read fresh for every turn.
+    async with deps.sessionmaker() as session:
+        thread_model = await apply_thread_model(
+            session,
+            agent=agent,
+            tenant_id=tenant_id,
+            platform=platform,
+            conversation_id=conversation_key(
+                channel_id=channel_id, thread_id=thread_id, is_dm=is_dm
+            ),
+            anthropic_backend=backend_revision is None or backend_revision.model is None,
+        )
+    agent = thread_model.agent
+    mark("thread_model")
+
     result = Admission(
         backend_revision=backend_revision,
         backend_revision_origin=backend_revision_origin,
@@ -1011,6 +1033,8 @@ async def admit_impl(
         channel_skills=channel_skills,
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
+        model_override=thread_model.model_override,
+        model_fell_back=thread_model.fell_back,
     )
     mark("result")
     _log.info(
