@@ -384,7 +384,7 @@ async def test_get_session_returns_session_info_when_owned() -> None:
     )
     router.add(
         "GET",
-        r"/v1/sessions/([^/]+)",
+        r"/v1/sessions/([^/]+)$",
         lambda _r, _m: httpx.Response(
             200,
             json=ma_session(
@@ -392,6 +392,8 @@ async def test_get_session_returns_session_info_when_owned() -> None:
             ).model_dump(mode="json"),
         ),
     )
+    # An idle read checks whether its turn is paused on confirmations.
+    router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
@@ -657,6 +659,7 @@ async def test_session_reads_do_not_cross_executing_agent(role, claim, agent_nam
         ):
             with pytest.raises(ToolError, match="session not found"):
                 await read()
-        assert events == []
+        # Only the owned session's pause check reads events; a refused read reads none.
+        assert "/v1/sessions/sess_other/events" not in events
     finally:
         await client.close()

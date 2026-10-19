@@ -54,12 +54,16 @@ def _spaced(*lines: str) -> list[CardElement]:
     return [TextBlock(text=line, wrap=True, spacing="Medium") for line in lines]
 
 
-def panel_card(*, bot: str, policy_url: str, delete_enabled: bool = True) -> AdaptiveCard:
+def panel_card(
+    *, bot: str, policy_url: str, delete_enabled: bool = True, microsoft_connected: bool = False
+) -> AdaptiveCard:
     """Who stores what, with Policy, Export and Delete; the detail is the policy's."""
     actions: list[Action] = [
         OpenUrlAction(title="📄 Policy", url=policy_url),
         button(VERB, "📤 Export", "export"),
     ]
+    if microsoft_connected:
+        actions.append(button(VERB, "🔌 Disconnect Microsoft", "disconnect_microsoft"))
     if delete_enabled:
         actions.append(button(VERB, "🗑 Delete…", "delete", style="destructive"))
     body: list[CardElement] = [
@@ -109,6 +113,8 @@ def _will_happen(preview: PurgePreview) -> list[str]:
         lines.append(
             f"🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"
         )
+    if preview.microsoft_user_tokens.count:
+        lines.append("🔌 Disconnect your Microsoft account")
     if preview.slack_turn_contexts.count:
         n = amount(preview.slack_turn_contexts.count, "temporary Slack request record")
         lines.append(f"💬 Delete {n}")
@@ -156,6 +162,7 @@ def post_delete_card(result: AccountPurgeResult, *, bot: str) -> AdaptiveCard:
         (db.user_configs, "user config row(s) removed"),
         (db.user_skills, "synced skill ledger row(s) removed"),
         (db.github_user_links, "GitHub user link(s) removed"),
+        (db.microsoft_user_tokens, "Microsoft connection removed"),
         (db.accounts, "account row removed"),
         (sessions.deleted, "session transcript(s) deleted from Anthropic"),
     )
@@ -183,4 +190,13 @@ def post_delete_card(result: AccountPurgeResult, *, bot: str) -> AdaptiveCard:
         ),
         *lines,
         _KEPT[1],
+    )
+
+
+def microsoft_disconnected_card() -> AdaptiveCard:
+    return text_card(
+        "🔌 Microsoft disconnected",
+        "Daimon no longer holds your Microsoft sign-in, so it cannot reach your files, mail, "
+        "calendar or notes. Ask it to connect Microsoft again any time.",
+        back=back(),
     )

@@ -14,9 +14,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import UUID
 
+from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.thread_participation import ParticipationMode
 from daimon.core.tool_safety import ToolSafetyPolicy
 from pydantic import (
@@ -27,10 +28,14 @@ from pydantic import (
     HttpUrl,
     PostgresDsn,
     SecretStr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from daimon.core.specs import SettingsFeature
 
 
 class DatabaseSettings(BaseModel):
@@ -299,6 +304,120 @@ class McpSettings(BaseModel):
         if self.public_url is None:
             return None
         return str(self.public_url).rstrip("/").removesuffix("/mcp").rstrip("/")
+
+
+class McpOAuthClientSettings(BaseModel):
+    """One OAuth client registered by hand, and the MCP servers it may sign in to."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    authorization_server_host: str = Field(min_length=1)
+    mcp_servers: list[str] = Field(min_length=1)
+    client_id: str = Field(min_length=1)
+    client_secret: SecretStr
+    token_endpoint_auth_method: Literal["client_secret_basic", "client_secret_post"] = (
+        "client_secret_post"
+    )
+    authorization_endpoint: str | None = None
+    token_endpoint: str | None = None
+    scope: str | None = None
+    send_resource: bool = True
+
+    @field_validator("authorization_server_host")
+    @classmethod
+    def _bare_host(cls, value: str) -> str:
+        host = value.strip().rstrip(".").lower()
+        if not host or any(char in host for char in "/:@ "):
+            raise ValueError("authorization_server_host must be a bare host name")
+        return host
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _public_https_servers(cls, value: list[str]) -> list[str]:
+        # Imported here: the package pulls in the Anthropic SDK, which a plain
+        # settings load should not pay for when no client is configured.
+        from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
+
+        try:
+            return [
+                canonical_mcp_url(assert_public_https_url(url, what="mcp_servers entry"))
+                for url in value
+            ]
+        except McpUrlError as err:
+            raise ValueError(str(err)) from err
+
+    @field_validator("authorization_endpoint", "token_endpoint")
+    @classmethod
+    def _public_https(cls, value: str | None) -> str | None:
+        from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
+
+        if value is None:
+            return None
+        try:
+            return assert_public_https_url(value, what="endpoint override")
+        except McpUrlError as err:
+            raise ValueError(str(err)) from err
+
+    @field_validator("scope")
+    @classmethod
+    def _space_separated(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.split():
+            raise ValueError("scope must name at least one scope, or be left out")
+        return " ".join(value.split())
+
+
+class McpOAuthSettings(BaseModel):
+    clients: Annotated[list[McpOAuthClientSettings], NoDecode] = Field(
+        default_factory=list[McpOAuthClientSettings],
+        description=(
+            "OAuth clients registered by hand, for authorization servers that offer no "
+            "dynamic client registration. A JSON array; each entry has "
+            "authorization_server_host (the bare host of the authorization server), "
+            "mcp_servers (required: the exact https URLs of the MCP servers this client may "
+            "be used for), client_id, client_secret, token_endpoint_auth_method "
+            "(client_secret_post by default, or client_secret_basic), optional "
+            "authorization_endpoint and token_endpoint overrides (public https), optional "
+            "scope (space-separated; replaces the scopes the MCP server publishes) and "
+            "send_resource (default true; false leaves the RFC 8707 resource parameter out "
+            "of sign-in and refresh). A sign-in uses an entry only when its MCP server is "
+            "listed and its authorization server is on that host; it then also asks for "
+            "offline_access when the authorization server offers it. Every other sign-in "
+            "registers a client dynamically. Default: [] (always register)."
+        ),
+    )
+
+    @field_validator("clients", mode="before")
+    @classmethod
+    def _parse_json(cls, value: object) -> object:
+        # Decoded here, not by the settings source: a blank value (a compose
+        # file passing `${DAIMON_MCP_OAUTH__CLIENTS:-}`) must mean "none", and
+        # bad JSON must name this variable rather than the whole section.
+        if not isinstance(value, str):
+            return value
+        if not value.strip():
+            return []
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as err:
+            # The position only: the decoder's message can quote the value, a secret.
+            raise ValueError(
+                f"DAIMON_MCP_OAUTH__CLIENTS is not valid JSON "
+                f"(line {err.lineno}, column {err.colno})"
+            ) from None
+
+    @field_validator("clients")
+    @classmethod
+    def _one_client_per_server(
+        cls, value: list[McpOAuthClientSettings]
+    ) -> list[McpOAuthClientSettings]:
+        seen: set[str] = set()
+        for url in (url for client in value for url in client.mcp_servers):
+            if url in seen:
+                raise ValueError(f"{url} is listed under more than one client")
+            seen.add(url)
+        return value
 
 
 _HUB_SIGNING_KEY_BYTES = 32
@@ -808,27 +927,7 @@ class TeamsSettings(BaseModel):
             "admin means making them an owner of that team; no redeploy. The "
             "app must be installed in that team. To find the ID, open the "
             "team's ⋯ menu in Teams, choose Get link to team and copy the "
-            "groupId parameter. Guests and people from another organisation "
-            "are never admins. Unset: nobody is an admin."
-        ),
-    )
-    restrict_guests: bool = Field(
-        default=True,
-        description=(
-            "When True, guests (Entra B2B guest accounts in this tenant) are "
-            "treated as people from another organisation: answered only in a "
-            "channel kept to its own agents, with a few conversation tools and no commands or "
-            "admin role. The tenant access policy's member guest list exempts "
-            "some. When False, guests are treated as team members."
-        ),
-    )
-    restrict_external_participants: bool = Field(
-        default=True,
-        description=(
-            "When True, a shared channel's external participants (people from "
-            "another tenant, via B2B direct connect) are answered only in a "
-            "channel kept to its own agents, with a few conversation tools and no commands or "
-            "admin role. When False, they are treated as team members."
+            "groupId parameter. Unset: nobody is an admin."
         ),
     )
 
@@ -1012,6 +1111,70 @@ class CryptoSettings(BaseModel):
             "and no keys, every agent key write is refused."
         ),
     )
+
+
+_ENTRA_AUTHORITY = HttpUrl("https://login.microsoftonline.com")
+
+
+class MicrosoftAccountsSettings(BaseModel):
+    """Per-person Microsoft 365 access on Teams: the Entra app people sign in to.
+
+    Inert until `client_id`, `client_secret` and `tenant_id` are all set.
+    """
+
+    client_id: str | None = Field(
+        default=None,
+        description=(
+            "Application (client) ID of the Entra app registration people sign in to "
+            "with Connect Microsoft. Its Web redirect URI is "
+            "`<public root>/oauth/microsoft/callback`."
+        ),
+    )
+    client_secret: SecretStr | None = Field(
+        default=None,
+        description="Client secret of that app registration, sent as client_secret_post.",
+    )
+    tenant_id: str | None = Field(
+        default=None,
+        description=(
+            "Entra tenant ID (a GUID) people sign in to. Only accounts of this tenant whose "
+            "object ID matches the Teams user asking can connect."
+        ),
+    )
+    authority: HttpUrl = Field(
+        default=_ENTRA_AUTHORITY,
+        description="Microsoft identity platform host; change it only for a sovereign cloud.",
+    )
+
+    @field_validator("client_id", "client_secret", "tenant_id", "authority", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object, info: ValidationInfo) -> object:
+        # A compose file passing an empty variable through means "not set".
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if not (isinstance(raw, str) and not raw.strip()):
+            return value
+        return _ENTRA_AUTHORITY if info.field_name == "authority" else None
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _canonical_tenant(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return str(uuid.UUID(value))
+        except ValueError:
+            raise ValueError(
+                "DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID must be the Entra directory tenant's UUID"
+            ) from None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.client_id and self.client_secret and self.tenant_id)
+
+    @property
+    def touched(self) -> bool:
+        """Whether any of the three is set, so a missing one is worth a warning."""
+        return bool(self.client_id or self.client_secret or self.tenant_id)
 
 
 class CredentialsSettings(BaseModel):
@@ -1627,6 +1790,7 @@ class Settings(BaseSettings):
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     ops: OpsSettings = Field(default_factory=OpsSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
+    mcp_oauth: McpOAuthSettings = Field(default_factory=McpOAuthSettings)
     hub: HubSettings = Field(default_factory=HubSettings)
     agent_identity: AgentIdentitySettings = Field(default_factory=AgentIdentitySettings)
     environment: EnvironmentSettings = Field(default_factory=EnvironmentSettings)
@@ -1639,6 +1803,7 @@ class Settings(BaseSettings):
     teams: TeamsSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
     github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
+    microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
@@ -1681,6 +1846,43 @@ class Settings(BaseSettings):
             "fields — they invite drift."
         ),
     )
+
+    def microsoft_accounts_missing(self) -> tuple[str, ...]:
+        """Settings Connect Microsoft still needs; empty when it is on or wholly unset.
+
+        A partial setup leaves the feature off with one startup warning rather
+        than failing every service, like the other optional integrations.
+        """
+        ms = self.microsoft_accounts
+        if not ms.touched:
+            return ()
+        wanted = (
+            ("DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID", ms.client_id is not None),
+            ("DAIMON_MICROSOFT_ACCOUNTS__CLIENT_SECRET", ms.client_secret is not None),
+            ("DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID", ms.tenant_id is not None),
+            ("DAIMON_CRYPTO__KEYS", bool(self.crypto.keys)),
+            ("DAIMON_MCP__PUBLIC_URL", self.mcp.public_url is not None),
+        )
+        return tuple(name for name, present in wanted if not present)
+
+    @property
+    def configured_features(self) -> frozenset[SettingsFeature]:
+        """Optional features set up here; a default skill can require one (`SkillRef.requires`).
+
+        Microsoft accounts count on `configured` alone, as for `microsoft_send`.
+        """
+        return (
+            frozenset({"microsoft_accounts"}) if self.microsoft_accounts.configured else frozenset()
+        )
+
+    @property
+    def microsoft_accounts_enabled(self) -> bool:
+        """Whether the MCP server offers Connect Microsoft and the `microsoft_*` tools.
+
+        Turn processes ask before `microsoft_send` on `configured` alone, so
+        they need no crypto keys or public URL to agree.
+        """
+        return self.microsoft_accounts.touched and not self.microsoft_accounts_missing()
 
     @model_validator(mode="after")
     def _private_channel_messages_need_a_public_url(self) -> Settings:

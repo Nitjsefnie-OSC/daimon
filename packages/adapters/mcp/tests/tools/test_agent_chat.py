@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import re
@@ -86,6 +87,7 @@ from daimon.core.stores.github_links import save_verified_link
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing import ma_agent, ma_model_usage, ma_session
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -178,6 +180,7 @@ def _runtime(
     environment_name: str | None = None,
 ) -> McpRuntime:
     settings = MagicMock()
+    settings.tool_safety = OPEN_TOOL_SAFETY
     settings.mcp.public_url = None
     settings.mcp.jwt_secret = None
     settings.github.fallback_pat = None
@@ -2114,6 +2117,7 @@ async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place() -> 
 
     router = MARouter()
     router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
+    router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add("GET", r"/v1/sessions/([^/]+)", on_retrieve)
     client = build_fake_anthropic(router.dispatch)
     billed_caller = AuthIdentity(
@@ -2127,10 +2131,15 @@ async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place() -> 
     result = await _continue_turn_impl(_runtime(client), billed_caller, "ses_exempt", "more")
 
     assert result["handle"] == "ses_exempt", "a same-account billed caller may continue"
-    assert requests == [
+    # Re-read inside the fence, then the message; the tool gate (policy off)
+    # leaves the session as it is.
+    sent = requests.index(("POST", "/v1/sessions/ses_exempt/events"))
+    assert requests[: sent + 1] == [
+        ("GET", "/v1/sessions/ses_exempt"),
         ("GET", "/v1/sessions/ses_exempt"),
         ("POST", "/v1/sessions/ses_exempt/events"),
     ], f"continue_turn must not rewrite session metadata; saw {requests!r}"
+    assert ("POST", "/v1/sessions/ses_exempt") not in requests
 
 
 async def test_start_turn_with_bundle_preserves_the_boundary_return_shape(
@@ -2370,8 +2379,25 @@ async def test_start_turn_with_bundle_when_jwt_secret_unset_is_refused(
         await _start_turn_impl(runtime, auth, "hi", handle)
 
 
+@pytest.fixture
+def sender_workers(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.Task[bool]]:
+    """Capture the real sender workers so each oracle scenario drains its own tasks."""
+    from daimon.adapters.mcp.tools import _agent_chat_safety
+
+    workers: list[asyncio.Task[bool]] = []
+
+    def watch(*args: Any, **kwargs: Any) -> asyncio.Task[bool]:
+        worker = _agent_chat_safety.watch_turn(*args, **kwargs)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr("daimon.adapters.mcp.tools.agent_chat.watch_turn", watch)
+    return workers
+
+
 async def test_start_turn_returns_the_accepted_events_boundary(
     db_session_factory: async_sessionmaker[AsyncSession],
+    sender_workers: list[asyncio.Task[bool]],
 ) -> None:
     """turn_event_id comes from events.send's data[0]; turn_started_at from the
     caller's own clock, captured before the send, not from the echo.
@@ -2410,11 +2436,22 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
     )
 
+    router.add(
+        "GET",
+        r"/v1/sessions/([^/]+)$",
+        lambda _r, _m: httpx.Response(
+            200,
+            json=fake_session.model_copy(update={"status": "terminated"}).model_dump(mode="json"),
+        ),
+    )
+
     with patch(
         "daimon.adapters.mcp.tools.agent_chat.create_session",
         new=AsyncMock(return_value=fake_session),
     ) as mock_create_session:
         result = await _start_turn_impl(runtime, auth, "hi", now=now)
+        (worker,) = sender_workers
+        assert await asyncio.wait_for(worker, 5), "the sender's worker must finish before recording"
 
     assert result["turn_event_id"] == "sevt_boundary_001", (
         f"turn_event_id should be the send response's accepted event id; got {result!r}"
@@ -2437,6 +2474,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "session_factory",
         "fernet",
         "app_session_unmapped",
+        "tool_safety",
         "github_fallback_pat",
         "github_app_id",
         "github_app_private_key",
@@ -2472,6 +2510,7 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bo
         },
     ).model_dump(mode="json")
     router = MARouter()
+    router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add("GET", r"/v1/sessions/([^/]+)", lambda _r, _m: httpx.Response(200, json=session))
     router.add(
         "POST",
@@ -2509,6 +2548,7 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bo
 @pytest.mark.parametrize("touch_result", [None, True], ids=["mapped-vault", "unmapped-vault"])
 async def test_continue_turn_returns_boundary_from_its_own_send(
     touch_result: bool | None,
+    sender_workers: list[asyncio.Task[bool]],
 ) -> None:
     """continue_turn's turn_event_id is THIS send's accepted event, not session
     history; turn_started_at is the caller's own clock, captured before THIS
@@ -2521,14 +2561,20 @@ async def test_continue_turn_returns_boundary_from_its_own_send(
         call_order.append("now")
         return own_clock_at
 
+    sent = False
     router = MARouter()
+    router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add(
         "GET",
         r"/v1/sessions/([^/]+)",
-        lambda _r, _m: httpx.Response(200, json=_session_json(status="idle")),
+        lambda _r, _m: httpx.Response(
+            200, json=_session_json(status="terminated" if sent else "idle")
+        ),
     )
 
     def on_send(_r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        nonlocal sent
+        sent = True
         call_order.append("send")
         return send_events_response(
             data=[
@@ -2551,6 +2597,8 @@ async def test_continue_turn_returns_boundary_from_its_own_send(
         new=AsyncMock(return_value=touch_result),
     ) as touch_app:
         result = await _continue_turn_impl(runtime, auth, "ses_test001", "again", now=now)
+        (worker,) = sender_workers
+        assert await asyncio.wait_for(worker, 5), "the sender's worker must finish before recording"
 
     assert result == {
         "handle": "ses_test001",
@@ -4017,6 +4065,7 @@ async def test_start_then_continue_rotates_the_mounted_chat_token_inside_the_rea
         )
 
     router.add("POST", r"/v1/sessions/ses_test001/events$", send)
+    router.add("GET", r"/v1/sessions/ses_test001/events$", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
     runtime = _runtime(client, session_factory=factory, environment_name=_ENV_NAME)
     runtime.settings.mcp = McpSettings(

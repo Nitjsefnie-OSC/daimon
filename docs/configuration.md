@@ -24,6 +24,7 @@ typo is silent — check the spelling here.
 - [Observability](#observability)
 - [Ops](#ops)
 - [MCP Server](#mcp-server)
+- [MCP OAuth](#mcp-oauth)
 - [Hub](#hub)
 - [Agent Identity](#agent-identity)
 - [Environment](#environment)
@@ -33,6 +34,7 @@ typo is silent — check the spelling here.
 - [Teams](#teams)
 - [GitHub](#github)
 - [GitHub App](#github-app)
+- [Microsoft Accounts](#microsoft-accounts)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
 - [Gemini](#gemini)
@@ -347,6 +349,27 @@ directly — a deployment running no scheduler will never reclaim these objects.
 
 Per-token cap on tool calls an operator token (minted with `daimon mcp mint-operator-
 token`) may make per rolling minute, counted in each MCP process. Set to 0 to disable.
+
+## MCP OAuth
+
+Read from `daimon.core.config.McpOAuthSettings`. Prefix `DAIMON_MCP_OAUTH__`.
+
+### `DAIMON_MCP_OAUTH__CLIENTS`
+
+`list[McpOAuthClientSettings]` · optional · default unset
+
+OAuth clients registered by hand, for authorization servers that offer no dynamic client
+registration. A JSON array; each entry has authorization_server_host (the bare host of
+the authorization server), mcp_servers (required: the exact https URLs of the MCP
+servers this client may be used for), client_id, client_secret,
+token_endpoint_auth_method (client_secret_post by default, or client_secret_basic),
+optional authorization_endpoint and token_endpoint overrides (public https), optional
+scope (space-separated; replaces the scopes the MCP server publishes) and send_resource
+(default true; false leaves the RFC 8707 resource parameter out of sign-in and refresh).
+A sign-in uses an entry only when its MCP server is listed and its authorization server
+is on that host; it then also asks for offline_access when the authorization server
+offers it. Every other sign-in registers a client dynamically. Default: [] (always
+register).
 
 ## Hub
 
@@ -816,26 +839,7 @@ Entra group ID of the team whose owners administer this deployment from Teams: a
 get the admin role in turns, create routines, replace shared keys, top up and see
 everyone's usage. Adding an admin means making them an owner of that team; no redeploy.
 The app must be installed in that team. To find the ID, open the team's ⋯ menu in Teams,
-choose Get link to team and copy the groupId parameter. Guests and people from another
-organisation are never admins. Unset: nobody is an admin.
-
-### `DAIMON_TEAMS__RESTRICT_GUESTS`
-
-`bool` · optional · default `True`
-
-When True, guests (Entra B2B guest accounts in this tenant) are treated as people from
-another organisation: answered only in a channel kept to its own agents, with a few
-conversation tools and no commands or admin role. The tenant access policy's member
-guest list exempts some. When False, guests are treated as team members.
-
-### `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS`
-
-`bool` · optional · default `True`
-
-When True, a shared channel's external participants (people from another tenant, via B2B
-direct connect) are answered only in a channel kept to its own agents, with a few
-conversation tools and no commands or admin role. When False, they are treated as team
-members.
+choose Get link to team and copy the groupId parameter. Unset: nobody is an admin.
 
 ## GitHub
 
@@ -901,6 +905,41 @@ GitHub App client ID for user authorization.
 `SecretStr | None` · optional · default unset · secret
 
 GitHub App client secret for user authorization.
+
+## Microsoft Accounts
+
+Read from `daimon.core.config.MicrosoftAccountsSettings`. Prefix
+`DAIMON_MICROSOFT_ACCOUNTS__`.
+
+Per-person Microsoft 365 access on Teams: the Entra app people sign in to.
+
+Inert until `client_id`, `client_secret` and `tenant_id` are all set.
+
+### `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID`
+
+`str | None` · optional · default unset
+
+Application (client) ID of the Entra app registration people sign in to with Connect
+Microsoft. Its Web redirect URI is `&lt;public root&gt;/oauth/microsoft/callback`.
+
+### `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Client secret of that app registration, sent as client_secret_post.
+
+### `DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID`
+
+`str | None` · optional · default unset
+
+Entra tenant ID (a GUID) people sign in to. Only accounts of this tenant whose object ID
+matches the Teams user asking can connect.
+
+### `DAIMON_MICROSOFT_ACCOUNTS__AUTHORITY`
+
+`HttpUrl` · optional · default `https://login.microsoftonline.com`
+
+Microsoft identity platform host; change it only for a sovereign cloud.
 
 ## Crypto
 
@@ -1367,8 +1406,9 @@ is replaced. Off keeps every tool auto-approved.
 
 `bool` · optional · default `False`
 
-Apply workspace-admin tool rules for individual agents and third-party MCP tools. Off by
-default; stored rules remain editable but inactive until enabled.
+Apply workspace-admin tool rules for individual agents and MCP tools: third-party tools,
+and Daimon's own daimon-mcp/&lt;tool&gt; (ask and deny). Off by default; stored rules
+remain editable but inactive until enabled.
 
 ### `DAIMON_TOOL_SAFETY__EFFECTS`
 

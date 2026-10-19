@@ -1,7 +1,6 @@
 """Executable record of Teams' deliberate gaps against Discord and Slack.
 
-A Teams group chat is one session, answered only while everyone in it is from
-the host organisation (anyone else is told privately why not); it takes no
+A Teams group chat is one session; it takes no
 files, not even image previews, and routines and agent tools do not reach it.
 Neither Bot Framework nor
 app-only Graph reads a 1:1 chat back, so the boot sweep finds a card whose post
@@ -40,6 +39,10 @@ exactly a command word runs it: a reply of just `here` gets the card, where
 Slack and Discord take `here` as a slash command no reply can trip. The word
 stays `here` to match them.
 
+Teams opens no 1:1 chat across organisations: people from another one are
+answered as members in channels and group chats, but a 1:1 chat naming their
+tenant is refused, and a command answered in the 1:1 chat tells them so.
+
 No platform parametrization, no database -- this is a scope check.
 """
 
@@ -67,7 +70,6 @@ from daimon.adapters.teams.attachments import (
 )
 from daimon.adapters.teams.commands import CommandContext, parse_command
 from daimon.adapters.teams.credential_requests import credential_form
-from daimon.adapters.teams.group_chats import ChatMember, outsiders
 from daimon.adapters.teams.help import COMMAND_HELP
 from daimon.adapters.teams.identity import TeamsInbound, parse_inbound
 from daimon.adapters.teams.installations import TeamInstalls
@@ -88,7 +90,7 @@ TENANT = "00000000-0000-0000-0000-000000000001"
 CONTENT_URL = "https://example.sharepoint.com/sites/team/Shared%20Documents/q3.xlsx"
 
 
-def test_a_teams_group_chat_is_one_session_answered_only_among_our_own() -> None:
+def test_a_teams_group_chat_is_one_session() -> None:
     activity = MessageActivity.model_validate(
         {
             "type": "message",
@@ -112,10 +114,41 @@ def test_a_teams_group_chat_is_one_session_answered_only_among_our_own() -> None
     inbound = parse_inbound(activity, configured_tenant=TENANT, service_url=None)
     assert isinstance(inbound, TeamsInbound)
     assert (inbound.kind, inbound.conversation_id) == ("group", "19:g@thread.v2")
-    guest = ChatMember("29:g", "00000000-0000-0000-0000-000000000003", TENANT, "guest")
-    assert outsiders([guest], tenant_id=TENANT, member_guests=frozenset()) == 1, (
-        "a guest closes the chat: everyone there sees each answer"
+
+
+def test_a_teams_one_to_one_chat_across_organisations_is_refused() -> None:
+    def _from_elsewhere(conversation_type: str) -> MessageActivity:
+        return MessageActivity.model_validate(
+            {
+                "type": "message",
+                "id": "a-1",
+                "channelId": "msteams",
+                "serviceUrl": "https://smba.example.test",
+                "from": {
+                    "id": "29:u",
+                    "aadObjectId": "00000000-0000-0000-0000-000000000002",
+                    "tenantId": str(uuid.UUID(int=99)),
+                },
+                "recipient": {"id": "28:bot"},
+                "conversation": {
+                    "id": "a:chat" if conversation_type == "personal" else "19:g@thread.v2",
+                    "conversationType": conversation_type,
+                    "tenantId": TENANT,
+                },
+                "channelData": {"tenant": {"id": TENANT}},
+                "text": "<at>daimon</at> hi",
+                "entities": [
+                    {"type": "mention", "text": "<at>daimon</at>", "mentioned": {"id": "28:bot"}}
+                ],
+            }
+        )
+
+    group = parse_inbound(_from_elsewhere("groupChat"), configured_tenant=TENANT, service_url=None)
+    assert isinstance(group, TeamsInbound) and group.is_foreign, "answered, as a member"
+    personal = parse_inbound(
+        _from_elsewhere("personal"), configured_tenant=TENANT, service_url=None
     )
+    assert not isinstance(personal, TeamsInbound), "Teams opens no 1:1 chat across organisations"
 
 
 def test_teams_channels_and_group_chats_offer_only_the_commands_answered_there() -> None:
@@ -235,7 +268,6 @@ def test_teams_channel_files_need_a_tenant_permission_not_a_manifest_permission(
     assert [p["name"] for p in granted] == [
         "ChannelMessage.Read.Group",
         "TeamMember.Read.Group",
-        "ChannelMember.Read.Group",
         "ChatMessage.Read.Chat",
         "TeamsActivity.Send.Group",
     ], "no team permission reaches SharePoint, so files need admin consent to Files.ReadWrite.All"

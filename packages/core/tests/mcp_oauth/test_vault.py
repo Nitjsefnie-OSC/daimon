@@ -37,6 +37,21 @@ def test_build_mcp_oauth_auth_carries_refresh_block_for_a_public_client() -> Non
     assert refresh.get("resource") == "https://mcp.notion.com", "so does the resource"
 
 
+def test_build_mcp_oauth_auth_leaves_resource_out_of_refresh_when_not_sent() -> None:
+    auth = build_mcp_oauth_auth(
+        mcp_server_url=_URL,
+        tokens=TokenResponse(access_token="at", refresh_token="rt", scope="default"),
+        client=ClientRegistration(client_id="cid"),
+        token_endpoint="https://login.example.com/token",
+        resource=None,
+        now=_NOW,
+    )
+    refresh = auth.get("refresh")
+    assert refresh is not None and "resource" not in refresh, (
+        "a client configured not to send resource must not send it on refresh either"
+    )
+
+
 def test_build_mcp_oauth_auth_omits_refresh_without_a_refresh_token() -> None:
     auth = build_mcp_oauth_auth(
         mcp_server_url=_URL,

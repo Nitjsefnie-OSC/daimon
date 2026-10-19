@@ -14,6 +14,7 @@ import base64
 import hashlib
 import secrets
 from dataclasses import dataclass
+from typing import cast
 from urllib.parse import urlencode
 
 import httpx
@@ -28,6 +29,15 @@ from daimon.core.mcp_oauth.models import (
 
 class McpOAuthFlowError(DaimonError):
     """Registration or the code exchange was refused by the OAuth server."""
+
+
+class McpOAuthTokenRefusedError(McpOAuthFlowError):
+    """The token endpoint answered the code exchange with an error status."""
+
+    def __init__(self, message: str, *, error_code: str | None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        """The RFC 6749 `error` field, e.g. `invalid_client` for a wrong secret."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +85,38 @@ def build_authorization_url(
         query["resource"] = resource
     separator = "&" if "?" in authorization_endpoint else "?"
     return f"{authorization_endpoint}{separator}{urlencode(query)}"
+
+
+def requested_scope(scopes: list[str] | None, server_scopes: list[str] | None) -> str | None:
+    """A pre-registered client's scopes, plus `offline_access` when the server offers it.
+
+    Some authorization servers issue a refresh token only for `offline_access`;
+    without one the grant lapses with its first access token. Dynamically
+    registered clients do not get it, so those servers see the request they
+    always did. No scope stays no scope, so the server's default set is not
+    narrowed to that one.
+    """
+    if not scopes:
+        return None
+    requested = list(scopes)
+    if "offline_access" in (server_scopes or []) and "offline_access" not in requested:
+        requested.append("offline_access")
+    return " ".join(requested)
+
+
+def refresh_scope(granted: str | None, requested: str | None) -> str | None:
+    """The scope a refresh asks for: the granted one, keeping a requested `offline_access`.
+
+    Token responses often leave `offline_access` out of `scope` even when it
+    was granted, and a refresh limited to that echo would stop yielding new
+    refresh tokens.
+    """
+    if granted is None or requested is None:
+        return granted
+    scopes = granted.split()
+    if "offline_access" in requested.split() and "offline_access" not in scopes:
+        scopes.append("offline_access")
+    return " ".join(scopes)
 
 
 def pick_token_endpoint_auth_method(
@@ -127,6 +169,19 @@ async def register_client(
         ) from err
 
 
+def _oauth_error_code(response: httpx.Response) -> str | None:
+    """The `error` field of an OAuth error body, or None when there is none."""
+    try:
+        body: object = response.json()
+    except ValueError:
+        return None
+    if isinstance(body, dict):
+        code = cast("dict[str, object]", body).get("error")
+        if isinstance(code, str):
+            return code[:80]
+    return None
+
+
 async def exchange_authorization_code(
     http: httpx.AsyncClient,
     *,
@@ -156,9 +211,10 @@ async def exchange_authorization_code(
             form["client_secret"] = client.client_secret
     response = await http.post(token_endpoint, data=form, headers=headers)
     if response.status_code != 200:
-        raise McpOAuthFlowError(
+        raise McpOAuthTokenRefusedError(
             f"token exchange at {token_endpoint} failed: "
-            f"{response.status_code} {response.text[:300]}"
+            f"{response.status_code} {response.text[:300]}",
+            error_code=_oauth_error_code(response),
         )
     try:
         return TokenResponse.model_validate(response.json())

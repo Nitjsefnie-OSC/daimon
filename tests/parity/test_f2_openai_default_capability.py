@@ -23,7 +23,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
@@ -58,6 +58,9 @@ from mux.drivers.openai.usage import MemoryUsageRevisions
 from openai import AsyncOpenAI
 from pydantic import JsonValue
 
+if TYPE_CHECKING:
+    from daimon.testing.qa_mcp_host import SharedQaHost
+
 ROOT = Path(__file__).resolve().parents[2]
 MCP_URL = "https://qa-mcp.invalid/mcp"
 CREDENTIAL = "host:qa-mcp-run"
@@ -67,7 +70,13 @@ def _manifest() -> DefaultManifest:
     """The default agent, as F1's OpenAI test builds it, with an authenticated MCP."""
     raw = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
     skills: list[NamedSkill] = []
-    for name in (item["skill_id"] for item in raw["skills"]):
+    # Anthropic's built-in skills run only there; OpenAI gets the authored ones
+    # that are on the agent, not the platform-limited ones.
+    for name in (
+        item["skill_id"]
+        for item in raw["skills"]
+        if item["type"] == "custom" and "platforms" not in item
+    ):
         directory = ROOT / "defaults/skills" / name
         paths = sorted(path for path in directory.rglob("*") if path.is_file())
         skills.append(
@@ -352,20 +361,13 @@ def _offline(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[report
             monkeypatch.delenv(name)
 
 
-def _database_url() -> str:
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    assert url, "the parity lane provides an isolated test database"
-    return url
-
-
 async def test_f2_default_skills_builtins_and_authenticated_mcp_on_openai(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    qa_shared_host: SharedQaHost, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from daimon.testing.qa_mcp_host import QA_SESSION_ID, build_host, cleanup, serve
+    from daimon.testing.qa_mcp_host import QA_SESSION_ID, build_run, end_run, serve
 
     manifest = _manifest()
-    database_url = _database_url()
-    qa = await build_host(database_url=database_url, port=0, root=tmp_path)
+    qa = await build_run(qa_shared_host, port=0, root=tmp_path)
     manifest_path = qa.manifest.path(tmp_path)
     recorder = Recorder()
     caplog.set_level(logging.DEBUG, logger="openai")
@@ -406,17 +408,16 @@ async def test_f2_default_skills_builtins_and_authenticated_mcp_on_openai(
         assert "Bearer " not in caplog.text
         assert qa.manifest.refused_egress == []
     finally:
-        await qa.engine.dispose()
-        await cleanup(manifest_path, database_url=database_url)
+        await end_run(qa)
 
 
-async def test_f2_fails_when_the_mcp_bearer_is_revoked(tmp_path: Path) -> None:
-    from daimon.testing.qa_mcp_host import build_host, cleanup, serve
+async def test_f2_fails_when_the_mcp_bearer_is_revoked(
+    qa_shared_host: SharedQaHost, tmp_path: Path
+) -> None:
+    from daimon.testing.qa_mcp_host import build_run, end_run, serve
 
     manifest = _manifest()
-    database_url = _database_url()
-    qa = await build_host(database_url=database_url, port=0, root=tmp_path)
-    manifest_path = qa.manifest.path(tmp_path)
+    qa = await build_run(qa_shared_host, port=0, root=tmp_path)
     try:
         async with serve(qa) as gate_url, httpx.AsyncClient(timeout=30) as mcp:
             qa.bearer.revoke()
@@ -426,8 +427,7 @@ async def test_f2_fails_when_the_mcp_bearer_is_revoked(tmp_path: Path) -> None:
             assert result.status != "pass"
             assert f2.served[0].gate_statuses == [401]
     finally:
-        await qa.engine.dispose()
-        await cleanup(manifest_path, database_url=database_url)
+        await end_run(qa)
 
 
 _SENTINEL = "fictional-unbound-secondary-private-value"
@@ -468,17 +468,15 @@ _UNBOUND: dict[str, Object] = {
 
 @pytest.mark.parametrize("carrier", sorted(_UNBOUND))
 async def test_f2_never_copies_an_unbound_credential(
-    carrier: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    carrier: str, qa_shared_host: SharedQaHost, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The provider returns the stored agent with an unbound, credential-bearing tool."""
-    from daimon.testing.qa_mcp_host import build_host, cleanup, serve
+    from daimon.testing.qa_mcp_host import build_run, end_run, serve
 
     sentinel = _SENTINEL
     secondary = _UNBOUND[carrier]
     manifest = _manifest()
-    database_url = _database_url()
-    qa = await build_host(database_url=database_url, port=0, root=tmp_path)
-    manifest_path = qa.manifest.path(tmp_path)
+    qa = await build_run(qa_shared_host, port=0, root=tmp_path)
     caplog.set_level(logging.DEBUG, logger="openai")
     caplog.set_level(logging.DEBUG, logger="httpx")
     try:
@@ -499,5 +497,4 @@ async def test_f2_never_copies_an_unbound_credential(
         assert any(r.name.startswith("openai") for r in caplog.records)
         assert qa.manifest.refused_egress == []
     finally:
-        await qa.engine.dispose()
-        await cleanup(manifest_path, database_url=database_url)
+        await end_run(qa)

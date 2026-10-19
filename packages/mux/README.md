@@ -1,5 +1,9 @@
 # mux
 
+Source loss consent can name the unsupported native URL-fetch capability as
+`builtin_tool:web_fetch`. This does not waive other builtin tools or authorize
+shell-based emulation of the missing native tool.
+
 MCP source permissions can be resolved per tool with `mcp_permissions` without
 relaxing native toolset projection. Declared losses can name one unavailable
 MCP tool as `mcp_tool:<server>:<tool>`; this does not waive sibling capabilities

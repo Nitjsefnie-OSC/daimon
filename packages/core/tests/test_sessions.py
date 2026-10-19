@@ -48,6 +48,7 @@ from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import put_agent_file
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.posture import ExemptReason
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
@@ -561,6 +562,7 @@ async def test_an_isolated_session_for_a_deleted_skill_says_to_re_publish_the_re
             account_id=None,
             tenant_id=None,
             resources=[{"type": "file", "file_id": "file_1", "mount_path": "/bundle.tar.gz"}],
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     message = str(refused.value)
@@ -2450,79 +2452,6 @@ async def test_create_session_leaves_off_a_server_only_another_member_signed_in_
     )
     assert [tool["mcp_server_name"] for tool in sent_agent["tools"]] == ["daimon-mcp"], (
         "and its toolset with it — MA rejects a toolset whose server is absent"
-    )
-
-
-@pytest.mark.usefixtures("empty_app_vault")
-async def test_an_external_callers_session_gets_none_of_the_agents_keys_or_shared_tokens(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Someone from another organisation is answered with the agent, not its
-    credentials: no `.env`, no organisation token mirrored into their vault,
-    and the server only that token authenticates is left off their session."""
-    tenant = await make_tenant(db_session)
-    agent_uuid = uuid.uuid4()
-    external_account_id = uuid.UUID("00000000-0000-0000-0000-00000000ee01")
-    public_url = "https://mcp.example.com/mcp"
-    fernet = build_multifernet((Fernet.generate_key().decode(),))
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="API_KEY",
-        content="secret",
-        set_by_account_id=None,
-    )
-    await db_session.commit()
-    await save_agent_mcp_credential(
-        sessionmaker=db_session_factory,
-        fernet=fernet,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        mcp_server_url="https://mcp.example.com/docs",
-        plaintext_token="tok_org",
-    )
-
-    cred_bodies: list[dict[str, Any]] = []
-    session_bodies: list[dict[str, Any]] = []
-    client = build_fake_anthropic_http(
-        _warm_vault_mirror_handler(
-            chat_metadata=await _registered_vault_metadata(
-                db_session_factory, external_account_id, agent_uuid, tenant_id=tenant.id
-            ),
-            account_id=external_account_id,
-            agent_uuid=agent_uuid,
-            public_url=public_url,
-            credential_post_bodies=cred_bodies,
-            credential_deletes=[],
-            session_create_bodies=session_bodies,
-            session_id="sess_external",
-        )
-    )
-
-    await create_session(
-        client,
-        agent=_agent_with_personal_server(),
-        environment=_make_env(anthropic_id="env_external"),
-        account_id=external_account_id,
-        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
-        tenant_id=tenant.id,
-        agent_uuid=agent_uuid,
-        session_factory=db_session_factory,
-        fernet=fernet,
-        is_external=True,
-    )
-
-    assert not [b for b in cred_bodies if b["auth"]["mcp_server_url"].endswith("/docs")], (
-        "the organisation's token must never reach an external caller's vault"
-    )
-    assert _without_memory_resource(session_bodies[0].get("resources")) == [], (
-        "an external caller's session mounts no .env"
-    )
-    sent_agent = session_bodies[0]["agent"]
-    assert [server["name"] for server in sent_agent["mcp_servers"]] == ["daimon-mcp"], (
-        "the server only the organisation's token authenticates is left off"
     )
 
 

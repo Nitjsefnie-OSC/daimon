@@ -73,6 +73,9 @@ async def probe_bearer_token(mcp_server_url: str, bearer_token: str) -> McpProbe
 class OAuthDiscovery:
     resource: ProtectedResourceMetadata | None
     authorization_server: AuthorizationServerMetadata
+    authorization_server_url: str
+    """The issuer URL whose metadata answered. Its host is where the document was
+    fetched from, unlike the `issuer` the document claims for itself."""
 
 
 async def probe_mcp_server(
@@ -187,7 +190,9 @@ async def discover_authorization_server(
             metadata = await _fetch_metadata(http, url, AuthorizationServerMetadata)
             if metadata is not None:
                 return OAuthDiscovery(
-                    resource=resource, authorization_server=_endpoints_are_public(metadata)
+                    resource=resource,
+                    authorization_server=_endpoints_are_public(metadata),
+                    authorization_server_url=issuer,
                 )
     raise McpOAuthDiscoveryError(
         f"no OAuth authorization server metadata for {mcp_server_url} (tried {', '.join(tried)})"

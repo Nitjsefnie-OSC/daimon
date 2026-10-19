@@ -134,9 +134,6 @@ class Account(Base):
     platform_role_ids: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
-    # A person from another organisation (a Teams shared channel's external
-    # participant), refreshed with `role`; such an account is never an admin.
-    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -560,7 +557,6 @@ class ThreadSession(Base):
     platform: Mapped[str] = mapped_column(Text, nullable=False)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     ma_session_id: Mapped[str] = mapped_column(Text, nullable=False)
     ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The channel the session runs for, recorded at creation: a thread's parent,
@@ -1820,6 +1816,64 @@ class SlackUserToken(Base):
     )
 
 
+class MicrosoftUserToken(Base):
+    """One person's Microsoft 365 connection: a Fernet-encrypted refresh token.
+
+    Keyed by (tenant, user): `user_id` is the person's Entra object id, which
+    is also their Teams user id, and the sign-in proved the two equal. A
+    privacy purge deletes the row by that key; a tenant's deletion cascades.
+    """
+
+    __tablename__ = "microsoft_user_tokens"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_microsoft_user_tokens_tenants",
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    encrypted_refresh_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    scopes: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MicrosoftSignIn(Base):
+    """One Connect Microsoft link, spent by its callback.
+
+    `state` is both the link's handle and the OAuth state; the callback's
+    delete is the single-use gate. Bound to the person who asked: the callback
+    refuses a sign-in whose object id differs from `user_id`. Lives ten
+    minutes and cascades with the account.
+    """
+
+    __tablename__ = "microsoft_sign_ins"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_microsoft_sign_ins_tenants"
+        ),
+        ForeignKeyConstraint(
+            ["account_id"],
+            ["accounts.id"],
+            ondelete="CASCADE",
+            name="fk_microsoft_sign_ins_accounts",
+        ),
+        Index("ix_microsoft_sign_ins_user", "tenant_id", "user_id"),
+    )
+
+    state: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class SlackConnectPrompt(Base):
     """Once-ever marker: the first-mention connect nudge was shown to this user."""
 
@@ -2397,8 +2451,6 @@ class TurnOrigin(Base):
     configuration_target_ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     configuration_target_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    # Answered as from another organisation, stored or for this turn only.
-    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     role: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -3100,7 +3152,6 @@ class GitHubAppSessionVault(Base):
     vault_id: Mapped[str] = mapped_column(Text)
     is_unmapped: Mapped[bool] = mapped_column(Boolean, nullable=False)
     is_mcp: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    is_external: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
@@ -3661,7 +3712,9 @@ class SessionSettleState(Base):
     (the send's own `user.message`) once it is accepted; both are cleared when
     that turn has been settled (`daimon.core.usage_sweep`). `covered_through`
     is read only on the reserved `backlog-cutoff` row, where it records when
-    this settle path was deployed.
+    this settle path was deployed. `unattended_turn_event_id` is the latest
+    turn an agent-chat send started (`unattended_turn`), never cleared by a
+    settle.
 
     The table keeps its original name; the former catch-up's cursor columns
     are no longer mapped and are dropped later. Private to
@@ -3674,6 +3727,9 @@ class SessionSettleState(Base):
     covered_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     settle_turn_event_id: Mapped[str | None] = mapped_column(Text)
     settle_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The latest turn an agent-chat send started here, and its tool-rule channel.
+    unattended_turn_event_id: Mapped[str | None] = mapped_column(Text)
+    unattended_rules_channel_id: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

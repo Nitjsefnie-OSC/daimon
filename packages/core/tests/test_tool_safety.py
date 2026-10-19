@@ -7,9 +7,11 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME
 from daimon.core.tool_safety import (
+    CONFIRMED_DAIMON_TOOLS,
     DAIMON_SERVER_NAME,
     OPEN_TOOL_SAFETY,
     PUBLISH_TOOLS,
+    ResolvedAgentToolRule,
     ToolAnnotations,
     ToolCall,
     ToolSafetyPolicy,
@@ -20,6 +22,7 @@ from daimon.core.tool_safety import (
     session_tools_for_policy,
     toolset_permission_policy,
     trusted_servers_for,
+    unwrap_daimon_call,
 )
 from daimon.core.turn.approvals import interactive_decider, unattended_decider
 
@@ -52,6 +55,19 @@ def test_daimon_server_name_matches_the_defaults_constant() -> None:
         ("verifyAnswer", "read"),
         ("ask_question", "read"),
         ("askQuestion", "read"),
+        # GitHub's "<object>_read" tools, whose verb comes last.
+        ("pull_request_read", "read"),
+        ("pullRequestRead", "read"),
+        ("issue_read", "read"),
+        # A trailing "read" alone is no rule.
+        ("mark_all_notifications_read", "write"),
+        ("mark_as_read", "write"),
+        ("pull_request_review_write", "write"),
+        ("issue_write", "write"),
+        ("create_pull_request", "write"),
+        ("push_files", "write"),
+        ("merge_pull_request", "write"),
+        ("pull_request_read_and_merge", "write"),
         # Plain writes and unknowns.
         ("create_issue", "write"),
         ("update_deal", "write"),
@@ -455,6 +471,42 @@ async def test_question_and_answer_tools_run_without_a_card(
 
 
 @pytest.mark.parametrize("attended", [True, False])
+async def test_github_pull_request_read_runs_without_a_card(attended: bool) -> None:
+    card = AsyncMock(return_value="denied")
+    decider = (
+        interactive_decider(_ON, requester_platform_user_id="u1", confirm=card)
+        if attended
+        else unattended_decider(_ON)
+    )
+    call = ToolCall(
+        tool_use_id="tu_1",
+        server_name="github",
+        tool_name="pull_request_read",
+        input={"method": "get_diff", "owner": "o", "repo": "r", "pullNumber": 1},
+    )
+    verdict = decide_tool_call(_ON, call, attended=attended)
+    assert (verdict.outcome, verdict.reason) == ("allow", "read")
+    assert (await decider(call)).allow
+    card.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "pull_request_review_write",
+        "create_pull_request",
+        "push_files",
+        "merge_pull_request",
+        "mark_all_notifications_read",
+    ],
+)
+def test_github_write_tools_still_ask_in_chat_and_are_denied_unattended(tool: str) -> None:
+    call = _call("github", tool)
+    assert decide_tool_call(_ON, call, attended=True).outcome == "ask"
+    assert decide_tool_call(_ON, call, attended=False).outcome == "deny"
+
+
+@pytest.mark.parametrize("attended", [True, False])
 async def test_another_daimons_agent_ask_still_needs_approval(attended: bool) -> None:
     """agent_chat's `ask` starts or continues a turn in another agent: an action.
     Attached from another Daimon endpoint, it must wait for the card in chat
@@ -484,3 +536,266 @@ def test_an_empty_trusted_annotations_is_left_out_of_the_dump() -> None:
     assert "trusted_annotations" not in ToolSafetyPolicy(enabled=True).model_dump(mode="json")
     dumped = ToolSafetyPolicy(enabled=True, trusted_annotations=("bridge",)).model_dump(mode="json")
     assert dumped["trusted_annotations"] == ["bridge"]
+
+
+# --- agent tool rules on daimon's own tools -------------------------------------
+
+_RULES_ON = ToolSafetyPolicy(enabled=True, agent_rules=True)
+_TRUSTED = frozenset({DAIMON_SERVER_NAME})
+
+
+def _proxy(inner: str, **arguments: object) -> ToolCall:
+    """What MA reports for `call_tool(name=inner, arguments=...)` on daimon's server."""
+    return ToolCall(
+        tool_use_id="tu_p",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="call_tool",
+        input={"name": inner, "arguments": arguments},
+    )
+
+
+def _rule(rule: str, scope: str = "chat") -> ResolvedAgentToolRule:
+    return ResolvedAgentToolRule.model_validate({"rule": rule, "scope": scope})
+
+
+def test_unwrapping_a_proxy_call_names_the_inner_tool_and_its_arguments() -> None:
+    inner = unwrap_daimon_call(_proxy("hubspot_update_objects", title="Q3"), _TRUSTED)
+    assert inner.key == "daimon-mcp/hubspot_update_objects"
+    assert inner.input == {"title": "Q3"}
+    assert inner.tool_use_id == "tu_p"
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        _call("linear", "call_tool"),
+        _call(DAIMON_SERVER_NAME, "get_session"),
+        ToolCall(
+            tool_use_id="x",
+            server_name=DAIMON_SERVER_NAME,
+            tool_name="call_tool",
+            input={"name": 7},
+        ),
+        ToolCall(tool_use_id="x", server_name=DAIMON_SERVER_NAME, tool_name="call_tool"),
+        _proxy("a/b"),
+        _proxy("call_tool"),
+        _proxy("search_tools"),
+    ],
+)
+def test_a_call_that_is_not_a_plain_proxy_call_is_left_as_it_is(call: ToolCall) -> None:
+    assert unwrap_daimon_call(call, _TRUSTED) == call
+
+
+def test_the_proxy_is_not_unwrapped_where_the_server_is_not_trusted() -> None:
+    call = _proxy("get_session")
+    assert unwrap_daimon_call(call, frozenset()) == call
+
+
+@pytest.mark.parametrize(
+    ("rule", "attended", "outcome", "reason"),
+    [
+        ("deny", True, "deny", "agent_rule_deny"),
+        ("deny", False, "deny", "agent_rule_deny"),
+        ("ask", True, "ask", "agent_rule_ask"),
+        ("ask", False, "deny", "agent_rule_ask"),
+        ("allow", True, "allow", "agent_rule_allow"),
+        ("allow", False, "allow", "agent_rule_allow"),
+        (None, True, "allow", "not_attached"),
+        (None, False, "allow", "not_attached"),
+    ],
+)
+def test_a_daimon_tool_follows_its_agent_rule(
+    rule: str | None, attended: bool, outcome: str, reason: str
+) -> None:
+    call = unwrap_daimon_call(_proxy("hubspot_update_objects"), _TRUSTED)
+    verdict = decide_tool_call(
+        _RULES_ON,
+        call,
+        attended=attended,
+        trusted_servers=_TRUSTED,
+        agent_rule=_rule(rule) if rule else None,
+    )
+    assert (verdict.outcome, verdict.reason) == (outcome, reason)
+
+
+def test_daimon_tool_rules_need_both_the_policy_and_the_rules_switch() -> None:
+    call = _call(DAIMON_SERVER_NAME, "hubspot_update_objects")
+    for policy in (OPEN_TOOL_SAFETY, _ON):
+        verdict = decide_tool_call(
+            policy, call, attended=True, trusted_servers=_TRUSTED, agent_rule=_rule("deny")
+        )
+        assert verdict.outcome == "allow", "a stored rule is inert until both switches are on"
+
+
+def test_without_trusted_servers_the_reserved_name_is_gated_like_any_third_party() -> None:
+    verdict = decide_tool_call(
+        _RULES_ON,
+        _call(DAIMON_SERVER_NAME, "delete_records"),
+        attended=True,
+        agent_rule=_rule("allow"),
+    )
+    assert (verdict.outcome, verdict.reason) == ("allow", "agent_rule_allow")
+
+
+def test_an_agent_deny_beats_the_fixed_daimon_asks() -> None:
+    publish = _call(DAIMON_SERVER_NAME, "publish_report")
+    upload = ToolCall(
+        tool_use_id="tu_2",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="add_skill",
+        input={"agent_name": "a", "content_hash": "abc"},
+    )
+    for call in (publish, upload):
+        for attended in (True, False):
+            verdict = decide_tool_call(
+                _RULES_ON,
+                call,
+                attended=attended,
+                trusted_servers=_TRUSTED,
+                agent_rule=_rule("deny"),
+            )
+            assert (verdict.outcome, verdict.reason) == ("deny", "agent_rule_deny")
+
+
+def test_an_agent_allow_or_ask_never_loosens_a_fixed_daimon_gate() -> None:
+    publish = _call(DAIMON_SERVER_NAME, "publish_report")
+    upload = ToolCall(
+        tool_use_id="tu_2",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="add_skill",
+        input={"agent_name": "a", "content_hash": "abc"},
+    )
+    for rule in ("allow", "ask"):
+        asked = decide_tool_call(
+            _RULES_ON, publish, attended=True, trusted_servers=_TRUSTED, agent_rule=_rule(rule)
+        )
+        assert (asked.outcome, asked.reason) == ("ask", "publish_needs_confirmation")
+        refused = decide_tool_call(
+            _RULES_ON, publish, attended=False, trusted_servers=_TRUSTED, agent_rule=_rule(rule)
+        )
+        assert (refused.outcome, refused.reason) == ("deny", "unattended_publish")
+        write = decide_tool_call(
+            _RULES_ON, upload, attended=True, trusted_servers=_TRUSTED, agent_rule=_rule(rule)
+        )
+        assert write.outcome == "ask"
+        unattended = decide_tool_call(
+            _RULES_ON,
+            upload,
+            attended=False,
+            trusted_servers=_TRUSTED,
+            agent_rule=_rule(rule, "chat_and_routines"),
+        )
+        assert (unattended.outcome, unattended.reason) == ("deny", "unattended_write")
+    assert set(CONFIRMED_DAIMON_TOOLS) >= {"add_skill"}
+
+
+def test_the_operators_deny_of_a_confirmed_daimon_write_still_comes_first() -> None:
+    policy = ToolSafetyPolicy(enabled=True, agent_rules=True, denied=("daimon-mcp/add_skill",))
+    upload = ToolCall(
+        tool_use_id="tu_2",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="add_skill",
+        input={"agent_name": "a", "content_hash": "abc"},
+    )
+    for rule in ("deny", "ask", "allow"):
+        verdict = decide_tool_call(
+            policy, upload, attended=True, trusted_servers=_TRUSTED, agent_rule=_rule(rule)
+        )
+        assert (verdict.outcome, verdict.reason) == ("deny", "denied_by_operator")
+
+
+def test_session_tools_for_an_agent_without_daimon_rules_are_exactly_as_before() -> None:
+    before = session_tools_for_policy(_RULES_ON, _tools(), trusted_servers=_TRUSTED)
+    assert before is not None
+    assert (
+        session_tools_for_policy(
+            _RULES_ON, _tools(), trusted_servers=_TRUSTED, daimon_rule_tools=frozenset()
+        )
+        == before
+    )
+    assert session_tools_for_policy(OPEN_TOOL_SAFETY, _tools(), trusted_servers=_TRUSTED) is None
+
+
+def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
+    out = session_tools_for_policy(
+        _RULES_ON,
+        _tools(),
+        trusted_servers=_TRUSTED,
+        daimon_rule_tools=frozenset({"hubspot_update_objects", "search_tools"}),
+    )
+    assert out is not None
+    daimon = out[1]
+    assert daimon["default_config"] == {"permission_policy": {"type": "always_allow"}}
+    asked = {c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"}
+    assert asked == {"add_skill", "call_tool", "hubspot_update_objects"}
+    assert has_confirmation_gate(out, tool_name="call_tool")
+    assert not has_confirmation_gate(out, tool_name="search_tools"), "search never asks"
+    plain = session_tools_for_policy(_ON, _tools(), trusted_servers=_TRUSTED)
+    assert plain is not None and out[2] == plain[2], "third-party toolsets are unchanged"
+
+
+def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
+    out = session_tools_for_policy(
+        _RULES_ON,
+        _tools(),
+        trusted_servers=_TRUSTED,
+        daimon_rule_tools=frozenset({"add_skill", "publish_report"}),
+    )
+    assert out is not None
+    names = [c["name"] for c in out[1]["configs"]]
+    assert sorted(names) == ["add_skill", "call_tool", "publish_report"]
+
+
+def test_daimon_rules_are_inert_for_session_tools_until_both_switches_are_on() -> None:
+    rules = frozenset({"hubspot_update_objects"})
+    assert (
+        session_tools_for_policy(
+            OPEN_TOOL_SAFETY, _tools(), trusted_servers=_TRUSTED, daimon_rule_tools=rules
+        )
+        is None
+    )
+    plain = session_tools_for_policy(_ON, _tools(), trusted_servers=_TRUSTED)
+    assert (
+        session_tools_for_policy(_ON, _tools(), trusted_servers=_TRUSTED, daimon_rule_tools=rules)
+        == plain
+    )
+
+
+def test_a_daimon_rule_config_takes_the_toolsets_enabled_and_is_stable() -> None:
+    stored = [
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": DAIMON_SERVER_NAME,
+            "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
+        }
+    ]
+    rules = frozenset({"get_session"})
+    out = session_tools_for_policy(
+        _RULES_ON, stored, trusted_servers=_TRUSTED, daimon_rule_tools=rules
+    )
+    assert out is not None
+    assert all(c["enabled"] is False for c in out[0]["configs"])
+    assert (
+        session_tools_for_policy(_RULES_ON, out, trusted_servers=_TRUSTED, daimon_rule_tools=rules)
+        is None
+    ), "complete configs hash the same on the next bind"
+
+
+def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own() -> None:
+    only = session_tools_for_policy(
+        _RULES_ON, _tools(), trusted_servers=_TRUSTED, daimon_rule_tools=frozenset({"*"})
+    )
+    assert only is not None
+    assert sorted(c["name"] for c in only[1]["configs"]) == ["add_skill", "call_tool"]
+    both = session_tools_for_policy(
+        _RULES_ON,
+        _tools(),
+        trusted_servers=_TRUSTED,
+        daimon_rule_tools=frozenset({"*", "get_session"}),
+    )
+    assert both is not None
+    assert sorted(c["name"] for c in both[1]["configs"]) == [
+        "add_skill",
+        "call_tool",
+        "get_session",
+    ]

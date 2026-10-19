@@ -215,35 +215,21 @@ config). The order is load-bearing and documented as such in the module:
    start a turn. A refused user raises `AdmissionDenied("invoker_not_allowed")`
    before the cascade, so they learn nothing about the tenant's configuration
    and no MA call is made.
-4. External participant — a caller from another organisation (a Teams shared
-   channel's B2B direct connect participant or a guest,
-   `admit(external=ExternalFinding(…))`) raises
-   `AdmissionDenied("external_participant")` anywhere but a channel with
-   `readers: own` or a thread in one, and in its setup thread too. A Teams
-   group chat holding anyone from outside counts every sender there as
-   external, so it is never answered. Only a finding on
-   positive evidence is stored on `accounts.is_external`; one without holds
-   that turn alone (`turn_origins.is_external`, which the MCP verifier reads)
-   and keeps the stored role. An external account's stored role is always
-   `user`, and it administers no channel. `reauthorize` checks it again.
-   Their sessions mount no agent keys and get no agent-wide MCP token
-   (`SessionSnapshot.is_external`, identity, so a member's session is
-   replaced for them, never reused or carried over).
-5. Resolve config through the cascade
+4. Resolve config through the cascade
    `thread → channel → tenant → deployment`, in
    `packages/core/daimon/core/stores/scoped_config_read.py`. The tiers are
    named by `ConfigTier` in `packages/core/daimon/core/scope.py`; the bottom
    one comes from `defaults/config.yaml`, see [defaults.md](defaults.md).
-6. Raise `MissingTurnConfigError` if no agent or environment resolved — before
+5. Raise `MissingTurnConfigError` if no agent or environment resolved — before
    any MA call, so a misconfigured tenant sees the config error rather than a
    billing one.
-7. Resolve the agent and environment to live MA ids via
+6. Resolve the agent and environment to live MA ids via
    `packages/core/daimon/core/ma_resolver.py`, which self-heals by re-running
    defaults reconciliation when a tag no longer resolves, and rejects an agent
    whose `archived_at` is set.
-8. Balance gate — `tenant_balance.is_over_balance`.
-9. Monthly cap gate — `billing.is_over_cap`.
-10. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
+7. Balance gate — `tenant_balance.is_over_balance`.
+8. Monthly cap gate — `billing.is_over_cap`.
+9. Channel budget gate — `channel_budget.is_over_channel_budget`, against the
    parent channel, or for a DM the channel it was moved from with `/dm-me`
    (`dm_source_channel_id`); skipped in an older DM or where the channel has
    no budget. A channel's own agent counts toward its home channel wherever an
@@ -253,7 +239,7 @@ config). The order is load-bearing and documented as such in the module:
    DMs the channel's admins through the adapter's `TurnDeps.budget_notifier`
    (`daimon.core.channel_budget_notice`).
 
-The policy, writers, external participant, balance, cap and channel
+The policy, writers, balance, cap and channel
 budget gates each raise `AdmissionDenied` with a reason literal, which
 `admission_refusal_text` words in each platform's nouns. See
 [billing.md](billing.md).
@@ -317,7 +303,11 @@ adopts the same queue and card; stale writes queued by the old lifecycle are
 dropped. A defensive repair reasserts the final render if a stale completion is
 detected. The bot's outer error boundary finishes the card through the same
 lifecycle. Long answers keep their summary on the last chunk, and failed turns
-preserve sealed answer text before showing the error card. Process death loses
+preserve sealed answer text before showing the error card. Discord limits a turn
+to five answer messages, reserving one for the terminal answer or error card.
+Excess sealed or final prose is combined into `answer.txt` on that final message,
+with a notice and a warning in the logs. Consecutive identical answer blocks
+and text consisting entirely of pseudo tool calls are suppressed. Process death loses
 the in-memory queue: a request already sent to Discord may still arrive after
 the new process edits an orphaned card to its restarted notice.
 
@@ -497,8 +487,7 @@ earliest expiry). A notification reads the message once, `parse_graph_message`
 builds the same `TeamsInbound` as `parse_inbound`, and `handle_graph_message`
 claims it under the Bot Framework delivery key before the shared dispatch, so
 a message seen by both sources runs once. Graph @mentions are left to Bot
-Framework, and Graph's sender tenant is not used: guests and external
-members are classified by the same roster lookup. The permission is
+Framework. The permission is
 tenant-wide and no read tells whether the bot is in a channel, so a channel is
 dropped on the bot's removal event, an app removal (the whole team), or a send
 there refused with 403 `BotNotInConversationRoster` (`_RemovalWatch`).
@@ -614,11 +603,7 @@ adapter passes; no role means non-admin. The MCP turn tools (`ask`,
 and routine fires have no live platform role, so they use the account's
 stored role, refreshed on every chat turn. The operator path
 (`platform_user_id` unset: CLI and internal tokens) is not a platform member
-and skips the policy, as it skips billing. An account marked external is
-never an admin on any path: admission stores no group ids
-for it, the MCP verifier reads the mark from the row on every request, and
-the identity middleware refuses it the setup, channel setup, credential and
-direct-message tools (`middleware/external_participants.py`). Ids are the
+and skips the policy, as it skips billing. Ids are the
 platform's own (Discord snowflakes, Slack ids, Teams Entra object and
 conversation ids):
 
@@ -713,8 +698,6 @@ daimon tenants access-policy rules discord GUILD_ID [--json]
 daimon tenants access-policy get discord GUILD_ID [--json]
 daimon tenants access-policy set discord GUILD_ID --invoker USER_ID [--dm-memory-read-only]
 daimon tenants access-policy set discord GUILD_ID --clear [--drop-agent-rules]   # back to open
-daimon tenants access-policy set teams ENTRA_TENANT_ID \
-    --add-member-guest OBJECT_ID [--remove-member-guest OBJECT_ID]   # guests as members
 ```
 
 An agent with a rule runs only in its listed channels and the threads under
@@ -1071,6 +1054,16 @@ session's stable agent id, attached server URL and admitted parent channel.
 Agent-wide and matching channel rules combine by the stricter outcome. The
 operator deny list wins; a matching rule then decides before classification.
 A failed lookup asks in chat or refuses unattended. The flag is off by default.
+The driver also reads rules for Daimon's own trusted `daimon-mcp` server (see
+the paragraph on `call_tool` below), and an agent-wide `deny` on one of its
+tools is additionally enforced by
+`IdentityMiddleware` (`middleware/tool_rule_backstop.py`): for a chat-vault
+credential (`chat_agent_id` set, no `agent_id`) it reads the tenant's `deny`
+rows for the tool being invoked, which for a `call_tool` proxied call is the
+inner tool, and refuses when one belongs to the caller's agent and names this
+deployment's MCP URL. An agent-wide `deny` on `daimon-mcp/*` refuses every call from
+that agent's credential, `search_tools` and `call_tool` included. The same two settings
+gate it, and a failed read refuses.
 With `DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
 third-party toolset as `always_ask` (a per-session override, so it holds
 however the agent was written); reads then run, a write in a routine is
@@ -1117,15 +1110,33 @@ A pause shows one card per blocked call, and the driver sends one
 `user.tool_confirmation` event per call after its answer. An adapter that
 passes no hook gets `no_confirmation_surface`, which
 refuses the write. Plugins can build their own `ConfirmationPrompt` and call
-the same hook. Daimon's own `daimon-mcp` tools are not gated here (they keep
-their `operation_policy` checks), except `add_skill`: its confirming call, the
+the same hook. Daimon's own `daimon-mcp` tools are not gated here by
+classification (they keep their `operation_policy` checks), except `add_skill`: its confirming call, the
 one naming a preview's `content_hash`, is sent `always_ask`, so it waits on
 the same card in chat and is always refused in a routine, whatever
 `unattended_writes` allows. Each bind compares a reused session's tools with
 the gated ones a new session would get and updates them in place, so a
 session started before tool safety was turned on is gated from its next turn,
-and a tools change never writes the agent's own `always_allow` back. The
-exemption holds only for the deployment's verified
+and a tools change never writes the agent's own `always_allow` back. An agent
+`ask` or `deny` rule on `daimon-mcp/<tool>` (see [Permissions](permissions.md))
+adds `call_tool` and each tool such a rule names to the asking set: admission
+reads the agent's rule tool names once per turn and again in `reauthorize`
+(`agent_tool_rules.daimon_rule_set`; no query unless both settings are on, and
+tool names outside `[A-Za-z0-9_.-]{1,128}` are skipped), and they enter the tools hash like
+`asks_before_publishing`, so a rule change updates the session on the next
+bind. The decider unwraps `call_tool` to the inner tool (`unwrap_daimon_call`)
+and looks the rule up under `daimon-mcp/<inner>`, against the agent's attached
+URL and the deployment's own; a call with no rule is allowed without a card.
+Precedence on a daimon tool: the operator deny of a confirmed write, an agent
+`deny`, the fixed gates (`add_skill` with a preview hash, the publish tools),
+then an agent `ask`; a rule never loosens a fixed gate. Gemini and OpenAI
+sessions, which cannot hold these asks, refuse a turn for an agent with an
+`ask` rule or a channel `deny` on a daimon tool (`daimon_rules_need_driver`);
+an agent-wide `deny` is the server's and does not block them. A daimon call that
+needs no rule lookup (the agent has none) is not looked up at all. An agent-wide `deny` on `daimon-mcp/*` adds `call_tool` to the
+asking set and the lookup returns that deny for every daimon call, so the
+driver refuses each proxied call too (the server refuses all of them anyway).
+The exemption holds only for the deployment's verified
 endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
 naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
 reserved name is gated like any other server. A pending card is owned by the
@@ -1134,6 +1145,36 @@ decision, refuses the call and retires the card, so an Approve that arrives
 after Stop never runs anything. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.
+
+Agent-chat turns (`start_turn`, `continue_turn` and `ask`, per agent and on
+the hub) have nobody to press Approve, so they take the unattended rules
+through one core gate, `packages/core/daimon/core/turn/unattended.py`. Before
+every send, `gate_session_snapshot` rewrites the session's own frozen tool
+config from the current policy (every gated toolset's default and per-tool
+configs to `always_ask`, Daimon rule tools, a healed `daimon-mcp` URL) and
+fails the send if the update fails; it never restores attachments the
+session hides. It also makes Daimon's card-only actions (`protected_tools`,
+the same selection as chat: the backend switch and Microsoft sends with the
+policy on or off, Microsoft writes with it on) ask, and heals a foreign
+`daimon-mcp` URL, with the policy on or off. After the send, the turn's
+boundary and tool-rule channel are recorded on the session's settle row
+(`session_settle_state.record_unattended_turn`), and the sending process runs
+one bounded worker for that turn (`_agent_chat_safety.watch_turn`), which
+answers only pauses after its own `user.message` boundary, each decided at
+call time by `unattended_posture`: `unattended_decider` with the agent's
+rules for that channel (`channel_for_tool_rules`), the protected tools
+refused, never `AutoApprove` and never the session's frozen config.
+Confirmations themselves are not re-gated; the gate before the message
+covers the turn. `annotations_for` is the seam for operator-trusted MCP
+hints; nothing supplies them yet. A read never answers a pause: `get_session`
+(both), `get_my_session` and hub `get_session` report `running` while this
+process's worker owns the turn and `paused` with a hint otherwise; list tools
+report the provider's status. Only the session's own account (an agent key,
+or the hub in `continue` mode) can resume a pause, and only on the turn the
+record names, so a chat card is never adopted: `continue_turn` re-gates the
+session, starts a worker on the paused turn with the recorded channel, which
+decides from the policy now in force, and, given a message, sends it once
+that turn ends, after repeating every check and the gate.
 
 With both `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
 an active chat admin can request an agent backend change through that same
@@ -1647,6 +1688,21 @@ or a deployment-provided Google MCP server.
 Existing static-bearer vault credentials are upgraded in place on the next
 session creation. Credential metadata records the identity version so subsequent
 creates leave the token stable; unrelated and OAuth credentials are preserved.
+
+### Microsoft 365 per person
+
+Teams people connect their own Microsoft account (Entra v2 authorization
+code with PKCE, confidential client). `core/microsoft_identity.py` builds the
+link, redeems and refreshes tokens, and checks the id token's tenant and
+object ID against the Teams caller. `microsoft_sign_ins` holds single-use,
+requester-bound state; `microsoft_user_tokens` holds one Fernet-encrypted
+refresh token per (tenant, user), rotated on each refresh and deleted on
+`invalid_grant` or `interaction_required`. Purge and the privacy preview
+cover it. The MCP routes are `/oauth/microsoft/start` and `/callback`; the
+`microsoft_*` tools in `tools/microsoft/` call Graph v1.0 through a path
+allowlist, keep access tokens in memory, and decide 1:1-only scopes (mail,
+calendar, OneNote) from the verified turn origin. `microsoft_send` is a
+confirmed daimon tool, so it always goes through the approval card.
 
 ### Completion signals
 

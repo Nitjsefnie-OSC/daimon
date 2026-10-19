@@ -141,6 +141,7 @@ async def _world(factory: async_sessionmaker[AsyncSession], *, managed: bool = F
     settings.mcp.public_url = None
     settings.mcp.app_root_url = "https://daimon.example"
     settings.mcp.jwt_secret = SecretStr("proxy-secret")
+    settings.microsoft_accounts.configured = False
     runtime = McpRuntime(
         session_factory=factory,
         client=build_fake_anthropic(

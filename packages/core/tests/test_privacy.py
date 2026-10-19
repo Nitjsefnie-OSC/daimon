@@ -41,6 +41,7 @@ from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
+from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
@@ -465,6 +466,40 @@ async def test_collect_purge_preview_counts_slack_user_tokens_and_turn_contexts(
     )
 
 
+async def test_preview_and_purge_agree_on_microsoft_user_tokens(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from datetime import UTC, datetime
+
+    tenant = await make_tenant(db_session, platform="teams", workspace_id="PV_TEAMS_MS")
+    account = await make_account(db_session, tenant=tenant)
+    oid = "00000000-0000-0000-0000-00000000c0de"
+    await make_platform_principal(
+        db_session, platform="teams", external_id=oid, tenant=tenant, account=account
+    )
+    await microsoft_tokens_store.upsert_microsoft_user_token(
+        db_session,
+        tenant_id=tenant.id,
+        user_id=oid,
+        encrypted_refresh_token=b"ct",
+        scopes="User.Read",
+        now=datetime.now(tz=UTC),
+    )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.microsoft_user_tokens.count == 1, "must count the Teams person's connection"
+    assert "1 saved Microsoft account" in summary_line(preview), "the privacy card must list it"
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+    assert report.db.microsoft_user_tokens == 1, "purge must delete the connection it previewed"
+    async with db_session_factory() as session:
+        left = await microsoft_tokens_store.count_microsoft_user_tokens(
+            session, tenant_id=tenant.id, user_id=oid
+        )
+    assert left == 0, "no refresh token may survive the purge"
+
+
 async def test_collect_purge_preview_credential_requests_matches_purge_account(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -785,6 +820,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "agent_post_requesters": "agent_post_requesters",
         "platform_user_names": "platform_user_names",
         "teams_messages": "teams_messages",
+        "microsoft_user_tokens": "microsoft_user_tokens",
     }
 
     uncovered = report_fields - set(mapping.keys())
@@ -901,6 +937,8 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             "github_access_request_deliveries",
             # Browser link attempts last ten minutes and cascade with the account.
             "github_personal_link_intents",
+            # Connect Microsoft links last ten minutes and cascade with the account.
+            "microsoft_sign_ins",
             # The account link is removed by ON DELETE CASCADE. A token's
             # requester reference is erased by SET NULL and its GitHub user ID
             # is explicitly cleared; its recorded link

@@ -220,16 +220,41 @@ async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
     anonymous. A server outside `trusted_annotations` is never listed and its
     name decides."""
     from daimon.core import mcp_tool_annotations
+    from daimon.core.mcp_oauth import discovery
 
     tokens: list[str | None] = []
 
     async def _catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
         assert url == "https://mcp.linear.app/mcp"
         tokens.append(token)
-        return [
-            {"name": "memory_flag_list", "annotations": {"readOnlyHint": True}},
-            {"name": "create_issue", "annotations": {"readOnlyHint": False}},
-        ]
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            assert str(request.url) == url
+            assert request.headers.get("authorization") is None
+            body = json.loads(request.content)
+            if body["method"] == "notifications/initialized":
+                return httpx.Response(204)
+            result = (
+                {
+                    "tools": [
+                        {"name": "memory_flag_list", "annotations": {"readOnlyHint": True}},
+                        {"name": "create_issue", "annotations": {"readOnlyHint": False}},
+                    ]
+                }
+                if body["method"] == "tools/list"
+                else {}
+            )
+            return httpx.Response(200, json={"id": body["id"], "result": result})
+
+        original = httpx.AsyncClient
+
+        def client(**kwargs: Any) -> httpx.AsyncClient:
+            return original(transport=httpx.MockTransport(handle), **kwargs)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(httpx, "AsyncClient", client)
+            scoped.setattr(discovery, "assert_public_https_url", lambda *a, **k: None)
+            return list(await discovery.read_mcp_catalogue(url, token))
 
     monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", _catalogue)
     creates: list[dict[str, Any]] = []
@@ -273,3 +298,56 @@ async def test_routine_read_marked_read_only_by_a_trusted_server_runs(
     else:
         assert sent["result"] == "deny", "the name decides: a noun-first read is a write"
         assert tokens == [], "no tools/list for an untrusted server"
+
+
+async def _create_with_rules(
+    rule_tools: frozenset[str], *, policy: ToolSafetyPolicy
+) -> dict[str, Any]:
+    creates: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_router(creates=creates, sends=[]).dispatch)
+    agent = ma_agent(
+        id="agent_x",
+        tools=[_toolset("daimon-mcp"), _toolset("linear")],
+        mcp_servers=[
+            {"name": "daimon-mcp", "type": "url", "url": _PUBLIC_URL},
+            {"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"},
+        ],
+    )
+    await create_session(
+        client,
+        agent=agent,
+        environment=ma_environment(id="env_x", name="env", created_at=_NOW.isoformat()),
+        mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
+        tool_safety=policy,
+        daimon_rule_tools=rule_tools,
+    )
+    (created,) = creates
+    return created["agent"]
+
+
+async def test_a_session_for_an_agent_with_daimon_rules_asks_on_call_tool_and_the_named_tool() -> (
+    None
+):
+    agent = await _create_with_rules(
+        frozenset({"hubspot_update_objects"}),
+        policy=ToolSafetyPolicy(enabled=True, agent_rules=True),
+    )
+
+    (daimon,) = [t for t in agent["tools"] if t.get("mcp_server_name") == "daimon-mcp"]
+    assert daimon["default_config"]["permission_policy"] == {"type": "always_allow"}
+    asked = sorted(
+        c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"
+    )
+    assert asked == ["add_skill", "call_tool", "hubspot_update_objects"]
+
+
+async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before() -> None:
+    policy = ToolSafetyPolicy(enabled=True, agent_rules=True)
+    without = await _create_with_rules(frozenset(), policy=policy)
+    inert = await _create_with_rules(
+        frozenset({"hubspot_update_objects"}), policy=ToolSafetyPolicy(enabled=True)
+    )
+
+    assert without == inert, "rules that are not applied leave the session's tools alone"
+    (daimon,) = [t for t in without["tools"] if t.get("mcp_server_name") == "daimon-mcp"]
+    assert [c["name"] for c in daimon["configs"]] == ["add_skill"]

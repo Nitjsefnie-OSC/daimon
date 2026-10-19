@@ -26,6 +26,7 @@ from daimon.core.config import (
     DiscordSettings,
     GeminiSettings,
     McpSettings,
+    MicrosoftAccountsSettings,
     NotebookSettings,
     Settings,
     SlackSettings,
@@ -67,6 +68,11 @@ def _fully_configured_settings() -> Settings:
             app_token=SecretStr("xapp-test-token"),
         ),
         crypto=CryptoSettings(keys=(SecretStr(Fernet.generate_key().decode()),)),
+        microsoft_accounts=MicrosoftAccountsSettings(
+            client_id="client-id",
+            client_secret=SecretStr("test-client-secret"),
+            tenant_id="00000000-0000-0000-0000-000000000001",
+        ),
         gemini=GeminiSettings(api_key=SecretStr("gemini-test-key")),
         notebook=NotebookSettings(
             host_url=HttpUrl("http://notebook-host:8001"),

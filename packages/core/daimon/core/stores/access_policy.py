@@ -200,7 +200,6 @@ async def set_access_policy(
         "channel_rules",
         "category_rules",
         "agent_rules",
-        "member_guest_ids",
         "invoker_role_ids",
     ):
         if not payload.get(key):
