@@ -68,6 +68,16 @@ async def _final_state(events: list[Any]) -> TurnState:
             ).model_dump(mode="json"),
         ),
     )
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+$",
+        lambda r, m: httpx.Response(
+            200,
+            json=ma_session(
+                id="ses_1", agent_id="agent_x", model="claude-sonnet-4-5", environment_id="env_x"
+            ).model_dump(mode="json"),
+        ),
+    )
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", lambda r, m: sse_response(events))
     router.add(
         "POST", r"/v1/sessions/[^/]+/events", lambda r, m: httpx.Response(200, json={"data": None})
