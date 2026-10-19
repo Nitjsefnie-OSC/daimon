@@ -62,7 +62,11 @@ SCOPE = resource_ports.mcp_scope(AUTH)
 SESSION = ma_session(
     id="session",
     agent=AGENT,
-    metadata={"daimon_tenant": str(TENANT), "daimon_account": str(ACCOUNT)},
+    metadata={
+        "daimon_tenant": str(TENANT),
+        "daimon_account": str(ACCOUNT),
+        "daimon_agent_chat": "true",
+    },
 )
 BODY = SESSION.model_dump(mode="json")
 MESSAGE = [{"type": "user.message", "content": [{"type": "text", "text": 'hi "世界"\n'}]}]
