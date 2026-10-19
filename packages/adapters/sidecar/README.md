@@ -36,3 +36,6 @@ session tool arrays before releasing it, including on errors and cancellation.
 It also invalidates cached tool hashes before restriction; after a process
 interruption or failed restore, the next bind reapplies its ordinary tools before
 an attended turn, while preserving recorded workspace and credential metadata.
+
+Evidence expires after seven days. A fresh event starts a new wake when an older
+pending batch has already expired, rather than joining a batch the reader will skip.

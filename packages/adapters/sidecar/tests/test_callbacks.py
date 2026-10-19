@@ -288,6 +288,21 @@ async def test_seven_day_retention_and_replay_window(db_session_factory, registe
         )
 
 
+async def test_new_event_after_retention_gets_a_fresh_wake(db_session_factory, registered):
+    old_key = await deliver(db_session_factory, event(registered, body=b"expired evidence"))
+    async with db_session_factory.begin() as db:
+        await db.execute(text("UPDATE watch_inbox SET accepted_at=now()-interval '8 days'"))
+        await db.execute(text("UPDATE watch_firings SET created_at=now()-interval '8 days'"))
+        await watches.prune_evidence(db)
+    new_key = await deliver(db_session_factory, event(registered, body=b"fresh evidence"))
+    assert new_key != old_key
+    async with db_session_factory() as db:
+        fresh = await get_continuation(db, idempotency_key=new_key)
+        old = await get_continuation(db, idempotency_key=old_key)
+        assert "fresh evidence" in await watches.watch_seed(db, fresh, now=datetime.now(UTC))
+        assert await watches.watch_seed(db, old, now=datetime.now(UTC)) is None
+
+
 @pytest.mark.parametrize(
     "header", ["X-Signature", "X-Timestamp", "X-Page-ID", "X-Event-ID", "X-Watch-Key-ID"]
 )
@@ -339,6 +354,31 @@ async def test_live_binding_and_turn_cap_refuse(db_session_factory, registered):
         await db.execute(text("UPDATE thread_sessions SET channel_id='elsewhere'"))
     with pytest.raises(DBAPIError):
         await deliver(db_session_factory, event(registered))
+
+
+@pytest.mark.parametrize("cap", ["turns", "fires"])
+async def test_watch_caps_reject_new_evidence_without_extra_wakes(
+    db_session_factory, registered, cap
+):
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE watches SET max_turns_per_day=1"
+                if cap == "turns"
+                else "UPDATE watches SET max_fires=1"
+            )
+        )
+    await deliver(db_session_factory, event(registered))
+    if cap == "turns":
+        # A completed wake cannot coalesce; another event needs fresh capacity.
+        async with db_session_factory.begin() as db:
+            await db.execute(text("UPDATE task_continuations SET status='delivered'"))
+    with pytest.raises(DBAPIError) as refused:
+        await deliver(db_session_factory, event(registered))
+    assert getattr(refused.value.orig, "sqlstate", None) == ("54000" if cap == "turns" else "42501")
+    async with db_session_factory() as db:
+        assert len(await watches.list_evidence(db, registered.id)) == 1
+        assert await db.scalar(text("SELECT count(*) FROM task_continuations")) == 1
 
 
 async def test_real_restricted_login_cannot_enumerate_credentials_edit_policy_or_forge_wakes(

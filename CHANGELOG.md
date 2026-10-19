@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent chat and hub mutations require a session opened on that headless surface. Same-account platform sessions and legacy sessions without proven headless provenance cannot be continued, cancelled or archived through it. Unauthorized callers are refused before waiting on a session mutation fence.
 - Restore ordinary session tools after page-watch turns, including cancellation,
   and reconcile tools after interrupted restrictions without losing workspace metadata.
+- Keep fresh page events from being merged into expired watch wakes.
 
 - Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
 

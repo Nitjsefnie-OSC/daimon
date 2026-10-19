@@ -119,9 +119,11 @@ BEGIN
            +octet_length(p_payload)>16777216 THEN
         RAISE EXCEPTION 'evidence quota' USING ERRCODE='54000';
     END IF;
+    -- New evidence must not join a batch whose reader retention already expired.
     SELECT f.wake_key INTO k FROM {schema}.watch_firings f JOIN {schema}.task_continuations q
       ON q.idempotency_key=f.wake_key WHERE f.watch_id=w.id AND f.revision=w.revision
-      AND f.generation=c.generation AND q.status='pending' AND q.started_at IS NULL
+      AND f.generation=c.generation AND f.created_at>t-interval '7 days'
+      AND q.status='pending' AND q.started_at IS NULL
       ORDER BY f.created_at DESC LIMIT 1 FOR UPDATE OF q;
     IF k IS NULL THEN
         SELECT count(*) INTO n FROM {schema}.watch_firings WHERE watch_id=w.id
