@@ -415,7 +415,7 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         changes who answers a channel; neither does this. The destination must
         already answer in this workspace. A member may hand only to an agent of
         this channel (the one it answers with, or one pinned to it); any other
-        needs a server admin.
+        needs an admin.
 
         From the next message here, that agent answers, with its own keys,
         connections and memory; conversation, decisions and files move with the

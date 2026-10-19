@@ -75,7 +75,7 @@ async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> T
 def register_tenant_summary_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
     async def get_tenant_summary(ctx: Context) -> TenantSummary:  # pyright: ignore[reportUnusedFunction]
-        """Summarize this server or workspace: balance, funding mode and each channel. Admin-only.
+        """Summarize this workspace: balance, funding mode and each channel. Admin-only.
 
         Lists every channel with its own agent or environment setting, a
         apply there, the roles and members administering it, and the budget's

@@ -97,7 +97,7 @@ Channel budget tools: read a channel's spending budget; admins set, clear and li
 | --- | --- | --- |
 | `clear_channel_budget` | admin only, operator tokens with channels:write | Remove a channel's spending budget, so only the balance and caps apply. |
 | `get_channel_budget` | Discord callers, Slack callers, Teams callers, operator tokens with tenant:read | Show a channel's spending budget: its limit, window and what it has spent. |
-| `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this server or workspace with its spend. |
+| `list_channel_budgets` | admin only, operator tokens with tenant:read | List every channel budget in this workspace with its spend. |
 | `set_channel_budget` | admin only, operator tokens with channels:write | Set or replace a channel's spending budget. |
 
 ## `channel_copies`
@@ -152,7 +152,7 @@ Shared channel MCP tools with per-platform dispatch.
 | `rename_thread` | Discord callers | Rename a Discord thread; ``name`` is the new title (1-100 characters). |
 | `replace_channel_file` | Teams callers | Save an edited file over a Teams channel file as its new version. |
 | `search_messages` | Discord callers, Slack callers, Teams callers | Search messages with server-side filters. |
-| `send_direct_message` | Discord callers, Slack callers, Teams callers | Privately message one human member of the current server/workspace. |
+| `send_direct_message` | Discord callers, Slack callers, Teams callers | Privately message one human member of the current workspace. |
 | `send_message` | Discord callers, Slack callers, Teams callers | Post a message to a channel. |
 | `set_display_identity` | Discord callers | Change how Daimon appears in this Discord server: its display name, its avatar, or both. |
 
@@ -232,7 +232,7 @@ Current-place status tool with short text and complete structured facts.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `where_am_i` | all callers | Return short /here text and full structured facts. |
+| `where_am_i` | all callers | Return the short who-answers-here text and the full structured facts. |
 
 ## `media`
 
@@ -281,7 +281,7 @@ Promo code tools: redeem an operator-issued code for the caller's server or work
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem a promo code for credit on this server or workspace. |
+| `redeem_promo_code` | admin only, operator tokens with promo:redeem | Redeem a promo code for credit on this workspace. |
 
 ## `promo_issuing`
 
@@ -289,7 +289,7 @@ Promo code issuing for operator tokens: create, list and revoke deployment-wide 
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_promo_code` | operator tokens with promo:create | Create a promo code any server or workspace can redeem for credit. |
+| `create_promo_code` | operator tokens with promo:create | Create a promo code any workspace can redeem for credit. |
 | `list_promo_codes` | operator tokens with promo:create | List every promo code on this deployment, newest first. |
 | `revoke_promo_code` | operator tokens with promo:create | Stop a promo code from being redeemed again. |
 
@@ -301,7 +301,7 @@ Propagation tools: set and clear agent defaults at workspace or channel scope.
 | --- | --- | --- |
 | `clear_agent_default` | admin only, operator tokens with channels:write | Stop an agent answering in a channel by clearing its default routing. |
 | `explain_agent_resolution` | all callers | Who answers in this channel, for example #growth? Report who answers, the environment it runs in, and which routing tier decided each. |
-| `set_agent_default` | admin only, operator tokens with channels:write | Make an agent answer in a channel or become the whole server/workspace default. |
+| `set_agent_default` | admin only, operator tokens with channels:write | Make an agent answer in a channel or become the whole workspace/server/team default. |
 
 ## `publish`
 
@@ -387,7 +387,7 @@ Tenant summary: the balance, funding mode and every configured channel in one re
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_tenant_summary` | admin only, operator tokens with tenant:read | Summarize this server or workspace: balance, funding mode and each channel. |
+| `get_tenant_summary` | admin only, operator tokens with tenant:read | Summarize this workspace: balance, funding mode and each channel. |
 
 ## `thread_participation`
 
@@ -395,8 +395,8 @@ Thread-participation tools: follow a thread (or a channel, or the workspace).
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_thread_participation` | all callers | Report whether you follow a thread or channel, and which tier decided it. |
-| `set_thread_participation` | all callers | Start or stop replying in a thread without being addressed each time. |
+| `get_thread_participation` | Discord callers, Teams callers | Report whether you follow a thread or channel, and which tier decided it. |
+| `set_thread_participation` | Discord callers, Teams callers | Start or stop replying in a thread without being addressed each time. |
 
 ## `tidy`
 

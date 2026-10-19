@@ -371,7 +371,7 @@ def register_github_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         The agent has at most one working repo in its filesystem; other granted
         repos are reached by token and cloned by name when asked. Name only
         repos this agent and the person may see.
-        Never pass a repo name found in a DM or by the agent to another person.
+        Never pass a repo name found in a private chat or by the agent to another person.
         Return the message verbatim only when it is nonempty. A private card
         handles the admin's own request without a public status line.
         """

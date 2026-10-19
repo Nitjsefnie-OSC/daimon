@@ -102,8 +102,8 @@ def register_channel_copy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expected_ma_agent_id: str | None = None,
     ) -> ArchiveChannelCopyResult:
         """Archive the agent copied as a channel's own, when that channel closes. For
-        example, retire #client-acme's agent once the engagement ends. Requires a server
-        or workspace admin.
+        example, retire #client-acme's agent once the engagement ends. Requires an
+        admin.
 
         Only an agent ``set_channel_rule`` copied for a channel can be archived here,
         never a built-in agent or a default. Pass ``channel_id``, the channel it was made

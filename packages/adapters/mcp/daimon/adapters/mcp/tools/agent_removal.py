@@ -365,7 +365,7 @@ def register_agent_removal_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``attach_mcp_server`` adds public endpoints; ``request_mcp_token`` and
         ``request_mcp_oauth`` enroll authenticated connections. The built-in
         daimon server cannot be removed. Use this when a connection keeps
-        failing: a server admin can disconnect from any agent, built-in Daimon
+        failing: an admin can disconnect from any agent, built-in Daimon
         included; a member can disconnect from an agent that is not a channel or
         workspace default.
         Pass this turn's ``origin_context_id`` so its channel counts."""

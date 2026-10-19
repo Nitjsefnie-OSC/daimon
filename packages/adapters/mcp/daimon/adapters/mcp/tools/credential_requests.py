@@ -847,7 +847,7 @@ def register_credential_request_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         Match supported authentication; an API key is not automatically an MCP token.
 
         Use ``attach_mcp_server`` for public servers without tokens. Never accept
-        credentials in chat. Connecting requires a workspace or server admin.
+        credentials in chat. Connecting requires an admin.
         This applies to new servers and replacements.
 
         Posts a requester-only card naming the agent and the server, opening a private

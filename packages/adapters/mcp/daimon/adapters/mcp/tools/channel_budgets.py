@@ -318,7 +318,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ChannelBudgetLookup:
         """Show a channel's spending budget: its limit, window and what it has spent.
 
-        For the channel this turn is in (in a DM, the channel it was moved
+        For the channel this turn is in (in a private chat, the channel it was moved
         from), omit ``channel_id`` and pass this turn's
         ``origin_context_id``. For another channel, pass its id; a
         thread id resolves to its parent channel. Any member may read the
@@ -331,7 +331,7 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"admin", *scope_tags("tenant:read")})
     async def list_channel_budgets(ctx: Context) -> list[ChannelBudgetResult]:  # pyright: ignore[reportUnusedFunction]
-        """List every channel budget in this server or workspace with its spend. Admin-only."""
+        """List every channel budget in this workspace with its spend. Admin-only."""
         return await _list_channel_budgets_impl(runtime, await _auth(ctx))
 
     @mcp.tool(tags={"admin", *scope_tags("channels:write")})

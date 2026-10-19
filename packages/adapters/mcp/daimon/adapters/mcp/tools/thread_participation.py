@@ -14,7 +14,9 @@ Deliberately NOT tagged ``admin``: thread scope is a member action, and the
 tool would be invisible to the very callers who ask for it. Channel and
 workspace scope are admin-only, enforced inside the impl instead.
 
-Discord and Teams follow threads; Slack callers are refused before any read.
+Discord and Teams follow threads, so the tools are tagged for those two and Slack
+callers never see them; a call that still arrives from another platform is refused
+before any read.
 """
 
 from __future__ import annotations
@@ -287,7 +289,7 @@ async def _get_thread_participation_impl(
 
 
 def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool
+    @mcp.tool(tags={"discord", "teams"})  # pyright: ignore[reportArgumentType]
     async def set_thread_participation(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         mode: Literal["on", "off", "disabled", "inherit"],
@@ -300,7 +302,7 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
         thread (its parent is looked up, so ``channel_id`` is optional);
         ``channel_id`` from ``<channel role="parent_channel">`` alone for a
         channel; neither for the workspace. Channel and workspace scope need an
-        admin (Manage Server on Discord, an admin team owner on Teams).
+        admin.
 
         Modes: ``on`` follow, ``off`` do not, ``disabled`` lock a channel or
         workspace so nothing below can turn it on (not valid for a thread),
@@ -311,7 +313,7 @@ def register_thread_participation_tools(mcp: FastMCP, runtime: McpRuntime) -> No
             runtime, await _auth(ctx), mode, thread_id, channel_id
         )
 
-    @mcp.tool
+    @mcp.tool(tags={"discord", "teams"})  # pyright: ignore[reportArgumentType]
     async def get_thread_participation(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         thread_id: str | None = None,

@@ -45,7 +45,7 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         embed is replaced by the new text). A person's message, another
         agent's or another bot's is refused. A reply or card is refused while
         its turn is still running, and unless the person asking started that
-        turn, opened the thread, or is a server admin. channel_id is where
+        turn, opened the thread, or is an admin. channel_id is where
         the message is (Discord: the thread id for a message in a thread;
         Slack: the channel id, and message_id is the message ts; Teams: the
         conversation_id and activity_id send_message returned). Pass this
@@ -132,7 +132,7 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Its messages stay readable and a new post reopens it. Use it for a
         finished or abandoned thread of yours that others wrote in. A thread
         opened from someone's mention can be archived only when that person
-        or a server admin asks. The thread you are answering in is archived
+        or an admin asks. The thread you are answering in is archived
         when your turn ends (action "archive_scheduled"), so say it will be
         archived rather than that it is. Pass origin_context_id. Discord-only:
         Slack threads cannot be archived.
@@ -153,7 +153,7 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Remove your own messages from a thread you opened.
 
         Discord: a thread from create_thread or from a mention (the latter
-        only when the person who mentioned you or a server admin asks); your
+        only when the person who mentioned you or an admin asks); your
         posts, replies and status cards go, except the running turn's and
         replies to someone the person asking cannot speak for.
         Discord keeps the thread and everyone else's messages. Slack refuses

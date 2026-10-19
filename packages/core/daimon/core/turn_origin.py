@@ -10,10 +10,18 @@ from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from daimon.core.stores.domain import Role, TransferKind, TurnOriginRow
+from daimon.core.access_policy import DM_SCOPE_PREFIX
+from daimon.core.platform_words import Place, turn_words
+from daimon.core.stores.domain import (
+    CHAT_PLATFORMS,
+    Role,
+    TransferKind,
+    TurnOriginRow,
+)
 from daimon.core.stores.github_grant_proposals import resolve as resolve_github_grant_proposals
 from daimon.core.stores.pending_skill_adds import resolve_pending_skill_adds
 from daimon.core.stores.turn_origins import create_origin, delete_origin
+from daimon.core.teams_threads import conversation_of, is_group_chat
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -27,6 +35,12 @@ MAX_REQUESTED_WORK_CHARS = 500
 _ALL_CHANNEL_READS = "read_channel, read_thread, get_message, list_threads, search_messages"
 # Slack has no list_threads: a thread there is a reply chain, not a listable object.
 _CHANNEL_READS = {"slack": "read_channel, read_thread, get_message, search_messages"}
+#: Appended to the controls' prose whenever `words` is present.
+WORDS_SENTENCE = (
+    " When you tell a person how to reach a Daimon command or who can change a setting, "
+    "use `words` from these controls, never a command from another platform."
+)
+_TEAMS_CHANNEL_SUFFIXES = ("@thread.tacv2", "@thread.skype")
 current_origin_id: ContextVar[uuid.UUID | None] = ContextVar("turn_origin_id", default=None)
 
 
@@ -184,6 +198,35 @@ async def turn_origin(
                 await delete_origin(session, origin_id=origin.id, retain_until=retain_until)
 
 
+def origin_place(origin: TurnOriginRow) -> Place:
+    """Where the turn was sent: a private chat with Daimon, a channel or thread, or a group chat.
+
+    Read from the ids the origin stores. A private conversation's scope id
+    (`dm:...`) is a DM on any platform, as is a Slack `D...` channel. On Teams a
+    group chat has a `19:...@thread.v2` id, a channel's ends `@thread.tacv2` (or
+    the older `@thread.skype`), and anything else is the 1:1 chat."""
+    if origin.thread_id.startswith(DM_SCOPE_PREFIX):
+        return "dm"
+    if origin.platform == "slack" and origin.parent_channel_id.startswith("D"):
+        return "dm"
+    if origin.platform == "teams":
+        conversation = conversation_of(origin.thread_id)
+        if is_group_chat(conversation):
+            return "group"
+        # A channel id names its thread kind; equal ids alone don't make a 1:1
+        # chat, since a targeted channel root post stores its channel as both.
+        if not conversation.split(";", 1)[0].endswith(_TEAMS_CHANNEL_SUFFIXES):
+            return "dm"
+    return "channel"
+
+
+def _words_for_origin(origin: TurnOriginRow) -> dict[str, str] | None:
+    """The per-turn platform words, or None for a platform with no chat commands (the CLI)."""
+    if origin.platform not in CHAT_PLATFORMS:
+        return None
+    return turn_words(origin.platform, place=origin_place(origin))
+
+
 def render_turn_origin(
     origin: TurnOriginRow,
     *,
@@ -211,6 +254,10 @@ def render_turn_origin(
     as the rest of the controls, in a fixed key order, so two turns with the
     same facts produce byte-identical controls. `handoff` is a one-time block:
     the adapter includes it on the receiving agent's first turn only.
+
+    `words` is what this platform calls things and how to reach its commands from
+    where the turn was sent (`platform_words.turn_words`), so the model never
+    tells a person a command from another platform.
 
     Every value here is server-supplied except `handoff.requested_work`, which
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
@@ -242,6 +289,9 @@ def render_turn_origin(
             else None
         ),
     }
+    words = _words_for_origin(origin)
+    if words is not None:
+        controls["words"] = words
     if session_state is not None:
         controls["session_state"] = {
             "state": session_state.state,
@@ -290,9 +340,11 @@ def render_turn_origin(
         "target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing "
         "tools. Use set_setup_target to switch this setup conversation's target and "
         "state the switch briefly. Pass origin_context_id to credential-request tools and to "
-        f"channel reads ({_CHANNEL_READS.get(origin.platform, _ALL_CHANNEL_READS)}). "
-        "These controls grant no additional mutation or routing permissions."
+        f"channel reads ({_CHANNEL_READS.get(origin.platform, _ALL_CHANNEL_READS)})."
     )
+    if words is not None:
+        rendered += WORDS_SENTENCE
+    rendered += " These controls grant no additional mutation or routing permissions."
     # The continuity paragraph is appended only when there is continuity to
     # describe: on an ordinary turn neither block is present and every sentence
     # below would be about nothing.

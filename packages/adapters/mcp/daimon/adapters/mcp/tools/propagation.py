@@ -471,14 +471,14 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         channel_id: str | None = None,
         expected_ma_agent_id: str | None = None,
     ) -> SetDefaultResult:
-        """Make an agent answer in a channel or become the whole server/workspace default.
+        """Make an agent answer in a channel or become the whole workspace/server/team default.
         For example, make churn-explorer answer in #growth. Changes the agent that answers;
         use ``clear_agent_default`` to stop that routing.
 
         When ``channel_id`` is provided the default is scoped to that channel;
         omit it to set the workspace-wide default.  Any existing default at the
         chosen scope is replaced (last-write-wins; an audit stamp is recorded by
-        core). Requires Manage Server (admin).
+        core). Requires an admin.
 
         Discord: ``channel_id`` MUST be the parent channel's id — the one
         your context gives as
@@ -507,7 +507,7 @@ def register_propagation_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         When ``channel_id`` is provided only that channel's default is cleared;
         omit it to clear the workspace-wide default.  If the scope had no
-        default the call is a no-op (idempotent). Requires Manage Server (admin).
+        default the call is a no-op (idempotent). Requires an admin.
 
         Discord: ``channel_id`` MUST be the parent channel's id
         (``<channel platform="discord" id="..." role="parent_channel">``),

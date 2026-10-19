@@ -248,8 +248,8 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         copy_from: str | None = None,
         release_agents: bool = False,
     ) -> SetChannelRuleResult:
-        """Set who can read a channel and who can post there. Requires a server or
-        workspace admin. Leave one out to keep it.
+        """Set who can read a channel and who can post there. Requires an
+        admin. Leave one out to keep it.
 
         ``readers``: ``any``; ``inside``, only turns in this channel read its messages
         and conversations; or ``own``, which also keeps it to its own agents: only they
@@ -283,7 +283,7 @@ def register_channel_rule_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> SetAgentRuleResult:
         """Set where an agent runs: only in the ``runs_in`` channels and their threads,
         or, with null, wherever it is set to answer; an empty list runs it nowhere.
-        Requires a server or workspace admin.
+        Requires an admin.
 
         Outside its rule its turns are refused. An agent with a rule messages only
         whoever asked, asks before publishing, and can't be copied. A channel's own
