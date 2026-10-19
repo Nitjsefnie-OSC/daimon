@@ -1,26 +1,25 @@
 """Async Alembic env; DSN from DAIMON_DATABASE_URL or DAIMON_DATABASE__URL.
 
-Legacy preview stamps are a one-time boundary for disposable preview databases.
-Only online ``upgrade``/``downgrade`` repair them, targeting canonical revisions
-(or relative steps). Old IDs are not supported as command targets. Stamp and
-DB-aware inspection/history/check/revision commands never repair: they reject
-legacy stamps by name and direct operators to ``alembic upgrade head``. History
-and revision enter this environment via ``revision_environment`` in alembic.ini.
-Offline SQL never reads a database and accepts only canonical revision ranges;
-legacy IDs in a supplied range get the same actionable diagnostic.
+Invariant: main revisions receive no repair writes. Only online upgrade/downgrade
+may atomically repair a stored legacy preview stamp in the migration transaction.
+Every other command is non-mutating, even on an empty/unversioned database.
+Online stamp/ensure_version bookkeeping is therefore rejected; use --sql to
+inspect bookkeeping SQL. Plain history/heads remain graph-only. Commands that
+enter this env diagnose legacy stamps without repairing; old literal targets and
+offline legacy ranges are unsupported: run ``alembic upgrade head`` online first.
 
-Online upgrade/downgrade hold a database-scoped session advisory lock from before
-the first head read through the entire migration, including autocommit blocks.
-Injected upgrade/downgrade connections must have no active transaction.
+The DEPLOYER serializes migrations; this environment adds no advisory lock or
+retry loop. Lane: .github/workflows/lane.yml:46, group lane-<lane>. Staging/prod:
+.github/workflows/deploy.yml:66, group deploy-gcp-<environment>, with the blocking
+Cloud Run migrate job at :206-210. These callers must run one migrator at a time.
+A concurrent manual run can fail with ordinary PostgreSQL DDL conflicts; after
+the other invocation finishes, retry normally, as on main.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 
 from alembic import context, util
 from alembic.operations import Operations
@@ -51,9 +50,6 @@ LEGACY_REVISIONS = {
     "0112_unattended_turn_provenance": "0113_unattended_turn_provenance",
     "0113_microsoft_accounts": "0113_unattended_turn_provenance",
 }
-# PostgreSQL advisory locks are database-scoped. A stable key serializes every
-# migrator for this database, independently of other databases on the same host.
-MIGRATION_LOCK = 0x4441494D4F4E  # DAIMON
 
 
 def _legacy_error(revision: str) -> util.CommandError:
@@ -83,40 +79,6 @@ def _is_migration_command() -> bool:
     ) in ("upgrade", "downgrade")
 
 
-@contextmanager
-def _migration_lock(connection: Connection) -> Iterator[None]:
-    if connection.in_transaction():
-        raise util.CommandError(
-            "Upgrade/downgrade requires a connection without an active transaction"
-        )
-    locked = False
-    try:
-        while not locked:
-            locked = bool(
-                connection.scalar(
-                    text("SELECT pg_try_advisory_lock(:key)"), {"key": MIGRATION_LOCK}
-                )
-            )
-            # A blocking SELECT pg_advisory_lock holds a transaction snapshot:
-            # CREATE INDEX CONCURRENTLY can wait for that snapshot while the
-            # waiter waits for us. End each nonblocking attempt's transaction
-            # before sleeping, so queued migrators cannot deadlock index builds.
-            # A successfully acquired session lock survives this commit too.
-            connection.commit()
-            if not locked:
-                time.sleep(0.1)
-        yield
-    finally:
-        # An error may have aborted a transaction; release on the same session
-        # without hiding the migration error behind InFailedSQLTransaction.
-        connection.rollback()
-        # A dead session already released its locks; do not reconnect just to
-        # unlock, or mask the original disconnect with a new connection error.
-        if locked and not connection.closed and not connection.invalidated:
-            connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": MIGRATION_LOCK})
-            connection.commit()
-
-
 def run_migrations_offline() -> None:
     context.configure(
         url=config.get_main_option("sqlalchemy.url"),
@@ -132,18 +94,25 @@ def run_migrations_offline() -> None:
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
     _reject_legacy_targets()
-    if _is_migration_command():
-        with _migration_lock(connection), context.begin_transaction():
+    migrating = _is_migration_command()
+    if not migrating:
+        # Alembic otherwise creates alembic_version on an empty database even
+        # when the inspection callback yields no migration steps.
+        context.configure(connection=connection, target_metadata=target_metadata, dont_mutate=True)
+    with context.begin_transaction():
+        if migrating:
             _normalize_preview_revision(connection)
-            context.run_migrations()
-    else:
-        with context.begin_transaction():
-            # Read the stored IDs before Alembic tries to resolve deleted nodes.
-            # In particular, stamp (including --purge) must never run repair DDL.
+        else:
             for revision in context.get_context().get_current_heads():
                 if revision in LEGACY_REVISIONS:
                     raise _legacy_error(revision)
-            context.run_migrations()
+            fn = context.get_context().opts.get("fn")
+            if getattr(fn, "__name__", None) in ("do_stamp", "do_ensure_version"):
+                raise util.CommandError(
+                    "Online stamp/ensure_version is disabled: only alembic upgrade/downgrade "
+                    "may write database state. Use --sql to inspect bookkeeping SQL."
+                )
+        context.run_migrations()
 
 
 def _normalize_preview_revision(connection: Connection) -> None:

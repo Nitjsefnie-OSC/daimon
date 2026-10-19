@@ -67,12 +67,6 @@ def _historical_scripts(tmp_path: Path) -> Path:
 
 def _assert_head(connection: Connection) -> None:
     assert connection.scalar(text("SELECT version_num FROM alembic_version")) == HEAD
-    assert not connection.scalar(
-        text(
-            "SELECT EXISTS (SELECT FROM pg_locks WHERE locktype = 'advisory' "
-            "AND pid = pg_backend_pid())"
-        )
-    )
 
     def include_name(name: str | None, kind: str, _parents: dict[str, str | None]) -> bool:
         return kind != "table" or name in TABLES
@@ -278,51 +272,21 @@ def _record_sql(statements: list[str]) -> Callable[..., None]:
     return record
 
 
-@pytest.mark.parametrize("start", [MAIN, "0111_routine_dm_destination", "0113_microsoft_accounts"])
-@pytest.mark.parametrize("purge", [False, True])
-async def test_stamp_never_runs_repair_ddl(
+LEGACY = (
+    "0110_cold_dm_agent",
+    "0111_routine_dm_destination",
+    "0112_unattended_turn_provenance",
+    "0113_microsoft_accounts",
+)
+
+
+@pytest.mark.parametrize("start", ["empty", "unversioned", MAIN, *LEGACY])
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_diagnostics_never_write_even_without_a_version_table(
     migration_database: AsyncEngine,
     tmp_path: Path,
     start: str,
-    purge: bool,
-) -> None:
-    historical = _historical_scripts(tmp_path)
-    async with migration_database.connect() as connection:
-
-        def exercise(sync: Connection) -> None:
-            config = _config(SCRIPTS, sync)
-            command.upgrade(config if start == MAIN else _config(historical, sync), start)
-            statements: list[str] = []
-            recorder = _record_sql(statements)
-            event.listen(sync, "before_cursor_execute", recorder)
-            try:
-                if start == MAIN:
-                    command.stamp(config, MAIN, purge=purge)
-                else:
-                    with pytest.raises(util.CommandError, match=f"{start}.*alembic upgrade head"):
-                        command.stamp(config, MAIN, purge=purge)
-            finally:
-                event.remove(sync, "before_cursor_execute", recorder)
-            assert not [
-                sql
-                for sql in statements
-                if sql.lstrip().split()[0].upper()
-                in {"CREATE", "ALTER", "DROP", "TRUNCATE", "COMMENT", "GRANT", "REVOKE", "DO"}
-            ]
-            assert sync.scalar(text("SELECT version_num FROM alembic_version")) == start
-            assert inspect(sync).has_table("microsoft_user_tokens") == (
-                start != "0111_routine_dm_destination"
-            )
-            sync.commit()
-
-        await connection.run_sync(exercise)
-
-
-@pytest.mark.parametrize("start", ["0111_routine_dm_destination", "0113_microsoft_accounts"])
-async def test_legacy_inspection_fails_read_only_with_upgrade_instructions(
-    migration_database: AsyncEngine,
-    tmp_path: Path,
-    start: str,
+    read_only: bool,
 ) -> None:
     historical = _historical_scripts(tmp_path)
     canonical = tmp_path / "canonical"
@@ -330,58 +294,107 @@ async def test_legacy_inspection_fails_read_only_with_upgrade_instructions(
     async with migration_database.connect() as connection:
 
         def exercise(sync: Connection) -> None:
-            command.upgrade(_config(historical, sync), start)
             config = _config(canonical, sync)
-            # A broken revision command may only write into the temporary copy.
-            files_before = set((canonical / "versions").glob("*.py"))
-            sync.execute(text("SET default_transaction_read_only = on"))
+            if start == "unversioned":
+                command.upgrade(config, FORK)
+                sync.execute(text("DROP TABLE alembic_version"))
+                sync.commit()
+            elif start != "empty":
+                command.upgrade(config if start == MAIN else _config(historical, sync), start)
+            tables_before = set(inspect(sync).get_table_names())
+            stamp_before = (
+                sync.scalar(text("SELECT version_num FROM alembic_version"))
+                if "alembic_version" in tables_before
+                else None
+            )
             sync.commit()
-            actions: list[Callable[[], object]] = [
-                lambda: command.current(config),
-                lambda: command.history(config),
-                lambda: command.history(config, rev_range="current:head"),
-                lambda: command.history(config, indicate_current=True),
-                lambda: command.check(config),
-                lambda: command.revision(config, message="must not write"),
-                lambda: command.revision(config, message="must not write", autogenerate=True),
-                lambda: command.upgrade(config, f"{start}:head", sql=True),
-                lambda: command.downgrade(config, f"{start}:{MAIN}", sql=True),
-                lambda: command.upgrade(config, start),
-                lambda: command.downgrade(config, start),
-            ]
+            if read_only:
+                sync.execute(text("SET default_transaction_read_only = on"))
+                sync.commit()
             statements: list[str] = []
             recorder = _record_sql(statements)
             event.listen(sync, "before_cursor_execute", recorder)
             try:
-                for action in actions:
-                    with pytest.raises(
-                        util.CommandError, match=f"{start}.*alembic upgrade head"
-                    ) as error:
-                        action()
-                    assert "Can't locate revision" not in str(error.value)
+                # Graph-only commands must not enter env.py or contact the DB.
+                command.history(config)
+                command.heads(config)
+                assert not statements
+                if start in LEGACY:
+                    diagnostics: list[Callable[[], object]] = [
+                        lambda: command.current(config),
+                        lambda: command.history(config, rev_range="current:head"),
+                        lambda: command.history(config, indicate_current=True),
+                        lambda: command.check(config),
+                        lambda: command.stamp(config, MAIN),
+                        lambda: command.stamp(config, MAIN, purge=True),
+                        lambda: command.revision(
+                            config, message="must not write", autogenerate=True
+                        ),
+                        lambda: command.upgrade(config, f"{start}:head", sql=True),
+                        lambda: command.downgrade(config, f"{start}:{MAIN}", sql=True),
+                    ]
+                    for action in diagnostics:
+                        with pytest.raises(
+                            util.CommandError, match=f"{start}.*alembic upgrade head"
+                        ) as error:
+                            action()
+                        assert "Can't locate revision" not in str(error.value)
+                else:
+                    command.current(config)
+                    with pytest.raises(util.CommandError):
+                        command.check(config)
+                    for purge in (False, True):
+                        with pytest.raises(
+                            util.CommandError, match="Online stamp/ensure_version is disabled"
+                        ):
+                            command.stamp(config, MAIN, purge=purge)
+                with pytest.raises(util.CommandError):
+                    command.ensure_version(config)
             finally:
                 event.remove(sync, "before_cursor_execute", recorder)
-            assert all(sql.lstrip().upper().startswith("SELECT") for sql in statements)
-            assert sync.scalar(text("SELECT version_num FROM alembic_version")) == start
-            assert inspect(sync).has_table("microsoft_user_tokens") == (
-                start == "0113_microsoft_accounts"
-            )
-            assert set((canonical / "versions").glob("*.py")) == files_before
+            assert all(sql.lstrip().upper().startswith(("SELECT", "SHOW")) for sql in statements)
+            assert set(inspect(sync).get_table_names()) == tables_before
+            if stamp_before is not None:
+                assert sync.scalar(text("SELECT version_num FROM alembic_version")) == stamp_before
             sync.commit()
 
         await connection.run_sync(exercise)
 
 
-# Separate Python interpreters exercise the real environment/command API on
-# independent sessions. Assert the session lock during each concurrent-index
-# DDL statement, after autocommit_block has committed the migration transaction.
+@pytest.mark.parametrize("revision", ["0092_routine_post_source", FORK, MAIN])
+async def test_main_same_target_receives_no_repair_writes(
+    migration_database: AsyncEngine,
+    revision: str,
+) -> None:
+    async with migration_database.connect() as connection:
+
+        def exercise(sync: Connection) -> None:
+            config = _config(SCRIPTS, sync)
+            command.upgrade(config, revision)
+            statements: list[str] = []
+            recorder = _record_sql(statements)
+            event.listen(sync, "before_cursor_execute", recorder)
+            try:
+                command.upgrade(config, revision)
+            finally:
+                event.remove(sync, "before_cursor_execute", recorder)
+            assert statements
+            assert all(sql.lstrip().upper().startswith("SELECT") for sql in statements)
+            assert not inspect(sync).has_table("microsoft_user_tokens") or revision == MAIN
+            sync.commit()
+
+        await connection.run_sync(exercise)
+
+
+# Two independent processes intentionally bypass the deployer's single-migrator
+# contract. PostgreSQL rejects one transaction; no custom lock/retry machinery.
 _MIGRATOR = r"""
 import asyncio
 import sys
 from alembic import command
 from alembic.config import Config
 from daimon.testing.db import build_test_engine, require_owned_sessionmaker
-from sqlalchemy import event, text
+from sqlalchemy import text
 
 async def main():
     engine = build_test_engine(sys.argv[1], "public")
@@ -390,16 +403,9 @@ async def main():
         async with engine.connect() as connection:
             await connection.execute(text("SELECT set_config('application_name', :name, false)"), {"name": sys.argv[3]})
             await connection.commit()
+            print("ready", flush=True)
+            sys.stdin.readline()
             def migrate(sync):
-                def check_lock(conn, cursor, statement, parameters, context, executemany):
-                    if statement.lstrip().startswith("SELECT pg_try_advisory_lock"):
-                        print("migration-lock-attempt", flush=True)
-                    if "SELECT alembic_version.version_num" in statement:
-                        print("migration-head-read", flush=True)
-                    if statement.lstrip().startswith("CREATE INDEX CONCURRENTLY"):
-                        assert conn.scalar(text("SELECT EXISTS (SELECT FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid())"))
-                        print("concurrent-index-session-lock", flush=True)
-                event.listen(sync, "after_cursor_execute", check_lock)
                 config = Config(sys.argv[2])
                 config.attributes["connection"] = sync
                 command.upgrade(config, "head")
@@ -415,8 +421,8 @@ async def _wait_for_backend(
     name: str,
     wait_event: str,
     process: asyncio.subprocess.Process,
-) -> int:
-    async with asyncio.timeout(60):
+) -> None:
+    async with asyncio.timeout(3):
         while True:
             if process.returncode is not None:
                 output, _ = await process.communicate()
@@ -428,103 +434,98 @@ async def _wait_for_backend(
                 ),
                 {"name": name, "event": wait_event},
             )
-            # pg_stat_activity snapshots are cached until transaction end.
             await connection.commit()
             if pid is not None:
-                assert isinstance(pid, int)
-                return pid
-            await asyncio.sleep(0.05)
+                return
+            await asyncio.sleep(0.01)
 
 
-@pytest.mark.parametrize("start", ["0092_routine_post_source", MAIN, "0111_routine_dm_destination"])
-async def test_two_processes_serialize_before_head_read_through_autocommit(
+async def test_concurrent_migrator_fails_cleanly_then_retry_succeeds(
     migration_database: AsyncEngine,
     tmp_path: Path,
-    start: str,
 ) -> None:
     historical = _historical_scripts(tmp_path)
     async with migration_database.connect() as connection:
-        await connection.run_sync(
-            lambda sync: command.upgrade(
-                _config(historical if start == "0111_routine_dm_destination" else SCRIPTS, sync),
-                start,
+
+        def setup(sync: Connection) -> None:
+            command.upgrade(_config(historical, sync), "0111_routine_dm_destination")
+            sync.execute(
+                text("INSERT INTO tenants (platform, external_id) VALUES ('discord', 'concurrent')")
             )
-        )
+            sync.execute(
+                text(
+                    "INSERT INTO direct_message_policies (tenant_id, enabled, dm_agent_name) SELECT id, true, 'private' FROM tenants"
+                )
+            )
+            sync.commit()
+
+        await connection.run_sync(setup)
     processes: list[asyncio.subprocess.Process] = []
     url = migration_database.url.render_as_string(hide_password=False)
     try:
+        # Preload both interpreters before taking a DDL barrier: the migration's
+        # five-second lock_timeout must not include Python import/startup time.
+        for label in ("migration-first", "migration-second"):
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                _MIGRATOR,
+                url,
+                str(ROOT / "alembic.ini"),
+                label,
+                cwd=ROOT,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            processes.append(process)
+            assert process.stdout is not None
+            async with asyncio.timeout(60):
+                while True:
+                    line = await process.stdout.readline()
+                    assert line, "migrator exited before ready"
+                    if line == b"ready\n":
+                        break
         async with (
             migration_database.connect() as barrier,
             migration_database.connect() as observer,
         ):
-            # Monitoring must not retain snapshots that concurrent index builds
-            # legitimately wait for; only the barrier owns a transaction.
             observer = await observer.execution_options(isolation_level="AUTOCOMMIT")
-            # Stall the first head read. A correct migrator already holds the
-            # session advisory lock here; a second must wait on that lock.
-            await barrier.execute(text("LOCK TABLE alembic_version IN ACCESS EXCLUSIVE MODE"))
-            first = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-c",
-                _MIGRATOR,
-                url,
-                str(ROOT / "alembic.ini"),
-                "migration-first",
-                cwd=ROOT,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            processes.append(first)
-            first_pid = await _wait_for_backend(observer, "migration-first", "relation", first)
-            assert await observer.scalar(
-                text(
-                    "SELECT EXISTS (SELECT FROM pg_locks WHERE pid = :pid "
-                    "AND locktype = 'advisory' AND granted)"
-                ),
-                {"pid": first_pid},
-            )
-            await observer.commit()
-            second = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-c",
-                _MIGRATOR,
-                url,
-                str(ROOT / "alembic.ini"),
-                "migration-second",
-                cwd=ROOT,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            processes.append(second)
-            # Observe retries rather than a blocked SQL lock call: blocking
-            # SELECT pg_advisory_lock retains a snapshot and deadlocks concurrent
-            # index builds. The waiting process must not read a head yet.
-            second_prefix = bytearray()
-            assert second.stdout is not None
-            async with asyncio.timeout(60):
-                attempts = 0
-                while attempts < 2:
-                    line = await second.stdout.readline()
-                    assert line, second_prefix.decode()
-                    second_prefix.extend(line)
-                    assert line != b"migration-head-read\n"
-                    if line == b"migration-lock-attempt\n":
-                        attempts += 1
+            await barrier.execute(text("LOCK TABLE tenants IN ACCESS EXCLUSIVE MODE"))
+            first, second = processes
+            assert first.stdin is not None and second.stdin is not None
+            first.stdin.write(b"go\n")
+            await first.stdin.drain()
+            await _wait_for_backend(observer, "migration-first", "relation", first)
+            second.stdin.write(b"go\n")
+            await second.stdin.drain()
+            await _wait_for_backend(observer, "migration-second", "transactionid", second)
             await barrier.rollback()
             outputs = await asyncio.wait_for(
-                asyncio.gather(*(process.communicate() for process in processes)), timeout=120
+                asyncio.gather(*(p.communicate() for p in processes)), 60
             )
-            outputs[1] = (bytes(second_prefix) + outputs[1][0], outputs[1][1])
-            for process, (output, _) in zip(processes, outputs, strict=True):
-                assert process.returncode == 0, output.decode()
-            if start == "0092_routine_post_source":
-                # Two CREATE INDEX CONCURRENTLY in 0093, plus the one in 0109.
-                assert outputs[0][0].count(b"concurrent-index-session-lock") >= 3
-                assert b"concurrent-index-session-lock" not in outputs[1][0]
+            assert sorted(p.returncode for p in processes if p.returncode is not None) == [0, 1]
+            loser = next(
+                output
+                for p, (output, _) in zip(processes, outputs, strict=True)
+                if p.returncode == 1
+            )
+            assert b"duplicate key" in loser or b"already exists" in loser, loser.decode()
         async with migration_database.connect() as connection:
-            await connection.run_sync(_assert_head)
+
+            def verify_and_retry(sync: Connection) -> None:
+                _assert_head(sync)
+                assert (
+                    sync.scalar(text("SELECT dm_agent_name FROM direct_message_policies"))
+                    == "private"
+                )
+                sync.commit()
+                command.upgrade(_config(SCRIPTS, sync), "head")
+                _assert_head(sync)
+
+            await connection.run_sync(verify_and_retry)
     finally:
         for process in processes:
             if process.returncode is None:
                 process.terminate()
-                await asyncio.wait_for(process.communicate(), timeout=10)
+                await asyncio.wait_for(process.communicate(), 10)
