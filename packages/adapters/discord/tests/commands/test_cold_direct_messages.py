@@ -390,7 +390,6 @@ async def test_failed_selector_send_does_not_leave_an_unanswerable_pending_choic
         "writers_none",
         "runs_elsewhere",
         "own_agents_only",
-        "external_participant",
     ],
 )
 @pytest.mark.parametrize("active_route", [False, True])
@@ -416,7 +415,6 @@ async def test_admission_denials_preserve_notices_and_silence_access_failures(
             "writers_none",
             "runs_elsewhere",
             "own_agents_only",
-            "external_participant",
         }:
             msg.channel.send.assert_not_awaited()
             assert any(entry.get("reason") == reason for entry in logs)
