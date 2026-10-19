@@ -27,10 +27,14 @@ import asyncio
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal, NoReturn, cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
+    BetaManagedAgentsAgentToolset20260401,
+)
+from anthropic.types.beta.beta_managed_agents_mcp_toolset import BetaManagedAgentsMCPToolset
 from anthropic.types.beta.beta_managed_agents_session_agent_update_param import (
     BetaManagedAgentsSessionAgentUpdateParam,
 )
@@ -62,25 +66,6 @@ UnattendedEntryPoint = Literal[
 BUILTIN_TOOLSET: Final[str] = "agent_toolset_20260401"
 MCP_TOOLSET: Final[str] = "mcp_toolset"
 CUSTOM_TOOL: Final[str] = "custom"
-
-#: The session agent fields an unattended turn may carry. `multiagent` and
-#: `skills` are known but checked on their own; anything else the provider
-#: adds later is refused until it is reviewed here.
-KNOWN_AGENT_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "id",
-        "type",
-        "version",
-        "name",
-        "description",
-        "model",
-        "system",
-        "tools",
-        "mcp_servers",
-        "skills",
-        "multiagent",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -138,8 +123,79 @@ def protected_tools(policy: ToolSafetyPolicy) -> frozenset[str]:
     )
 
 
-def _unknown_fields(model: BaseModel) -> bool:
-    return bool(model.model_extra)
+def _fields(*names: str) -> frozenset[str]:
+    return frozenset(name for group in names for name in group.split())
+
+
+# The reviewed schema of every capability-bearing node, frozen here rather
+# than read from the installed SDK: a field the provider adds, or an SDK
+# upgrade starts parsing, is refused until it is reviewed. Opaque data (a
+# custom tool's `input_schema`, metadata values, usage) is not walked.
+_SESSION = _fields(
+    "id type agent archived_at created_at updated_at deployment_id environment_id",
+    "metadata outcome_evaluations resources stats status title usage vault_ids",
+)
+_AGENT = _fields(
+    "id type version name description model system tools mcp_servers skills multiagent"
+)
+_MODEL = _fields("id speed")
+_SKILL = _fields("skill_id type version")
+_SERVER = _fields("name type url")
+_TOOLSETS: Final[Mapping[str, frozenset[str]]] = {
+    BUILTIN_TOOLSET: _fields("type default_config configs"),
+    MCP_TOOLSET: _fields("type mcp_server_name default_config configs"),
+}
+_CUSTOM = _fields("type name description input_schema")
+_DEFAULT_CONFIG = _fields("enabled permission_policy")
+_CONFIG = _fields("name enabled permission_policy")
+_POLICY = _fields("type")
+_POLICY_TYPES = frozenset({"always_allow", "always_ask"})
+_RESOURCES: Final[Mapping[str, frozenset[str]]] = {
+    "file": _fields("id type file_id mount_path created_at updated_at"),
+    "github_repository": _fields("id type url mount_path checkout created_at updated_at"),
+    "memory_store": _fields("type memory_store_id access description instructions mount_path name"),
+}
+_CHECKOUTS: Final[Mapping[str, frozenset[str]]] = {
+    "branch": _fields("type name"),
+    "commit": _fields("type sha"),
+}
+
+
+def _refuse() -> NoReturn:
+    raise AdmissionDenied(reason="backend_unsupported")
+
+
+def _only(value: object, names: frozenset[str]) -> None:
+    """Refuse `value` unless it is a parsed model carrying only `names`.
+
+    Counts the fields the SDK declares (set or not), the response's extras
+    and anything else on the instance, so neither a new provider key nor a
+    newly parsed SDK field passes unreviewed.
+    """
+    if not isinstance(value, BaseModel):
+        _refuse()
+    present = (
+        set(type(value).model_fields)
+        | set(value.model_extra or {})
+        | {name for name in vars(value) if not name.startswith("_")}
+    )
+    if present - names:
+        _refuse()
+
+
+def _require_toolset_configs(
+    tool: BetaManagedAgentsAgentToolset20260401 | BetaManagedAgentsMCPToolset,
+) -> None:
+    _only(tool.default_config, _DEFAULT_CONFIG)
+    configs = list(tool.configs)
+    if len({config.name for config in configs}) != len(configs):
+        _refuse()
+    for config in configs:
+        _only(config, _CONFIG)
+    for policy in (tool.default_config.permission_policy, *(c.permission_policy for c in configs)):
+        _only(policy, _POLICY)
+        if policy.type not in _POLICY_TYPES:
+            _refuse()
 
 
 def require_allowed_capabilities(
@@ -148,24 +204,47 @@ def require_allowed_capabilities(
     """Refuse a session whose capabilities cannot be constrained, before any send.
 
     Pure: reads only `snapshot`. Raises `AdmissionDenied` for a coordinator
-    roster, for skills unless `allow_skills`, and for any agent field, tool
-    type, tool or server entry this release does not know.
+    roster, for skills unless `allow_skills`, and for any field this release
+    has not reviewed, at every capability-bearing level: the session and its
+    resources, the agent, its model, skills and servers, each tool, toolset
+    default and per-tool config, and their permission policies. An unknown
+    field is refused whatever its value, empty or not.
     """
+    _only(snapshot, _SESSION)
     agent = snapshot.agent
-    if (
-        agent.multiagent is not None
-        or (agent.skills and not allow_skills)
-        or any(
-            getattr(agent, name, None) not in (None, [], {})
-            for name in {*agent.model_fields_set, *(agent.model_extra or {})} - KNOWN_AGENT_FIELDS
-        )
-        or any(_unknown_fields(server) or server.type != "url" for server in agent.mcp_servers)
-        or any(
-            tool.type not in (BUILTIN_TOOLSET, MCP_TOOLSET, CUSTOM_TOOL) or _unknown_fields(tool)
-            for tool in agent.tools
-        )
-    ):
-        raise AdmissionDenied(reason="backend_unsupported")
+    _only(agent, _AGENT)
+    if agent.multiagent is not None or (agent.skills and not allow_skills):
+        _refuse()
+    _only(agent.model, _MODEL)
+    for skill in agent.skills:
+        _only(skill, _SKILL)
+        if skill.type not in ("anthropic", "custom"):
+            _refuse()
+    names = [server.name for server in agent.mcp_servers]
+    if len(set(names)) != len(names):
+        _refuse()
+    for server in agent.mcp_servers:
+        _only(server, _SERVER)
+        if server.type != "url":
+            _refuse()
+    for tool in agent.tools:
+        if tool.type == CUSTOM_TOOL:
+            _only(tool, _CUSTOM)
+            continue
+        if tool.type not in _TOOLSETS:
+            _refuse()
+        _only(tool, _TOOLSETS[tool.type])
+        _require_toolset_configs(tool)
+    for resource in snapshot.resources:
+        kind = getattr(resource, "type", None)
+        if not isinstance(kind, str) or kind not in _RESOURCES:
+            _refuse()
+        _only(resource, _RESOURCES[kind])
+        checkout = getattr(resource, "checkout", None)
+        if checkout is not None:
+            if checkout.type not in _CHECKOUTS:
+                _refuse()
+            _only(checkout, _CHECKOUTS[checkout.type])
 
 
 @dataclass(frozen=True)

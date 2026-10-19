@@ -12,6 +12,7 @@ import httpx
 import pytest
 from anthropic._models import construct_type  # pyright: ignore[reportPrivateImportUsage]
 from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from daimon.core.mux_backend import platform_scope
 from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
 from daimon.core.turn import unattended_capabilities as caps
@@ -86,6 +87,37 @@ def _with_agent_field(**fields: Any) -> BetaManagedAgentsSession:
     )
 
 
+_FILE: dict[str, Any] = {
+    "id": "sesrsc_1",
+    "type": "file",
+    "file_id": "file_1",
+    "mount_path": "/mnt/session/uploads/a.txt",
+    "created_at": "2026-10-01T00:00:00Z",
+    "updated_at": "2026-10-01T00:00:00Z",
+}
+
+
+def _mutated(change: Any) -> BetaManagedAgentsSession:
+    """A root snapshot changed in its raw provider form, then parsed as the SDK does."""
+    session = _root_session().model_dump(mode="json")
+    change(session)
+    return cast(
+        BetaManagedAgentsSession, construct_type(type_=BetaManagedAgentsSession, value=session)
+    )
+
+
+class _FutureModelConfig(BetaManagedAgentsModelConfig):
+    """An SDK upgrade that starts parsing a field this release never reviewed."""
+
+    budget: dict[str, Any] | None = None
+
+
+def _sdk_recognized_field() -> BetaManagedAgentsSession:
+    session = _root_session()
+    model = _FutureModelConfig.model_construct(id=session.agent.model.id, speed=None)
+    return session.model_copy(update={"agent": session.agent.model_copy(update={"model": model})})
+
+
 def _can_run_without_decider(toolset: dict[str, Any], name: str) -> bool:
     config = next((c for c in toolset["configs"] if c["name"] == name), None)
     effective: dict[str, Any] = {**toolset["default_config"], **(config or {})}
@@ -145,10 +177,14 @@ class _Provider:
 
 
 async def _drive(
-    snapshot: BetaManagedAgentsSession, entry_point: UnattendedEntryPoint | None
+    snapshot: BetaManagedAgentsSession,
+    entry_point: UnattendedEntryPoint | None,
+    *,
+    policy: ToolSafetyPolicy | None = None,
+    public_url: str | None = None,
 ) -> tuple[_Provider, Any]:
     provider = _Provider(snapshot)
-    policy = ToolSafetyPolicy(enabled=True)
+    policy = policy or ToolSafetyPolicy(enabled=True)
     try:
         with unattended_sends(
             session_gate(
@@ -156,7 +192,7 @@ async def _drive(
                 snapshot.id,
                 policy,
                 scope=platform_scope("unattended capability regression"),
-                public_url=None,
+                public_url=public_url,
                 session_factory=None,
                 tenant_id=None,
                 entry_point=entry_point,
@@ -173,7 +209,7 @@ async def _drive(
                 tool_confirmation=unattended_posture(
                     policy,
                     session=snapshot,
-                    public_url=None,
+                    public_url=public_url,
                     session_factory=None,
                     tenant_id=None,
                     entry_point=entry_point,
@@ -299,6 +335,59 @@ async def test_attended_chat_posture_is_unchanged() -> None:
             id="server_field",
         ),
         pytest.param(_coordinator_session, id="multiagent"),
+        pytest.param(lambda: _with_agent_field(sandbox_policy={}), id="empty_agent_field"),
+        pytest.param(lambda: _with_agent_field(sandbox_policy=None), id="null_agent_field"),
+        pytest.param(
+            lambda: _mutated(lambda s: s["agent"]["tools"][0]["default_config"].update(net=1)),
+            id="builtin_default_config_field",
+        ),
+        pytest.param(
+            lambda: _mutated(lambda s: s["agent"]["tools"][0]["configs"][0].update(net={})),
+            id="builtin_config_field",
+        ),
+        pytest.param(
+            lambda: _mutated(lambda s: s["agent"]["tools"][1]["configs"][0].update(scope="*")),
+            id="mcp_config_field",
+        ),
+        pytest.param(
+            lambda: _mutated(
+                lambda s: s["agent"]["tools"][1]["default_config"]["permission_policy"].update(
+                    budget=5
+                )
+            ),
+            id="permission_policy_field",
+        ),
+        pytest.param(
+            lambda: _mutated(
+                lambda s: s["agent"]["tools"][1]["configs"][0].update(
+                    permission_policy={"type": "allow_within_budget"}
+                )
+            ),
+            id="permission_policy_type",
+        ),
+        pytest.param(
+            lambda: _mutated(
+                lambda s: s["agent"]["tools"][1]["configs"].append(
+                    {"name": "create_issue", **ALLOW}
+                )
+            ),
+            id="duplicate_config",
+        ),
+        pytest.param(
+            lambda: _mutated(lambda s: s["agent"]["mcp_servers"].append(dict(SERVERS[0]))),
+            id="duplicate_server",
+        ),
+        pytest.param(lambda: _mutated(lambda s: s["agent"]["model"].update(tier={})), id="model"),
+        pytest.param(lambda: _mutated(lambda s: s.update(sandbox={})), id="session_field"),
+        pytest.param(
+            lambda: _mutated(lambda s: s["resources"].append({**_FILE, "exec": True})),
+            id="resource_field",
+        ),
+        pytest.param(
+            lambda: _mutated(lambda s: s["resources"].append({**_FILE, "type": "shell"})),
+            id="resource_type",
+        ),
+        pytest.param(_sdk_recognized_field, id="sdk_recognized_field"),
     ],
 )
 @pytest.mark.parametrize("entry_point", ENTRY_POINTS)
@@ -517,3 +606,46 @@ async def test_restore_finishes_through_repeated_cancellation(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert restored.is_set()
+
+
+def test_a_reviewed_session_with_every_known_capability_passes() -> None:
+    """No false refusal: skills, resources of each kind and a custom tool are known."""
+    session = _mutated(
+        lambda s: (
+            s["agent"]["skills"].append({"type": "custom", "skill_id": "skill_1", "version": "1"}),
+            s["agent"]["tools"].append(
+                {
+                    "type": "custom",
+                    "name": "local",
+                    "description": "d",
+                    "input_schema": {"type": "object", "anything": {"goes": True}},
+                }
+            ),
+            s["resources"].extend(
+                [
+                    _FILE,
+                    {
+                        "id": "sesrsc_2",
+                        "type": "github_repository",
+                        "url": "https://github.com/o/r",
+                        "mount_path": "/workspace/r",
+                        "checkout": {"type": "branch", "name": "main"},
+                        "created_at": "2026-10-01T00:00:00Z",
+                        "updated_at": "2026-10-01T00:00:00Z",
+                    },
+                    {
+                        "type": "memory_store",
+                        "memory_store_id": "memstore_1",
+                        "access": "read_write",
+                        "description": None,
+                        "instructions": None,
+                        "mount_path": "/mnt/memory",
+                        "name": "notes",
+                    },
+                ]
+            ),
+        )
+    )
+    require_allowed_capabilities(session, allow_skills=True)
+    with pytest.raises(AdmissionDenied):
+        require_allowed_capabilities(session, allow_skills=False)
