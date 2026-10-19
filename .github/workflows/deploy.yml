@@ -493,8 +493,9 @@ jobs:
               # restarts that answers on its liveness port before calling the
               # refresh done. Discord fails loudly on its own (bad token kills
               # the gateway handshake); Slack is the one that dies silently.
-              for i in $(seq 1 20); do
-                sleep 6
+              # Polled every 2s within the same 120s budget.
+              for i in $(seq 1 60); do
+                sleep 2
                 running=$(sudo docker inspect --format "{{.State.Running}}" daimon-slack-1)
                 restarts=$(sudo docker inspect --format "{{.RestartCount}}" daimon-slack-1)
                 if [ "$running" = "true" ] && [ "$restarts" = "0" ] \
@@ -502,7 +503,7 @@ jobs:
                   echo "slack worker healthy (attempt $i)"
                   break
                 fi
-                if [ "$i" = "20" ]; then
+                if [ "$i" = "60" ]; then
                   echo "slack worker not healthy after 120s (running=$running restarts=$restarts)" >&2
                   exit 1
                 fi
@@ -583,14 +584,94 @@ jobs:
             '
 
       - name: Let the adapters' boot reconcile settle
+        env:
+          DAIMON_IMAGE: ${{ steps.images.outputs.daimon }}
         run: |
           # After it starts, each adapter reconciles its installs against the
-          # shipped defaults in the background and signals nothing when done;
-          # the verify below would read a reconcile still in flight as drift.
-          # The notebook-host refresh used to sit between the two and give it a
-          # minute or more. It now runs alongside, so keep that margin here.
+          # shipped defaults in the background; the verify below would read a
+          # reconcile still in flight as drift, or pass on the old state before
+          # the reconcile writes. The fixed floor is 90s after the worker
+          # refresh. The step ends sooner only when every running container
+          # that reconciles at boot has logged its own completion event since
+          # it started. Anything else (a failure event, no event in this image,
+          # a service with no completion event, an unreadable log, an SSH
+          # failure) waits for the floor, so this never ends later than it.
           [ -f "$RUNNER_TEMP/workers-refreshed-at" ] || exit 0
-          wait_s=$(( $(cat "$RUNNER_TEMP/workers-refreshed-at") + 90 - $(date +%s) ))
+          deadline=$(( $(cat "$RUNNER_TEMP/workers-refreshed-at") + 90 ))
+          remaining=$(( deadline - $(date +%s) ))
+          [ "$remaining" -gt 0 ] || exit 0
+          # Leave the remote loop time to report before the deadline cuts SSH.
+          budget=$(( remaining - 10 ))
+          if [ "$budget" -gt 0 ] && [[ "$DAIMON_IMAGE" =~ ^[A-Za-z0-9./:@_-]+$ ]]; then
+            remote=$(cat <<'REMOTE'
+          set -u
+          cd /etc/daimon || exit 3
+          export DOCKER_CONFIG=/root/.docker DAIMON_IMAGE="$image"
+          end=$(( $(date +%s) + budget ))
+          fallback() { echo "boot reconcile: $*; keeping the fixed wait"; exit 3; }
+          # Events are JSON log lines: {"event": "<name>", ...}.
+          logged() { printf "%s\n" "$1" | grep -qF "\"event\": \"$2\""; }
+          while :; do
+            pending=""
+            # Every worker service that reconciles installs at boot. The
+            # scheduler reconciles only on a resolver miss at fire time.
+            for svc in discord slack teams; do
+              case $svc in
+                # Spawns one reconcile per guild from on_ready and logs no
+                # event when they are all done: no completion signal.
+                discord) done_events=""; failure_events="" ;;
+                slack)
+                  done_events="slack.boot_sweep_complete slack.boot_sweep_skipped"
+                  failure_events="slack.boot_sweep_crashed slack.boot_sweep_tenant_failed slack.boot_sweep_reconcile_failed_ready_tenant slack.boot_sweep_status_flip_failed" ;;
+                teams)
+                  done_events="teams.tenant_ready teams.tenant_archived"
+                  failure_events="teams.tenant_reconcile_failed teams.task_failed" ;;
+              esac
+              ids=$(sudo -E docker compose -f compose.worker.yml ps -a -q "$svc" </dev/null) \
+                || fallback "cannot list $svc"
+              for id in $ids; do
+                state=$(sudo docker inspect --format "{{.State.Status}} {{.State.ExitCode}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}} {{.Config.Image}}" "$id" </dev/null) \
+                  || fallback "cannot inspect $svc"
+                set -- $state
+                [ "$5" = "$image" ] || fallback "$svc runs $5"
+                # Exited for good (teams without settings exits 0): it writes nothing.
+                if [ "$1" = exited ] && { [ "$3" = no ] || { [ "$3" = on-failure ] && [ "$2" = 0 ]; }; }; then
+                  continue
+                fi
+                [ -n "$done_events" ] || fallback "$svc logs no completion event"
+                if [ "$1" != running ]; then
+                  pending="$pending $svc"
+                  continue
+                fi
+                # Only this run of the container: a restart reconciles again.
+                logs=$(sudo docker logs --since "$4" "$id" 2>&1 </dev/null) || logs=""
+                for event in $failure_events; do
+                  if logged "$logs" "$event"; then fallback "$svc logged $event"; fi
+                done
+                complete=""
+                for event in $done_events; do
+                  if logged "$logs" "$event"; then complete=1; fi
+                done
+                [ -n "$complete" ] || pending="$pending $svc"
+              done
+            done
+            if [ -z "$pending" ]; then
+              echo "boot reconcile complete in every reconciling container"
+              exit 0
+            fi
+            [ "$(date +%s)" -lt "$end" ] || fallback "still waiting on$pending"
+            sleep 2
+          done
+          REMOTE
+          )
+            payload="budget=$budget image=$DAIMON_IMAGE
+          $remote"
+            if timeout "$remaining" gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
+              --tunnel-through-iap --command "$payload"; then
+              exit 0
+            fi
+          fi
+          wait_s=$(( deadline - $(date +%s) ))
           if [ "$wait_s" -gt 0 ]; then
             echo "waiting ${wait_s}s"
             sleep "$wait_s"
@@ -632,8 +713,9 @@ jobs:
                 sudo -E docker compose -f compose.worker.yml run --rm smoke defaults verify $verify_tenant_arg
               "
           }
-          # The settle floor above covers a typical boot reconcile; one retry a
-          # minute later covers a slow one. Real drift fails both attempts.
+          # The settle step above waits for every boot reconcile to report done,
+          # or for its floor; one retry a minute later covers a reconcile slower
+          # than the floor. Real drift fails both attempts.
           if ! verify; then
             echo "verify failed; retrying in 60s"
             sleep 60
