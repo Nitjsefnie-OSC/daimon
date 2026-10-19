@@ -31,7 +31,12 @@ from anthropic.types.beta.beta_packages_params import BetaPackagesParams
 from daimon.core.context_prompt import ContextFragment, TurnContext, encode_fragments
 from daimon.core.errors import SpecError
 from daimon.core.model_presets import ModelSelection, resolve_model
+from daimon.core.stores.domain import ChatPlatform
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+#: Optional deployment features a platform-limited default skill can require
+#: (`SkillRef.requires`); `Settings.configured_features` says which are set up.
+SettingsFeature = Literal["microsoft_accounts"]
 
 
 class SkillRef(BaseModel):
@@ -43,12 +48,30 @@ class SkillRef(BaseModel):
 
     `extra="forbid"` enforces a STRIDE threat mitigation: unknown
     fields from YAML are rejected at parse time.
+
+    `platforms` limits the skill to turns on those chat platforms. Such a skill
+    stays off the agent at the provider and is added per session at admission
+    (`daimon.core.channel_skills.platform_skill_refs`); only `defaults/` agents
+    may set it. `requires` further limits it to deployments that have set up
+    that feature, so it takes no room where its tools do not exist.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     type: Literal["custom", "anthropic"]
     skill_id: str
+    platforms: tuple[ChatPlatform, ...] | None = None
+    requires: SettingsFeature | None = None
+
+    @model_validator(mode="after")
+    def _platforms_are_distinct(self) -> SkillRef:
+        if self.platforms is not None and (
+            not self.platforms or len(set(self.platforms)) != len(self.platforms)
+        ):
+            raise ValueError("platforms must list at least one platform, each once")
+        if self.requires is not None and self.platforms is None:
+            raise ValueError("requires applies only to a skill limited by platforms")
+        return self
 
 
 class SkillRepo(BaseModel):

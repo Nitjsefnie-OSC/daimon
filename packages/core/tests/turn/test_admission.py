@@ -32,7 +32,6 @@ from daimon.core.stores.thread_agent_bindings import upsert_responder_binding
 from daimon.core.turn.admission import (
     Admission,
     AdmissionDenied,
-    ExternalFinding,
     MissingTurnConfigError,
     admit,
 )
@@ -42,6 +41,7 @@ from daimon.testing.ma import (
     build_fake_anthropic,
     list_response,
     resolved_agent_env_router,
+    skill_response,
 )
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
@@ -1071,6 +1071,141 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
     )
 
 
+@pytest.mark.parametrize("is_dm", [False, True], ids=["channel", "dm"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    platform: str,
+    is_dm: bool,
+) -> None:
+    """A Teams turn of the seeded agent runs with docx, pptx and xlsx; others run as before.
+
+    They come from `defaults/agents/daimon.yaml`'s `platforms: [teams]` entries
+    and ride the session's skills override, so a Slack or Discord turn adds
+    nothing and its agent, skills and session match a deployment without them.
+    """
+    from daimon.core.defaults.loader import load_platform_skills
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    router = resolved_agent_env_router(
+        ma_agent(
+            id="ag_1",
+            name="daimon",
+            tenant_id=tenant.id,
+            metadata={MA_METADATA_KEY_MANAGED: "true"},
+        ),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        platform_skills=load_platform_skills(Path(__file__).resolve().parents[4] / "defaults"),
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform=platform,
+        external_user_id="user-1",
+        channel_id="chan-1",
+        is_dm=is_dm,
+        now=_NOW,
+    )
+
+    expected = [("anthropic", n) for n in ("docx", "pptx", "xlsx")] if platform == "teams" else []
+    assert [(s.type, s.skill_id) for s in admission.channel_skills] == expected, (
+        "only a Teams turn adds the Office skills, in a channel and in a DM alike"
+    )
+    assert admission.platform_skill_ids == {n for _, n in expected}, (
+        "the platform's are marked, so a refused one can be left out at create"
+    )
+    assert admission.agent.skills == [], "the agent itself is never changed"
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+async def test_admit_adds_the_default_agents_microsoft_365_skill_on_teams_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    """A Teams turn of the seeded agent runs with the tenant's `microsoft-365` upload.
+
+    It is `platforms: [teams]` in `defaults/agents/daimon.yaml`, so it is found
+    by its seeded title and added after the Office built-ins, while a Slack or
+    Discord turn of the same agent adds no skill at all.
+    """
+    from daimon.core.defaults.loader import load_platform_skills
+    from daimon.core.defaults.metadata import (
+        MA_METADATA_KEY_MANAGED,
+        tenant_scoped_display_title,
+    )
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    router = resolved_agent_env_router(
+        ma_agent(
+            id="ag_1",
+            name="daimon",
+            tenant_id=tenant.id,
+            metadata={MA_METADATA_KEY_MANAGED: "true"},
+        ),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    title = tenant_scoped_display_title(tenant_id=tenant.id, name="microsoft-365")
+    router.add(
+        "GET",
+        r"/v1/skills",
+        lambda request, match: list_response([skill_response("skill_m365", title)]),
+    )
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        platform_skills=load_platform_skills(Path(__file__).resolve().parents[4] / "defaults"),
+    )
+
+    admission = await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform=platform,
+        external_user_id="user-1",
+        channel_id="chan-1",
+        is_dm=False,
+        now=_NOW,
+    )
+
+    teams = platform == "teams"
+    assert [(s.type, s.skill_id) for s in admission.channel_skills if s.type == "custom"] == (
+        [("custom", "skill_m365")] if teams else []
+    ), "only a Teams turn adds the seeded microsoft-365 upload"
+    assert ("skill_m365" in admission.platform_skill_ids) is teams, (
+        "it is marked as the platform's, so a refused one can be left out at create"
+    )
+    assert admission.agent.skills == [], "the agent itself never carries it"
+
+
+@pytest.mark.parametrize(
+    ("profile", "kept"),
+    [
+        (None, True),
+        ("anthropic.managed_agents", True),
+        ("openai.persistent_workspace", False),
+        ("gemini.inline_reuse", False),
+    ],
+)
+def test_only_the_managed_agents_backend_gets_a_platforms_skills(
+    profile: str | None, kept: bool
+) -> None:
+    """Another backend has no Anthropic built-ins, so a Teams turn there adds none."""
+    from anthropic.types.beta import BetaManagedAgentsAnthropicSkill
+    from daimon.core.turn.admission import backend_platform_skills
+
+    office = (BetaManagedAgentsAnthropicSkill(type="anthropic", skill_id="docx", version="latest"),)
+    assert backend_platform_skills(office, profile) == (office if kept else ()), (
+        "only the default backend and Managed Agents run the platform's skills"
+    )
+
+
 async def test_admit_refuses_an_invoker_outside_the_allowlist_before_any_ma_call(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -2032,8 +2167,6 @@ async def _admit_as(
     *,
     channel_id: str = "chan-1",
     thread_id: str | None = None,
-    is_external: bool | None,
-    is_known: bool = True,
     is_dm: bool = False,
     role: Role = Role.USER,
 ) -> Admission:
@@ -2052,160 +2185,25 @@ async def _admit_as(
         now=_NOW,
         role=role,
         is_dm=is_dm,
-        external=None if is_external is None else ExternalFinding(is_external, is_known),
     )
 
 
-async def _stored(db_session: AsyncSession, admission: Admission) -> tuple[bool, str]:
+async def _stored_role(db_session: AsyncSession, admission: Admission) -> str:
     row = await db_session.execute(
-        text("SELECT is_external, role FROM accounts WHERE id = :id"),
-        {"id": admission.account_id},
+        text("SELECT role FROM accounts WHERE id = :id"), {"id": admission.account_id}
     )
-    is_external, role = row.one()
-    return is_external, role
+    return row.scalar_one()
 
 
-@pytest.mark.parametrize("thread_id", [None, "thr-1"], ids=["channel", "thread"])
-async def test_an_external_participant_is_answered_inside_an_isolated_channel_as_a_user(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    thread_id: str | None,
-) -> None:
-    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
-    await _answer_in(db_session, tenant, "chan-1", "own")
-    admission = await _admit_as(
-        db_session_factory, tmp_path, tenant, thread_id=thread_id, is_external=True, role=Role.ADMIN
-    )
-    assert admission.is_external and admission.grant.is_external
-    assert not admission.grant.subject.is_admin, "an admin role is ignored"
-    assert await _stored(db_session, admission) == (True, Role.USER.value), "stored, demoted"
-
-
-@pytest.mark.parametrize(
-    ("channel_id", "is_dm"),
-    [("chan-2", False), ("dm-1", True)],
-    ids=["open-channel", "dm"],
-)
-async def test_an_external_participant_is_refused_outside_an_isolated_channel(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    channel_id: str,
-    is_dm: bool,
-) -> None:
-    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
-    with pytest.raises(AdmissionDenied) as exc_info:
-        await _admit_as(
-            db_session_factory,
-            tmp_path,
-            tenant,
-            channel_id=channel_id,
-            is_dm=is_dm,
-            is_external=True,
-        )
-    assert exc_info.value.reason == "external_participant"
-
-
-async def test_a_continuation_that_cannot_tell_keeps_the_stored_external_flag(
+async def test_a_caller_in_an_isolated_channel_may_be_an_admin(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
     await _answer_in(db_session, tenant, "chan-1", "own")
-    await _admit_as(db_session_factory, tmp_path, tenant, is_external=True)
-    with pytest.raises(AdmissionDenied) as exc_info:
-        await _admit_as(db_session_factory, tmp_path, tenant, channel_id="chan-2", is_external=None)
-    assert exc_info.value.reason == "external_participant", "still external"
-
-
-async def test_an_external_participant_is_refused_in_an_isolated_channels_setup_thread(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """The built-in agent answers a setup thread, with wider reads than the channel's own."""
-    from daimon.core.stores.thread_agent_bindings import create_binding
-
-    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
-    await _answer_in(db_session, tenant, "chan-1", "own")
-    await create_binding(
-        db_session,
-        tenant_id=tenant.id,
-        platform="teams",
-        parent_channel_id="chan-1",
-        thread_id="setup-1",
-        responder_ma_agent_id="ag_daimon",
-        responder_name="daimon",
-        kind="setup",
+    admission = await _admit_as(db_session_factory, tmp_path, tenant, role=Role.ADMIN)
+    assert admission.grant.subject.is_admin, (
+        "no one is held to a user's grant by where they are from"
     )
-    await db_session.commit()
-    with pytest.raises(AdmissionDenied) as exc_info:
-        await _admit_as(db_session_factory, tmp_path, tenant, thread_id="setup-1", is_external=True)
-    assert exc_info.value.reason == "external_participant", "refused before the setup agent"
-
-
-async def test_a_finding_without_evidence_holds_for_the_turn_and_stores_nothing(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    """A fail-closed guess makes this turn an external's, but never demotes the account."""
-    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
-    await _answer_in(db_session, tenant, "chan-1", "own")
-    first = await _admit_as(
-        db_session_factory, tmp_path, tenant, is_external=False, role=Role.ADMIN
-    )
-    guessed = await _admit_as(
-        db_session_factory,
-        tmp_path,
-        tenant,
-        is_external=True,
-        is_known=False,
-        role=Role.ADMIN,
-    )
-    assert guessed.is_external and not guessed.grant.subject.is_admin, "external this turn"
-    assert await _stored(db_session, first) == (False, Role.ADMIN.value), "nothing stored"
-    with pytest.raises(AdmissionDenied) as exc_info:
-        await _admit_as(
-            db_session_factory,
-            tmp_path,
-            tenant,
-            channel_id="chan-2",
-            is_external=True,
-            is_known=False,
-        )
-    assert exc_info.value.reason == "external_participant", "refused outside isolation"
-
-
-async def test_only_positive_internal_evidence_clears_a_stored_external_flag(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
-    await _answer_in(db_session, tenant, "chan-1", "own")
-    marked = await _admit_as(db_session_factory, tmp_path, tenant, is_external=True)
-    unsure = await _admit_as(
-        db_session_factory, tmp_path, tenant, is_external=False, is_known=False
-    )
-    assert unsure.is_external, "an unsure internal guess does not outweigh stored evidence"
-    assert await _stored(db_session, marked) == (True, Role.USER.value)
-    cleared = await _admit_as(db_session_factory, tmp_path, tenant, is_external=False)
-    assert not cleared.is_external
-    assert await _stored(db_session, marked) == (False, Role.USER.value), "cleared, still user"
-
-
-async def test_an_internal_caller_is_admitted_as_before_and_may_be_an_admin(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    tenant = await _seed_admittable_tenant(db_session, policy=_ISOLATED)
-    await _answer_in(db_session, tenant, "chan-1", "own")
-    admission = await _admit_as(
-        db_session_factory, tmp_path, tenant, is_external=False, role=Role.ADMIN
-    )
-    assert not admission.is_external and admission.grant.subject.is_admin
-    assert await _stored(db_session, admission) == (False, Role.ADMIN.value)
+    assert await _stored_role(db_session, admission) == Role.ADMIN.value

@@ -38,6 +38,7 @@ def _runtime() -> McpRuntime:
         tool_safety=POLICY,
         mcp=SimpleNamespace(public_url="https://mcp.example/mcp"),
         turn=SimpleNamespace(),
+        microsoft_accounts=SimpleNamespace(configured=False),
     )
     return cast(
         McpRuntime, SimpleNamespace(client=object(), session_factory=object(), settings=settings)
@@ -71,7 +72,7 @@ async def _gated(
 ) -> bool:
     monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=now))
     live = cast(Any, SimpleNamespace())
-    live.effective_config = SimpleNamespace(tools_sha256=_recorded_sha(recorded), is_external=False)
+    live.effective_config = SimpleNamespace(tools_sha256=_recorded_sha(recorded))
     return await _session_gate._recorded_as_gated(  # pyright: ignore[reportPrivateUsage]
         _runtime(),
         AUTH,

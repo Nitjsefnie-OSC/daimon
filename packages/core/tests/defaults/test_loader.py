@@ -6,13 +6,15 @@ import pytest
 from daimon.core.defaults.loader import (
     load_agent_specs,
     load_environment_specs,
+    load_platform_skills,
     load_skill_paths,
     load_skill_spec,
     load_system_config,
     parse_skill_frontmatter,
 )
 from daimon.core.errors import DefaultsError
-from daimon.core.specs import SystemConfigSpec
+from daimon.core.specs import SettingsFeature, SystemConfigSpec
+from structlog.testing import capture_logs
 
 
 def test_load_agent_specs(tmp_path: Path) -> None:
@@ -25,6 +27,76 @@ def test_load_agent_specs(tmp_path: Path) -> None:
     (root / "b.yaml").write_text("name: b\nmodel: claude-sonnet-4-6\n")
     specs = load_agent_specs(root)
     assert {s.name for s in specs} == {"a", "b"}
+
+
+def test_load_platform_skills_maps_each_agent_to_its_platform_limited_skills(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "a.yaml").write_text(
+        "name: a\nmodel: claude-sonnet-4-6\nskills:\n"
+        "  - {type: custom, skill_id: s1}\n"
+        "  - {type: anthropic, skill_id: docx, platforms: [teams]}\n"
+    )
+    (root / "b.yaml").write_text("name: b\nmodel: claude-sonnet-4-6\n")
+    limited = load_platform_skills(tmp_path)
+    assert {name: [ref.skill_id for ref in refs] for name, refs in limited.items()} == {
+        "a": ["docx"]
+    }, "only platform-limited refs are listed, and only for agents that have one"
+    with capture_logs() as logs:
+        for _ in range(2):
+            assert load_platform_skills(tmp_path / "missing") == {}, "no agents/ directory"
+    assert [log["event"] for log in logs] == ["defaults.platform_skills_unread"], (
+        "a missing defaults directory is logged once, not silently empty"
+    )
+
+
+def test_load_platform_skills_leaves_out_a_skill_whose_feature_is_not_set_up(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "a.yaml").write_text(
+        "name: a\nmodel: claude-sonnet-4-6\nskills:\n"
+        "  - {type: anthropic, skill_id: docx, platforms: [teams]}\n"
+        "  - {type: custom, skill_id: m365, platforms: [teams], requires: microsoft_accounts}\n"
+    )
+
+    def names(features: frozenset[SettingsFeature] | None) -> list[str]:
+        return [ref.skill_id for ref in load_platform_skills(tmp_path, features=features)["a"]]
+
+    assert names(frozenset()) == ["docx"], "not set up: the skill is left out"
+    assert names(frozenset({"microsoft_accounts"})) == ["docx", "m365"], "set up: it is kept"
+    assert names(None) == ["docx", "m365"], "no features given: every name is listed"
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "{type: custom, skill_id: m365, requires: microsoft_accounts}",
+        "{type: custom, skill_id: m365, platforms: [teams], requires: email}",
+    ],
+    ids=["without-platforms", "unknown-feature"],
+)
+def test_load_agent_specs_rejects_a_bad_requires(tmp_path: Path, ref: str) -> None:
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "a.yaml").write_text(f"name: a\nmodel: m\nskills:\n  - {ref}\n")
+    with pytest.raises(DefaultsError, match="requires"):
+        load_agent_specs(root)
+
+
+@pytest.mark.parametrize("platforms", ["[]", "[teams, teams]", "[email]"])
+def test_load_agent_specs_rejects_a_bad_platforms_list(tmp_path: Path, platforms: str) -> None:
+    root = tmp_path / "agents"
+    root.mkdir()
+    (root / "a.yaml").write_text(
+        "name: a\nmodel: m\nskills:\n"
+        f"  - {{type: anthropic, skill_id: docx, platforms: {platforms}}}\n"
+    )
+    with pytest.raises(DefaultsError, match="platforms"):
+        load_agent_specs(root)
 
 
 def test_load_agent_specs_rejects_extra_keys(tmp_path: Path) -> None:

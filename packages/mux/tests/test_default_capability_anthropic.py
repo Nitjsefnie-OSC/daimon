@@ -72,7 +72,8 @@ def manifest() -> DefaultManifest:
     authored = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
     uploads = []
     for ref in authored["skills"]:
-        assert ref["type"] == "custom"
+        if ref["type"] != "custom" or "platforms" in ref:
+            continue  # A built-in has nothing to upload; a platform-limited skill is off the agent.
         name = ref["skill_id"]
         directory = ROOT / "defaults/skills" / name
         files = tuple(

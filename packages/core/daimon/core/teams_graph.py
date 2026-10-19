@@ -6,12 +6,10 @@ per team) and `GraphClient`, whose requests only ever go to `GRAPH_HOST` and
 never follow a redirect. The app's resource-specific consent
 `ChannelMessage.Read.Group`, granted by a team owner at install, covers the
 message reads here, `TeamMember.Read.Group` the owner list
-(`list_team_owner_ids`, for native admin-team owners) and `ChannelMember.Read.Group`
-a channel's members (`list_channel_members`, for who is from another
-organisation); `ChatMessage.Read.Chat`, granted when the app is added to a
-group chat, the chat reads (`list_chat_messages`, `get_chat_message`);
-`teams_sharepoint` sends its file calls through
-`send`. The subscription calls (`create_subscription` and its renewal and
+(`list_team_owner_ids`, for native admin-team owners); `ChatMessage.Read.Chat`,
+granted when the app is added to a group chat, the chat reads
+(`list_chat_messages`, `get_chat_message`); `teams_sharepoint` sends its file
+calls through `send`. The subscription calls (`create_subscription` and its renewal and
 delete) watch a private or shared channel, where the resource-specific
 consent does not reach: they need the application permission
 `ChannelMessage.Read.All`, which a tenant admin consents to. Writes are never
@@ -64,6 +62,10 @@ class GraphUnavailable(DaimonError):
         self.status = status
 
 
+class GraphNotSent(GraphUnavailable):
+    """A Graph call that failed before its request went out, so it changed nothing."""
+
+
 class _Model(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="ignore")
 
@@ -71,6 +73,7 @@ class _Model(BaseModel):
 class GraphIdentity(_Model):
     id: str | None = None
     display_name: str | None = None
+    tenant_id: str | None = None
 
 
 class GraphSender(_Model):
@@ -134,14 +137,10 @@ class GraphPage(_Model):
 
 
 class GraphMember(_Model):
-    """A team or channel member as Graph's `aadUserConversationMember` gives one.
-
-    `tenant_id` is the member's home tenant; `roles` holds "owner" or "guest".
-    """
+    """A team member as Graph's `aadUserConversationMember` gives one; `roles` may hold "owner"."""
 
     user_id: str | None = None
     roles: list[str] = Field(default_factory=list[str])
-    tenant_id: str | None = None
 
 
 class GraphMemberPage(_Model):
@@ -176,8 +175,6 @@ class ChangeNotificationBatch(_Model):
 
 MAX_OWNER_PAGES = 5
 """Owner pages read before giving up; a team has at most 100 owners."""
-MAX_MEMBER_PAGES = 5
-"""Channel member pages read; a longer list is cut short, not refused."""
 
 
 def is_graph_url(url: httpx.URL) -> bool:
@@ -287,7 +284,7 @@ class GraphClient:
         return _parse(GraphMessage, await self._get(url))
 
     async def list_team_owner_ids(self, group_id: str) -> frozenset[str]:
-        """The Entra object ids (lower-case) of a team's owners, guests left out.
+        """The Entra object ids (lower-case) of a team's owners.
 
         Needs `TeamMember.Read.Group`; a team that never granted it raises
         `GraphUnavailable`, as does an owner list longer than `MAX_OWNER_PAGES`.
@@ -302,29 +299,12 @@ class GraphClient:
             owners.update(
                 member.user_id.lower()
                 for member in page.value
-                # A guest made an owner in Entra still administers nothing here.
-                if member.user_id and "owner" in member.roles and "guest" not in member.roles
+                if member.user_id and "owner" in member.roles
             )
             url, params = page.next_link, None
         if url is None:
             return frozenset(owners)
         raise GraphUnavailable("too many owner pages")
-
-    async def list_channel_members(self, group_id: str, channel_id: str) -> list[GraphMember]:
-        """A channel's members with their home tenants, shared channels' external ones too.
-
-        Needs `ChannelMember.Read.Group`. At most `MAX_MEMBER_PAGES` pages: a
-        member past them is simply not listed.
-        """
-        url: str | None = f"{self._channel(group_id, channel_id)}/allMembers"
-        members: list[GraphMember] = []
-        for _ in range(MAX_MEMBER_PAGES):
-            if url is None:
-                break
-            page = _parse(GraphMemberPage, await self.send("GET", url))
-            members.extend(page.value)
-            url = page.next_link
-        return members
 
     async def create_subscription(
         self,
@@ -382,27 +362,32 @@ class GraphClient:
         params: Mapping[str, str] | None = None,
         body: object = None,
         content: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
         timeout: float = GRAPH_TIMEOUT_S,
     ) -> object:
-        """One Graph call: `body` as JSON or `content` as bytes; the JSON reply (None on 204)."""
+        """One Graph call: `body` as JSON or `content` as bytes; the JSON reply (None on 204).
+
+        `headers` add to the request's own, such as an `If-Match`; they never replace the token.
+        A failure before the request goes out raises `GraphNotSent`.
+        """
         # `params=None` would drop a query already in `url`, such as a next link's.
         target = httpx.URL(url, params=params) if params else httpx.URL(url)
         if not is_graph_url(target):
-            raise GraphUnavailable("not a Graph URL")
+            raise GraphNotSent("not a Graph URL")
         try:
             token = await self.token()
         except (ValueError, OSError, httpx.HTTPError) as err:  # MSAL's, or a raw token call's
-            raise GraphUnavailable(f"token: {type(err).__name__}") from err
+            raise GraphNotSent(f"token: {type(err).__name__}") from err
         if not token:
-            raise GraphUnavailable("no token")
-        headers = {"Authorization": f"Bearer {token}"}
+            raise GraphNotSent("no token")
+        sent = {**(headers or {}), "Authorization": f"Bearer {token}"}
         if content is not None:
-            headers["Content-Type"] = "application/octet-stream"
+            sent["Content-Type"] = "application/octet-stream"
         request = functools.partial(
             self._http.request,
             method,
             target,
-            headers=headers,
+            headers=sent,
             json=body,
             content=content,
             follow_redirects=False,

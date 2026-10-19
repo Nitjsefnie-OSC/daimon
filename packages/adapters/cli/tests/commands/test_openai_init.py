@@ -216,6 +216,41 @@ def test_init_seeds_every_default_skill_onto_a_persistent_workspace_agent(
     assert paths.index("/v1/agents") > last_skill_call
 
 
+def test_init_leaves_out_a_skill_a_default_agent_limits_to_platforms(
+    monkeypatch: pytest.MonkeyPatch, manifest_path: Path, tmp_path: Path
+) -> None:
+    """A Teams-only default skill is added per session on Anthropic, never to an OpenAI agent."""
+    defaults_root = tmp_path / "defaults"
+    write_skill(defaults_root, "alpha")
+    beta = write_skill(defaults_root, "beta")
+    (defaults_root / "agents").mkdir()
+    (defaults_root / "agents" / "daimon.yaml").write_text(
+        "name: daimon\nmodel: claude-sonnet-4-6\nskills:\n"
+        "  - {type: custom, skill_id: alpha, platforms: [teams]}\n"
+        "  - {type: custom, skill_id: beta}\n"
+    )
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "sk-test-not-a-real-key")
+    calls: list[httpx.Request] = []
+    monkeypatch.setattr(
+        "daimon.adapters.cli.commands.openai.configured_transport",
+        fake_transport_factory(calls, [beta]),
+    )
+
+    openai_init_command(
+        tenant_id=TENANT_ID,
+        project="proj_123",
+        model="gpt-6-luna",
+        manifest=manifest_path,
+        defaults_root=defaults_root,
+    )
+
+    deployment = OpenAIDeployment.model_validate(json.loads(manifest_path.read_text())[0])
+    assert list(deployment.skill_ids) == ["skill-1"], "only the unlimited skill is attached"
+    assert [c.url.path for c in calls].count("/v1/skills") == 1, (
+        "the Teams-only one is not uploaded"
+    )
+
+
 def test_init_conversation_only_profile_never_seeds_skills(
     monkeypatch: pytest.MonkeyPatch, manifest_path: Path, tmp_path: Path
 ) -> None:

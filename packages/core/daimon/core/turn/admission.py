@@ -6,12 +6,12 @@ gate, the per-user monthly cap gate and the channel budget gate -- returning a
 frozen `Admission` or raising a typed error. No boolean gate result crosses this boundary.
 
 Gate ORDER is load-bearing and must not be reordered: identity -> channel
-protection -> invoker policy -> external participant -> cascade -> external in
-setup -> missing-config -> resolve/retrieve -> agent pin -> channel isolation ->
-balance -> cap -> channel budget. A tenant that is both over-balance and
-mis-configured must see the config error (matches both adapters' inline
-sequences today). The access policy gates run before the cascade so a refused turn learns nothing
-about the tenant's configuration and never reaches an MA call.
+protection -> invoker policy -> cascade -> missing-config -> resolve/retrieve ->
+agent pin -> channel isolation -> balance -> cap -> channel budget. A tenant that
+is both over-balance and mis-configured must see the config error (matches both
+adapters' inline sequences today). The access policy gates run before the
+cascade so a refused turn learns nothing about the tenant's configuration and
+never reaches an MA call.
 
 Ported verbatim from `bot.py`'s inline pre-turn sequence (the reference
 implementation). Both the Discord and Slack adapters now call `admit()` as
@@ -30,11 +30,7 @@ from typing import Literal
 
 import structlog
 from anthropic import APIError, APIStatusError
-from anthropic.types.beta import (
-    BetaEnvironment,
-    BetaManagedAgentsAgent,
-    BetaManagedAgentsCustomSkill,
-)
+from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core import channel_backend
 from daimon.core.access_policy import (
     TenantAccessPolicy,
@@ -62,7 +58,7 @@ from daimon.core.channel_backend import (
 )
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
-from daimon.core.channel_skills import turn_channel_skills
+from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_identity import derive_agent_uuid
@@ -82,14 +78,11 @@ from daimon.core.permissions import (
     limiting_ids_at,
 )
 from daimon.core.scope import ResolvedConfig, ScopeContext
+from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
 from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.accounts import (
-    get_external,
-    set_external,
-    set_role,
-)
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -124,6 +117,7 @@ __all__ = [
     "DmSource",
     "MissingTurnConfigError",
     "admit",
+    "backend_platform_skills",
     "reauthorize",
 ]
 
@@ -137,20 +131,6 @@ class DmSource:
     channel_id: str | None
     thread_id: str | None
     thread_keys: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class ExternalFinding:
-    """An adapter's live finding on whether the caller is from another organisation.
-
-    `is_external` is how this turn treats them. `is_known` says it rests on
-    positive evidence (a home tenant id, ours or another's, or a verified 1:1
-    chat); only such a finding is stored. One without it, such as a fail-closed
-    guess, applies to this turn alone.
-    """
-
-    is_external: bool
-    is_known: bool
 
 
 @dataclass(frozen=True)
@@ -176,8 +156,6 @@ class AdmissionGrant:
     is_dm: bool
     # Set by the DM path: the conversation's source, whose seal is re-checked.
     dm_source: DmSource | None = None
-    # The caller is from another organisation: answered only in an isolated channel.
-    is_external: bool = False
 
 
 @dataclass(frozen=True)
@@ -207,9 +185,6 @@ class Admission:
     source_sealed: bool = False
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
-    # The caller is from another organisation (`admit`'s `is_external`, or the stored
-    # flag when the adapter could not tell): never an admin, whatever its role.
-    is_external: bool = False
     private_dm_id: str | None = None
     # The channel and thread the turn runs in, and every sealed id that seals
     # them (the channel and a thread sealed on its own): stamped on the session
@@ -222,9 +197,14 @@ class Admission:
     # was moved from, or None. Apart from `origin_channel_id`, which drives the
     # seal: a DM is budgeted to its source channel but never runs there.
     budget_channel_id: str | None = None
-    # The channel's extra skills (`daimon.core.channel_skills`), decided once
-    # so creating the session and checking it for drift add the same ones.
-    channel_skills: tuple[BetaManagedAgentsCustomSkill, ...] = ()
+    # The skills the session adds to the agent's, decided once so creating the
+    # session and checking it for drift add the same ones: the platform's
+    # (`turn_platform_skills`, on the Anthropic backend only), then the
+    # channel's (`daimon.core.channel_skills`).
+    channel_skills: tuple[MaSkill, ...] = ()
+    # Which of `channel_skills` are the platform's, so a create the provider
+    # refuses for one of them can run without it (`create_ma_session`).
+    platform_skill_ids: frozenset[str] = frozenset()
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
@@ -323,7 +303,6 @@ async def admit(
     dm_source_channel_id: str | None = None,
     category_id: str | None = None,
     category_unresolved: bool = False,
-    external: ExternalFinding | None = None,
     observer: AdmissionObserver | None = None,
 ) -> Admission:
     observation = current_outcome.get() or TurnObservation(
@@ -346,7 +325,6 @@ async def admit(
                 dm_source_channel_id=dm_source_channel_id,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
-                external=external,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -382,6 +360,17 @@ async def admit(
     return replace(result, observation=observation)
 
 
+def backend_platform_skills(
+    platform_skills: tuple[MaSkill, ...], profile: str | None
+) -> tuple[MaSkill, ...]:
+    """The platform's skills a session on backend `profile` (None: the default) runs. Pure.
+
+    Another backend than Managed Agents has no Anthropic built-in skills and
+    carries a channel's skills only as a declared loss, so it gets none.
+    """
+    return platform_skills if profile in (None, MANAGED_AGENTS.profile_id) else ()
+
+
 async def admit_impl(
     deps: TurnDeps,
     *,
@@ -396,13 +385,8 @@ async def admit_impl(
     dm_source_channel_id: str | None = None,
     category_id: str | None = None,
     category_unresolved: bool = False,
-    external: ExternalFinding | None = None,
 ) -> Admission:
-    """Run the full pre-turn gate sequence; raise instead of returning bool.
-
-    `external` is the adapter's live finding about the caller's organisation
-    (`ExternalFinding`); None (an adapter that cannot tell) uses the stored flag.
-    """
+    """Run the full pre-turn gate sequence; raise instead of returning bool."""
     started = last_stage = perf_counter()
     stage_ms: dict[str, float] = {}
 
@@ -420,19 +404,7 @@ async def admit_impl(
             platform=platform,
             external_id=external_user_id,
         )
-        # Only positive evidence is stored, before the role: marking demotes, and
-        # an external account is never promoted. A finding without it holds
-        # for this turn alone and leaves the stored flag, role and groups be.
-        if external is not None and external.is_known:
-            await set_external(session, principal.account_id, external.is_external)
-            stored = external.is_external
-        else:
-            stored = await get_external(session, principal.account_id)
-        is_external = stored or (external is not None and external.is_external)
-        store_identity = stored or not is_external
-        if is_external:
-            role = Role.USER
-        if role is not None and store_identity:
+        if role is not None:
             await set_role(session, principal.account_id, role)
         await session.commit()
         mark("identity")
@@ -450,13 +422,6 @@ async def admit_impl(
             category_unresolved=category_unresolved,
         )
         _require_turn_start(policy, subject, turn_place)
-        _require_external_inside_home(
-            policy,
-            is_external=is_external,
-            is_dm=is_dm,
-            channel_id=channel_id,
-            thread_id=thread_id,
-        )
         mark("start_policy")
 
         if (observation := current_outcome.get()) is not None:
@@ -582,12 +547,6 @@ async def admit_impl(
                 _log_backend_unsupported("retained_default_policy", error)
                 raise AdmissionDenied(reason="backend_unsupported") from error
     mark("config")
-
-    # --- An external caller is never answered in a setup conversation, even
-    # one in their isolated channel: its built-in agent is not the channel's
-    # own and changes the agent's setup. Before any MA call. ---
-    if is_external and config.thread_binding_kind == "setup":
-        raise AdmissionDenied(reason="external_participant")
 
     # --- Missing config check (before any MA call) ---
     if config.agent_name is None or config.environment_name is None:
@@ -732,7 +691,6 @@ async def admit_impl(
         channel_id=channel_id,
         thread_id=thread_id,
         is_dm=is_dm,
-        is_external=is_external,
     )
     _require_run_agent(policy, grant)
     mark("agent_policy")
@@ -791,7 +749,6 @@ async def admit_impl(
             origin_seal_ids=seal_ids,
             private_dm_id=(thread_id or channel_id) if is_dm else None,
             channel_skills=channel_skills,
-            is_external=is_external,
             backend_revision=revision,
             backend_revision_origin=origin,
             backend_agent_revision=agent_revision,
@@ -944,6 +901,16 @@ async def admit_impl(
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
+    platform_skills = await turn_platform_skills(
+        deps.anthropic,
+        tenant_id=tenant_id,
+        platform=platform,
+        agent=agent,
+        platform_skills=deps.platform_skills,
+        now=now,
+        memory=deps.platform_skill_memory,
+        cache=deps.resolver_cache,
+    )
     channel_skills = (
         ()
         if is_dm
@@ -957,6 +924,7 @@ async def admit_impl(
             agent_names=grant.agent.names,
             rows=channel_skill_rows,
             cache=deps.resolver_cache,
+            platform_skills=platform_skills,
         )
     )
 
@@ -964,6 +932,10 @@ async def admit_impl(
 
     if deps.agent_backends:
         await resolve_preference()
+    platform_skills = backend_platform_skills(
+        platform_skills, None if backend_revision is None else backend_revision.profile
+    )
+    channel_skills = (*platform_skills, *channel_skills)
 
     result = Admission(
         backend_revision=backend_revision,
@@ -991,8 +963,8 @@ async def admit_impl(
         config=config.model_copy(update={"responder_ma_agent_id": agent.id}),
         budget_channel_id=budget_channel_id,
         channel_skills=channel_skills,
+        platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
-        is_external=is_external,
     )
     mark("result")
     _log.info(
@@ -1016,28 +988,6 @@ def _require_turn_start(policy: TenantAccessPolicy, subject: Subject, place: Pla
             if decision.reason == "invoker_not_allowed"
             else "writers_none"
         )
-
-
-def _require_external_inside_home(
-    policy: TenantAccessPolicy,
-    *,
-    is_external: bool,
-    is_dm: bool,
-    channel_id: str,
-    thread_id: str | None,
-    setup_thread: bool = False,
-) -> None:
-    """Refuse an external caller anywhere but an isolated channel or a thread in one,
-    and in a setup conversation anywhere."""
-    if not is_external:
-        return
-    place = channel_permissions(
-        policy,
-        channel_id=thread_id or channel_id,
-        parent_channel_id=channel_id if thread_id is not None else None,
-    )
-    if is_dm or setup_thread or not place.answers_external:
-        raise AdmissionDenied(reason="external_participant")
 
 
 def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> None:
@@ -1096,14 +1046,6 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
     _require_turn_start(policy, grant.subject, grant.turn_place)
-    _require_external_inside_home(
-        policy,
-        is_external=grant.is_external,
-        is_dm=grant.is_dm,
-        channel_id=grant.channel_id,
-        thread_id=grant.thread_id,
-        setup_thread=grant.run_place.setup_thread,
-    )
     _require_run_agent(policy, grant)
     if deps.backend_selection_enabled and admission.backend_revision is not None:
         try:
@@ -1243,7 +1185,7 @@ async def capture_backend_source(
                 account = await get_account_with_tenant(db, account_id=context.account_id)
                 policy = await load_access_policy(db, tenant_id=context.tenant_id)
                 config = await resolve_config(db, context=context, default=deps.deployment_default)
-            if account is None or account.tenant_id != context.tenant_id or account.is_external:
+            if account is None or account.tenant_id != context.tenant_id:
                 raise channel_backend.AgentBackendRefused("source_unavailable")
             if (
                 subject.platform_user_id is not None

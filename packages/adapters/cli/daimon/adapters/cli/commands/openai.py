@@ -131,11 +131,20 @@ async def _seed_default_skills(
     skills: OpenAISkills, scope: Scope, defaults_root: Path, *, key_prefix: str
 ) -> tuple[SkillRef, ...]:
     """Upload every `defaults/skills/*` directory as a native OpenAI skill,
-    matching what `daimon defaults apply` seeds on the Anthropic path."""
-    from daimon.core.defaults.loader import load_skill_paths
+    matching what `daimon defaults apply` seeds on the Anthropic path.
 
+    A skill a default agent limits to some platforms (`microsoft-365`) is left
+    out: only the Anthropic backend adds those, per session on their platforms.
+    """
+    from daimon.core.defaults.loader import load_platform_skills, load_skill_paths
+
+    limited = {
+        ref.skill_id for refs in load_platform_skills(defaults_root).values() for ref in refs
+    }
     refs: list[SkillRef] = []
     for skill_dir in load_skill_paths(defaults_root / "skills"):
+        if skill_dir.name in limited:
+            continue
         bundle = _skill_bundle(skill_dir)
         skill = await skills.create(scope, bundle, key=f"{key_prefix}:{skill_dir.name}")
         assert skill.latest_version is not None

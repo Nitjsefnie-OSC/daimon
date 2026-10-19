@@ -26,6 +26,8 @@ from daimon.adapters.mcp.tools.discord._credential_button import (
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
+    McpOAuthClientSettings,
+    McpOAuthSettings,
     McpSettings,
     Settings,
 )
@@ -79,11 +81,20 @@ def test_oauth_success_returns_to_platform(platform: str, name: str, url: str) -
         assert 'class="web-icon web-icon--teams"' not in body
 
 
-def _settings() -> Settings:
+_CONFIGURED_CLIENT = McpOAuthClientSettings(
+    authorization_server_host="mcp.notion.com",
+    mcp_servers=[_MCP_URL],
+    client_id="app-id",
+    client_secret=SecretStr("app-secret"),
+)
+
+
+def _settings(clients: list[McpOAuthClientSettings] | None = None) -> Settings:
     return Settings(
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
         mcp=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(f"{_ROOT}/mcp")),
+        mcp_oauth=McpOAuthSettings(clients=clients or []),
     )
 
 
@@ -92,6 +103,9 @@ def _notion(
     *,
     registrations: list[str] | None = None,
     token_body: dict[str, str] | None = None,
+    token_status: int = 200,
+    metadata: dict[str, object] | None = None,
+    resource_scopes: list[str] | None = None,
 ) -> httpx.MockTransport:
     """The authorization server: discovery, registration and the token endpoint."""
     registered = registrations if registrations is not None else []
@@ -108,10 +122,11 @@ def _notion(
                 json={
                     "resource": "https://mcp.notion.com",
                     "authorization_servers": [_AS["issuer"]],
-                },
+                }
+                | ({"scopes_supported": resource_scopes} if resource_scopes else {}),
             )
         if path == "/.well-known/oauth-authorization-server":
-            return httpx.Response(200, json=_AS)
+            return httpx.Response(200, json=_AS | (metadata or {}))
         if req.method == "POST" and path == "/register":
             registered.append(f"cid{len(registered) + 1}")
             return httpx.Response(
@@ -124,7 +139,7 @@ def _notion(
                 if token_body is not None
                 else {"access_token": "at", "refresh_token": "rt"}
             )
-            return httpx.Response(200, json=body)
+            return httpx.Response(token_status, json=body)
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)
@@ -272,11 +287,12 @@ def _app(
     transport: httpx.MockTransport,
     now: datetime = _NOW,
     deployment_default: DeploymentDefault | None = None,
+    clients: list[McpOAuthClientSettings] | None = None,
 ) -> Starlette:
     runtime = McpRuntime(
         session_factory=sessionmaker,
         client=anthropic,
-        settings=_settings(),
+        settings=_settings(clients),
         deployment_default=deployment_default or DeploymentDefault(),
         fernet=make_fernet(),
     )
@@ -611,3 +627,120 @@ async def test_a_pin_added_during_the_code_exchange_stores_no_grant(
     assert done.status_code == 403 and "runs only in certain channels" in done.text, done.text
     assert created == [], "no grant is stored"
     assert updates == [], "nothing is attached"
+
+
+@pytest.mark.parametrize(
+    ("clients", "kept"),
+    [(None, "read"), ([_CONFIGURED_CLIENT], "read offline_access")],
+    ids=["registered", "configured"],
+)
+async def test_only_a_configured_client_keeps_offline_access_in_the_refresh_scope(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    clients: list[McpOAuthClientSettings] | None,
+    kept: str,
+) -> None:
+    flow, tenant_id = await _seed_flow(db_session, admin=True)
+    await db_session.commit()
+    anthropic, created, _u = _fake_ma(tenant_id, account_id=flow.account_id, agent_id=flow.agent_id)
+    transport = _notion(
+        [],
+        token_body={"access_token": "at", "refresh_token": "rt", "scope": "read"},
+        metadata={
+            "scopes_supported": ["read", "offline_access"],
+            "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+        },
+        resource_scopes=["read", "offline_access"],
+    )
+    app = _app(db_session_factory, anthropic=anthropic, transport=transport, clients=clients)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.get(f"/oauth/mcp/start?state={flow.state}")
+        done = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
+
+    assert done.status_code == 200, done.text
+    assert created[0]["auth"]["refresh"]["scope"] == kept, (
+        "a registered client stores the scope the server granted, byte for byte; only a "
+        "configured client keeps the offline_access its sign-in asked for"
+    )
+
+
+async def test_a_configured_client_with_a_wrong_secret_sends_the_person_to_the_operator(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    flow, tenant_id = await _seed_flow(db_session)
+    await db_session.commit()
+    anthropic, created, updates = _fake_ma(
+        tenant_id, account_id=flow.account_id, agent_id=flow.agent_id
+    )
+    transport = _notion(
+        [],
+        token_status=401,
+        token_body={"error": "invalid_client", "error_description": "bad secret"},
+    )
+    app = _app(
+        db_session_factory, anthropic=anthropic, transport=transport, clients=[_CONFIGURED_CLIENT]
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.get(f"/oauth/mcp/start?state={flow.state}")
+        r = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
+
+    assert r.status_code == 502 and "not set up correctly" in r.text, r.text
+    assert "Ask the operator" in r.text, "retrying cannot fix a wrong secret"
+    assert created == [] and updates == [], "a refused client stores and attaches nothing"
+    async with db_session_factory() as session:
+        request = await requests_store.peek_credential_request(session, token=flow.request_token)
+    assert request is not None and request.outcome == "write_failed", "the card is not left pending"
+
+
+@pytest.mark.parametrize(
+    ("clients", "page"),
+    [(None, "cancelled"), ([_CONFIGURED_CLIENT], "not set up correctly")],
+    ids=["registered", "configured"],
+)
+async def test_an_authorization_server_error_names_the_configuration_only_for_a_configured_client(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    clients: list[McpOAuthClientSettings] | None,
+    page: str,
+) -> None:
+    flow, tenant_id = await _seed_flow(db_session)
+    await db_session.commit()
+    anthropic, created, _u = _fake_ma(tenant_id, account_id=flow.account_id, agent_id=flow.agent_id)
+    app = _app(db_session_factory, anthropic=anthropic, transport=_notion([]), clients=clients)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.get(f"/oauth/mcp/start?state={flow.state}")
+        r = await client.get(f"/oauth/mcp/callback?error=invalid_request&state={flow.state}")
+
+    assert page in r.text, f"expected the {page!r} page; got {r.text}"
+    assert created == [], "nothing is stored when the authorization server refuses"
+
+
+async def test_start_names_the_configuration_when_a_configured_client_does_not_fit(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    flow, tenant_id = await _seed_flow(db_session)
+    await db_session.commit()
+    anthropic, _c, _u = _fake_ma(tenant_id, account_id=flow.account_id, agent_id=flow.agent_id)
+    transport = _notion([], metadata={"token_endpoint": "https://elsewhere.example.com/token"})
+    app = _app(
+        db_session_factory, anthropic=anthropic, transport=transport, clients=[_CONFIGURED_CLIENT]
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.get(f"/oauth/mcp/start?state={flow.state}")
+
+    assert r.status_code == 502 and "not set up correctly" in r.text, (
+        "a token endpoint off the configured host is the operator's to fix, not a server "
+        f"that cannot do sign-in; got {r.text}"
+    )

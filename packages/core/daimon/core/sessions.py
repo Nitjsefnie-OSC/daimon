@@ -21,7 +21,6 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     BetaEnvironment,
     BetaManagedAgentsAgent,
-    BetaManagedAgentsCustomSkill,
     BetaManagedAgentsSession,
     BetaManagedAgentsSkillParams,
 )
@@ -101,6 +100,7 @@ from daimon.core.session_ports_compat import (
 )
 from daimon.core.session_seal import origin_stamp
 from daimon.core.session_snapshot import (
+    MaSkill,
     hash_mcp_servers,
     hash_skills,
     session_mcp_servers,
@@ -249,13 +249,12 @@ async def project_session_resources(
     resource_scope: Scope,
     memory_read_only: bool,
     fernet: MultiFernet | None = None,
-    channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
+    channel_skills: Sequence[MaSkill] = (),
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     asks_before_publishing: bool = False,
     mcp_settings: McpSettings | None = None,
     agent_github_app: GithubAppSettings | None = None,
     hide_personal_for: uuid.UUID | None = None,
-    is_external: bool = False,
     requester_is_headless: bool = False,
     app_session_unmapped: bool = False,
     slack_turn_context_id: uuid.UUID | None = None,
@@ -283,19 +282,14 @@ async def project_session_resources(
     if caller_vault and account_id is None:
         raise ScopeViolation("source-preparation", "caller vault has no authorized account")
     async with session_factory() as session:
-        keys = (
-            ()
-            if is_external
-            else await agent_files.list_agent_file_revisions(
-                session, tenant_id=tenant_id, agent_id=agent_uuid
-            )
+        keys = await agent_files.list_agent_file_revisions(
+            session, tenant_id=tenant_id, agent_id=agent_uuid
         )
         credentials = (
             await credential_store.list_credential_revisions(
                 session, tenant_id=tenant_id, agent_id=agent_uuid
             )
-            if not is_external
-            and _agent_mcp_mirror_required(
+            if _agent_mcp_mirror_required(
                 vault_available=caller_vault,
                 account_id=account_id,
                 tenant_id=tenant_id,
@@ -317,7 +311,6 @@ async def project_session_resources(
             agent_id=agent_uuid,
             account_id=hiding_for,
             server_urls={server.name: server.url for server in agent.mcp_servers},
-            is_external=is_external,
         )
     public_url = (
         str(mcp_settings.public_url)
@@ -367,7 +360,7 @@ async def project_session_resources(
             ResourceBinding(id=reference, kind="credential", credential_ref=reference)
         )
     repos: list[WorkspaceSource] = []
-    if app_mode and not is_external:
+    if app_mode:
         # This owner's requester-access calculation may use network and tokens.
         # Capture its locally declared intent; remote effective access remains unproven.
         repos.extend(
@@ -507,7 +500,6 @@ async def create_session(
     github_app_id: str | None = None,
     github_app_private_key: str | None = None,
     agent_github_app: GithubAppSettings | None = None,
-    is_external: bool = False,
     requester_is_headless: bool = False,
     hide_personal_for: uuid.UUID | None = None,
     app_session_unmapped: bool = False,
@@ -533,7 +525,7 @@ async def create_session(
         Awaitable[BetaManagedAgentsSession],
     ]
     | None = None,
-    channel_skills: Sequence[BetaManagedAgentsCustomSkill] = (),
+    channel_skills: Sequence[MaSkill] = (),
     model_override: str | None = None,
     resource_source: BackendAgent | None = None,
     worker: ResolvedWorkerSpec | None = None,
@@ -557,8 +549,9 @@ async def create_session(
     turn a session is opened for; they are stamped on it so the transcript tools
     can refuse a sealed conversation's transcript outside its channel.
 
-    ``channel_skills`` are the turn's channel's extra skills, added after the
-    agent's own (`session_skills`, the shape the drift check hashes too).
+    ``channel_skills`` are the turn's extra skills (the platform's, then the
+    channel's), added after the agent's own (`session_skills`, the shape the
+    drift check hashes too).
 
     ``model_override`` replaces the model for this session through
     ``agent_with_overrides``. It never changes the stored agent.
@@ -597,11 +590,6 @@ async def create_session(
     The ``resources`` kwarg is passed only when the agent actually has
     secrets; otherwise it is omitted entirely. ``resources`` composes
     alongside ``vault_ids`` — it never replaces the vault branch.
-
-    ``is_external`` (a person from another organisation) gets neither: no
-    ``.env`` and no agent-wide MCP token in their vault, and the servers only
-    such a token authenticates are left off their session like another
-    person's OAuth server. Their own sign-ins still reach them.
 
     The same gate (``tenant_id`` + ``agent_uuid`` + ``session_factory``) also
     attaches the agent's per-agent memory store via
@@ -731,7 +719,7 @@ async def create_session(
             session_factory, tenant_id=tenant_id, agent_id=agent_uuid
         )
     app_grant_view: EffectiveAppGrantView | None = None
-    if app_mode and not is_external:
+    if app_mode:
         assert tenant_id is not None and agent_uuid is not None and session_factory is not None
         app_grant_view = await effective_app_grant_view(
             session_factory,
@@ -823,10 +811,9 @@ async def create_session(
         # stored credentials in on every session create (same shape as the Copilot
         # mirror above) or callers who did not personally attach a server fail the
         # whole turn at MCP init. Not degrade-not-block: see
-        # mirror_credentials_into_vault. Never for a person from another
-        # organisation: those servers come off their session instead.
+        # mirror_credentials_into_vault.
         credential_vault_id = caller_vault_id if app_mode else vault_id
-        if not is_external and _agent_mcp_mirror_required(
+        if _agent_mcp_mirror_required(
             vault_available=credential_vault_id is not None,
             account_id=account_id,
             tenant_id=tenant_id,
@@ -865,16 +852,12 @@ async def create_session(
         app_access: AppSessionAccess | None = None
         provisional_session_id = f"pending:{uuid.uuid4()}"
         if tenant_id is not None and agent_uuid is not None and session_factory is not None:
-            mount = (
-                None
-                if is_external
-                else await upload_env_and_mount(
-                    anthropic,
-                    session_factory,
-                    tenant_id=tenant_id,
-                    agent_id=agent_uuid,
-                    exclude_github=app_mode,
-                )
+            mount = await upload_env_and_mount(
+                anthropic,
+                session_factory,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                exclude_github=app_mode,
             )
             if mount is not None:
                 resources.append(mount)
@@ -957,7 +940,6 @@ async def create_session(
                 agent_id=agent_uuid,
                 account_id=hiding_for,
                 server_urls={server.name: server.url for server in agent.mcp_servers},
-                is_external=is_external,
             )
             if hidden:
                 _log.info(
@@ -1057,7 +1039,6 @@ async def create_session(
                         tenant_id=tenant_id,
                         agent_id=agent_uuid,
                         account_id=None if requester_is_headless else account_id,
-                        is_external=is_external,
                         provisional_session_id=provisional_session_id,
                         config=agent_github_app or GithubAppSettings(),
                         fernet=fernet,
@@ -1269,7 +1250,6 @@ async def create_session(
                     mcp_settings=mcp_settings,
                     agent_github_app=agent_github_app,
                     hide_personal_for=hide_personal_for,
-                    is_external=is_external,
                     requester_is_headless=requester_is_headless,
                     app_session_unmapped=app_session_unmapped,
                     slack_turn_context_id=slack_turn_context_id,
@@ -1303,7 +1283,6 @@ async def create_session(
                         vault_id=vault_id,
                         sent_skills=session_skills(agent, channel_skills),
                         github_mode="app",
-                        is_external=is_external,
                     )
                     if app_session_unmapped
                     else None
@@ -1316,7 +1295,6 @@ async def create_session(
                         vault_id=vault_id,
                         is_unmapped=requester_is_headless or app_session_unmapped,
                         is_mcp=app_session_unmapped,
-                        is_external=is_external,
                         agent_id=agent_uuid if app_session_unmapped else None,
                         account_id=account_id if app_session_unmapped else None,
                         repo_urls=snapshot.repo_urls if snapshot is not None else (),
