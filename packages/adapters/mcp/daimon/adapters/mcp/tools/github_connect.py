@@ -176,8 +176,6 @@ async def _github_connect_impl(
 ) -> ConnectResult:
     if auth.platform not in ("discord", "slack", "teams") or auth.platform_user_id is None:
         raise ToolError("GitHub setup from chat is available in Discord, Slack and Teams.")
-    if auth.is_external:
-        raise ToolError("GitHub setup is for members of this workspace.")
     root = runtime.settings.mcp.app_root_url
     config = runtime.settings.github_app
     if runtime.fernet is None:
@@ -216,7 +214,7 @@ async def _github_connect_impl(
         except PinnedAgentConnectionError as exc:
             return ConnectResult(status="client_agent", message=str(exc))
         account = await get_account(session, auth.account_id)
-        if account is None or account.tenant_id != auth.tenant_id or account.is_external:
+        if account is None or account.tenant_id != auth.tenant_id:
             raise ToolError("GitHub setup is unavailable for this account.")
         is_admin = account.role == Role.ADMIN and auth.is_admin
         manages = is_admin or await requester_manages_agent(
@@ -414,7 +412,8 @@ async def _github_connect_impl(
             status="delivery_failed",
             message=(
                 "I couldn't send the Connect GitHub link to your 1:1 chat with me. "
-                "Open a chat with me in Teams, then try again."
+                "Open a chat with me in Teams, then try again. Teams opens none "
+                "with people from another organisation."
                 if auth.platform == "teams"
                 else "I couldn't show the GitHub connection button. Try again."
             ),
