@@ -121,7 +121,11 @@ async def get_routine(
     ).scalar_one_or_none()
     if orm is None:
         return None
-    return RoutineRow.model_validate(orm)
+    from daimon.core.stores.routine_sessions import status
+
+    return RoutineRow.model_validate(orm).model_copy(
+        update={"session_lifecycle": await status(session, routine_id=orm.id, tenant_id=tenant_id)}
+    )
 
 
 async def list_routines_missing_agent_name(
@@ -148,7 +152,16 @@ async def list_routines_for_tenant(
         .scalars()
         .all()
     )
-    return [RoutineRow.model_validate(r) for r in rows]
+    from daimon.core.stores.routine_sessions import status
+
+    return [
+        RoutineRow.model_validate(r).model_copy(
+            update={
+                "session_lifecycle": await status(session, routine_id=r.id, tenant_id=tenant_id)
+            }
+        )
+        for r in rows
+    ]
 
 
 async def list_routine_creators(

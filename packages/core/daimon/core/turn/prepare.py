@@ -795,6 +795,11 @@ async def insert_mapping(
         transfer_file_id=transfer_file_id,
         transfer_kind=transfer_kind,
     )
+    from daimon.core.routine_sessions import current_lifecycle
+
+    routine_lifecycle = current_lifecycle.get()
+    if routine_lifecycle is not None:
+        await routine_lifecycle.mapped(created.ma_session_id, row.id)
     return FreshSession(
         ma_session_id=created.ma_session_id,
         mapping_id=row.id,

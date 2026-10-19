@@ -60,6 +60,7 @@ from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import (
     FAILURE_NOTICE,
     claim_routine_deliveries,
+    get_routine,
     queue_failure_notice,
     record_result,
     routine_platform,
@@ -98,6 +99,8 @@ __all__ = [
 ]
 
 log = structlog.get_logger(__name__)
+
+STOP_UNRESOLVED_NOTICE = "This run may still be running; Daimon couldn't confirm it stopped."
 
 DELIVERY_LEASE: Final[timedelta] = timedelta(minutes=2)
 DELIVERY_POLL_INTERVAL_S: Final[float] = 15.0
@@ -372,6 +375,8 @@ def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
     says the run failed instead of introducing a result.
     """
     payload = decode_payload(payload_for(row)).text.strip()
+    if row.delivery_note == "stop_unresolved_notice":
+        return STOP_UNRESOLVED_NOTICE
     phrase = routine_phrase(row.cron_expr, row.timezone)
     if row.delivery_note == FAILURE_NOTICE:
         owner = "The" if as_agent else f"{row.agent_name}'s"
@@ -448,6 +453,8 @@ def render_fallback_dm(row: RoutineRow, reason: str) -> str:
 
     The agent and schedule first, then why the result is here, then the result.
     """
+    if row.delivery_note == "stop_unresolved_notice":
+        return STOP_UNRESOLVED_NOTICE
     schedule = schedule_words(row.cron_expr, row.timezone)
     payload = decode_payload(payload_for(row)).text.strip()
     if row.delivery_note == FAILURE_NOTICE:
@@ -731,7 +738,31 @@ async def poll_deliveries_once(
             note=outcome.note,
             settled=settled,
         )
-    return len(claimed)
+    notices = 0
+    if platform == "discord":
+        from daimon.core.stores.routine_sessions import claim_unresolved_notices
+
+        async with sessionmaker.begin() as session:
+            unresolved = await claim_unresolved_notices(session, platform=platform)
+        for intent in unresolved:
+            async with sessionmaker() as session:
+                current = await get_routine(session, intent.routine_id, tenant_id=intent.tenant_id)
+            if current is None or current.destination_kind != "dm":
+                continue
+            notice = current.model_copy(
+                update={
+                    "delivery_status": None,
+                    "delivery_note": "stop_unresolved_notice",
+                    "delivery_payload": STOP_UNRESOLVED_NOTICE,
+                    "last_result_tail": None,
+                }
+            )
+            try:
+                await post(notice)
+            except Exception:
+                log.exception("routine.stop_notice_failed", intent_id=str(intent.id))
+            notices += 1
+    return len(claimed) + notices
 
 
 async def run_delivery_poller(

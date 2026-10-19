@@ -3,7 +3,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from daimon.core._models import RoutineSession
+from daimon.core._models import RoutineSession, Tenant
 from daimon.core.stores.domain import RoutineLifecycleStatus, RoutineSessionRow, RoutineSessionState
 from daimon.core.stores.thread_sessions import mark_dead
 from daimon.core.stores.worker_ownership import owner_is_alive
@@ -149,3 +149,24 @@ async def status(
         pending=sum(count for state, count in counts.items() if state != "stop_unresolved"),
         stop_unresolved=counts.get("stop_unresolved", 0),
     )
+
+
+async def claim_unresolved_notices(db: AsyncSession, *, platform: str) -> list[RoutineSessionRow]:
+    """At-most-once owner notices, independently of the routine result outbox."""
+    rows = (
+        await db.scalars(
+            select(RoutineSession)
+            .join(Tenant, Tenant.id == RoutineSession.tenant_id)
+            .where(
+                Tenant.platform == platform,
+                RoutineSession.state == "stop_unresolved",
+                RoutineSession.notice_claimed_at.is_(None),
+            )
+            .with_for_update(of=RoutineSession, skip_locked=True)
+            .limit(20)
+        )
+    ).all()
+    for row in rows:
+        row.notice_claimed_at = datetime.now(UTC)
+    await db.flush()
+    return [RoutineSessionRow.model_validate(row) for row in rows]

@@ -526,6 +526,14 @@ async def _archive_orphaned_session(
     background and its result is logged when it finishes. A failure is
     swallowed: the error being unwound is the one the caller must see.
     """
+    from daimon.core.routine_sessions import current_lifecycle
+
+    routine = current_lifecycle.get()
+    if routine is not None:
+        # The allocation has an independent durable receipt, even if mapping
+        # insertion rolled back. The dispatcher owns its cleanup task.
+        routine.supervisor.submit_stop(routine.sessions[session_id])
+        return
     archive_task = asyncio.create_task(
         archive()
         if archive is not None
@@ -643,6 +651,11 @@ async def _replace_dead_session_locked(
     # A recovery can run long after admission: decide the turn again on the
     # current policy before its successor is created or adopted, and stamp any
     # seal added since (`reauthorize`).
+    from daimon.core.routine_sessions import current_lifecycle
+
+    routine = current_lifecycle.get()
+    if routine is not None:
+        await routine.stop(dead_session_id)
     admission = await reauthorize(deps, prepared.admission)
     session_account_id = prepared.session_account_id
     created: CreatedSession | None = None
@@ -1148,6 +1161,11 @@ async def run_prepared_turn_impl(
                 now=now,
             )
 
+        from daimon.core.routine_sessions import current_lifecycle
+
+        routine = current_lifecycle.get()
+        if routine is not None:
+            await routine.running(ma_session_id)
         first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
         async with persisted(prepared.admission, ma_session_id, mapping_id, prepared.session_ref):
             state = await run_turn(
@@ -1237,6 +1255,9 @@ async def run_prepared_turn_impl(
             recovered_cell[0] = True
             if on_session is not None:
                 await on_session(new_session_id, new_mapping_id)
+
+            if routine is not None:
+                await routine.running(new_session_id)
 
             # The session this turn was bound to is gone, so whatever the bind
             # decided has been overtaken: this is a replacement after a loss.

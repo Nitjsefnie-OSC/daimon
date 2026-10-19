@@ -12,6 +12,7 @@ import structlog
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.routine_delivery import record_failure
+from daimon.core.routine_sessions import RoutineSessionSupervisor
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
     advance_stale,
@@ -36,7 +37,11 @@ class RoutineDispatcher:
     """Own a bounded batch of running and queued fires across ticks."""
 
     def __init__(
-        self, max_concurrent_fires: int, *, clock: Callable[[], datetime] | None = None
+        self,
+        max_concurrent_fires: int,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        supervisor: RoutineSessionSupervisor | None = None,
     ) -> None:
         if max_concurrent_fires < 1:
             raise ValueError("max_concurrent_fires must be positive")
@@ -45,6 +50,8 @@ class RoutineDispatcher:
         self.semaphore = asyncio.Semaphore(max_concurrent_fires)
         self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
         self._versions: dict[uuid.UUID, datetime] = {}
+        self.supervisor = supervisor
+        self._close_task: asyncio.Task[None] | None = None
 
     @property
     def in_flight_ids(self) -> frozenset[uuid.UUID]:
@@ -81,12 +88,40 @@ class RoutineDispatcher:
             await asyncio.gather(*list(self._tasks.values()))
 
     async def close(self) -> None:
-        """Cancel and join fires before releasing database/client resources."""
+        """Cancel fires and drain independently owned stops within six seconds."""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        cancelled = False
+        while not self._close_task.done():
+            try:
+                await asyncio.shield(self._close_task)
+            except asyncio.CancelledError:
+                cancelled = True
+        self._close_task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _close(self) -> None:
         tasks = list(self._tasks.values())
         for task in tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            async with asyncio.timeout(6):
+                # Fire finalizers can add stops while the first drain runs.
+                async def join() -> None:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    if self.supervisor is not None:
+                        await self.supervisor.drain()
+
+                await asyncio.gather(
+                    join(),
+                    self.supervisor.drain() if self.supervisor is not None else asyncio.sleep(0),
+                )
+        except TimeoutError:
+            log.warning("scheduler.shutdown_budget_exhausted")
+        finally:
+            if self.supervisor is not None:
+                await self.supervisor.abort_pending()
 
 
 async def _record_fire_error(
@@ -128,6 +163,8 @@ async def run_one_tick(
     dispatcher = dispatcher or RoutineDispatcher(
         max_concurrent_fires, clock=lambda: now + timedelta(seconds=loop.time() - tick_started)
     )
+    if dispatcher.supervisor is not None:
+        await dispatcher.supervisor.recover()
     active_versions = dispatcher.in_flight_versions
     active_ids = frozenset(active_versions)
     async with sm() as session, session.begin():

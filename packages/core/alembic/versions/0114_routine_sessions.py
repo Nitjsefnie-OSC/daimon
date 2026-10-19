@@ -37,6 +37,7 @@ def upgrade() -> None:
             "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.Column("finished_at", sa.DateTime(timezone=True)),
+        sa.Column("notice_claimed_at", sa.DateTime(timezone=True)),
         sa.CheckConstraint(
             "state IN ('recorded', 'session_created', 'running', 'stopping', "
             "'completed', 'stopped', 'stop_unresolved')",

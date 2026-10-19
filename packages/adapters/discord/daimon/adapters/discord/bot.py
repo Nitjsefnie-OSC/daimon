@@ -1605,6 +1605,15 @@ class DaimonBot(commands.Bot):
         list, check owner liveness and compare the original marker, so neither
         gateway reconnects nor periodic recovery can interrupt a new live turn.
         """
+        from daimon.core.routine_sessions import RoutineSessionSupervisor
+
+        routine_recovery = RoutineSessionSupervisor(
+            self.runtime.sessionmaker, self.runtime.anthropic, owner_key=self.runtime.owner_key
+        )
+        try:
+            await routine_recovery.recover()
+        finally:
+            await routine_recovery.abort_pending()
         if self._orphans_retired and not retry:
             return
         if retry:

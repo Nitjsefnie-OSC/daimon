@@ -47,6 +47,7 @@ from daimon.core.stores.tenant_ledger import get_channel_spend
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.admission import DmSource
+from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
 from daimon.testing.ma import (
     FakeMAState,
@@ -125,6 +126,8 @@ class Upstream:
                 if sid in self.dead:
                     return not_found_response(f"no such session: {sid}")
                 body = json.loads(request.content)
+                kinds = {event["type"] for event in body["events"]}
+                self.state.sessions[sid].status = "idle" if "user.interrupt" in kinds else "running"
                 async with self.changed:
                     self.sent.extend((sid, event) for event in body["events"])
                     self.changed.notify_all()
@@ -347,9 +350,9 @@ class Harness:
 
 @pytest.fixture
 async def harness(
-    db_engine: Any, db_clean: None, monkeypatch: pytest.MonkeyPatch
+    db_nullpool_engine: Any, db_clean: None, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[Harness]:
-    db_session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    db_session_factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, workspace_id=str(GUILD))
         await make_tenant_config(

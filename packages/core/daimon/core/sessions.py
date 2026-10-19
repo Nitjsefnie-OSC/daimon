@@ -1131,6 +1131,9 @@ async def create_session(
             if before_create is not None:
                 # The caller's last access decision, after every await above.
                 await before_create()
+            from daimon.core.routine_sessions import current_lifecycle
+
+            routine_lifecycle = current_lifecycle.get()
             create = functools.partial(
                 create_session_record,
                 anthropic,
@@ -1155,16 +1158,33 @@ async def create_session(
                     "max_list_cost": {"amount": str(budget_cents), "currency": "USD"},
                 }
             try:
-                created = (
-                    await allocation(
+
+                async def allocated() -> BetaManagedAgentsSession:
+                    if allocation is None:
+                        return await create()
+                    return await allocation(
                         create,
                         SessionCreateRequest.model_validate(
                             {key: value for key, value in create.keywords.items() if key != "scope"}
                         ),
                     )
-                    if allocation is not None
-                    else await create()
-                )
+
+                if routine_lifecycle is not None:
+                    from mux.drivers.anthropic.transport import single_attempt_mutation
+
+                    assert tenant_id is not None and account_id is not None
+                    # The intent stamps the same dict the provider call uses.
+                    create.keywords["metadata"] = metadata
+                    with single_attempt_mutation():
+                        created = await routine_lifecycle.allocate(
+                            allocated,
+                            tenant_id=tenant_id,
+                            account_id=account_id,
+                            agent_id=agent.id,
+                            metadata=metadata,
+                        )
+                else:
+                    created = await allocated()
             except anthropic_pkg.BadRequestError as error:
                 unresolved = unresolved_skill_id(error)
                 if unresolved is None:

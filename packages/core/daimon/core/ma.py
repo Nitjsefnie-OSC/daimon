@@ -191,6 +191,27 @@ async def send_interrupt_and_wait(
         ) from err
 
 
+async def stop_routine_session(
+    client: AsyncAnthropic,
+    *,
+    session_id: str,
+    scope: Scope,
+) -> bool:
+    """Observe cessation, never equate an accepted interrupt with a stop."""
+    from daimon.core.session_ports_compat import retrieve_session_record
+
+    try:
+        session = await retrieve_session_record(client, session_id, scope=scope)
+        if session.status in {"idle", "archived"}:
+            return True
+        await send_interrupt_and_wait(client, session_id=session_id, scope=scope, timeout_s=3)
+        return True
+    except APIStatusError as error:
+        if error.status_code == 404:
+            return True
+        raise
+
+
 # HTTP status codes that indicate a stale-version conflict on agents.update.
 # Characterized by concurrent-update probing:
 # MA raises anthropic.ConflictError (status 409) with type "invalid_request_error"

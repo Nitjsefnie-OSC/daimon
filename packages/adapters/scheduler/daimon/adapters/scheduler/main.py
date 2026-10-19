@@ -99,6 +99,7 @@ from daimon.core.routine_delivery import (
     render_routine_controls,
 )
 from daimon.core.routine_files import collect_routine_files
+from daimon.core.routine_sessions import RoutineSessionSupervisor
 from daimon.core.rule_views import (
     keeps_routine_inside,
     routine_destination_channel,
@@ -145,6 +146,7 @@ from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refresh
+from daimon.core.stores.worker_ownership import hold_worker_owner
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.admission import DmSource
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
@@ -235,6 +237,7 @@ async def _build_fire(
     resolver_cache: ResolverCache,
     membership_resolver: MembershipResolver | None = None,
     billing_config: BillingConfig | None = None,
+    supervisor: RoutineSessionSupervisor | None = None,
 ) -> FireFn:
     """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
 
@@ -260,6 +263,11 @@ async def _build_fire(
         else None
     )
 
+    if supervisor is None:
+        from secrets import randbits
+
+        supervisor = RoutineSessionSupervisor(sm, client, owner_key=randbits(63))
+    lifecycle = supervisor
     turn_deps: list[TurnDeps] = []
 
     def _turn_deps() -> TurnDeps:
@@ -331,15 +339,16 @@ async def _build_fire(
             else None
         )
         try:
-            reply = await run_dm_routine(
-                _turn_deps(),
-                tenant_id=row.tenant_id,
-                owner_user_id=owner_user_id,
-                agent_name=row.agent_name,
-                prompt=prompt,
-                source=source,
-                budget_channel_id=row.channel_id,
-            )
+            with lifecycle.fire(row.id):
+                reply = await run_dm_routine(
+                    _turn_deps(),
+                    tenant_id=row.tenant_id,
+                    owner_user_id=owner_user_id,
+                    agent_name=row.agent_name,
+                    prompt=prompt,
+                    source=source,
+                    budget_channel_id=row.channel_id,
+                )
         except (AdmissionDenied, DirectMessageAccessRevoked) as error:
             log.info(
                 "routine.skipped.invoker_policy",
@@ -1454,6 +1463,13 @@ async def run(
     billing_config = load_billing_config()
     caps = _CapsAdapter(sm, billing_config=billing_config)
     resolver_cache = new_resolver_cache()
+    from secrets import randbits
+
+    owner_key = randbits(63)
+    ownership_lost = asyncio.Event()
+    owner_context = hold_worker_owner(engine, owner_key=owner_key, ownership_lost=ownership_lost)
+    await owner_context.__aenter__()
+    supervisor = RoutineSessionSupervisor(sm, client, owner_key=owner_key)
     fire = await _build_fire(
         client=client,
         sm=sm,
@@ -1461,10 +1477,17 @@ async def run(
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         billing_config=billing_config,
+        supervisor=supervisor,
     )
 
-    dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
+    dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires, supervisor=supervisor)
     stop_event = asyncio.Event()
+
+    async def stop_on_owner_loss() -> None:
+        await ownership_lost.wait()
+        stop_event.set()
+
+    owner_watcher = asyncio.create_task(stop_on_owner_loss())
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -1475,6 +1498,7 @@ async def run(
             log.debug("scheduler.signal_handler_unavailable", signal=sig.name)
 
     try:
+        await supervisor.recover()
         if args.once:
             await run_one_tick(
                 now=datetime.now(UTC),
@@ -1485,6 +1509,7 @@ async def run(
                 max_concurrent_fires=scheduler_settings.max_concurrent_fires,
                 dispatch_timeout_s=scheduler_settings.dispatch_timeout_s,
                 wait_for_completion=True,
+                dispatcher=dispatcher,
             )
             await _sweep_fleet_deadlines(sm)
             await _sweep_pending_files(client, sm)
@@ -1573,6 +1598,9 @@ async def run(
         return 0
     finally:
         await dispatcher.close()
+        owner_watcher.cancel()
+        await asyncio.gather(owner_watcher, return_exceptions=True)
+        await owner_context.__aexit__(None, None, None)
         health_server.close()
         await health_server.wait_closed()
         try:

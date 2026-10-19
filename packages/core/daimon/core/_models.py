@@ -464,6 +464,7 @@ class RoutineSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notice_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Routine(Base):

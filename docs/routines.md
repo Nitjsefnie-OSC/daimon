@@ -295,11 +295,11 @@ routine's agent runs on another provider (an OpenAI or Gemini native backend),
 the fire is refused before any session is created and the routine records
 `DM routines need a Managed Agents agent`.
 
-A run that ends without a final answer (an error, the turn ceiling, a lost
-stream, or a scheduler shutdown) stops the session it was running in,
-including a replacement created by dead-session recovery, and queues nothing.
-A stop the provider does not confirm is logged as `dm_routine.stop_unresolved`
-with the session id and recorded on the routine as `stop_unresolved`.
+Every DM-routine session, including a recovery replacement, is tracked durably before creation and ends as completed, stopped, or stop_unresolved. Errors, time limits, cancellation and scheduler shutdown request a bounded stop outside the fire task; failed runs queue no result. Startup recovery and scheduler ticks retry pending stops, with at most three attempts across restarts. Stopped means the provider confirmed the session is idle or gone; stop_unresolved means Daimon could not confirm that execution stopped and personal-memory access or tool activity may continue. Pending and unresolved stops remain visible in routine status even after later fires. A completed session's result can still fail delivery.
+
+When a stop ends unresolved, the owner receives a one-line DM notice through
+the same owner and tenant policy checks as routine results. It has no public
+fallback.
 
 The run is unattended. Before anything is sent the session's tool settings
 are rewritten from the current policy (`gate_session_snapshot`), and every

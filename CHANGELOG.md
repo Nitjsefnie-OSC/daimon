@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Track every DM routine allocation durably, including recovery replacements;
+  supervise bounded stops independently of cancelled fires, retry pending stops
+  after restart, and keep pending/unresolved outcomes visible in routine status.
+  Notify the owner by DM when cessation cannot be confirmed.
+
+
 - A Discord routine that delivers to its owner's DM now runs like a DM with Daimon: it reads and writes your personal memory under the same rules as your DMs, and has the same web, file, internal-tool and connected-tool access. Each run starts fresh in its own private scope and never touches the DM conversation you have selected. A DM routine has your normal DM abilities, but nobody is watching what it does along the way: a mistaken send or publish tool call could expose personal content before you see the final DM. Calls that need an approval are refused unless the unattended permissions already allow them; keeping those permissions narrow is the cheapest protection. Daimon still posts the final reply only to your DM, after rechecking your access. DM routines need a Managed Agents agent for now; a routine whose agent runs on another provider is refused and says so. A run that fails or times out is stopped and delivers nothing. Channel and thread routines are unchanged and do not read personal memory.
 - Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
 

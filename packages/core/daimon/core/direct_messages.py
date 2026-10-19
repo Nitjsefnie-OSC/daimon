@@ -778,15 +778,48 @@ class DmRoutineReply:
 MANAGED_AGENTS_ONLY = "DM routines need a Managed Agents agent"
 
 
-@dataclass
-class _RunningSession:
-    """The session a DM routine's turn is actually running in, across recovery."""
-
-    session_id: str
-    mapping_id: uuid.UUID | None
-
-
 async def run_dm_routine(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    owner_user_id: str,
+    agent_name: str,
+    prompt: str,
+    source: DmSource | None,
+    budget_channel_id: str | None,
+) -> DmRoutineReply:
+    from functools import partial
+    from secrets import randbits
+
+    from daimon.core.routine_sessions import RoutineSessionSupervisor, current_lifecycle
+
+    run = partial(
+        _run_dm_routine,
+        deps,
+        tenant_id=tenant_id,
+        owner_user_id=owner_user_id,
+        agent_name=agent_name,
+        prompt=prompt,
+        source=source,
+        budget_channel_id=budget_channel_id,
+    )
+    if current_lifecycle.get() is not None:
+        return await run()
+    supervisor = RoutineSessionSupervisor(deps.sessionmaker, deps.anthropic, owner_key=randbits(63))
+    try:
+        with supervisor.fire(uuid.uuid4()):
+            return await run()
+    finally:
+        drain = asyncio.create_task(supervisor.drain())
+        while not drain.done():
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError:
+                # Repeated cancellation may abandon a wait, never the owner.
+                continue
+
+
+async def _run_dm_routine(
     deps: TurnDeps,
     *,
     tenant_id: uuid.UUID,
@@ -811,10 +844,9 @@ async def run_dm_routine(
     and starts with no history. `source` is the routine's creation source,
     rechecked for a seal whenever the session is built; `budget_channel_id`
     only bills. Any exit without a final answer (an error, the ceiling, a lost
-    stream, cancellation) stops the session that is running; a stop that is
-    not confirmed is logged, and raised as `stop_unresolved` unless the run
-    was cancelled. Nothing is posted here: the caller queues the text for the
-    owner's DM.
+    stream, cancellation) leaves a durable stop obligation with the caller's
+    lifecycle supervisor. Nothing is posted here: the caller queues the text
+    for the owner's DM after completion has been committed.
     """
     now = datetime.now(UTC)
     async with deps.sessionmaker() as session:
@@ -876,7 +908,6 @@ async def run_dm_routine(
         raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE) from error
     except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
         raise _revoked(error) from error
-    running = _RunningSession(prepared.ma_session_id, prepared.mapping_id)
     scope = resource_scope(
         tenant_id=str(tenant_id),
         account_id=str(prepared.session_account_id),
@@ -890,7 +921,6 @@ async def run_dm_routine(
         posture = await _unattended_gate(deps, prepared, tenant_id=tenant_id, scope=scope)
 
         async def replaced(session_id: str, mapping_id: uuid.UUID | None) -> None:
-            running.session_id, running.mapping_id = session_id, mapping_id
             await _gate_session(deps, session_id, tenant_id=tenant_id, scope=scope)
 
         async def sealed() -> None:
@@ -917,14 +947,6 @@ async def run_dm_routine(
         if prepared.backend is not None:
             # Refused above before anything was sent to the other provider.
             raise
-        stopped = await _stop_routine_session(deps, running, scope=scope)
-        if isinstance(error, asyncio.CancelledError):
-            raise
-        if not stopped:
-            raise DirectMessageAccessRevoked(
-                "stop_unresolved",
-                message=f"The routine failed and its session could not be stopped: {error}",
-            ) from error
         if isinstance(error, DmSourceSealedError):
             raise DirectMessageAccessRevoked(
                 "source_sealed", message=SEALED_SINCE_MESSAGE
@@ -932,6 +954,11 @@ async def run_dm_routine(
         if isinstance(error, (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError)):
             raise _revoked(error) from error
         raise
+    from daimon.core.routine_sessions import current_lifecycle
+
+    lifecycle = current_lifecycle.get()
+    if lifecycle is not None:
+        await lifecycle.completed(session_id)
     return DmRoutineReply(text=text, session_id=session_id, grant=grant)
 
 
@@ -942,36 +969,6 @@ def _revoked(
         "policy_unreadable" if isinstance(error, AccessPolicyUnreadable) else "agent_unavailable"
     )
     return DirectMessageAccessRevoked(reason, message=str(error))
-
-
-async def _stop_routine_session(deps: TurnDeps, running: _RunningSession, *, scope: Scope) -> bool:
-    """Stop the session a failed or cancelled DM routine left, bounded; True once confirmed.
-
-    Interrupts the session the turn is actually running in (a recovery's
-    replacement, not the one it was bound to) and retires its mapping, so
-    nothing sends into it again. Never raises: an unconfirmed stop is logged
-    with the session id for an operator.
-    """
-    interrupted = False
-    try:
-        interrupted = await interrupt_orphaned_session(
-            deps.anthropic,
-            session_id=running.session_id,
-            scope=scope,
-            timeout_s=_SHUTDOWN_INTERRUPT_TIMEOUT_S,
-        )
-    except Exception as error:
-        # Named boundary: cleanup must never mask why the run ended.
-        _log.warning("dm_routine.stop_failed", error_type=type(error).__name__)
-    if running.mapping_id is not None:
-        with suppress(SQLAlchemyError):
-            async with deps.sessionmaker.begin() as session:
-                await mark_dead(session, id=running.mapping_id)
-    if interrupted:
-        _log.info("dm_routine.session_stopped", session_id=running.session_id)
-    else:
-        _log.error("dm_routine.stop_unresolved", session_id=running.session_id)
-    return interrupted
 
 
 async def _gate_session(
