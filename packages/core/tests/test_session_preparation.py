@@ -2910,6 +2910,14 @@ async def test_missing_legacy_source_is_not_retrieved_again_for_memory_replaceme
     assert len(transport.paths("GET", "/v1/sessions/sess_missing")) == 1
 
 
+def _mark_headless_handle(transport, session_id):
+    """The handle variant models an agent-chat-created session, with no human origin."""
+    native = transport.state.sessions[session_id]
+    transport.state.sessions[session_id] = native.model_copy(
+        update={"metadata": {**(native.metadata or {}), "daimon_agent_chat": "true"}}
+    )
+
+
 @pytest.mark.parametrize("entry", ["handle", "prepared"])
 async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
     db_session, db_nullpool_engine, db_schema, monkeypatch, entry
@@ -2992,6 +3000,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
 
     async def send(index):
         if entry == "handle":
+            _mark_headless_handle(transport, first.ma_session_id)
             return await _continue_turn_impl(
                 runtime,
                 auth,
@@ -3168,6 +3177,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
         prepared = send_turns[index]
         message = f"send during {phase} {index}"
         if entry == "handle":
+            _mark_headless_handle(transport, prepared.ma_session_id)
             return await _continue_turn_impl(
                 runtime, auth, prepared.ma_session_id, message, recheck=recheck
             )
@@ -3328,6 +3338,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         prepared = replacement_turns[index % 2] if retired else send_turns[index]
         message = f"send during {phase} {index}"
         if entry == "handle":
+            _mark_headless_handle(transport, prepared.ma_session_id)
             return await _continue_turn_impl(
                 runtime, auth, prepared.ma_session_id, message, recheck=recheck
             )
