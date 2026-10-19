@@ -63,7 +63,7 @@ async def create_blank_agent(
     """
     if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=name):
         raise AgentNameCollision(
-            f"This workspace already has an agent named {name}. Pick a different name."
+            f"There is already an agent named {name} here. Pick a different name."
         )
     try:
         spec = AgentSpec.model_validate({"name": name, "model": model, "system": system})

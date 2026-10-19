@@ -108,7 +108,7 @@ async def sync_connect_admin(
 ) -> None:
     """Record a live platform admin check before a connect entry point mints a link."""
     if not verified_tenant_admin:
-        raise ValueError("Only a workspace admin can connect GitHub.")
+        raise ValueError("Only an admin can connect GitHub.")
     principal = await get_or_create_platform_principal(
         session, tenant_id=tenant_id, platform=platform, external_id=platform_user_id
     )
@@ -124,8 +124,8 @@ _PUBLIC_ERRORS = frozenset(
         "Give this agent read access to its skill repo first.",
         "This repo is no longer connected.",
         "Select at least one repo.",
-        "Only a server or workspace admin can manage connected repos.",
-        "Only a workspace admin can connect GitHub.",
+        "Only an admin can manage connected repos.",
+        "Only an admin can connect GitHub.",
         PINNED_AGENT_MESSAGE,
         SERVER_WIDE_GRANT_MESSAGE,
     }
@@ -225,7 +225,7 @@ async def connect_link(
     """
     root = connect_root(settings)
     if root is None:
-        raise ValueError("GitHub connection is not configured for this workspace.")
+        raise ValueError("GitHub connection is not configured here.")
     for_agent = agent_id is not None and agent_name is not None
     if verified_tenant_admin:
         account_id = await admin_account_for_platform_user(
@@ -237,7 +237,7 @@ async def connect_link(
         )
         account_id = principal.account_id
     else:
-        raise ValueError("Only a workspace admin can connect GitHub.")
+        raise ValueError("Only an admin can connect GitHub.")
     if agent_id is not None and agent_name is not None:
         await require_app_eligible_agent(
             session,

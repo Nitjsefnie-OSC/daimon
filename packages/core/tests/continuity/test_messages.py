@@ -433,7 +433,7 @@ def test_render_replacement_summary_joins_multiple_lost_items_with_commas() -> N
 
 def test_render_tool_refusal_unreachable() -> None:
     assert render_tool_refusal_unreachable("Ada", "#data") == (
-        "'Ada' does not answer anywhere in this workspace, so it cannot be handed a task.\n"
+        "'Ada' does not answer anywhere here, so it cannot be handed a task.\n"
         "Tell the caller an admin can say: make Ada answer in #data. Then the handoff "
         "will work.\n"
         "Nothing was changed. Do not retry."

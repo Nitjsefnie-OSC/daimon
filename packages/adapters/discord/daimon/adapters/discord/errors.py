@@ -20,6 +20,7 @@ from daimon.core.errors import (
     UserFacingError,
 )
 from daimon.core.notebooks.publish import NotebookRateLimitError
+from daimon.core.platform_words import words_for
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
@@ -83,7 +84,10 @@ def _guidance(exc: BaseException) -> str | None:
             return "Daimon doesn't have permission to post here. Ask a server admin for help."
         return None
     if isinstance(exc, AgentNameCollision):
-        return "This workspace already has an agent with that name. Pick a different name."
+        return (
+            f"This {words_for('discord').space} already has an agent with that name. "
+            "Pick a different name."
+        )
     if isinstance(exc, UserFacingError):
         return str(exc)
     if isinstance(exc, DirectMessageBusy):

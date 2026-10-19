@@ -134,7 +134,7 @@ async def check_confirmation_admin(
     """
     if not prompt.admin or clicker is None or clicker != prompt.requester_platform_user_id:
         return None
-    refusal = "This change needs a current workspace admin."
+    refusal = "This change needs a current admin."
     if check is None:
         return refusal
     try:

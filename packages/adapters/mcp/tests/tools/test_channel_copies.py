@@ -119,7 +119,7 @@ async def test_a_closing_channels_copy_is_archived_with_its_rule_and_default(
         await _archive_channel_copy_impl(runtime, world.auth(), name=COPY)
     with pytest.raises(ToolError, match="made for another channel"):
         await _archive_channel_copy_impl(runtime, world.auth(), name=COPY, channel_id=OTHER)
-    with pytest.raises(ToolError, match="Only a workspace or server admin"):
+    with pytest.raises(ToolError, match="Only an admin"):
         await _archive_channel_copy_impl(
             runtime, world.auth(admin=False), name=COPY, channel_id=ROOM
         )
@@ -184,7 +184,7 @@ async def test_a_copy_made_the_workspace_default_is_refused(
             agent_name=COPY,
             mode="agent",
         )
-    with pytest.raises(ToolError, match="workspace or deployment default"):
+    with pytest.raises(ToolError, match="default for everyone here"):
         await _archive_channel_copy_impl(runtime, world.auth(), name=COPY, channel_id=ROOM)
     assert not world.archived(COPY)
 

@@ -21,6 +21,8 @@ from enum import StrEnum
 from typing import Final, Literal, cast
 from xml.sax.saxutils import escape, quoteattr
 
+from daimon.core.platform_words import NEUTRAL_SPACE
+
 
 class ParticipationMode(StrEnum):
     ON = "on"
@@ -209,9 +211,9 @@ def decide_post_classifier(verdict: ClassifierVerdict) -> ParticipationDecision:
 # --- Notes returned by the participation tool ---------------------------------
 
 
-def scope_label(scope: ParticipationScope, scope_id: str | None) -> str:
+def scope_label(scope: ParticipationScope, scope_id: str | None, space: str = NEUTRAL_SPACE) -> str:
     return (
-        "the whole workspace"
+        f"the whole {space}"
         if scope is ParticipationScope.WORKSPACE
         else f"{scope.value} {scope_id}"
     )
@@ -248,6 +250,7 @@ def build_participation_note(
     scope_id: str | None,
     requested: ParticipationMode | None,
     effective: ResolvedParticipation,
+    space: str = NEUTRAL_SPACE,
 ) -> str:
     """One sentence stating what was written and what is now in effect at that scope.
 
@@ -255,7 +258,7 @@ def build_participation_note(
     the cascade's actual answer: a thread turned `on` under a `disabled` channel
     stays silent, and the note says so.
     """
-    where = scope_label(scope, scope_id)
+    where = scope_label(scope, scope_id, space)
     wrote = (
         f"{where} now inherits its setting"
         if requested is None

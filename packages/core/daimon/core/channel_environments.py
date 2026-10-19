@@ -37,6 +37,7 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.permissions import home_of, limited_ids
+from daimon.core.platform_words import NEUTRAL_ADMIN, NEUTRAL_SPACE
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
 from daimon.core.scope import (
     ChannelConfigRow,
@@ -65,18 +66,21 @@ NOT_OFFERED_NOTE: Final = "That is not an environment this panel offers. Nothing
 """A pick whose value no picker offered: forged or stale."""
 
 
-def _scope_phrase(channel: str | None) -> str:
-    return f"Channel {channel}" if channel is not None else "The workspace default"
+def _scope_phrase(channel: str | None, space: str) -> str:
+    return f"Channel {channel}" if channel is not None else f"The {space} default"
 
 
-def build_set_environment_note(*, environment_name: str, channel: str | None) -> str:
+def build_set_environment_note(
+    *, environment_name: str, channel: str | None, space: str = NEUTRAL_SPACE
+) -> str:
     """What changed after an environment is set, and when a conversation sees it.
 
     `channel` is the channel as the reader sees it (an id or a platform
-    mention); None is the workspace default.
+    mention); None is the default for the whole `space` (server, workspace,
+    organisation).
     """
     return (
-        f"{_scope_phrase(channel)} now runs in the {environment_name} environment, from "
+        f"{_scope_phrase(channel, space)} now runs in the {environment_name} environment, from "
         "the next message in each conversation. The conversation and its saved files carry "
         "over; a running process does not."
     )
@@ -87,10 +91,12 @@ def build_missing_environment_note(environment_name: str) -> str:
     return f"The {environment_name} environment no longer exists. Nothing changed."
 
 
-def build_archive_environment_note(*, environment_name: str, cleared: int) -> str:
-    """What archiving an environment did to the channels and workspace that picked it."""
+def build_archive_environment_note(
+    *, environment_name: str, cleared: int, space: str = NEUTRAL_SPACE
+) -> str:
+    """What archiving an environment did to the channels and `space` that picked it."""
     if cleared == 0:
-        return f"Archived the {environment_name} environment. No channel or workspace picked it."
+        return f"Archived the {environment_name} environment. No channel or {space} picked it."
     picks = "1 pick" if cleared == 1 else f"{cleared} picks"
     return (
         f"Archived the {environment_name} environment and cleared {picks} of it; where it "
@@ -98,17 +104,21 @@ def build_archive_environment_note(*, environment_name: str, cleared: int) -> st
     )
 
 
-def build_clear_environment_note(*, channel: str | None, cleared: bool) -> str:
+def build_clear_environment_note(
+    *, channel: str | None, cleared: bool, space: str = NEUTRAL_SPACE
+) -> str:
     """What changed after an environment is cleared; `cleared` False means nothing did."""
     if not cleared:
-        return f"{_scope_phrase(channel)} had no environment of its own; nothing changed."
+        return f"{_scope_phrase(channel, space)} had no environment of its own; nothing changed."
     return (
-        f"{_scope_phrase(channel)} no longer picks an environment; from the next message "
+        f"{_scope_phrase(channel, space)} no longer picks an environment; from the next message "
         "it falls through to the next tier."
     )
 
 
-def build_limited_network_refusal(*, environment_name: str | None) -> str:
+def build_limited_network_refusal(
+    *, environment_name: str | None, admin: str = NEUTRAL_ADMIN
+) -> str:
     what = (
         f"the {environment_name} environment has"
         if environment_name is not None
@@ -116,8 +126,8 @@ def build_limited_network_refusal(*, environment_name: str | None) -> str:
     )
     return (
         f"Only turns inside this channel read it, and {what} unrestricted network access, "
-        "so only a server admin can make that change here. Nothing changed. Pick an "
-        "environment with limited networking and no allowed hosts, or ask a server admin."
+        f"so only {admin} can make that change here. Nothing changed. Pick an "
+        f"environment with limited networking and no allowed hosts, or ask {admin}."
     )
 
 
@@ -153,18 +163,23 @@ def build_limited_channels_confirm(*, environment_name: str | None) -> str:
 
 
 def build_environment_resolution_note(
-    *, environment_name: str | None, tier: ConfigTier | None, channel_id: str
+    *,
+    environment_name: str | None,
+    tier: ConfigTier | None,
+    channel_id: str,
+    space: str = NEUTRAL_SPACE,
+    admin: str = NEUTRAL_ADMIN,
 ) -> str:
     """Which environment a turn in `channel_id` runs in, and the tier that chose it."""
     if environment_name is None:
         return (
             f"No environment resolves for channel {channel_id}, so a mention there cannot "
-            "start. A server admin can pick one."
+            f"start. {admin[0].upper()}{admin[1:]} can pick one."
         )
     where = {
         "channel": "this channel's own setting",
-        "tenant": "the workspace default, since this channel has none of its own",
-        "deployment": "the deployment default, since neither this channel nor the workspace "
+        "tenant": f"the {space} default, since this channel has none of its own",
+        "deployment": f"the deployment default, since neither this channel nor the {space} "
         "sets one",
     }.get(tier or "", "an unrecognised tier")
     return f"Turns in channel {channel_id} run in the {environment_name} environment, from {where}."
@@ -359,7 +374,7 @@ class EnvironmentPick:
     """A set naming no environment of the tenant: nothing to write."""
     needs_confirm: bool = False
     """An allowed pick leaves a sealed channel on an open network: written only
-    once the server admin confirms it."""
+    once an admin confirms it."""
 
     @property
     def environment_name(self) -> str | None:
@@ -625,13 +640,12 @@ async def archive_needs_confirm(
 
 
 LIMITED_OPEN_NETWORK_WARNING: Final = (
-    "This channel runs an environment with open network; a server admin should confirm "
-    "or change it."
+    "This channel runs an environment with open network; an admin should confirm or change it."
 )
 """Sealing a channel whose own pick may predate the seal's network rule."""
 
 LIMITED_NETWORK_UNCHECKED_WARNING: Final = (
-    "This channel's environment could not be checked for an open network; a server "
+    "This channel's environment could not be checked for an open network; an "
     "admin should confirm it."
 )
 """Sealing a channel whose own pick could not be looked up."""

@@ -159,7 +159,7 @@ async def stage_panel_grant(
         session, tenant_id=tenant_id, repo_id=repo_id, agent_id=agent_id, for_update=True
     )
     if authorized is None or authorized.status != "active":
-        raise ValueError("Repository is not connected to this workspace.")
+        raise ValueError("Repository is not connected here.")
     await github_access.require_may_grant(session, repo=authorized, account_id=account_id)
     installation = await session.get(GitHubAppInstallation, authorized.installation_id)
     if not installation_covers_repo(installation, authorized.repo_full_name):

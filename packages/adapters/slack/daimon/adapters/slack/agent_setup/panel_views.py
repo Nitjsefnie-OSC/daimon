@@ -48,11 +48,9 @@ from daimon.core.github_connect_cards import repo_count
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
+from daimon.core.platform_words import words_for
 from daimon.core.roster import Page, Roster, RosterAgent
-from daimon.core.routing_facts import (
-    PRECEDENCE_LINE,
-    build_routing_request,
-)
+from daimon.core.routing_facts import build_routing_request, precedence_line
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
     EMPTY_ROSTER_COPY,
@@ -1256,7 +1254,7 @@ def _routing_request_line(
     request = build_routing_request(
         agent_name=escape_mrkdwn(agent_name or "an agent"), channel_label=f"<#{channel_id}>"
     )
-    return f"{PRECEDENCE_LINE} {lead}{request}"
+    return f"{precedence_line(words_for('slack').space)} {lead}{request}"
 
 
 # ---------------------------------------------------------------------------

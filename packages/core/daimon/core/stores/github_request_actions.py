@@ -87,7 +87,7 @@ async def approve_connected_request(
     await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
     actor = await session.get(Account, account_id)
     if actor is None or actor.tenant_id != tenant_id or actor.role != "admin":
-        raise ValueError("Only a server or workspace admin can approve this request.")
+        raise ValueError("Only an admin can approve this request.")
     request = await session.get(GitHubAccessRequest, request_id, with_for_update=True)
     if (
         request is None
@@ -192,7 +192,7 @@ async def approve_connection_request(
     await github_access.lock_tenant_grants(session, tenant_id=tenant_id)
     actor = await session.get(Account, account_id)
     if actor is None or actor.tenant_id != tenant_id or actor.role != "admin":
-        raise ValueError("Only a server or workspace admin can connect repos.")
+        raise ValueError("Only an admin can connect repos.")
     request = await session.get(GitHubAccessRequest, request_id, with_for_update=True)
     if (
         request is None

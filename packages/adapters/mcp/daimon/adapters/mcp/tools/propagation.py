@@ -29,6 +29,7 @@ from daimon.adapters.mcp.tools._rule_view import (
     require_bindable,
 )
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._words import space_noun
 from daimon.adapters.mcp.tools.reachability import (
     require_admin,
     require_bindable_as_channel_default,
@@ -145,14 +146,16 @@ async def _set_agent_default_impl(
             require_bindable(policy, agent_name, agent=agent, channel_id=None)
 
     tenant_id: uuid.UUID = auth.tenant_id
+    space = space_noun(auth.platform)
     if channel_id is not None:
         scope: ChannelScopeRef | TenantScopeRef = ChannelScopeRef(
             tenant_id=tenant_id, channel_id=channel_id
         )
-        scope_label = f"channel:{channel_id}"
+        scope_label = note_scope = f"channel:{channel_id}"
     else:
         scope = TenantScopeRef(tenant_id=tenant_id)
         scope_label = "workspace"
+        note_scope = space
 
     if agent is None:
         agent = await find_agent_by_daimon_tag(
@@ -181,7 +184,9 @@ async def _set_agent_default_impl(
         scope=scope_label,
         agent_name=agent_name,
         previous_agent_name=prior_agent,
-        routing_note=build_set_default_note(agent_name=agent_name, scope_label=scope_label)
+        routing_note=build_set_default_note(
+            agent_name=agent_name, scope_label=note_scope, space=space
+        )
         + (f" {repos_come_too_line(agent_name)}" if brings_repos else ""),
     )
 
@@ -198,14 +203,16 @@ async def _clear_agent_default_impl(
         refuse(clear_refusal(policy, channel_id=channel_id), agent_name=None)
 
     tenant_id: uuid.UUID = auth.tenant_id
+    space = space_noun(auth.platform)
     if channel_id is not None:
         scope: ChannelScopeRef | TenantScopeRef = ChannelScopeRef(
             tenant_id=tenant_id, channel_id=channel_id
         )
-        scope_label = f"channel:{channel_id}"
+        scope_label = note_scope = f"channel:{channel_id}"
     else:
         scope = TenantScopeRef(tenant_id=tenant_id)
         scope_label = "workspace"
+        note_scope = space
 
     async with runtime.session_factory.begin() as session:
         prior = await get_scope(session, scope=scope)
@@ -221,7 +228,9 @@ async def _clear_agent_default_impl(
     return ClearDefaultResult(
         scope=scope_label,
         cleared=had_default,
-        routing_note=build_clear_default_note(scope_label=scope_label, cleared=had_default),
+        routing_note=build_clear_default_note(
+            scope_label=note_scope, cleared=had_default, space=space
+        ),
     )
 
 
@@ -386,7 +395,7 @@ async def _explain_agent_resolution_impl(
                     next_step = (
                         "Open a new setup conversation to continue."
                         if binding.kind == "setup"
-                        else "Start the task again in a new thread to continue."
+                        else "Start the task again in a new conversation to continue."
                     )
                     raise ToolError(
                         f"{kind_label} '{thread_id}' in '{channel_id}' was deleted. "
@@ -444,6 +453,7 @@ async def _explain_agent_resolution_impl(
             environment_name=resolved.environment_name,
             tier=resolved.environment_name_tier,
             channel_id=channel_id,
+            space=space_noun(auth.platform),
         ),
         responder_ma_agent_id=binding.responder_ma_agent_id if binding else None,
         configuration_target_ma_agent_id=binding.configuration_target_ma_agent_id
@@ -459,6 +469,7 @@ async def _explain_agent_resolution_impl(
             agent_name=resolved.agent_name,
             tier=resolved.agent_name_tier,
             channel_id=channel_id,
+            space=space_noun(auth.platform),
         ),
     )
 

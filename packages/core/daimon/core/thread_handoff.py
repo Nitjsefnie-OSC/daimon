@@ -402,17 +402,17 @@ def render_handoff_refused(refusal: HandoffRefused, *, channel: str) -> str:
     reasons: dict[str, str] = {
         "setup_thread": "This is a setup conversation, so it always answers as Daimon.",
         "writers_none": "Daimon doesn't post here, so no agent can take this over.",
-        "invoker_not_allowed": "This workspace limits who can use Daimon, and you aren't on "
+        "invoker_not_allowed": "Daimon is limited to certain people here, and you aren't on "
         "that list.",
         "runs_elsewhere": f"{name} only runs in other channels, so it can't answer here.",
         "own_agents_only": f"{channel} only runs its own agents, and {name} isn't one of them.",
-        "unreachable": f"{name} doesn't answer anywhere in this workspace any more.",
+        "unreachable": f"{name} doesn't answer anywhere here any more.",
         "same_agent": f"{name} already answers in this conversation.",
         "admin_required": (
-            f"{name} isn't an agent of {channel}. A server admin can hand this conversation to it."
+            f"{name} isn't an agent of {channel}. An admin can hand this conversation to it."
         ),
         "not_a_reader": f"Only turns inside {channel} read it and {name} isn't one of its "
-        "agents, so only a server admin can hand this conversation to it.",
+        "agents, so only an admin can hand this conversation to it.",
     }
     return f"{reasons[refusal.reason]} Nothing was changed."
 
@@ -460,7 +460,7 @@ async def switch_thread_on_request(
     except DaimonError:
         return SwitchOutcome(
             switched=False,
-            text="That agent is no longer available in this workspace. Nothing was changed.",
+            text="That agent is no longer available here. Nothing was changed.",
         )
     name = agent.metadata.get(MA_METADATA_KEY_NAME)
     if not name:

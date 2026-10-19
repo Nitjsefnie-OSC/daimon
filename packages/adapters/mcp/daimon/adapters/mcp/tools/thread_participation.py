@@ -32,6 +32,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._words import space_noun
 from daimon.adapters.mcp.tools.discord import verify_participation_scope
 from daimon.adapters.mcp.tools.teams._participation import verify_teams_participation_scope
 from daimon.core.stores.thread_participation import (
@@ -199,8 +200,8 @@ async def _set_thread_participation_impl(
         if requested is ParticipationMode.ON and above.mode is ParticipationMode.DISABLED:
             raise ToolError(
                 f"Participation is disabled at the {above.tier} level, so "
-                f"{scope_label(scope, scope_id)} cannot be turned on. An admin would "
-                f"have to change the {above.tier} setting first."
+                f"{scope_label(scope, scope_id, space_noun(auth.platform))} cannot be "
+                f"turned on. An admin would have to change the {above.tier} setting first."
             )
 
         if requested is None:
@@ -241,7 +242,11 @@ async def _set_thread_participation_impl(
         effective_mode=effective.mode.value,
         effective_tier=effective.tier,
         note=build_participation_note(
-            scope=scope, scope_id=scope_id, requested=requested, effective=effective
+            scope=scope,
+            scope_id=scope_id,
+            requested=requested,
+            effective=effective,
+            space=space_noun(auth.platform),
         ),
     )
 

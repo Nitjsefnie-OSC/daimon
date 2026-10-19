@@ -114,6 +114,7 @@ from daimon.core.agent_identity import (
 )
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.platform_words import words_for
 from daimon.core.stores.domain import Role, WizardSessionRow
 from daimon.core.stores.tenants import get_turn_cap
 from daimon.core.stores.thread_sessions import (
@@ -154,8 +155,8 @@ _CALLBACK_FAILED = "Something went wrong.\n\nTry again."
 _CHECK_FAILED = "Something went wrong.\n\nTry again."
 _DRAINING = "Daimon is restarting.\n\nPress Submit again in a minute."
 _OVER_CAP = (
-    "Your answers were recorded, but this server has too many chats in flight "
-    "right now -- ask again in the thread in a moment."
+    f"Your answers were recorded, but this {words_for('discord').space} has too many "
+    "chats at once right now -- ask again in the thread in a moment."
 )
 
 

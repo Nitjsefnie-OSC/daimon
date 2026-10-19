@@ -477,7 +477,5 @@ async def test_setup_foreign_tag_keeps_exact_unavailable_copy() -> None:
         assert expected.metadata["daimon_tenant"] != str(TENANT)
         with pytest.raises(DaimonError) as error:
             await get_setup_agent(after, tenant_id=TENANT, ma_agent_id="exact")
-        assert str(error.value) == (
-            "That agent is no longer available in this workspace. Choose another agent."
-        )
+        assert str(error.value) == ("That agent is no longer available here. Choose another agent.")
     equal_requests(old, new)

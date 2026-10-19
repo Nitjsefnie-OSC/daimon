@@ -560,7 +560,7 @@ async def test_fork_agent_copies_the_source_under_a_new_name(
             default_agent_name=None,
         )
 
-    with pytest.raises(UserFacingError, match="Only a workspace or server admin"):
+    with pytest.raises(UserFacingError, match="Only an admin"):
         await fork_agent(
             client,
             db_session_factory,

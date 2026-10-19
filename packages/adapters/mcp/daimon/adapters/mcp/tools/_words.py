@@ -7,13 +7,19 @@ A caller with no chat platform (a CLI or MCP client) gets neutral words.
 
 from __future__ import annotations
 
-from daimon.core.platform_words import Place, PlatformWords, words_for
+from daimon.core.platform_words import (
+    NEUTRAL_ADMIN,
+    NEUTRAL_SPACE,
+    Place,
+    PlatformWords,
+    words_for,
+)
 from daimon.core.stores.domain import CHAT_PLATFORMS
 
 __all__ = ["admin_noun", "setup_instruction", "space_noun", "top_up_noun"]
 
-_NEUTRAL_ADMIN = "an admin"
-_NEUTRAL_SPACE = "workspace"
+_NEUTRAL_ADMIN = NEUTRAL_ADMIN
+_NEUTRAL_SPACE = NEUTRAL_SPACE
 _NEUTRAL_SETUP = "open the setup panel"
 _NEUTRAL_TOP_UP = "the billing command"
 

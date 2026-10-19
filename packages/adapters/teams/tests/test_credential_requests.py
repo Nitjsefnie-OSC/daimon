@@ -403,7 +403,7 @@ async def test_an_mcp_token_needs_setup_and_a_token_the_server_accepts(
             ]
             if supports_sign_in:
                 expected.append(
-                    "This server also lets you sign in. Ask the agent to connect your account."
+                    "This connection also lets you sign in. Ask the agent to connect your account."
                 )
             assert [b["text"] for b in shown] == expected, (
                 "the dialog stays open with Discord's and Slack's words; sign-in only if offered"

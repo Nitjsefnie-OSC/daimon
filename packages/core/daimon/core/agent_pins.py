@@ -39,12 +39,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 PIN_WRITE_REFUSAL = (
     "This agent's rule runs it only in certain channels, so its keys, connections and "
-    "configuration can only be changed from a conversation inside them, or by a "
-    "server or workspace admin. Nothing was changed."
+    "configuration can only be changed from a conversation inside them, or by an "
+    "admin. Nothing was changed."
 )
 POLICY_UNREADABLE_REFUSAL = (
-    "This workspace's access policy could not be read, so nothing was changed. "
-    "Ask an admin to check it."
+    "The access policy here could not be read, so nothing was changed. Ask an admin to check it."
 )
 
 

@@ -200,7 +200,7 @@ DRAIN_GRACE_S = 60.0
 CONTROLS_WAIT_S = 30.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
-_SHED = "Too many chats are in flight right now. Try again in a moment."
+_SHED = "Too many chats at once right now. Try again in a moment."
 _CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
 _CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
 _CANCELLING = "Cancelling…"
@@ -229,7 +229,7 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
 }
 
 _NO_CONTEXT = (
-    "I couldn't read this thread, so there's nothing for me to go on. "
+    "I couldn't read this conversation, so there's nothing for me to go on. "
     "Write your question after the mention. If this keeps happening, ask a team owner "
     "to check the app's permission to read channel messages."
 )

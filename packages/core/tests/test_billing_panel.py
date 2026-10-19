@@ -132,7 +132,7 @@ def test_the_month_summary_and_own_use_lines() -> None:
     ), "the month and the spend are two lines, no separator"
     assert admin_summary(since, spend=1.0, people=1) == ("October 2026", "$1.00 spent by 1 person")
     assert admin_summary(since, spend=0.0, people=0) == ("October 2026", "Nothing used yet")
-    assert turns_phrase(1250) == "about 1,250 turns"
+    assert turns_phrase(1250) == "about 1,250 answers"
     assert caller_line(11.5, Decimal("25"), 71) == "$11.50 of your $25.00 this month"
     assert caller_line(11.5, None, 71) == "$11.50 used this month"
     assert caller_line(0.0, Decimal("25"), 0) == "Nothing used this month"

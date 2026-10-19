@@ -1038,7 +1038,7 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
     router.add_environment_list(env)
     router.add_environment(env)
 
-    with pytest.raises(DaimonError, match="no longer available in this workspace"):
+    with pytest.raises(DaimonError, match="no longer available here"):
         await admit(
             _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
             tenant_id=tenant.id,

@@ -78,7 +78,7 @@ def test_known_local_errors_never_publish_exception_bodies() -> None:
         (NotebookRateLimitError(body), "The notebook publishing limit has been reached."),
         (DirectMessageBusy(body), "A reply is still running."),
         (HandoffRefusedInSetupThread(body), "This setup conversation can't change agents."),
-        (AgentNameCollision(body), "This workspace already has an agent with that name."),
+        (AgentNameCollision(body), "This server already has an agent with that name."),
     ]:
         result = render_error(error, request_id=TEST_RID)
         assert result.startswith(expected)
@@ -249,7 +249,7 @@ def test_an_unreadable_access_policy_keeps_its_words_and_the_ref() -> None:
     """A class whose every message is written for people subclasses UserFacingError."""
     error = AccessPolicyUnreadable(tenant_id=uuid.uuid4())
     assert render_error(TurnError(kind="upstream", cause=error), request_id=TEST_RID) == (
-        "this workspace's access settings can't be read, so no turn was started; "
+        "the access settings here can't be read, so no turn was started; "
         f"ask an admin to fix them\n\n{REF}"
     )
 

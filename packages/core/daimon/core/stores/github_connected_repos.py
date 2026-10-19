@@ -32,7 +32,7 @@ async def _require_admin(
 ) -> None:
     account = await session.get(Account, account_id)
     if account is None or account.tenant_id != tenant_id or account.role != "admin":
-        raise ValueError("Only a server or workspace admin can manage connected repos.")
+        raise ValueError("Only an admin can manage connected repos.")
 
 
 def _has_own_row(model: type[AgentGitHubGrant] | type[AgentGitHubGrantDraft]) -> Exists:

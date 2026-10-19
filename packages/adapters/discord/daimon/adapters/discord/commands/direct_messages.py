@@ -31,7 +31,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.platform_words import DESCRIPTIONS
+from daimon.core.platform_words import DESCRIPTIONS, words_for
 from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set_dm_enabled
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
@@ -214,7 +214,7 @@ class DirectMessageCog(commands.Cog):
         try:
             guild = self.bot.get_guild(int(conversation.workspace_id))
             if guild is None:
-                raise DaimonError("This workspace is no longer available.")
+                raise DaimonError(f"This {words_for('discord').space} is no longer available.")
             # Live fetch also proves membership. A departed user never falls back
             # to a stored role or keeps using a former workspace's credentials.
             member = await guild.fetch_member(message.author.id)

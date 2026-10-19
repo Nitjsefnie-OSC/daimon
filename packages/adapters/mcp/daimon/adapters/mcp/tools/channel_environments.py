@@ -24,7 +24,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._rule_view import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
-from daimon.adapters.mcp.tools._words import admin_noun
+from daimon.adapters.mcp.tools._words import admin_noun, space_noun
 from daimon.adapters.mcp.tools.environments import CONFIRM_OPEN_NETWORK_ASK
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
@@ -132,7 +132,10 @@ async def _require_pick_allowed(
         raise ToolError(_missing(environment_name))
     if not pick.decision:  # not_a_reader
         raise ToolError(
-            build_limited_network_refusal(environment_name=environment_name) + " Do not retry."
+            build_limited_network_refusal(
+                environment_name=environment_name, admin=admin_noun(auth.platform)
+            )
+            + " Do not retry."
         )
     if pick.missing:
         raise ToolError(_missing(environment_name))
@@ -176,7 +179,9 @@ async def _set_channel_environment_impl(
         environment_name=name,
         previous_environment_name=None if previous in hidden else previous,
         changed=previous != name,
-        note=build_set_environment_note(environment_name=name, channel=target.channel_id),
+        note=build_set_environment_note(
+            environment_name=name, channel=target.channel_id, space=space_noun(auth.platform)
+        ),
     )
 
 
@@ -209,7 +214,9 @@ async def _clear_channel_environment_impl(
         environment_name=None,
         previous_environment_name=None if previous in hidden else previous,
         changed=previous is not None,
-        note=build_clear_environment_note(channel=channel_id, cleared=previous is not None),
+        note=build_clear_environment_note(
+            channel=channel_id, cleared=previous is not None, space=space_noun(auth.platform)
+        ),
     )
 
 

@@ -820,7 +820,7 @@ class McpCredentialModal(discord.ui.Modal):
 
         if not token_value.strip():
             await interaction.followup.send(
-                "MCP token cannot be empty — try again.", ephemeral=True
+                "Connection token cannot be empty — try again.", ephemeral=True
             )
             return
 

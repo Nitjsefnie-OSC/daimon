@@ -782,7 +782,7 @@ channel, else `Channel name unavailable`; never the `19:…` id.
 
 The panel has no `·` separators: the admin subtitle is two lines (`October
 2026`, `$48.17 spent by 9 people`), an expiry date reads `$20.00 on Oct 12`,
-and a top-up amount is `$10` with `about 100 turns` under it.
+and a top-up amount is `$10` with `about 100 answers` under it.
 
 A privacy deletion removes the person's stored name with the rest of their
 records, in every tenant their account has a principal in, and drops any name

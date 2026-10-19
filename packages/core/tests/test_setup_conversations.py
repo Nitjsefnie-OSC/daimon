@@ -110,7 +110,7 @@ _MEMBER_ROLE_LINE = (
 )
 _ADMIN_ROLE_LINE = (
     "You can change any agent and choose who answers in each channel. "
-    "Daimon itself can't be edited; ask me to fork it and change the fork."
+    "Daimon itself can't be edited; ask me to make a copy and change the copy."
 )
 
 

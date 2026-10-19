@@ -298,7 +298,9 @@ class ChannelSettingsDialog:
                 actor, "environment", outcome="denied", reason=f"authz:{pick.decision.reason}"
             )
             if pick.decision.reason == "not_a_reader":
-                return build_limited_network_refusal(environment_name=name)
+                return build_limited_network_refusal(
+                    environment_name=name, admin=words_for("teams").admin
+                )
             return await self._need_admin()
         if name is not None and pick.missing:
             return build_missing_environment_note(name)

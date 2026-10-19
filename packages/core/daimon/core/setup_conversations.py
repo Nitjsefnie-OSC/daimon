@@ -74,14 +74,12 @@ async def get_setup_agent(
         raise
     except ScopeViolation:
         raise UserFacingError(
-            "That agent is no longer available in this workspace. Choose another agent."
+            "That agent is no longer available here. Choose another agent."
         ) from None
     if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(
         tenant_id
     ):
-        raise UserFacingError(
-            "That agent is no longer available in this workspace. Choose another agent."
-        )
+        raise UserFacingError("That agent is no longer available here. Choose another agent.")
     return agent
 
 
@@ -156,7 +154,7 @@ def build_setup_opener(
     )
     role = (
         "You can change any agent and choose who answers in each channel. "
-        "Daimon itself can't be edited; ask me to fork it and change the fork."
+        "Daimon itself can't be edited; ask me to make a copy and change the copy."
         if is_admin
         else (
             "You can make your own agents and add a key to any agent. "

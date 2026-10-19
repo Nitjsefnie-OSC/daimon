@@ -858,7 +858,7 @@ async def test_only_tenant_admin_can_approve_connected_request(db_session: Async
         requested_work="Continue",
         is_admin=False,
     )
-    with pytest.raises(ValueError, match="Only a server or workspace admin"):
+    with pytest.raises(ValueError, match="Only an admin"):
         await approve_connected_request(
             db_session,
             tenant_id=tenant_id,

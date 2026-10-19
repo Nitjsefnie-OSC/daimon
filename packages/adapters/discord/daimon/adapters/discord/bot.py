@@ -141,6 +141,7 @@ from daimon.core.ops_alerts import alert_ops
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.permissions import channel_permissions
+from daimon.core.platform_words import words_for
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
 from daimon.core.stores.access_policy import load_access_policy
@@ -282,7 +283,10 @@ def log_anthropic_overload(
 
 _EMBED_COLOR = theme.COLOR_BLURPLE  # Blurple — repo standard (help.py D-FORMAT-01).
 GLOBAL_CAP_NOTICE = "Daimon is at capacity right now — try again in a minute."
-TENANT_CAP_NOTICE = "This server has too many chats in flight right now — try again in a moment."
+TENANT_CAP_NOTICE = (
+    f"This {words_for('discord').space} has too many chats at once right now"
+    " — try again in a moment."
+)
 THREAD_OPEN_FAILED_NOTICE = "Couldn't open a thread. @mention Daimon again."
 
 # Grace window for active turns. The documented worker stop grace is 90s,
