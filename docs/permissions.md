@@ -317,3 +317,12 @@ in the new shape on its next change, so no migration runs.
 The invoker allowlist, read-only DM
 memory, environments, budgets and operator tokens are not
 channel or agent rules. They say who may act and who may change the rules.
+
+Origin-based MCP actions, including task handoffs, require the explicit
+`origin_context_id` and the calling session's server-issued grant. Knowing a
+live origin UUID, even for the same account and agent, grants no authority.
+Empty IDs never discover a concurrent human turn. A handoff retains attendance
+only after that session check and only when its stored origin is attended;
+routines and timer turns cannot acquire human approval surfaces this way.
+Legacy sessions using a shared caller credential are replaced at their next
+bind. Personal OAuth connections remain in the caller's shared vault.

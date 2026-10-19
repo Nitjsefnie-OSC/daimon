@@ -1107,6 +1107,7 @@ class TurnOriginRow(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
     account_id: uuid.UUID
+    chat_session_id: str | None = None
     attended: bool = False
     platform: str
     parent_channel_id: str

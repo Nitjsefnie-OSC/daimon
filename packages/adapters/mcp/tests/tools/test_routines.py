@@ -122,6 +122,7 @@ def _auth_identity(
             if talking_to is None
             else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=talking_to)
         ),
+        chat_session_id="test-session",
     )
 
 
@@ -1352,6 +1353,7 @@ async def test_create_routine_without_a_destination_budgets_the_turns_channel(
         role=Role.USER,
         expires_at=now + timedelta(minutes=10),
         now=now,
+        chat_session_id="test-session",
     )
     await db_session.commit()
     runtime = _runtime(

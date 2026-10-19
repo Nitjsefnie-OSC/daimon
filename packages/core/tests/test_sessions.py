@@ -3270,3 +3270,147 @@ async def test_source_environment_projection_retains_unrepresented_native_policy
     assert projected.native == environment.model_dump(mode="json", exclude_unset=True)
     transport.assert_consumed()
     assert [request.method for request in transport.requests] == ["GET"]
+
+
+async def test_each_daimon_session_mounts_its_own_signed_origin_credential(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    import jwt
+    from daimon.core.mcp_server_url import is_session_mcp_url
+    from daimon.core.session_snapshot import snapshot_from_created_session
+    from daimon.core.session_update_ops import apply_update_ops
+
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    agent_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    public_url = "https://daimon.example/mcp"
+    shared_id = "vlt_shared"
+    vaults = [
+        {
+            "id": shared_id,
+            "type": "vault",
+            "display_name": f"daimon-mcp:{account.id}:{agent_id}",
+            "created_at": now.isoformat(),
+            "archived_at": None,
+            "metadata": None,
+        }
+    ]
+    slots: dict[str, list[dict[str, Any]]] = {shared_id: []}
+    tokens: list[dict[str, Any]] = []
+    sessions: dict[str, dict[str, Any]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/vaults":
+            if request.method == "GET":
+                return httpx.Response(200, json={"data": vaults, "has_more": False})
+            body = json.loads(request.content)
+            new = {
+                **vaults[0],
+                "id": f"vlt_identity_{len(vaults)}",
+                "display_name": body["display_name"],
+            }
+            vaults.append(new)
+            slots[new["id"]] = []
+            return httpx.Response(200, json=new)
+        if path.startswith("/v1/vaults/") and "/credentials" in path:
+            vault_id = path.split("/")[3]
+            if request.method == "GET":
+                return httpx.Response(200, json={"data": slots[vault_id], "has_more": False})
+            body = json.loads(request.content)
+            token = jwt.decode(
+                body["auth"]["token"], "s" * 32, algorithms=["HS256"], options={"verify_iat": False}
+            )
+            tokens.append(token)
+            existing = slots[vault_id][0] if slots[vault_id] else None
+            url = body["auth"].get("mcp_server_url") or existing["auth"]["mcp_server_url"]
+            slot = {
+                "id": f"cred_{vault_id}",
+                "type": "vault_credential",
+                "vault_id": vault_id,
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "metadata": body["metadata"],
+                "auth": {"type": "static_bearer", "mcp_server_url": url},
+            }
+            slots[vault_id] = [slot]
+            return httpx.Response(200, json=slot)
+        if path == "/v1/sessions" and request.method == "POST":
+            body = json.loads(request.content)
+            sent_agent = body["agent"]
+            frozen = ma_agent(
+                id=agent.id, mcp_servers=sent_agent["mcp_servers"], tools=sent_agent["tools"]
+            )
+            native = ma_session(
+                id=f"sess_{len(sessions)}",
+                agent=frozen,
+                metadata=body["metadata"],
+                vault_ids=body["vault_ids"],
+            ).model_dump(mode="json")
+            sessions[native["id"]] = native
+            return httpx.Response(200, json=native)
+        if path.startswith("/v1/sessions/") and request.method == "GET":
+            return httpx.Response(200, json=sessions[path.split("/")[3]])
+        raise NotHandled
+
+    agent = ma_agent(
+        id="agent_scoped", mcp_servers=[{"type": "url", "name": "daimon-mcp", "url": public_url}]
+    )
+    mcp = McpSettings(jwt_secret=SecretStr("s" * 32), public_url=HttpUrl(public_url))
+    client = build_fake_anthropic_http(combine_handlers(handler, make_fake_memory_store_handler()))
+    created = [
+        await create_session(
+            client,
+            agent=agent,
+            environment=ma_environment(),
+            tenant_id=tenant.id,
+            account_id=account.id,
+            agent_uuid=agent_id,
+            session_factory=db_session_factory,
+            mcp_settings=mcp,
+            tool_safety=OPEN_TOOL_SAFETY,
+        )
+        for _ in range(2)
+    ]
+    first, second = created
+    assert first.metadata["daimon_chat_session_id"] != second.metadata["daimon_chat_session_id"]
+    assert set(first.vault_ids) & set(second.vault_ids) == {shared_id}
+    assert first.agent.mcp_servers[0].url != second.agent.mcp_servers[0].url
+    assert all(
+        is_session_mcp_url(session.agent.mcp_servers[0].url, public_url) for session in created
+    )
+    assert {token.get("chat_session_id") for token in tokens} == {
+        None,
+        first.metadata["daimon_chat_session_id"],
+        second.metadata["daimon_chat_session_id"],
+    }
+    recorded = snapshot_from_created_session(
+        first,
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id=shared_id,
+        sent_skills=(),
+    )
+    await apply_update_ops(
+        client,
+        db_session_factory,
+        ops=(),
+        session_id=first.id,
+        recorded=recorded,
+        agent=agent,
+        tenant_id=tenant.id,
+        agent_uuid=agent_id,
+        account_id=account.id,
+        mcp=mcp,
+        tool_safety=OPEN_TOOL_SAFETY,
+        fernet=None,
+        github_fallback_pat=None,
+        github_app_id=None,
+        github_app_private_key=None,
+        now=now + timedelta(minutes=12),
+    )
+    assert tokens[-2].get("chat_session_id") == first.metadata["daimon_chat_session_id"]
+    assert tokens[-1].get("chat_session_id") is None

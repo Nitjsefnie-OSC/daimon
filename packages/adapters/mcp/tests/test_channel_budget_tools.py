@@ -87,6 +87,7 @@ def _auth(
         role=Role.ADMIN if admin else Role.USER,
         platform=platform,
         is_admin=admin,
+        chat_session_id="test-session",
     )
 
 
@@ -159,6 +160,7 @@ async def _origin(
             role=Role.USER,
             expires_at=now + timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
     return str(origin.id)
 

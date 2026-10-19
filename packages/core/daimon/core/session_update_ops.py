@@ -269,7 +269,7 @@ async def apply_update_ops(
         and mcp.jwt_secret is not None
     ):
         mounted_vaults = (snapshot.vault_id,)
-        if snapshot.github_mode == "app":
+        if snapshot.github_mode == "app" or snapshot.chat_session_id is not None:
             live = await retrieve_session_record(anthropic, session_id, scope=scope)
             mounted_vaults = tuple(dict.fromkeys(live.vault_ids))
         await refresh_mounted_mcp_vaults(
@@ -322,6 +322,7 @@ async def apply_update_ops(
                     tool_safety=tool_safety,
                     public_url=public_url,
                     confirmed_tools=confirmed_tools,
+                    chat_session_id=recorded.chat_session_id,
                 )
                 try:
                     await update_session_record(

@@ -97,6 +97,7 @@ class _World:
             role=Role.USER,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
         await self.db.commit()
         return str(origin.id)
@@ -119,6 +120,7 @@ class _World:
             platform=self.platform,
             chat_agent_id=agent_uuid,
             **extra,
+            chat_session_id="test-session",
         )
 
     def agent_key_auth(self, bound_channel_id: str | None = None) -> AuthIdentity:
@@ -131,6 +133,7 @@ class _World:
             platform=self.platform,
             agent_id=agent_uuid,
             bound_channel_id=bound_channel_id,
+            chat_session_id="test-session",
         )
 
     def runtime(self) -> McpRuntime:

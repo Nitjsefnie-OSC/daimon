@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -28,6 +28,21 @@ _ALL_CHANNEL_READS = "read_channel, read_thread, get_message, list_threads, sear
 # Slack has no list_threads: a thread there is a reply chain, not a listable object.
 _CHANNEL_READS = {"slack": "read_channel, read_thread, get_message, search_messages"}
 current_origin_id: ContextVar[uuid.UUID | None] = ContextVar("turn_origin_id", default=None)
+# A prepared driver explicitly grants its own origin. Child workers mask this
+# context even when they inherit their parent's rendering/origin context.
+current_execution_origin_id: ContextVar[uuid.UUID | None] = ContextVar(
+    "execution_origin_id", default=None
+)
+
+
+@contextmanager
+def execution_origin(origin_id: uuid.UUID | None) -> Iterator[None]:
+    """Authorize origin credential derivation only inside this prepared execution."""
+    token = current_execution_origin_id.set(origin_id)
+    try:
+        yield
+    finally:
+        current_execution_origin_id.reset(token)
 
 
 class SessionState(BaseModel):
@@ -124,6 +139,7 @@ async def turn_origin(
     configuration_target_name: str | None = None,
     is_setup: bool = False,
     attended: bool = True,
+    chat_session_id: str | None = None,
     message_text: str | None = None,
     queued_message: bool = False,
     keep_fleet_root: bool = False,
@@ -154,6 +170,7 @@ async def turn_origin(
             now=now,
             is_setup=is_setup,
             attended=attended,
+            chat_session_id=chat_session_id,
         )
         if message_text is not None:
             if not queued_message:

@@ -18,7 +18,6 @@ from daimon.core.stores.domain import CHAT_PLATFORMS, TurnOriginRow
 from daimon.core.stores.thread_agent_bindings import get_binding, update_target
 from daimon.core.stores.turn_origins import (
     get_active_origin,
-    list_active_origins,
     update_origin_target,
 )
 from fastmcp import Context, FastMCP
@@ -30,14 +29,11 @@ async def require_turn_origin(
     auth: AuthIdentity,
     origin_context_id: str | None,
 ) -> TurnOriginRow:
-    if auth.platform not in CHAT_PLATFORMS:
-        raise ToolError("Use the origin_context_id from this active platform turn.")
-    if not origin_context_id:
-        # Smaller models sometimes drop the argument. The caller's own single
-        # running turn for this responder is unambiguous; anything else refuses.
-        origin_context_id = await _sole_running_origin_id(runtime, auth)
-        if origin_context_id is None:
-            raise ToolError("Use the origin_context_id from this active platform turn.")
+    """Require an explicit live origin authorized by the caller session's signed grant."""
+    if auth.platform not in CHAT_PLATFORMS or not origin_context_id or auth.chat_session_id is None:
+        raise ToolError(
+            "Use the origin_context_id from this active platform turn with its session grant."
+        )
     try:
         origin_id = uuid.UUID(origin_context_id)
     except ValueError as exc:
@@ -53,7 +49,7 @@ async def require_turn_origin(
             platform=auth.platform,
             now=datetime.now(UTC),
         )
-    if origin is None:
+    if origin is None or origin.chat_session_id != auth.chat_session_id:
         raise ToolError("This turn origin is unavailable or expired; retry in that conversation.")
     # A chat turn's credential names its agent as chat_agent_id, as
     # `get_verified_origin` reads it: it may claim only its own responder's origin.
@@ -63,28 +59,6 @@ async def require_turn_origin(
     ):
         raise ToolError("This turn origin belongs to another responder.")
     return origin
-
-
-async def _sole_running_origin_id(runtime: McpRuntime, auth: AuthIdentity) -> str | None:
-    """The id of the caller's one running turn with this responder, or None."""
-    executing_agent = auth.agent_id or auth.chat_agent_id
-    if executing_agent is None or auth.platform is None:
-        return None
-    async with runtime.session_factory() as session:
-        running = await list_active_origins(
-            session,
-            tenant_id=auth.tenant_id,
-            account_id=auth.account_id,
-            platform=auth.platform,
-            now=datetime.now(UTC),
-        )
-    mine = [
-        origin
-        for origin in running
-        if derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
-        == executing_agent
-    ]
-    return str(mine[0].id) if len(mine) == 1 else None
 
 
 async def resolve_setup_agent(

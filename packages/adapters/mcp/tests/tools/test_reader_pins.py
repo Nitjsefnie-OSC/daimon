@@ -154,6 +154,7 @@ async def test_publishing_from_inside_the_pin_or_as_admin_is_allowed(
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
+        chat_session_id="test-session",
     )
     async with db_session_factory.begin() as session:
         origin = await create_origin(
@@ -170,6 +171,7 @@ async def test_publishing_from_inside_the_pin_or_as_admin_is_allowed(
             role=Role.USER,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
+            chat_session_id="test-session",
         )
 
     out = await _publish_report_impl(

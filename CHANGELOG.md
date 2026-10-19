@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Origin-based MCP actions require the signed grant of the calling session.
+  Routines and timers cannot borrow a concurrent human origin, and empty origin
+  IDs refuse. Human handoffs retain their approval surfaces.
+
 - Fleet workers and unattended wakes re-gate Managed Agents sessions before every
   confirmation batch. Runtimes without session reads refuse unattended
   confirmations with a plain reason, including when tool safety is off.

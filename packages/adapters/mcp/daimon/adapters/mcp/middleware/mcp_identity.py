@@ -347,6 +347,14 @@ class IdentityMiddleware(Middleware):
             agent_id=agent_id,
             chat_agent_id=chat_agent_id,
             slack_turn_context_id=slack_turn_context_id,
+            chat_session_id=(
+                _token.claims.get("chat_session_id")
+                if _token is not None
+                and isinstance(_token.claims.get("chat_session_id"), str)
+                and agent_id is None
+                and not internal_claim
+                else None
+            ),
             platform_user_id=platform_user_id,
             is_admin=is_admin,
             # Set by the verifier from the token's row; an agent key's only.

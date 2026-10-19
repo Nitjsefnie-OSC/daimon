@@ -101,6 +101,46 @@ async def resolve_agent_mcp_credential(
     )
     if await list_mcp_tools(destination, token) != frozenset(tools):
         raise ValueError("target MCP catalogue differs from captured source")
+    if chat_execution:
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.stores.accounts import get_account_with_tenant
+        from daimon.core.stores.turn_origins import bind_origin_session, get_active_origin
+        from daimon.core.turn_origin import current_execution_origin_id
+
+        origin_id = current_execution_origin_id.get()
+        if origin_id is not None:
+            # Native runtimes resolve the credential inside the executing turn.
+            # Derive a grant from that trusted context, keeping the SAME registry
+            # owner, expiry and revocation as the validated source credential.
+            async with sessionmaker.begin() as db:
+                identity = await get_account_with_tenant(db, account_id=uuid.UUID(scope.account_id))
+                origin = (
+                    None
+                    if identity is None
+                    else await get_active_origin(
+                        db,
+                        origin_id=origin_id,
+                        tenant_id=uuid.UUID(scope.tenant_id),
+                        account_id=uuid.UUID(scope.account_id),
+                        platform=identity.platform,
+                        now=now,
+                    )
+                )
+                if (
+                    origin is None
+                    or derive_agent_uuid(
+                        tenant_id=origin.tenant_id, ma_agent_id=origin.responder_ma_agent_id
+                    )
+                    != agent_id
+                ):
+                    raise ValueError("native MCP origin has no executing session grant")
+                await bind_origin_session(db, origin_id=origin_id, chat_session_id=str(origin_id))
+            claims = pyjwt.decode(
+                token, secret, algorithms=["HS256"], options={"verify_exp": False}
+            )
+            token = pyjwt.encode(
+                {**claims, "chat_session_id": str(origin_id)}, secret, algorithm="HS256"
+            )
     return token
 
 
@@ -115,6 +155,7 @@ def mint_jwt(
     expires_at: dt.datetime | None = None,
     chat_agent_id: uuid.UUID | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
@@ -133,6 +174,7 @@ def mint_jwt(
       scoped to the agent without trusting tool-supplied parameters.
     - ``chat_agent_id`` identifies the agent executing an ordinary chat session
       without selecting the restricted external agent-chat tool surface.
+    - ``chat_session_id`` binds origin use to one isolated provider session.
     - ``slack_turn_context_id`` is an execution grant used only by isolated Slack
       DM session credentials. Readers require the matching live tenant/account row.
     - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
@@ -159,6 +201,8 @@ def mint_jwt(
         claims["chat_agent_id"] = str(chat_agent_id)
     if slack_turn_context_id is not None:
         claims["slack_turn_context_id"] = str(slack_turn_context_id)
+    if chat_session_id is not None:
+        claims["chat_session_id"] = chat_session_id
     if is_admin:
         claims["is_admin"] = True
     return pyjwt.encode(claims, secret, algorithm="HS256")
@@ -185,6 +229,7 @@ async def mint_chat_mcp_token(
     secret: bytes,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    chat_session_id: str | None = None,
 ) -> tuple[str, uuid.UUID, dt.datetime]:
     """Register one expiring ordinary-chat credential with the existing token owner.
 
@@ -217,6 +262,7 @@ async def mint_chat_mcp_token(
         secret=secret,
         now=now,
         slack_turn_context_id=slack_turn_context_id,
+        chat_session_id=chat_session_id,
         jti=jti,
         expires_at=expires_at,
     )
@@ -301,6 +347,7 @@ def registered_agent_claims_match(
     now: dt.datetime,
     chat_execution: bool,
     max_ttl_s: int = 900,
+    allow_session_grant: bool = False,
 ) -> bool:
     """Share the remote credential's exact mint shape with server admission.
 
@@ -310,9 +357,12 @@ def registered_agent_claims_match(
     """
     identity_claim = "chat_agent_id" if chat_execution else "agent_id"
     expiry = claims.get("exp")
+    expected = {"sub", identity_claim, "jti", "exp"}
+    if allow_session_grant and chat_execution and isinstance(claims.get("chat_session_id"), str):
+        expected.add("chat_session_id")
     return (
         0 < max_ttl_s <= 900
-        and set(claims) == {"sub", identity_claim, "jti", "exp"}
+        and set(claims) == expected
         and claims["sub"] == str(row.account_id)
         and claims[identity_claim] == row.agent_id
         and claims["jti"] == str(row.jti)

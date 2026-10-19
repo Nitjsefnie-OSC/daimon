@@ -3364,6 +3364,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
         responder_name="timer-agent",
         role=Role.USER,
         attended=False,
+        chat_session_id="timer-session",
     ) as origin:
         await _hand_off_task_impl(
             handoff_runtime,
@@ -3373,6 +3374,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
                 role=Role.USER,
                 platform=platform,
                 platform_user_id="user-1",
+                chat_session_id="timer-session",
             ),
             origin_context_id=str(origin.id),
             agent_id=agent.id,
@@ -3501,3 +3503,160 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
             "update refused"
         ]
         assert len(confirmations) == failed_batch - 1
+
+
+@pytest.mark.parametrize(
+    "kind,origin_attended,caller_attended",
+    [("chat", True, True), ("chat", True, False), ("chat", False, True), ("worker", True, False)],
+)
+async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    kind: str,
+    origin_attended: bool,
+    caller_attended: bool,
+) -> None:
+    from daimon.core.session_snapshot import (
+        fingerprint_identity,
+        fingerprint_mutable,
+        snapshot_from_created_session,
+    )
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.thread_sessions import record_snapshot
+    from daimon.core.stores.turn_origins import create_origin, get_active_origin
+    from daimon.core.turn_origin import current_execution_origin_id, turn_origin
+    from daimon.testing.ma_models import ma_session
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    grant = str(uuid.uuid4())
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-1",
+        ma_session_id="sess_1",
+    )
+    agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+    snapshot = snapshot_from_created_session(
+        ma_session(id="sess_1", agent=agent, metadata={"daimon_chat_session_id": grant}),
+        env_sha256=None,
+        env_file_id=None,
+        repo_token_issued_at=None,
+        vault_id="vlt_own",
+        sent_skills=(),
+    )
+    await record_snapshot(
+        db_session,
+        id=row.id,
+        snapshot=snapshot,
+        identity_fingerprint=fingerprint_identity(snapshot),
+        mutable_fingerprint=fingerprint_mutable(snapshot),
+    )
+    stale = await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="C1",
+        thread_id="thread-1",
+        responder_ma_agent_id=agent.id,
+        responder_name="daimon",
+        role=Role.USER,
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        now=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        attended=True,
+        chat_session_id=grant,
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    router.add(
+        "GET",
+        r"/v1/sessions/sess_1",
+        lambda _r, _m: httpx.Response(
+            200, json=ma_session(id="sess_1", agent=agent).model_dump(mode="json")
+        ),
+    )
+    deps = dataclasses.replace(
+        _deps(sessionmaker=db_session_factory, router=router), turn_path="legacy"
+    )
+    admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id=row.ma_session_id,
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    seen = []
+    async with turn_origin(
+        db_session_factory,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="C1",
+        thread_id="thread-1",
+        responder_ma_agent_id=agent.id,
+        responder_name="daimon",
+        role=Role.USER,
+        attended=origin_attended,
+    ) as origin:
+
+        async def read_origin():
+            async with db_session_factory() as session:
+                return await get_active_origin(
+                    session,
+                    origin_id=origin.id,
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+
+        async def before_send() -> None:
+            bound = await read_origin()
+            assert bound is not None
+            assert bound.chat_session_id == (None if kind == "worker" else grant)
+            assert bound.attended is (
+                origin_attended if kind == "worker" else origin_attended and caller_attended
+            )
+            assert current_execution_origin_id.get() == (None if kind == "worker" else origin.id)
+            async with db_session_factory() as db:
+                previous = await get_active_origin(
+                    db,
+                    origin_id=stale.id,
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    platform="discord",
+                    now=datetime.now(UTC),
+                )
+            assert previous is not None
+            assert previous.chat_session_id == (grant if kind == "worker" else None)
+            seen.append(bound.id)
+
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="thread-1",
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            attended=caller_attended,
+            origin=kind,
+            render_interval_s=0.001,
+            before_send=before_send,
+        )
+        assert outcome.state.error is None
+        released = await read_origin()
+        assert released is not None and released.chat_session_id is None
+    assert seen == [origin.id]
