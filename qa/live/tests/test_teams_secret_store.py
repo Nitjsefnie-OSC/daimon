@@ -155,6 +155,25 @@ def test_prune_matches_project_number_names() -> None:
     assert len(enabled(api, ADMIN)) == 3
 
 
+def test_prune_skips_when_added_version_is_in_another_project() -> None:
+    api = FakeSecrets()
+    backend = SecretManagerCacheBackend("qa-project", "teams-qa", api)
+    for _ in range(4):
+        backend.write("admin", SENTINEL)
+    destroyed = list(api.destroyed)
+    real_add = api.add_secret_version
+
+    def add_elsewhere(*, request: dict[str, Any]) -> SimpleNamespace:
+        real_add(request=request)
+        return SimpleNamespace(
+            name="projects/other-project/secrets/teams-qa-token-admin/versions/9", state=ENABLED
+        )
+
+    api.add_secret_version = add_elsewhere  # type: ignore[method-assign]
+    backend.write("admin", SENTINEL)
+    assert api.destroyed == destroyed
+
+
 def test_prune_skips_when_added_version_is_another_secret() -> None:
     api = FakeSecrets()
     backend = SecretManagerCacheBackend("qa-project", "teams-qa", api)

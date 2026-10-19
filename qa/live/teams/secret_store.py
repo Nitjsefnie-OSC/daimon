@@ -85,6 +85,7 @@ class SecretManagerCacheBackend:
             if (
                 len(parts) != 4
                 or parts[0] != "projects"
+                or not (parts[1] == self.project or parts[1].isdigit())
                 or parts[2:] != ["secrets", name.split("/")[-1]]
             ):
                 return
