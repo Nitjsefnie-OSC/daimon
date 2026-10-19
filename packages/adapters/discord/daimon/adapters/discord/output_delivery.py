@@ -115,7 +115,7 @@ async def deliver_session_outputs(
     max_bytes = upload_limit(thread)
     mention, attributed = _attribution(thread, requester_id=requester_id, reply_to=reply_to)
     # With no turn to tie it to, a file posted on its own is the file alone.
-    file_attributed: dict[str, Any] = {}
+    file_attributed: dict[str, Any] = {"allowed_mentions": discord.AllowedMentions.none()}
     if mention is not None:
         file_attributed = {"content": f"For {mention}", **attributed}
     elif reply_to is not None:
