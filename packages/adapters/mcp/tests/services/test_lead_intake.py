@@ -275,3 +275,29 @@ async def test_manual_source_is_verified_from_provider(
         else:
             with pytest.raises(ValueError):
                 await ports.source(config(), source, "7")
+
+
+async def test_manual_thread_source_verifies_parent_guild() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if "/messages/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "600",
+                    "channel_id": "502",
+                    "author": {"id": "7"},
+                    "content": "Register this lead: Synthetic",
+                },
+            )
+        if request.url.path.endswith("502"):
+            return httpx.Response(200, json={"id": "502", "parent_id": "500"})
+        return httpx.Response(200, json={"id": "500", "guild_id": "1"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        ports = HttpIntakePorts(
+            client, gmail_token="synthetic", hubspot_token="synthetic", discord_token="synthetic"
+        )
+        result = await ports.source(
+            config(), LeadSource(kind="manual", channel_id="502", message_id="600"), "7"
+        )
+    assert result.text == "Register this lead: Synthetic"

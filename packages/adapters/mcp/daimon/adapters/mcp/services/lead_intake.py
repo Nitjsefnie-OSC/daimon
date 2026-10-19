@@ -130,10 +130,11 @@ class HttpIntakePorts:
                 source=source, text=decoded.text, raw=raw, recipients=tuple(decoded.recipients)
             )
         channel = await self.request("discord", "GET", f"channels/{source.channel_id}")
-        if (
-            str(channel.get("guild_id")) != config.guild_id
-            or str(channel["id"]) != source.channel_id
-        ):
+        if str(channel["id"]) != source.channel_id:
+            raise ValueError("source_channel_mismatch")
+        if channel.get("guild_id") is None and channel.get("parent_id"):
+            channel = await self.request("discord", "GET", f"channels/{channel['parent_id']}")
+        if str(channel.get("guild_id")) != config.guild_id:
             raise ValueError("source_guild_mismatch")
         message = await self.request(
             "discord", "GET", f"channels/{source.channel_id}/messages/{source.message_id}"

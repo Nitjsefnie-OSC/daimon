@@ -129,8 +129,9 @@ class IntakeStore:
         actor_id: str | None,
         provenance: tuple[UUID, UUID] | None = None,
     ) -> IntakeRecord:
+        connection = config.source_connection_id if submission.source.kind == "gmail" else "discord"
         digest = hashlib.sha256(
-            f"{self.tenant_id}:{config.source_connection_id}:{submission.source.key}".encode()
+            f"{self.tenant_id}:{connection}:{submission.source.key}".encode()
         ).hexdigest()
         now = datetime.now(UTC)
         raw = submission.evidence.raw_source

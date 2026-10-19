@@ -24,7 +24,9 @@ from daimon.adapters.mcp.tools.discord._client import (
 )
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
+    _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
+    _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.lead_intake import (
@@ -173,23 +175,28 @@ async def service(
             if source_ref is not None and source_ref.kind == "manual":
                 source = await client.fetch_channel(int(source_ref.channel_id or "0"))
                 if (
-                    not isinstance(source, discord.TextChannel)
+                    not isinstance(source, discord.TextChannel | discord.Thread)
                     or str(source.guild.id) != config.guild_id
                 ):
                     raise ToolError("manual_source_channel_required")
+                parent_id = None
+                if isinstance(source, discord.Thread):
+                    await _ensure_thread_parent_cached(source)
+                    await _check_thread_view(client, source, member, auth.platform_user_id or "")
+                    parent_id = str(source.parent_id)
                 _check_view_permission(source, member)
                 decision = authorize(
                     policy,
                     subject=Subject(),
                     action=Action.READ_CHANNEL,
-                    place=Place(channel_id=str(source.id)),
+                    place=Place(channel_id=str(source.id), parent_channel_id=parent_id),
                     origin_channel_ids=frozenset(
                         value
                         for origin in origins
                         for value in (origin.parent_channel_id, origin.thread_id)
                     ),
                 )
-                if not decision or home_of(policy, str(source.id)):
+                if not decision or home_of(policy, str(source.id), parent_id):
                     raise ToolError("source_export_denied")
 
     await reauthorize(draft.source if draft else None)

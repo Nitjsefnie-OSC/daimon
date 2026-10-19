@@ -108,10 +108,11 @@ class IntakeService:
             thread_content=draft.thread_content,
         )
         record = await self.store.accept(config, submission, actor_id, self.provenance)
-        async with self.store.claim(f"mailbox:{config.source_connection_id}"):
-            state = await self.store.mailbox(config.source_connection_id)
-            state.discovered = [x for x in state.discovered if x != draft.source.message_id]
-            await self.store.save_mailbox(config.source_connection_id, state)
+        if draft.source.kind == "gmail":
+            async with self.store.claim(f"mailbox:{config.source_connection_id}"):
+                state = await self.store.mailbox(config.source_connection_id)
+                state.discovered = [x for x in state.discovered if x != draft.source.message_id]
+                await self.store.save_mailbox(config.source_connection_id, state)
         return await self.resume(record.id)
 
     async def _effect(
