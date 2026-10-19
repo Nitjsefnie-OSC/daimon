@@ -1329,3 +1329,41 @@ Discord bot credentials for live membership resolution. A missing or failed
 membership lookup cannot authorize private delivery. Inspect routine
 `delivery_status` and `delivery_note` when a DM fails; do not manually reset an
 uncertain or partially sent claim to pending, because delivery is at most once.
+
+### Rolling out durable routine sessions
+
+Migration `0114_routine_sessions` adds the `routine_sessions` table and indexes;
+it needs no backfill. Run `uv run alembic upgrade head` before starting the new
+scheduler, Discord startup/tick recovery, or any routine get/list readers
+(including MCP, CLI and adapter panels). These readers query the table even when
+no private routine has run. Keep older schedulers stopped while upgrading, then
+start the compatible readers, scheduler and Discord recovery workers.
+
+Before rolling back across `0114_routine_sessions`, quiesce new routine
+allocations by stopping scheduler dispatch. Let active fires finish or request
+their bounded stops, and keep compatible recovery workers available to drain
+pending obligations. Stopping the scheduler alone does not prove that its
+provider sessions stopped. Check the database for remaining work:
+
+```sql
+SELECT id, routine_id, tenant_id, ma_agent_id, ma_session_id,
+       discovered_session_ids, state, stop_attempts, next_attempt_at
+FROM routine_sessions
+WHERE state NOT IN ('completed', 'stopped');
+```
+
+An empty result means there are no pending or unresolved stop records. For
+pending rows (`recorded`, `session_created`, `running`, `stopping`), allow recovery
+to settle them before removing the table. A `stop_unresolved` row does not prove
+cessation: inspect the provider and confirm the session is idle or gone, or
+preserve the row and explicitly track its remaining stop work outside Daimon
+before rollback. Unknown-receipt rows may have no `ma_session_id`; preserve their
+`id` receipt token and tenant/account/agent identity for scoped provider discovery.
+
+Downgrading drops the entire table, including pending stop obligations,
+unknown-receipt tokens, attempt counts and terminal history. Export all rows
+(for example with `pg_dump --data-only --table=routine_sessions`) and record any
+unresolved work before a destructive downgrade; do not discard pending stop work.
+Stop every new reader/recovery worker before running the downgrade and starting
+the older version. Restoring the schema alone cannot reconstruct the dropped
+obligations or reset the provider's activity.
