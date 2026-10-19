@@ -166,6 +166,23 @@ async def may_choose_thread_model(
     return bool(authorize(policy, subject=subject, action=Action.START_TURN, place=place))
 
 
+def with_model_override(
+    agent: BetaManagedAgentsAgent, model_override: str | None
+) -> BetaManagedAgentsAgent:
+    """The agent as a turn runs it: the stored agent with the conversation's model, if any.
+
+    Every place that re-reads the stored agent for an admitted turn (a fleet
+    root restored from its frozen preparation, a fresh source capture) puts
+    the turn's override back, so the effective model is what is compared and
+    run, while any edit to the stored agent itself still shows.
+    """
+    if model_override is None:
+        return agent
+    return agent.model_copy(
+        update={"model": BetaManagedAgentsModelConfig(id=model_override, speed="standard")}
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AppliedThreadModel:
     agent: BetaManagedAgentsAgent
@@ -197,9 +214,7 @@ async def apply_thread_model(
     if not anthropic_backend or model_id not in ALLOWED_MODEL_IDS:
         return AppliedThreadModel(agent=agent, model_override=None, fell_back=True)
     return AppliedThreadModel(
-        agent=agent.model_copy(
-            update={"model": BetaManagedAgentsModelConfig(id=model_id, speed="standard")}
-        ),
+        agent=with_model_override(agent, model_id),
         model_override=model_id,
         fell_back=False,
     )

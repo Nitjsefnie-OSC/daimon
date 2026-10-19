@@ -83,6 +83,7 @@ from daimon.core.stores.thread_sessions import (
     read_session_seals,
     record_session_seals,
 )
+from daimon.core.thread_models import with_model_override
 from daimon.core.turn.admission import Admission, reauthorize, restrict_inherited_memory
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -282,7 +283,10 @@ class ProviderPreparationRequest:
             actual = await retrieve_agent(self.deps.anthropic, pins[0][0].id, scope=self.scope)
             root = replace(
                 self,
-                admission=replace(self.admission, agent=actual),
+                admission=replace(
+                    self.admission,
+                    agent=with_model_override(actual, self.admission.model_override),
+                ),
                 source=None,
                 counterpart=None,
                 verified_counterpart=None,

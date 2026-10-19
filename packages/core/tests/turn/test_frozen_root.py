@@ -31,6 +31,7 @@ from daimon.core.stores import (
 )
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.thread_models import with_model_override
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
@@ -63,6 +64,7 @@ async def root_turn(
     live_root=False,
     null_environment_description=False,
     resolved_model=False,
+    model_override=None,
 ):
     sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
@@ -74,6 +76,13 @@ async def root_turn(
         )
         await access_policy.set_access_policy(db, tenant_id=tenant.id, policy=POLICY)
     root = parent("anthropic")
+    if model_override is not None:
+        from mux.contracts.ids import ModelRef
+
+        # The admin's fleet grant permits the model the conversation chose.
+        root = replace(
+            root, models=(*root.models, ModelRef(provider="anthropic", id=model_override))
+        )
     scope = resource_scope(
         tenant_id=str(tenant.id), account_id=str(account.id), authorization_id="admitted-turn"
     )
@@ -175,6 +184,8 @@ async def root_turn(
     transport = ScriptedTransport(router=router)
     async with transport.client() as client:
         actual = await retrieve_agent(client, native.id, scope=scope)
+        # A conversation's model choice: admission runs the stored agent with it.
+        actual = with_model_override(actual, model_override)
         captured = await load_backend_agent(
             client, sm, tenant_id=tenant.id, agent_name="root", actual_agent=actual
         )
@@ -236,6 +247,7 @@ async def root_turn(
             grant=grant,
             origin_channel_id=thread.channel.channel_id,
             origin_thread_id=thread.thread_id,
+            model_override=model_override,
         )
         async with sm.begin() as db:
             intent = await turn_card_intents.create_turn_card_intent(

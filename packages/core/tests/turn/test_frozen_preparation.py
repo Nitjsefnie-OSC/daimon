@@ -509,6 +509,129 @@ async def test_a_root_retained_before_daimon_rule_tools_existed_still_reads(root
         await ports.close()
 
 
+async def test_a_root_retained_before_conversation_models_existed_still_reads(root_turn):
+    """A root frozen before the per-conversation model choice lacks both facts; they default."""
+    from copy import deepcopy
+    from decimal import Decimal
+
+    from daimon.core._models import MuxOperation
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores.fleet import WorkerPool
+    from sqlalchemy import select, update
+
+    deps, _, _, _, origin, _, _, _ = root_turn
+    parent = await retained(root_turn)
+    async with deps.sessionmaker.begin() as db:
+        row = (
+            await db.execute(
+                select(MuxOperation).where(
+                    MuxOperation.tenant_id == origin.tenant_id,
+                    MuxOperation.key == "fleet_root:" + str(origin.id) + ":root:0",
+                )
+            )
+        ).scalar_one()
+        record = deepcopy(row.record)
+        facts = record["result"]["preparation"]["admission"]
+        assert facts.pop("model_override") is None
+        assert facts.pop("model_fell_back") is False
+        await db.execute(
+            update(MuxOperation)
+            .where(
+                MuxOperation.tenant_id == row.tenant_id,
+                MuxOperation.account_id == row.account_id,
+                MuxOperation.key == row.key,
+            )
+            .values(record=record)
+        )
+    request = await read_frozen_preparation(
+        deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+    )
+    assert request.admission.model_override is None
+    assert request.admission.model_fell_back is False
+    ports = HostFleetPorts(
+        deps.sessionmaker,
+        prices={},
+        markup=Decimal("1"),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+    )
+    try:
+        source = await ports.capture_source(parent)
+        assert source.source.ref == parent.source_agents[0]
+    finally:
+        await ports.close()
+
+
+@pytest.fixture
+async def chosen_model_root_turn(db_preflight, db_nullpool_engine):
+    """The stored agent runs Haiku; the conversation chose Opus (`/model`)."""
+    async for value in root_turn.__wrapped__(
+        db_preflight, db_nullpool_engine, model_override="claude-opus-5-5"
+    ):
+        yield value
+
+
+async def test_a_conversations_model_choice_survives_freeze_restore_and_dispatch(
+    chosen_model_root_turn,
+):
+    from decimal import Decimal
+
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores.fleet import WorkerPool
+
+    deps, prepared, *_ = chosen_model_root_turn
+    assert prepared._source.source.spec.model.id == "claude-opus-5-5"
+    parent = await retained(chosen_model_root_turn)
+
+    request = await read_frozen_preparation(
+        deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+    )
+    assert request.admission.model_override == "claude-opus-5-5"
+    assert request.admission.agent.model.id == "claude-opus-5-5", "the choice is reapplied"
+    assert request.source.source.spec.model.id == "claude-opus-5-5"
+
+    ports = HostFleetPorts(
+        deps.sessionmaker,
+        prices={},
+        markup=Decimal("1"),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+    )
+    try:
+        source = await ports.capture_source(parent)
+        assert source.source.ref == parent.source_agents[0]
+        assert source.source.spec.model.id == "claude-opus-5-5"
+    finally:
+        await ports.close()
+
+
+@pytest.mark.parametrize("field", ["system", "version"])
+async def test_a_real_source_edit_still_refuses_under_a_chosen_model(chosen_model_root_turn, field):
+    import httpx
+    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+
+    deps, *_ = chosen_model_root_turn
+    parent = await retained(chosen_model_root_turn)
+    native = (await deps.anthropic.beta.agents.retrieve("root-source")).model_dump(mode="json")
+    assert native["model"]["id"] == "claude-haiku-5-5", "the stored agent was never edited"
+    if field == "system":
+        native["system"] = "Drifted instructions"
+    else:
+        native["version"] = 2
+    trace = ScriptedTransport()
+    trace.queue(
+        ScriptedReply("GET", "/v1/agents/" + native["id"], httpx.Response(200, json=native))
+    )
+    async with trace.client() as client:
+        with pytest.raises(WorkerSpecRefused):
+            await read_frozen_preparation(
+                replace(deps, anthropic=client),
+                parent,
+                deadline=parent.limits.deadline,
+                now=lambda: datetime.now(UTC),
+            )
+
+
 @pytest.mark.parametrize("mode", ["unrestricted", "limited"])
 def test_environment_sdk_facade_preserves_represented_network_packages_and_dates(mode):
     from daimon.core.mux_compat import sdk_environment, source_environment_record

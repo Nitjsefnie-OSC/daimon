@@ -21,6 +21,7 @@ from daimon.core.neutral_resources import (
     WorkerSpecRefused,
     resolve_worker_spec,
 )
+from daimon.core.thread_models import with_model_override
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
@@ -84,7 +85,9 @@ _ADMISSION_FACTS = {
 }
 
 #: Admission facts a root retained before they existed read as their default.
-_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools", "daimon_rules_need_driver"})
+_LEGACY_ADMISSION_FACTS = frozenset(
+    {"daimon_rule_tools", "daimon_rules_need_driver", "model_override", "model_fell_back"}
+)
 
 log = structlog.get_logger(__name__)
 
@@ -1358,7 +1361,11 @@ async def capture_preparation_source(
         request = replace(
             request,
             source=None,
-            admission=replace(request.admission, agent=actual, environment=environment),
+            admission=replace(
+                request.admission,
+                agent=with_model_override(actual, request.admission.model_override),
+                environment=environment,
+            ),
         )
     source = request.source
     if source is None:
