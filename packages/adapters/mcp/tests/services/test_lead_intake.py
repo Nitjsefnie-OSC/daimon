@@ -14,7 +14,12 @@ from cryptography.fernet import Fernet
 from daimon.adapters.mcp.services.lead_intake import HttpIntakePorts
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.lead_intake import IntakeConfig, LeadDraft, LeadSource
-from daimon.core.lead_intake_service import EffectRequest, IntakeService, ReviewRequired
+from daimon.core.lead_intake_service import (
+    EffectRequest,
+    IntakeAccess,
+    IntakeService,
+    ReviewRequired,
+)
 from daimon.core.stores.lead_intake import IntakeStore
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -171,7 +176,7 @@ class ProviderReplay:
         return httpx.Response(404, json={})
 
 
-async def noop(source: LeadSource | None) -> None:
+async def noop(access: IntakeAccess) -> None:
     pass
 
 

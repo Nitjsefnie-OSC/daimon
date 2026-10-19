@@ -2304,3 +2304,7 @@ identities. Separate mailbox scan history and message dispositions preserve
 page discoveries and failed coverage independently of the accepted intake queue.
 Sensitive opportunity mappings and discovered message IDs are encrypted and
 expire with the retention policy.
+
+Intake authorization carries the actual destination thread through recovery and
+write intents. Both MCP record readback and the private Discord queue evaluate
+that thread’s current policy and native visibility before returning its data.

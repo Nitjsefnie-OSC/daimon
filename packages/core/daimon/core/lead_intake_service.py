@@ -56,7 +56,14 @@ class IntakePorts(Protocol):
     ) -> tuple[list[str], str | None]: ...
 
 
-type Reauthorize = Callable[[LeadSource | None], Awaitable[None]]
+class IntakeAccess(BaseModel):
+    source: LeadSource | None = None
+    thread_id: str | None = None
+    write: bool = True
+    create_thread: bool = False
+
+
+type Reauthorize = Callable[[IntakeAccess], Awaitable[None]]
 
 
 class IntakeService:
@@ -75,7 +82,7 @@ class IntakeService:
         """Fetch an unexpired discovery for classification without retaining it."""
         config, _ = await self.store.configuration()
         source = LeadSource(kind="gmail", mailbox=config.gmail_mailbox, message_id=message_id)
-        await self.reauthorize(source)
+        await self.reauthorize(IntakeAccess(source=source, write=False))
         if not await self.store.is_discovered(config, message_id):
             raise ValueError("unexpired_discovery_required")
         verified = await self.ports.source(config, source, None)
@@ -84,7 +91,7 @@ class IntakeService:
         return verified.model_copy(update={"raw": None})
 
     async def submit(self, draft: LeadDraft, actor_id: str | None) -> IntakeRecord:
-        await self.reauthorize(draft.source)
+        await self.reauthorize(IntakeAccess(source=draft.source))
         config, _ = await self.store.configuration()
         verified = await self.ports.source(config, draft.source, actor_id)
         if verified.source != draft.source:
@@ -152,7 +159,13 @@ class IntakeService:
         payload: dict[str, str],
         identity: str | None = None,
     ) -> str:
-        await self.reauthorize(record.submission.source if record.submission else None)
+        await self.reauthorize(
+            IntakeAccess(
+                source=record.submission.source if record.submission else None,
+                thread_id=payload.get("thread") or record.progress.discord_thread_id,
+                create_thread=step == "thread",
+            )
+        )
         live_record = await self.store.get(record.id)
         if live_record.submission is None or record.expires_at <= datetime.now(UTC):
             raise ValueError("intake_erased_or_expired")
@@ -195,22 +208,56 @@ class IntakeService:
             # Empty history is not proof a non-idempotent POST did not happen.
             raise ReviewRequired("uncertain_write")
         await self.store.intent(record.id, step, key)
-        await self.reauthorize(record.submission.source if record.submission else None)
+        await self.reauthorize(
+            IntakeAccess(
+                source=record.submission.source if record.submission else None,
+                thread_id=payload.get("thread") or record.progress.discord_thread_id,
+                create_thread=step == "thread",
+            )
+        )
         remote_id = await self.ports.write(config, request)
         await self.store.finish(record.id, step, remote_id)
         return remote_id
 
+    async def authorize_record(self, record: IntakeRecord, *, write: bool = False) -> None:
+        thread_id = record.progress.discord_thread_id or next(
+            (e.remote_id for e in record.effects if e.step == "thread" and e.remote_id), None
+        )
+        if not write and thread_id is None and any(e.step == "thread" for e in record.effects):
+            # Discord creates a message thread at its starter's ID. Until an
+            # uncertain creation is reconciled, reads check that possible thread.
+            thread_id = record.progress.discord_message_id or next(
+                (e.remote_id for e in record.effects if e.step == "starter" and e.remote_id), None
+            )
+            if thread_id is None:
+                raise PermissionError("dossier_thread_reconciliation_required")
+        await self.reauthorize(
+            IntakeAccess(
+                source=record.submission.source if record.submission else None,
+                thread_id=thread_id,
+                write=write,
+            )
+        )
+
+    async def get(self, intake_id: UUID) -> IntakeRecord:
+        record = await self.store.get(intake_id)
+        await self.authorize_record(record)
+        return record
+
     async def resume(self, intake_id: UUID) -> IntakeRecord:
         try:
-            return await self._resume(intake_id)
+            record = await self._resume(intake_id)
         except IntakeBusy:
-            return await self.store.get(intake_id)
+            record = await self.store.get(intake_id)
+        await self.authorize_record(record)
+        return record
 
     async def _resume(self, intake_id: UUID) -> IntakeRecord:
-        await self.reauthorize(None)
+        await self.reauthorize(IntakeAccess())
         await self.store.purge(datetime.now(UTC))
         async with self.store.claim(f"source:{intake_id}"):
             record = await self.store.get(intake_id)
+            await self.authorize_record(record, write=True)
             config, _ = await self.store.configuration()
             if record.status in {"completed", "rejected", "expired"} or config.mode == "capture":
                 return record
@@ -349,7 +396,7 @@ class IntakeService:
     async def resolve(
         self, intake_id: UUID, resolution: IntakeResolution, actor_id: str
     ) -> IntakeRecord:
-        await self.reauthorize(None)
+        await self.reauthorize(IntakeAccess())
         async with self.store.claim(f"source:{intake_id}"):
             record = await self.store.get(intake_id)
             if record.status not in {"pending", "review"}:
@@ -358,7 +405,7 @@ class IntakeService:
             if record.config_revision != current_config.revision:
                 raise ValueError("config_revision_review")
             p = record.progress
-            await self.reauthorize(record.submission.source if record.submission else None)
+            await self.authorize_record(record, write=True)
             before = p.model_dump_json()
             starter_resolution: tuple[str, str | None] | None = None
             if resolution.deal_id and resolution.separate_opportunity_confirmed:
@@ -370,7 +417,7 @@ class IntakeService:
                 if intent is None or intent.state == "completed" or record.submission is None:
                     raise ValueError("uncertain_starter_required")
                 config, _ = await self.store.configuration()
-                await self.reauthorize(record.submission.source)
+                await self.authorize_record(record, write=True)
                 check = EffectRequest(
                     step="starter_resolution",
                     key=intent.stable_key,
@@ -415,7 +462,7 @@ class IntakeService:
         return await self.resume(intake_id)
 
     async def scan(self) -> dict[str, object]:
-        await self.reauthorize(None)
+        await self.reauthorize(IntakeAccess())
         config, _ = await self.store.configuration()
         async with self.store.claim(f"mailbox:{config.source_connection_id}"):
             state = await self.store.mailbox(config.source_connection_id)

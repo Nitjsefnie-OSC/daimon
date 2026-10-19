@@ -453,3 +453,10 @@ Lead resolution also requires a live interactive session that held the exact
 resolver tool for the requester's approval. Tenant opt-in adds that native
 approval gate even with third-party tool safety off; a role grant or a routine
 allowlist alone cannot approve selections.
+
+Lead intake rechecks the actual dossier thread, its parent and category before
+recovery and each write. Thread creation requires the caller’s native create
+and thread-send permissions. Readback applies each lead thread’s native view,
+history and private-thread membership checks plus its own OS readers rule;
+list results omit inaccessible records. Read-only tools do not require send
+permission.

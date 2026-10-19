@@ -23,26 +23,87 @@ from daimon.adapters.mcp.tools.discord._client import (
     rest_client,
 )
 from daimon.adapters.mcp.tools.discord._visibility import (
+    _check_create_thread_permission,  # pyright: ignore[reportPrivateUsage]
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.lead_intake import (
+    IntakeConfig,
     IntakeRecord,
     IntakeResolution,
     LeadDraft,
-    LeadSource,
     authorize_intake_actor,
 )
-from daimon.core.lead_intake_service import IntakeService, VerifiedSource
+from daimon.core.lead_intake_service import IntakeAccess, IntakeService, VerifiedSource
 from daimon.core.permissions import home_of
 from daimon.core.stores.accounts import account_exists
 from daimon.core.stores.lead_intake import IntakeStore, execution_is_active
 from daimon.core.stores.routines import get_routine
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+
+
+async def authorize_destination(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    client: discord.Client,
+    member: discord.Member,
+    config: IntakeConfig,
+    policy: TenantAccessPolicy,
+    access: IntakeAccess,
+    origin_ids: frozenset[str],
+) -> None:
+    """Check the real destination's native and OS rules, including its thread."""
+    parent = await client.fetch_channel(int(config.channel_id))
+    if not isinstance(parent, discord.TextChannel) or str(parent.guild.id) != config.guild_id:
+        raise ToolError("sales_channel_required")
+    if parent.permissions_for(parent.guild.default_role).view_channel:
+        raise ToolError("restricted_sales_channel_required")
+    _check_view_permission(parent, member)
+    category = str(parent.category_id) if parent.category_id else None
+    targets: list[discord.TextChannel | discord.Thread] = [parent]
+    if access.thread_id:
+        thread = await client.fetch_channel(int(access.thread_id))
+        if (
+            not isinstance(thread, discord.Thread)
+            or str(thread.guild.id) != config.guild_id
+            or str(thread.parent_id) != config.channel_id
+        ):
+            raise ToolError("dossier_thread_mismatch")
+        await _ensure_thread_parent_cached(thread)
+        await _check_thread_view(client, thread, member, auth.platform_user_id or "")
+        targets.append(thread)
+    for target in targets:
+        _check_view_permission(target, member)
+        parent_id = config.channel_id if isinstance(target, discord.Thread) else None
+        if not authorize(
+            policy,
+            subject=Subject(),
+            action=Action.READ_CHANNEL,
+            place=Place(
+                channel_id=str(target.id), parent_channel_id=parent_id, category_id=category
+            ),
+            origin_channel_ids=origin_ids,
+        ):
+            raise ToolError("sales_queue_read_denied")
+        if not access.write and not target.permissions_for(member).read_message_history:
+            raise ToolError("missing read_message_history permission")
+        if access.write:
+            _check_send_permission(target, member)
+            await require_channel_writable(
+                runtime,
+                auth,
+                channel_id=str(target.id),
+                parent_channel_id=parent_id,
+                category_id=category,
+                policy=policy,
+            )
+    if access.create_thread:
+        _check_create_thread_permission(parent, member)
 
 
 @asynccontextmanager
@@ -52,6 +113,7 @@ async def service(
     *,
     resolve: bool = False,
     draft: LeadDraft | None = None,
+    read_only: bool = False,
 ) -> AsyncIterator[IntakeService]:
     if (
         runtime.fernet is None
@@ -72,7 +134,8 @@ async def service(
         raise ToolError("lead_intake_agent_or_tenant_mismatch")
     token = runtime.settings.discord.bot_token.get_secret_value()
 
-    async def reauthorize(source_ref: LeadSource | None = None) -> None:
+    async def reauthorize(access: IntakeAccess) -> None:
+        source_ref = access.source
         async with runtime.session_factory() as session:
             if not await account_exists(session, account_id=auth.account_id):
                 raise ToolError("actor_account_revoked")
@@ -144,33 +207,12 @@ async def service(
             origin_ids.update(
                 value for value in (row.source_channel_id, row.source_thread_id) if value
             )
-        if not authorize(
-            policy,
-            subject=Subject(),
-            action=Action.READ_CHANNEL,
-            place=Place(channel_id=config.channel_id),
-            origin_channel_ids=frozenset(origin_ids),
-        ):
-            raise ToolError("sales_queue_read_denied")
-        # Native permissions and category/agent policy are re-read before every effect.
+        # Re-read destination membership, thread visibility and OS rules before
+        # every recovery/read and immediately before each write.
         async with rest_client(token) as client:
             _, member = await _resolve_member(client, config.guild_id, auth.platform_user_id or "")
-            target = await client.fetch_channel(int(config.channel_id))
-            if (
-                not isinstance(target, discord.TextChannel)
-                or str(target.guild.id) != config.guild_id
-            ):
-                raise ToolError("sales_channel_required")
-            if target.permissions_for(target.guild.default_role).view_channel:
-                raise ToolError("restricted_sales_channel_required")
-            _check_view_permission(target, member)
-            _check_send_permission(target, member)
-            await require_channel_writable(
-                runtime,
-                auth,
-                channel_id=config.channel_id,
-                category_id=str(target.category_id) if target.category_id else None,
-                policy=policy,
+            await authorize_destination(
+                runtime, auth, client, member, config, policy, access, frozenset(origin_ids)
             )
             if source_ref is not None and source_ref.kind == "manual":
                 source = await client.fetch_channel(int(source_ref.channel_id or "0"))
@@ -199,7 +241,7 @@ async def service(
                 if not decision or home_of(policy, str(source.id), parent_id):
                     raise ToolError("source_export_denied")
 
-    await reauthorize(draft.source if draft else None)
+    await reauthorize(IntakeAccess(source=draft.source if draft else None, write=not read_only))
     async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
         refresh = None
         if credentials.get("gmail_refresh_token"):
@@ -267,7 +309,7 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         submit its immutable source ID. Uses the configured tenant mailbox;
         credentials never enter the result. Does not post, archive or change CRM.
         """
-        async with service(runtime, await _auth(ctx)) as intake:
+        async with service(runtime, await _auth(ctx), read_only=True) as intake:
             return await intake.read_source(message_id)
 
     @mcp.tool(tags={"discord"})
@@ -289,8 +331,8 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context, intake_id: UUID
     ) -> IntakeRecord:
         """Read one authorized tenant lead, its review state and durable effect progress."""
-        async with service(runtime, await _auth(ctx)) as intake:
-            return await intake.store.get(intake_id)
+        async with service(runtime, await _auth(ctx), read_only=True) as intake:
+            return await intake.get(intake_id)
 
     @mcp.tool(tags={"discord"})
     async def lead_intake_list(  # pyright: ignore[reportUnusedFunction]
@@ -298,15 +340,22 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         after_id: UUID | None = None,
     ) -> list[IntakeRecord]:
         """Read up to 100 tenant leads in the restricted sales queue, oldest first."""
-        async with service(runtime, await _auth(ctx)) as intake:
-            return await intake.store.list(after_id=after_id)
+        async with service(runtime, await _auth(ctx), read_only=True) as intake:
+            visible: list[IntakeRecord] = []
+            for record in await intake.store.list(after_id=after_id):
+                try:
+                    await intake.authorize_record(record)
+                except (PermissionError, ToolError, discord.Forbidden, discord.NotFound):
+                    continue
+                visible.append(record)
+            return visible
 
     @mcp.tool(tags={"discord"})
     async def lead_intake_health(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
     ) -> dict[str, object]:
         """Read tenant lead counts, oldest pending age and mailbox coverage."""
-        async with service(runtime, await _auth(ctx)) as intake:
+        async with service(runtime, await _auth(ctx), read_only=True) as intake:
             config, _ = await intake.store.configuration()
             state = await intake.store.mailbox(config.source_connection_id)
             return {**await intake.store.health(), "mailbox": state.model_dump(mode="json")}

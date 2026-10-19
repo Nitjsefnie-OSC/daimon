@@ -178,3 +178,8 @@ Human resolution requires the requester's approval card showing the exact
 selected IDs and evidence, even when third-party tool safety is disabled.
 The handler verifies the live gated session before committing the resolution.
 Routine submit/resume does not acquire a resolution grant through that card.
+
+Dossier thread rules apply independently of the sales channel. Revoking thread
+write permission stops further chunks and resume effects. Get/list and the
+private queue check each actual thread’s visibility and OS read rule; parent
+access alone does not expose a restricted thread.

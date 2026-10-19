@@ -12,7 +12,12 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.lead_intake import IntakeConfig, IntakeResolution, LeadDraft, LeadSource
-from daimon.core.lead_intake_service import EffectRequest, IntakeService, VerifiedSource
+from daimon.core.lead_intake_service import (
+    EffectRequest,
+    IntakeAccess,
+    IntakeService,
+    VerifiedSource,
+)
 from daimon.core.stores.lead_intake import IntakeStore
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
@@ -74,7 +79,7 @@ class FakePorts:
         return (["archived-a"], "next") if not cursor else (["archived-b"], None)
 
 
-async def noop(source: LeadSource | None) -> None:
+async def noop(access: IntakeAccess) -> None:
     pass
 
 
@@ -377,10 +382,10 @@ async def test_live_revocation_stops_next_effect(
     store, _, ports = await setup(lead_sessions, "active")
     calls = 0
 
-    async def reauthorize(source: LeadSource | None) -> None:
+    async def reauthorize(access: IntakeAccess) -> None:
         nonlocal calls
         calls += 1
-        if calls >= 5:
+        if access.create_thread:
             raise PermissionError("revoked")
 
     service = IntakeService(store, ports, reauthorize)
@@ -597,3 +602,27 @@ async def test_preclassification_read_requires_live_discovery(
     with pytest.raises(ValueError, match="unexpired_discovery_required"):
         await service.read_source("archived-a")
     assert ports.writes == []
+
+
+async def test_thread_write_revocation_between_dossier_chunks_stops_resume(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, _, ports = await setup(lead_sessions, "active")
+    checked: list[str] = []
+
+    async def authorize(access: IntakeAccess) -> None:
+        if access.thread_id:
+            checked.append(access.thread_id)
+        if access.write and access.thread_id and "dossier:0" in ports.writes:
+            raise PermissionError("thread_writers_none")
+
+    service = IntakeService(store, ports, authorize)
+    result = await service.submit(
+        draft().model_copy(update={"thread_content": "DRAFT: " + "x" * 4000}), "7"
+    )
+    assert result.status == "pending"
+    assert checked and set(checked) == {result.progress.discord_thread_id}
+    assert ports.writes == ["starter", "thread", "dossier:0"]
+    with pytest.raises(PermissionError, match="thread_writers_none"):
+        await service.resume(result.id)
+    assert ports.writes == ["starter", "thread", "dossier:0"]
