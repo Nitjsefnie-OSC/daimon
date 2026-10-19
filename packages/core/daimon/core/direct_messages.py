@@ -65,6 +65,7 @@ from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.unattended import gate_session_snapshot, unattended_posture
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from mux.contracts.ids import Scope
+from mux.profiles import MANAGED_AGENTS
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -776,8 +777,6 @@ class DmRoutineReply:
 #: Recorded on the routine when its agent runs on another provider.
 MANAGED_AGENTS_ONLY = "DM routines need a Managed Agents agent"
 
-_MANAGED_AGENTS_PROFILE = "anthropic.managed_agents"
-
 
 @dataclass
 class _RunningSession:
@@ -848,7 +847,7 @@ async def run_dm_routine(
         )
         if (
             admission.backend_revision is not None
-            and admission.backend_revision.profile != _MANAGED_AGENTS_PROFILE
+            and admission.backend_revision.profile != MANAGED_AGENTS.profile_id
         ):
             raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
         if admission.grant is None:
