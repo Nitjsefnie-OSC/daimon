@@ -211,6 +211,28 @@ creates with SQL `PREPARE`, and changes
 a test commits to `public` or to another schema. A test that needs any of these
 should use `db_nullpool_engine`, whose connections close with the test.
 
+# Reusable schema for `fresh_schema` tests
+
+A test marked `@pytest.mark.fresh_schema` runs its own DDL, so it cannot use the
+worker's shared schema. It gets the worker's one reusable DDL schema
+(`test_f<pid>_<8hex>`), built from the ORM models on first use and dropped with
+the worker's other schemas. `db_session` runs the test in a transaction and rolls
+it back, and Postgres rolls DDL back with it, so a test that only issues
+`ALTER`, `CREATE` or `DROP` and never commits leaves nothing behind.
+
+A test that commits anyway (`session.commit()`, `engine.begin()`) is caught
+before the next one starts. The next `fresh_schema` test compares a catalog
+fingerprint of the schema with the one taken after the build. The fingerprint
+covers columns (type, nullability, default, identity, generation, collation),
+indexes, constraints, triggers, functions, views, sequences, and enum and domain
+types. If it is unchanged, the test deletes every row and restarts the
+sequences that were advanced; if it differs, the schema is dropped and rebuilt.
+Either way each test starts on an empty, ORM-shaped schema, as a private one
+would give it.
+
+`DAIMON_TEST_FRESH_SCHEMA=1` restores a private schema per test (CREATE,
+`create_all`, DROP around the test), which is slower and isolates the same way.
+
 # Isolated provider SDK clients
 
 `daimon.testing.isolated_sdk` supplies `build_async_openai`,

@@ -58,8 +58,10 @@ temp table, a `LISTEN`, an advisory lock). Use `db_nullpool_engine` for code tha
 runs `asyncio.run` per call or takes session-level advisory locks, and set
 `DAIMON_TEST_NULLPOOL=1` to run everything on one connection per checkout.
 `packages/testing/README.md` has the isolation contract.
-Mark a test that runs its own DDL with `@pytest.mark.fresh_schema` to give it a private throwaway schema
-instead, and run `scripts/db/sweep_test_schemas.py` to reclaim schemas left
+Mark a test that runs its own DDL with `@pytest.mark.fresh_schema` to give it the worker's
+reusable DDL schema instead: its transaction is rolled back, and a test that commits DDL gets
+the schema rebuilt for the next one (`DAIMON_TEST_FRESH_SCHEMA=1` gives each such test a
+private throwaway schema). Run `scripts/db/sweep_test_schemas.py` to reclaim schemas left
 behind by a killed run.
 
 Install pre-commit hooks once so the gates below run automatically on every
