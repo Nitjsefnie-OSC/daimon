@@ -43,11 +43,13 @@ from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.here import show_here
+from daimon.adapters.teams.identity import GraphSource
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
 from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
 from daimon.adapters.teams.reactions import ReactionTarget
+from daimon.adapters.teams.restart_catch_up import RestartCatchUp
 from daimon.adapters.teams.routine_delivery import make_teams_routine_poster
 from daimon.adapters.teams.routines_panel import RoutinesPanel
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -316,8 +318,10 @@ def create_teams_http_service(
     subscriptions = None
     if runtime.settings.private_channel_messages.enabled and settings.public_url is not None:
 
-        async def deliver(message: GraphMessage, channel: TeamsChannelSubscriptionRow) -> None:
-            await turns.handle_graph_message(message, channel)  # Built below.
+        async def deliver(
+            message: GraphMessage, channel: TeamsChannelSubscriptionRow, *, mentions: bool = False
+        ) -> None:
+            await turns.handle_graph_message(message, channel, mentions=mentions)  # Built below.
 
         subscriptions = ChannelSubscriptions(
             sessionmaker=runtime.sessionmaker,
@@ -355,6 +359,19 @@ def create_teams_http_service(
         installed_teams, billing_panel.sdk_team_channels(teams_app), stored_group=stored_group
     )
     feed = ActivityFeed(graph, homes, entra_tenant_id=settings.tenant_id, spawn=spawn)
+
+    async def catch_up_messages(source: GraphSource, messages: list[GraphMessage]) -> None:
+        await turns.catch_up_graph_messages(source, messages)  # Built below.
+
+    catch_up = RestartCatchUp(
+        sessionmaker=runtime.sessionmaker,
+        tenant_id=teams_tenant,
+        graph=graph,
+        list_teams=installed_teams,
+        standard_channels=channel_names,
+        deliver=catch_up_messages,
+        service_url=SERVICE_URL,
+    )
     commands["help"] = functools.partial(send_help, names=(*commands, "help"))
     turns = TeamsApp(
         runtime=runtime,
@@ -367,6 +384,7 @@ def create_teams_http_service(
         direct=direct,
         ask_human=support is not None,
         subscriptions=subscriptions,
+        catch_up=catch_up,
         react=react,
         feed=feed,
         routine_poster=make_teams_routine_poster(

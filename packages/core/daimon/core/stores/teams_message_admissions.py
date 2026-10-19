@@ -5,7 +5,8 @@ replay and a redelivery) never both win: `claim_teams_message` admits once or
 reclaims a dead owner's unhandled row; `finish_teams_messages` is the fence
 before a turn starts or any answer is sent; `mark_restart_notice` lets a drain
 notice go out once; `reclaim_teams_messages` hands a boot what a dead process
-left unhandled. Owner liveness is the process's advisory lock, as for Discord.
+left unhandled; `list_recent_teams_channels` names where a restart may have
+missed some. Owner liveness is the process's advisory lock, as for Discord.
 """
 
 from __future__ import annotations
@@ -228,6 +229,22 @@ async def reclaim_teams_messages(
         (taken.replay if fresh else taken.stale).append(before)
     await session.flush()
     return taken
+
+
+async def list_recent_teams_channels(
+    session: AsyncSession, *, tenant_id: uuid.UUID, since: datetime, limit: int
+) -> list[str]:
+    """The channels and chats with a message admitted since `since`, newest activity first."""
+    ids = await session.scalars(
+        select(TeamsMessageAdmission.channel_id)
+        .where(
+            TeamsMessageAdmission.tenant_id == tenant_id, TeamsMessageAdmission.created_at >= since
+        )
+        .group_by(TeamsMessageAdmission.channel_id)
+        .order_by(func.max(TeamsMessageAdmission.created_at).desc())
+        .limit(limit)
+    )
+    return list(ids)
 
 
 async def prune_teams_messages(
