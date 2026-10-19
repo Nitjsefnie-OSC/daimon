@@ -1350,6 +1350,7 @@ async def create_isolated_session(
     account_id: uuid.UUID | None,
     tenant_id: uuid.UUID | None,
     resources: list[Resource],
+    tool_safety: ToolSafetyPolicy,
     billing_exempt: ExemptReason | None = None,
     memory_read_only: bool = False,
     budget_channel_id: str | None = None,
@@ -1380,6 +1381,8 @@ async def create_isolated_session(
 
     `billing_exempt`, `budget_channel_id` and the origin stamp the session the
     same way `create_session` does: metadata only, never a mount.
+    `tool_safety` gates its toolsets the same way too, as an override of the
+    tools alone.
 
     On MA failure: `anthropic.APIError` propagates, except a skill the agent
     pins that no longer exists, which raises `SkillUnavailable` telling the
@@ -1395,6 +1398,14 @@ async def create_isolated_session(
         metadata.update(
             origin_stamp(channel_id=origin_channel_id, thread_id=None, seal=origin_seal_ids)
         )
+    tools = session_tools(agent, frozenset(), tool_safety=tool_safety, public_url=None)
+    agent_argument: Agent = agent.id
+    if list(tools) != list(agent.tools):
+        agent_argument = {
+            "type": "agent_with_overrides",
+            "id": agent.id,
+            "tools": [cast(Tool, t.model_dump(mode="json", exclude_none=True)) for t in tools],
+        }
 
     try:
         return await create_session_record(
@@ -1404,7 +1415,7 @@ async def create_isolated_session(
                 account_id=account_id,
                 call_site="sessions:create_isolated_session",
             ),
-            agent=agent.id,
+            agent=agent_argument,
             environment_id=environment.id,
             metadata=metadata if metadata else None,
             resources=resources,

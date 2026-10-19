@@ -45,7 +45,7 @@ Agent-chat primitives plus bounded ``ask`` and completed-chart delivery.
 | `archive_my_session` | agent tokens only | Archive a session when its conversation is finished. |
 | `ask` | agent tokens only | Ask one question and wait for the final answer and any chart images. |
 | `cancel_turn` | agent tokens only | Stop a running turn immediately. |
-| `continue_turn` | agent tokens only | Send a follow-up message on an existing session. |
+| `continue_turn` | agent tokens only | Send a follow-up message on an existing session, or resume a paused one. |
 | `deliver_turn_charts` | agent tokens only | Return the newest completed reply with its chart images and optional links. |
 | `describe_agent` | agent tokens only | Describe the agent associated with this MCP token. |
 | `get_my_session` | agent tokens only | Get one session's status and metadata (no reply text, read-only). |

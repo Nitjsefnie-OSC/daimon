@@ -52,6 +52,8 @@ class SessionInfo(BaseModel):
     created_at: datetime.datetime
     updated_at: datetime.datetime
     archived_at: datetime.datetime | None
+    # Set with status "paused": what the caller must do for the turn to go on.
+    hint: str | None = None
 
     @classmethod
     def from_ma(cls, s: BetaManagedAgentsSession) -> SessionInfo:

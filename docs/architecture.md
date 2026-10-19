@@ -1127,6 +1127,27 @@ after Stop never runs anything. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.
 
+Agent-chat turns (`start_turn`, `continue_turn` and `ask`, per agent and on
+the hub) have nobody to press Approve, so they take the unattended rules
+through one core gate, `packages/core/daimon/core/turn/unattended.py`. Before
+every send, `gate_session_snapshot` rewrites the session's own frozen tool
+config from the current policy (every gated toolset's default and per-tool
+configs to `always_ask`, Daimon rule tools, a healed `daimon-mcp` URL) and
+fails the send if the update fails; it never restores attachments the
+session hides. The sending process then runs one bounded worker for that
+turn (`_agent_chat_safety.watch_turn`), which answers only pauses after its
+own `user.message` boundary, each decided at call time by
+`unattended_posture` (`unattended_decider` with the agent's rules; never
+`AutoApprove` and never the session's frozen config). `annotations_for` is
+the seam for operator-trusted MCP hints; nothing supplies them yet. A read
+never answers a pause: `get_session` and `get_my_session` report `running`
+while this process's worker owns the turn and `paused` with a hint when the
+turn waits on confirmations nobody answers, such as after a restart. Only
+the session's own account (an agent key, or the hub in `continue` mode) can
+resume it: `continue_turn` re-gates the session and starts a worker on the
+paused turn, which decides from the policy now in force, and then sends the
+caller's message, if any, once that turn ends.
+
 With both `DAIMON_TURN__PATH=mux` and `DAIMON_TURN__CHANNEL_BACKENDS=true`,
 an active chat admin can request an agent backend change through that same
 confirmation hook. The card shows the server's current compatibility and cost

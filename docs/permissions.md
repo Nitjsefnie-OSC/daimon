@@ -104,6 +104,28 @@ any rule exists, or where, asks the model (`any_own_readers`,
 stored rules. Tests check the model against `authorize` over combinations of
 rules on two channels, a thread, a category and two agents with rules.
 
+## Agent-chat turns
+
+A turn started through agent chat (`start_turn`, `continue_turn` and `ask`,
+with an agent key or on the hub) has nobody to press Approve, so it runs
+under the same tool-safety rules as a routine: reads run, a third-party write
+is refused unless `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES` lists it (or an
+agent `allow` rule with `chat_and_routines` covers it), and `deny` always
+refuses. Before every message the session's tool settings are set again from
+the current policy, so a session created before tool safety was on, or one
+whose agent allowed a tool outright, still asks. Only the process that sent
+the turn answers its tool calls, and it decides each one when it is made.
+With `DAIMON_TOOL_SAFETY__ENABLED` off, the calls a session still asks about
+are allowed.
+
+Reading a session never answers a tool call. If the service restarts while a
+turn waits on one, the turn stays paused, and `get_session` and
+`get_my_session` report `status: paused` with the hint "paused: call
+continue_turn to resume". Only the session's own account can resume it, by
+calling `continue_turn`, with or without a message; the waiting calls are then
+decided by the policy in force at that moment. An admin who can read another
+member's channel conversation on the hub cannot resume it.
+
 ## Channel rules
 
 | Field | Value | Meaning |

@@ -48,6 +48,7 @@ from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import put_agent_file
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.posture import ExemptReason
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
@@ -561,6 +562,7 @@ async def test_an_isolated_session_for_a_deleted_skill_says_to_re_publish_the_re
             account_id=None,
             tenant_id=None,
             resources=[{"type": "file", "file_id": "file_1", "mount_path": "/bundle.tar.gz"}],
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     message = str(refused.value)

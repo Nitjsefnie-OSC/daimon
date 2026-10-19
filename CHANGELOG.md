@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Agent-chat turns (`start_turn`, `continue_turn` and `ask`, with an agent key or on the hub) now follow tool safety. Before every message the session's tool settings are set again from the current policy, and each tool call is decided by the unattended rules when it is made: reads run, and a third-party write is refused unless the operator allowed it in unattended runs. These turns used to run every tool without asking. With tool safety off, calls the session still asks about are allowed.
+- Reading a session never answers its tool calls. A turn left waiting on a tool call by a restart reads as `paused` from `get_session` and `get_my_session`, with a hint; only the session's owner resumes it with `continue_turn`, whose `message` is now optional for that case, and the current policy decides the waiting calls.
+- An MCP tool hint that marks a tool both read-only and destructive now counts as a write.
+
 - An agent-wide `deny` tool rule on one of Daimon's own tools (`daimon-mcp/<tool>`) now stops the call. The MCP server refuses it, directly or through `call_tool`, when that agent's chat or routine session makes it and tool rules are enabled. The rule used to be saved but never enforced for Daimon's own tools. An agent-wide `deny` on `daimon-mcp/*` denies all of Daimon's own tools for that agent, tools added later included, and `search_tools` and `call_tool` too; wildcards are recognised only for `daimon-mcp`, agent-wide and `deny`. The turn driver applies `ask` and channel rules on them (see Fixed).
 
 ### Fixed

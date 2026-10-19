@@ -8,6 +8,7 @@ import httpx
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.session_create_params import Resource
 from daimon.core.sessions import create_isolated_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session, ma_session_agent
 
@@ -67,6 +68,7 @@ async def test_create_isolated_session_sends_exactly_the_passed_resources() -> N
         account_id=None,
         tenant_id=None,
         resources=resources,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert isinstance(result, BetaManagedAgentsSession), (
@@ -107,6 +109,7 @@ async def test_create_isolated_session_never_sends_vault_ids_key() -> None:
         account_id=None,
         tenant_id=None,
         resources=[_bundle_resource()],
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     body = json.loads(requests[0].content)
@@ -144,6 +147,7 @@ async def test_create_isolated_session_stamps_account_and_tenant_when_given() ->
         account_id=account_id,
         tenant_id=tenant_id,
         resources=[_bundle_resource()],
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     body = json.loads(requests[0].content)
@@ -177,6 +181,7 @@ async def test_create_isolated_session_omits_metadata_keys_when_ids_are_none() -
         account_id=None,
         tenant_id=None,
         resources=[_bundle_resource()],
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     body = json.loads(requests[0].content)
@@ -212,6 +217,7 @@ async def test_create_isolated_session_makes_zero_vault_or_file_upload_calls() -
         account_id=None,
         tenant_id=None,
         resources=[_bundle_resource()],
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     paths = [r.url.path for r in requests]

@@ -41,7 +41,14 @@
         }),
       }),
       'continue_turn': dict({
-        'description': 'Send a follow-up on an existing session without waiting.',
+        'description': '''
+          Send a follow-up on an existing session without waiting.
+          <blank line>
+          On a session ``get_session`` reports ``paused`` (waiting on tool
+          confirmations after a restart), this resumes it first: the waiting
+          calls are decided by the current tool policy, and ``message`` is then
+          optional. Only the session's own account can continue or resume it.
+        ''',
         'parameters': dict({
           'additionalProperties': False,
           'properties': dict({
@@ -52,13 +59,20 @@
               'type': 'string',
             }),
             'message': dict({
-              'type': 'string',
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'default': None,
             }),
           }),
           'required': list([
             'daimon_id',
             'handle',
-            'message',
           ]),
           'type': 'object',
         }),
@@ -79,7 +93,13 @@
         }),
       }),
       'get_session': dict({
-        'description': 'Status of one session. Poll until ``idle`` before reading ``list_events``.',
+        'description': '''
+          Status of one session. Poll until ``idle`` before reading ``list_events``.
+          <blank line>
+          ``paused`` means the turn waits on tool confirmations nobody is
+          answering; its owner resumes it with ``continue_turn``. Reading never
+          answers them.
+        ''',
         'parameters': dict({
           'additionalProperties': False,
           'properties': dict({
@@ -794,7 +814,7 @@
     }),
     'continue_turn': dict({
       'description': '''
-        Send a follow-up message on an existing session.
+        Send a follow-up message on an existing session, or resume a paused one.
         <blank line>
         Use this to continue a multi-turn conversation. Returns
         ``{"handle": "<session_id>", "turn_event_id": "<event_id>",
@@ -803,6 +823,15 @@
         the session's earlier turns. Poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard events up to and
         including ``turn_event_id`` to read only this turn's transcript.
+        <blank line>
+        When ``get_my_session`` reports ``status`` ``paused``, the turn is
+        waiting on tool confirmations nobody is answering (the service
+        restarted). This call resumes it: the waiting calls are decided by the
+        current tool policy (reads run; writes are refused unless the operator
+        allowed them in unattended runs). ``message`` is then optional:
+        without one, the paused turn's boundary is returned; with one, it is
+        sent once the resumed turn ends, or the call is refused if that takes
+        more than about 90 seconds. Any other session needs a ``message``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -811,12 +840,19 @@
             'type': 'string',
           }),
           'message': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
           'handle',
-          'message',
         ]),
         'type': 'object',
       }),
@@ -2796,7 +2832,9 @@
         <blank line>
         Use this to check whether a turn has finished (``status`` becomes
         ``idle``/``terminated``) before reading the transcript with
-        ``list_events``.
+        ``list_events``. ``status`` ``paused`` means the turn waits on tool
+        confirmations nobody is answering; ``hint`` says to call
+        ``continue_turn`` to resume it. Reading never answers them.
       ''',
       'parameters': dict({
         'additionalProperties': False,
