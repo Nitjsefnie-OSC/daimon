@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 from typing import Any, Literal, cast, overload
 
 import httpx
@@ -262,17 +263,47 @@ class HttpIntakePorts:
                 return str(channel["id"])
             return None
         if step == "starter" or step.startswith("dossier:"):
+            if p.get("_uncertain") != "True":
+                return None
             channel_id = config.channel_id if step == "starter" else p["thread"]
             bot = await self.request("discord", "GET", "users/@me")
-            matches = [
+            posted = [
                 m
                 for m in await self._messages(channel_id)
                 if str(m["author"]["id"]) == str(bot["id"])
-                and str(m.get("nonce", "")) == effect.key[:24]
             ]
+            matches = [m for m in posted if str(m.get("nonce", "")) == effect.key[:24]]
             if len(matches) > 1:
                 raise ReviewRequired("duplicate_discord_effect")
-            return str(matches[0]["id"]) if matches else None
+            if matches:
+                return str(matches[0]["id"])
+            if step == "starter":
+                if p.get("_uncertain_peer") == "True":
+                    raise ReviewRequired("starter_candidates_require_human")
+                since = datetime.fromisoformat(p["_accepted_at"]) - timedelta(seconds=60)
+                claimed = cast("list[str]", json.loads(p.get("_claimed", "[]")))
+                matches = [
+                    m
+                    for m in posted
+                    if str(m.get("content", "")).strip() == p["content"].strip()
+                    and m.get("timestamp")
+                    and datetime.fromisoformat(str(m["timestamp"])) >= since
+                    and str(m["id"]) not in claimed
+                ]
+                if len(matches) == 1:
+                    return str(matches[0]["id"])
+                raise ReviewRequired("uncertain_write")
+            prefix = cast("list[str]", json.loads(p["_prefix"]))
+            ordered = sorted(
+                [m for m in posted if m.get("type", 0) == 0], key=lambda m: int(m["id"])
+            )
+            visible = [str(m.get("content", "")) for m in ordered]
+            if visible[: len(prefix)] == prefix:
+                return str(ordered[len(prefix) - 1]["id"])
+            if visible == prefix[:-1]:
+                p["_safe_dossier_absence"] = "True"
+                return None
+            raise ReviewRequired("dossier_history_review")
         if step == "archive":
             profile = await self.request("gmail", "GET", "profile")
             if str(profile["emailAddress"]).casefold() != config.gmail_mailbox.casefold():
@@ -386,6 +417,8 @@ class HttpIntakePorts:
         # Called only after recover validated portal/schema and read remote state.
         # CRM unique properties/contact email, one thread per starter, label sets
         # and association PUTs provide provider-enforced duplicate prevention.
+        if effect.step.startswith("dossier:"):
+            return effect.payload.get("_safe_dossier_absence") == "True"
         return effect.step in {
             "company",
             "contact",

@@ -79,3 +79,11 @@ def test_raw_decode_omits_attachments() -> None:
     assert "intake@example.test" in decoded.recipients
     assert has_registration_request("Please register this lead: Ada")
     assert not has_registration_request("Let's discuss a project")
+
+
+def test_dossier_split_respects_discord_utf16_limit() -> None:
+    from daimon.core.lead_intake import split_dossier
+
+    chunks = split_dossier("DRAFT reply: " + "🚀" * 2400, limit=1900)
+    assert len(chunks) > 1
+    assert all(len(chunk.encode("utf-16-le")) // 2 <= 1900 for chunk in chunks)

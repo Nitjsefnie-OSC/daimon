@@ -46,20 +46,26 @@ def _runtime() -> McpRuntime:
 
 
 @pytest.fixture(autouse=True)
-def _patch(monkeypatch: pytest.MonkeyPatch) -> None:
+def patch_session_gate_collaborators(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_session_gate, "retrieve_agent", AsyncMock(return_value=AGENT))
     monkeypatch.setattr(
-        _session_gate, "resolve_hidden_mcp_server_names", AsyncMock(return_value=frozenset())
+        _session_gate, "resolve_hidden_mcp_server_names", AsyncMock(return_value=frozenset[str]())
     )
-    monkeypatch.setattr(_session_gate, "backend_selection_enabled", lambda _turn: False)
-    monkeypatch.setattr(_session_gate, "confirmation_tools", AsyncMock(return_value=frozenset()))
+
+    def backend_off(_turn: object) -> bool:
+        return False
+
+    monkeypatch.setattr(_session_gate, "backend_selection_enabled", backend_off)
+    monkeypatch.setattr(
+        _session_gate, "confirmation_tools", AsyncMock(return_value=frozenset[str]())
+    )
 
 
-def _recorded_sha(rule_tools: frozenset[str], confirmed: frozenset[str] = frozenset()) -> str:
+def _recorded_sha(rule_tools: frozenset[str], confirmed: frozenset[str] = frozenset[str]()) -> str:
     return hash_tools(
         session_tools(
             AGENT,
-            frozenset(),
+            frozenset[str](),
             tool_safety=POLICY,
             public_url="https://mcp.example/mcp",
             asks_before_publishing=True,
@@ -74,7 +80,7 @@ async def _gated(
     *,
     recorded: frozenset[str],
     now: frozenset[str],
-    confirmed: frozenset[str] = frozenset(),
+    confirmed: frozenset[str] = frozenset[str](),
     tool_name: str = "publish_report",
 ) -> bool:
     monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=now))
@@ -93,9 +99,9 @@ async def _gated(
 @pytest.mark.parametrize(
     ("recorded", "now"),
     [
-        (frozenset(), frozenset()),
+        (frozenset[str](), frozenset[str]()),
         (frozenset({"hubspot_update_objects"}), frozenset({"hubspot_update_objects"})),
-        (frozenset(), frozenset({"hubspot_update_objects"})),
+        (frozenset[str](), frozenset({"hubspot_update_objects"})),
     ],
 )
 async def test_the_recorded_hash_proves_the_card_with_or_without_daimon_rules(
@@ -119,7 +125,7 @@ async def test_a_rule_cleared_since_the_bind_reads_as_not_gated_until_the_next_b
 ) -> None:
     """The refusal direction: the recorded hash cannot be matched, so no card is assumed."""
     assert not await _gated(
-        monkeypatch, recorded=frozenset({"hubspot_update_objects"}), now=frozenset()
+        monkeypatch, recorded=frozenset({"hubspot_update_objects"}), now=frozenset[str]()
     )
 
 
@@ -133,14 +139,14 @@ async def test_lead_resolution_requires_recorded_and_current_confirmation_gate(
     monkeypatch.setattr(
         _session_gate,
         "confirmation_tools",
-        AsyncMock(return_value=tools if current else frozenset()),
+        AsyncMock(return_value=tools if current else frozenset[str]()),
     )
     assert (
         await _gated(
             monkeypatch,
-            recorded=frozenset(),
-            now=frozenset(),
-            confirmed=tools if recorded else frozenset(),
+            recorded=frozenset[str](),
+            now=frozenset[str](),
+            confirmed=tools if recorded else frozenset[str](),
             tool_name="lead_intake_resolve",
         )
         is expected

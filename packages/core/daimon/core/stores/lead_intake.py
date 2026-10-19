@@ -334,6 +334,43 @@ class IntakeStore:
                 .values(status=record.status, encrypted_payload=self.seal(record.model_dump_json()))
             )
 
+    async def starter_recovery_facts(self, record: IntakeRecord) -> tuple[list[str], bool]:
+        async with self.sessions() as session:
+            claimed = list(
+                await session.scalars(
+                    select(LeadIntakeEffect.remote_id).where(
+                        LeadIntakeEffect.tenant_id == self.tenant_id,
+                        LeadIntakeEffect.intake_id != record.id,
+                        LeadIntakeEffect.step == "starter",
+                        LeadIntakeEffect.remote_id.is_not(None),
+                    )
+                )
+            )
+            peers = (
+                await session.execute(
+                    select(LeadIntakeRecord)
+                    .join(
+                        LeadIntakeEffect,
+                        (LeadIntakeRecord.tenant_id == LeadIntakeEffect.tenant_id)
+                        & (LeadIntakeRecord.id == LeadIntakeEffect.intake_id),
+                    )
+                    .where(
+                        LeadIntakeRecord.tenant_id == self.tenant_id,
+                        LeadIntakeRecord.id != record.id,
+                        LeadIntakeEffect.step == "starter",
+                        LeadIntakeEffect.state == "uncertain",
+                    )
+                )
+            ).scalars()
+            title = record.submission.thread_title.strip() if record.submission else ""
+            uncertain_peer = False
+            for row in peers:
+                other = self._record(row)
+                if other.submission and other.submission.thread_title.strip() == title:
+                    uncertain_peer = True
+                    break
+            return [value for value in claimed if value is not None], uncertain_peer
+
     async def effect(self, intake_id: UUID, step: str) -> Effect | None:
         async with self.sessions() as session:
             row = await session.get(LeadIntakeEffect, (self.tenant_id, intake_id, step))

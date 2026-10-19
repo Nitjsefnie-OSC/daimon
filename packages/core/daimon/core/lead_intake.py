@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.utils import getaddresses
 from enum import StrEnum
 from typing import Annotated
@@ -511,3 +511,103 @@ def authorize_intake_actor(
         member=facts.is_member is True,
     ):
         raise PermissionError("sales_resolver_or_core_role_required")
+
+
+DISCORD_MESSAGE_LIMIT = 2000
+_DISCORD_EPOCH_MS = 1420070400000
+# Recovery starts before durable acceptance to absorb clock skew with Discord.
+_RECOVERY_LEAD = timedelta(seconds=60)
+_FENCE = "```"
+# Room for a reopened fence line before a chunk and a closing fence after it.
+_MAX_REOPENED_FENCE = 40
+_FENCE_RESERVE = 2 * _MAX_REOPENED_FENCE + len("\n") + len("\n" + _FENCE)
+
+
+def get_recovery_cursor(accepted_at: datetime) -> str:
+    """Snowflake just before acceptance: every post for the intake comes after it."""
+    milliseconds = int((accepted_at - _RECOVERY_LEAD).timestamp() * 1000)
+    return str(max(0, (milliseconds - _DISCORD_EPOCH_MS) << 22))
+
+
+def get_starter_content(thread_title: str) -> str:
+    """The whole visible channel post; Discord trims surrounding whitespace itself."""
+    return thread_title.strip()
+
+
+def split_dossier(content: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
+    """Split on paragraph, then line boundaries; a cut code block is closed and reopened."""
+    lines = [
+        piece
+        for line in content.strip().split("\n")
+        for piece in _split_long_line(line, limit - _FENCE_RESERVE)
+    ]
+    # open_fences[i] is the fence line still open before lines[i].
+    open_fences: list[str | None] = [None]
+    for line in lines:
+        is_fence = line.lstrip().startswith(_FENCE)
+        opened = open_fences[-1]
+        if is_fence:
+            opened = None if opened else line.strip()[:_MAX_REOPENED_FENCE]
+        open_fences.append(opened)
+
+    def render(start: int, end: int) -> str:
+        reopened = open_fences[start]
+        still_open = open_fences[end]
+        body = "\n".join(lines[start:end])
+        return (
+            (f"{reopened}\n" if reopened else "") + body + (f"\n{_FENCE}" if still_open else "")
+        ).strip()
+
+    chunks: list[str] = []
+    start = 0
+    while start < len(lines):
+        end = start + 1
+        paragraph_end: int | None = None
+        while end < len(lines) and len(render(start, end + 1).encode("utf-16-le")) // 2 <= limit:
+            end += 1
+            if not lines[end - 1].strip():
+                paragraph_end = end
+        if (
+            end < len(lines)
+            and paragraph_end is not None
+            and len(render(start, paragraph_end)) >= limit // 2
+        ):
+            end = paragraph_end
+        chunk = render(start, end)
+        if chunk and chunk != _FENCE and not _is_empty_fence(chunk):
+            chunks.append(chunk)
+        start = end
+    return chunks
+
+
+def count_posted_dossier_chunks(posted: list[str], chunks: list[str]) -> int:
+    """Length of the dossier prefix already visible, in order, among posted messages."""
+    count = 0
+    for message, chunk in zip(posted, chunks, strict=False):
+        if message != chunk:
+            break
+        count += 1
+    return count
+
+
+def _split_long_line(line: str, width: int) -> list[str]:
+    if len(line.encode("utf-16-le")) // 2 <= width:
+        return [line]
+    pieces: list[str] = []
+    current: list[str] = []
+    units = 0
+    for char in line:
+        size = 2 if ord(char) > 0xFFFF else 1
+        if units + size > width:
+            pieces.append("".join(current))
+            current, units = [], 0
+        current.append(char)
+        units += size
+    if current:
+        pieces.append("".join(current))
+    return pieces
+
+
+def _is_empty_fence(chunk: str) -> bool:
+    lines = chunk.split("\n")
+    return len(lines) == 2 and all(line.strip().startswith(_FENCE) for line in lines)

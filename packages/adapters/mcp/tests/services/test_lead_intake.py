@@ -52,6 +52,7 @@ class ProviderReplay:
         self.events: list[str] = []
         self.lose_response = ""
         self.next_id = 100
+        self.omit_nonce = False
         self.company_candidates: list[dict[str, Any]] = []
         self.portal = "3"
         self.unique = True
@@ -90,7 +91,13 @@ class ProviderReplay:
                 )
             channel = path.split("/")[-2]
             if method == "GET":
-                return httpx.Response(200, json=self.messages.get(channel, []))
+                return httpx.Response(
+                    200,
+                    json=[
+                        {k: v for k, v in m.items() if k != "nonce" or not self.omit_nonce}
+                        for m in self.messages.get(channel, [])
+                    ],
+                )
             assert payload["allowed_mentions"]["parse"] == []
             assert payload["allowed_mentions"]["users"] == ([] if channel == "2" else ["7"])
             if channel == "2":
@@ -99,10 +106,14 @@ class ProviderReplay:
             row = {
                 "id": "100" if channel == "2" else str(self.next_id),
                 "author": {"id": "99"},
+                "timestamp": datetime.now(UTC).isoformat(),
                 **payload,
             }
-            self.messages.setdefault(channel, []).append(row)
             effect = "starter" if channel == "2" else "dossier"
+            if self.lose_response == f"before_{effect}":
+                self.lose_response = ""
+                raise httpx.ReadTimeout("synthetic pre-post failure", request=request)
+            self.messages.setdefault(channel, []).append(row)
             self.events.append(effect)
             if self.lose_response == effect:
                 self.lose_response = ""
@@ -165,7 +176,19 @@ async def noop(source: LeadSource | None) -> None:
 
 
 @pytest.mark.parametrize(
-    "lost", ["", "starter", "dossier", "companies", "contacts", "deals", "before_companies"]
+    "lost",
+    [
+        "",
+        "starter",
+        "dossier",
+        "companies",
+        "contacts",
+        "deals",
+        "before_companies",
+        "starter_no_nonce",
+        "dossier_no_nonce",
+        "before_dossier",
+    ],
 )
 async def test_full_active_http_replay_without_duplicate_effects(
     db_nullpool_engine: AsyncEngine, db_clean: None, lost: str
@@ -177,7 +200,8 @@ async def test_full_active_http_replay_without_duplicate_effects(
     settings = config()
     await store.configure(settings, {"hubspot_access_token": "synthetic"})
     replay = ProviderReplay()
-    replay.lose_response = lost
+    replay.omit_nonce = lost.endswith("_no_nonce")
+    replay.lose_response = lost.removesuffix("_no_nonce")
     async with httpx.AsyncClient(transport=httpx.MockTransport(replay.handle)) as client:
         ports = HttpIntakePorts(
             client, gmail_token="synthetic", hubspot_token="synthetic", discord_token="synthetic"
@@ -301,3 +325,37 @@ async def test_manual_thread_source_verifies_parent_guild() -> None:
             config(), LeadSource(kind="manual", channel_id="502", message_id="600"), "7"
         )
     assert result.text == "Register this lead: Synthetic"
+
+
+@pytest.mark.parametrize(
+    "peer,claimed,count", [(True, False, 1), (False, True, 1), (False, False, 2)]
+)
+async def test_nonce_less_starter_ambiguity_never_reposts(
+    peer: bool, claimed: bool, count: int
+) -> None:
+    replay = ProviderReplay()
+    replay.messages["2"] = [
+        {
+            "id": str(100 + i),
+            "author": {"id": "99"},
+            "content": "Synthetic",
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        for i in range(count)
+    ]
+    payload = {
+        "content": "Synthetic",
+        "_uncertain": "True",
+        "_uncertain_peer": str(peer),
+        "_accepted_at": datetime.now(UTC).isoformat(),
+        "_claimed": json.dumps(["100"] if claimed else []),
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(replay.handle)) as client:
+        ports = HttpIntakePorts(
+            client, gmail_token="synthetic", hubspot_token="synthetic", discord_token="synthetic"
+        )
+        with pytest.raises(ReviewRequired):
+            await ports.recover(
+                config(), EffectRequest(step="starter", key="stable", payload=payload)
+            )
+    assert replay.events == []

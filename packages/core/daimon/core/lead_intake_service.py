@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -17,6 +18,7 @@ from daimon.core.lead_intake import (
     LeadEvidence,
     LeadSource,
     LeadSubmission,
+    split_dossier,
     verify_lead_evidence,
 )
 from daimon.core.stores.lead_intake import IntakeStore
@@ -104,7 +106,9 @@ class IntakeService:
             evidence=evidence,
             classification=draft.classification,
             opportunity_description=draft.opportunity_description,
-            thread_title=evidence.company_name or evidence.enquirer_name or draft.thread_title,
+            thread_title=(
+                evidence.company_name or evidence.enquirer_name or draft.thread_title
+            ).strip(),
             thread_content=draft.thread_content,
         )
         record = await self.store.accept(config, submission, actor_id, self.provenance)
@@ -116,6 +120,19 @@ class IntakeService:
         return await self.resume(record.id)
 
     async def _effect(
+        self,
+        config: IntakeConfig,
+        record: IntakeRecord,
+        step: str,
+        payload: dict[str, str],
+        identity: str | None = None,
+    ) -> str:
+        if step == "starter":
+            async with self.store.claim(f"discord-channel:{config.channel_id}"):
+                return await self._apply_effect(config, record, step, payload, identity)
+        return await self._apply_effect(config, record, step, payload, identity)
+
+    async def _apply_effect(
         self,
         config: IntakeConfig,
         record: IntakeRecord,
@@ -136,8 +153,21 @@ class IntakeService:
                 f"{identity or record.id}:{step}"
             ).encode()
         ).hexdigest()
-        request = EffectRequest(step=step, key=key, payload=payload)
         saved = await self.store.effect(record.id, step)
+        payload = {
+            **payload,
+            "_uncertain": str(saved is not None),
+            "_accepted_at": record.created_at.isoformat(),
+        }
+        if saved is not None and step == "starter":
+            claimed, peer = await self.store.starter_recovery_facts(record)
+            payload.update(_claimed=json.dumps(claimed), _uncertain_peer=str(peer))
+        if step.startswith("dossier:") and record.submission:
+            index = int(step.split(":")[1])
+            payload["_prefix"] = json.dumps(
+                split_dossier(record.submission.thread_content)[: index + 1]
+            )
+        request = EffectRequest(step=step, key=key, payload=payload)
         if saved and saved.state == "completed":
             return saved.remote_id or ""
         recovered = await self.ports.recover(config, request)
@@ -149,6 +179,7 @@ class IntakeService:
             # Empty history is not proof a non-idempotent POST did not happen.
             raise ReviewRequired("uncertain_write")
         await self.store.intent(record.id, step, key)
+        await self.reauthorize(record.submission.source if record.submission else None)
         remote_id = await self.ports.write(config, request)
         await self.store.finish(record.id, step, remote_id)
         return remote_id
@@ -193,13 +224,15 @@ class IntakeService:
                     "thread",
                     {"starter": p.discord_message_id, "title": submission.thread_title},
                 )
-                content = submission.thread_content
-                for index, offset in enumerate(range(0, len(content), 1900)):
+                chunks = split_dossier(submission.thread_content)
+                if not chunks:
+                    raise ReviewRequired("dossier_required")
+                for index, chunk in enumerate(chunks):
                     await self._effect(
                         config,
                         record,
                         f"dossier:{index}",
-                        {"thread": p.discord_thread_id, "content": content[offset : offset + 1900]},
+                        {"thread": p.discord_thread_id, "content": chunk},
                     )
                     p.discord_dossier_chunks_posted = index + 1
                 if submission.source.kind == "gmail":

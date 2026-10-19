@@ -372,7 +372,7 @@ async def test_live_revocation_stops_next_effect(
     async def reauthorize(source: LeadSource | None) -> None:
         nonlocal calls
         calls += 1
-        if calls >= 4:
+        if calls >= 5:
             raise PermissionError("revoked")
 
     service = IntakeService(store, ports, reauthorize)
