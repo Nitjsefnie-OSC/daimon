@@ -509,6 +509,16 @@ _TEAMS_ONE_TO_ONE = "a:1xyz"
             "start a new post",
         ),
         (
+            "teams targeted channel root post",
+            {
+                "platform": "teams",
+                "parent_channel_id": _TEAMS_CHANNEL,
+                "thread_id": _TEAMS_CHANNEL,
+            },
+            "send `setup` in a 1:1 chat with Daimon",
+            "start a new post",
+        ),
+        (
             "teams 1:1 chat",
             {
                 "platform": "teams",

@@ -40,6 +40,7 @@ WORDS_SENTENCE = (
     " When you tell a person how to reach a Daimon command or who can change a setting, "
     "use `words` from these controls, never a command from another platform."
 )
+_TEAMS_CHANNEL_SUFFIXES = ("@thread.tacv2", "@thread.skype")
 current_origin_id: ContextVar[uuid.UUID | None] = ContextVar("turn_origin_id", default=None)
 
 
@@ -201,9 +202,9 @@ def origin_place(origin: TurnOriginRow) -> Place:
     """Where the turn was sent: a private chat with Daimon, a channel or thread, or a group chat.
 
     Read from the ids the origin stores. A private conversation's scope id
-    (`dm:...`) is a DM on any platform, as is a Slack `D...` channel; a Teams
-    1:1 chat is its own parent channel and a Teams group chat has a
-    `19:...@thread.v2` id."""
+    (`dm:...`) is a DM on any platform, as is a Slack `D...` channel. On Teams a
+    group chat has a `19:...@thread.v2` id, a channel's ends `@thread.tacv2` (or
+    the older `@thread.skype`), and anything else is the 1:1 chat."""
     if origin.thread_id.startswith(DM_SCOPE_PREFIX):
         return "dm"
     if origin.platform == "slack" and origin.parent_channel_id.startswith("D"):
@@ -212,7 +213,9 @@ def origin_place(origin: TurnOriginRow) -> Place:
         conversation = conversation_of(origin.thread_id)
         if is_group_chat(conversation):
             return "group"
-        if conversation == origin.parent_channel_id:
+        # A channel id names its thread kind; equal ids alone don't make a 1:1
+        # chat, since a targeted channel root post stores its channel as both.
+        if not conversation.split(";", 1)[0].endswith(_TEAMS_CHANNEL_SUFFIXES):
             return "dm"
     return "channel"
 
