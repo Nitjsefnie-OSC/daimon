@@ -2961,9 +2961,7 @@ async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) 
     assert calls == expected, f"usage pass ran {calls} times with enabled={enabled}"
 
 
-@pytest.mark.parametrize("explicit_dm", [False, True])
-async def test_explicit_dm_never_reads_personal_memory_and_legacy_owner_only_can(
-    explicit_dm: bool,
+async def test_channel_routine_excludes_personal_memory_and_legacy_owner_only_can(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -2981,14 +2979,10 @@ async def test_explicit_dm_never_reads_personal_memory_and_legacy_owner_only_can
         cron_expr="* * * * *",
         timezone_="UTC",
         trigger_message="trigger",
-        destination_kind="dm" if explicit_dm else None,
+        destination_kind=None,
         next_fire_at=now - timedelta(minutes=1),
         tenant_id=tenant.id,
     )
-    if explicit_dm:
-        from daimon.core.stores.direct_messages import set_dm_enabled
-
-        await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
     await db_session.commit()
     fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
     calls: list[dict[str, object]] = []
@@ -3000,18 +2994,13 @@ async def test_explicit_dm_never_reads_personal_memory_and_legacy_owner_only_can
     async def fake_resolve(*args: object, **kwargs: object) -> str:
         return "agent_z"
 
-    from daimon.core.membership import CachedMembershipResolver, Membership
-
-    async def member(tenant_id, guild_id, user_id):
-        return Membership(is_member=True)
-
     fire = await _build_fire(
         client=fake_client,
         sm=db_session_factory,
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        membership_resolver=CachedMembershipResolver(member) if explicit_dm else None,
+        membership_resolver=None,
     )
     posting = row.model_copy(
         update={"destination_kind": "channel", "destination_id": "chan-9", "channel_id": "chan-9"}
@@ -3027,7 +3016,7 @@ async def test_explicit_dm_never_reads_personal_memory_and_legacy_owner_only_can
         await fire(posting)
     await fake_client.close()
 
-    assert [call["personal_memory"] for call in calls] == [not explicit_dm, False]
+    assert [call["personal_memory"] for call in calls] == [True, False]
     assert calls[0]["account_id"] is not None, "the owner's account selects the store"
 
 

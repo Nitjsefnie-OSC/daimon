@@ -145,8 +145,8 @@ def routine_answers_only_owner(row: RoutineRow) -> bool:
 def routine_mounts_personal_memory(row: RoutineRow) -> bool:
     """Only legacy owner-only runs mount personal memory.
 
-    Explicit DM delivery retains ordinary tool authority, so its execution
-    must never load the owner's personal store.
+    Explicit DMs use the normal private-turn pipeline instead of this
+    headless memory decision. Channel routines never load personal memory.
     """
     return row.destination_kind != "dm" and routine_answers_only_owner(row)
 

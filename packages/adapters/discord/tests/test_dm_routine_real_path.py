@@ -73,6 +73,7 @@ from daimon.testing.ma import (
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from daimon.testing.turn_router import turn_events
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD = 700000101
@@ -407,6 +408,7 @@ class Harness:
             deployment_default=DeploymentDefault(),
             resolver_cache=new_resolver_cache(),
             membership_resolver=self.resolver,
+            dm_turn_deps=self.deps,
         )
         await run_one_tick(
             now=datetime.now(UTC),
@@ -678,7 +680,7 @@ async def test_a_paused_public_send_is_decided_unattended(
     assert toolset.model_dump(mode="json")["default_config"]["permission_policy"] == {
         "type": "always_ask" if policy.enabled else "always_allow"
     }, "the session runs under the current policy's gate"
-    assert harness.gated == [reply.session_id] * 3, (
+    assert harness.gated == [reply.session_id] * 2, (
         "gated before message and both sides of confirmation decision"
     )
 
@@ -932,7 +934,7 @@ async def test_replacement_endpoint_cannot_reuse_predecessor_allow(
             set_by=OWNER_A,
             actor=Subject(is_admin=True),
         )
-    upstream.scripts = [pause_on_public_send]
+    upstream.scripts = [pause_on_public_send, pause_on_public_send]
     row = await _routine_row(harness)
     await harness.fire(row)
     async with harness.factory() as db:
@@ -1118,7 +1120,7 @@ async def test_another_tenants_active_dm_is_untouched(harness: Harness):
         await other_upstream.client.close()
 
 
-@pytest.mark.parametrize("change", ["revoke", "retarget"])
+@pytest.mark.parametrize("change", ["revoke", "retarget", "agent"])
 @pytest.mark.parametrize("stage", ["chunk", "file"])
 async def test_owner_and_destination_are_rechecked_during_real_delivery(
     harness: Harness, change: str, stage: str
@@ -1141,6 +1143,11 @@ async def test_owner_and_destination_are_rechecked_during_real_delivery(
     async def changed() -> None:
         if change == "revoke":
             harness.members[OWNER_A] = False
+        elif change == "agent":
+            async with harness.factory.begin() as db:
+                await update_routine(
+                    db, row.id, tenant_id=row.tenant_id, agent_id="ag_b", agent_name="b"
+                )
         else:
             async with harness.factory.begin() as db:
                 await update_routine(
@@ -1191,3 +1198,306 @@ async def test_owner_and_destination_are_rechecked_during_real_delivery(
     assert not files, (
         "revocation/retarget during text or file delivery prevents later private output"
     )
+
+
+async def test_busy_live_owner_skips_slot_without_touching_c8(harness: Harness):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def waiting(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
+        await upstream.wait(lambda: bool(upstream.events(sid, "user.message")))
+        entered.set()
+        await release.wait()
+        async for chunk in answer("live answer")(upstream, sid):
+            yield chunk
+
+    harness.upstream.scripts = [waiting]
+    live = asyncio.create_task(harness.live_dm("owner is here", "busy-live"))
+    await asyncio.wait_for(entered.wait(), 15)
+    before = await harness.conversation()
+    row = await _routine_row(harness)
+    await harness.fire(row)
+    async with harness.factory() as db:
+        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    assert after is not None and after.last_error == "owner_busy"
+    assert after.delivery_payload is None and after.next_fire_at is not None
+    assert len(harness.upstream.state.sessions) == 1
+    release.set()
+    assert await live == "live answer"
+    current = await harness.conversation()
+    assert current is not None and before is not None and current.scope_id == before.scope_id
+    assert [t["text"] for t in current.history if t["role"] == "user"] == ["owner is here"]
+
+
+@pytest.mark.parametrize("change", ["agent", "retarget", "aba"])
+@pytest.mark.parametrize("stage", ["running", "pending"])
+async def test_private_result_cannot_survive_reclassification(
+    harness: Harness, change: str, stage: str
+):
+    from daimon.core.stores.routines import update_routine
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    secret = "old-agent-private-result"
+
+    async def waiting(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
+        await upstream.wait(lambda: bool(upstream.events(sid, "user.message")))
+        entered.set()
+        await release.wait()
+        upstream.state.write_output(sid, "old-agent.txt", b"private old producer output")
+        async for chunk in answer(secret)(upstream, sid):
+            yield chunk
+
+    harness.upstream.scripts = [waiting]
+    row = await _routine_row(harness)
+    task = asyncio.create_task(harness.fire(row))
+    await asyncio.wait_for(entered.wait(), 15)
+    if stage == "pending":
+        release.set()
+        await task
+        async with harness.factory() as db:
+            pending = await get_routine(db, row.id, tenant_id=row.tenant_id)
+        assert (
+            pending is not None and pending.delivery_payload and secret in pending.delivery_payload
+        )
+    async with harness.factory.begin() as db:
+        if change == "agent":
+            await update_routine(
+                db, row.id, tenant_id=row.tenant_id, agent_id="ag_b", agent_name="b"
+            )
+        else:
+            await update_routine(
+                db,
+                row.id,
+                tenant_id=row.tenant_id,
+                destination_kind="channel",
+                destination_id=BUDGET,
+                channel_id=BUDGET,
+            )
+            if change == "aba":
+                await update_routine(
+                    db,
+                    row.id,
+                    tenant_id=row.tenant_id,
+                    destination_kind="dm",
+                    destination_id=OWNER_A,
+                )
+    release.set()
+    await task
+    sent = []
+
+    async def forbidden(*args: Any, **kwargs: Any) -> Any:
+        sent.append(args)
+        raise AssertionError("invalidated content must never open any destination")
+
+    poster = make_discord_routine_poster(
+        harness.factory,
+        fetch_channel=forbidden,
+        open_dm=forbidden,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=harness.resolver,
+        output_client=harness.upstream.client,
+    )
+    await poll_deliveries_once(
+        harness.factory, platform="discord", post=poster, now=datetime.now(UTC)
+    )
+    async with harness.factory() as db:
+        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    assert after is not None
+    assert after.last_result_tail is None and after.last_error is None
+    assert after.delivery_payload is None and after.delivery_status != "pending"
+    assert not sent
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+async def test_cached_agent_hints_cannot_authorize_actual_session_endpoint(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, recovery: bool
+):
+    from daimon.core import ma_resolver
+    from daimon.core.authz import Subject
+    from daimon.core.stores.agent_tool_rules import set_rule
+
+    harness.with_safety(
+        ToolSafetyPolicy(enabled=True, agent_rules=True, trusted_annotations=("slack",))
+    )
+    upstream = harness.upstream
+    agent = upstream.state.ma.agents["ag_daimon"]
+    agent["tools"] = [
+        {
+            **SLACK_TOOLSET,
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_ask"}},
+        }
+    ]
+    agent["mcp_servers"] = [dict(SLACK_SERVER)]
+    cached = ma_agent(**{key: value for key, value in agent.items() if key != "type"})
+    actual_url = "https://actual.example/mcp"
+    for server in agent["mcp_servers"]:
+        server["url"] = actual_url
+    # Exercise the resolver's stale cache seam, retaining real admission and assembly.
+    real_cached = ma_resolver.retrieve_agent_cached
+
+    async def stale(*args: Any, **kwargs: Any) -> Any:
+        await real_cached(*args, **kwargs)
+        return cached
+
+    monkeypatch.setattr("daimon.core.turn.admission.retrieve_agent_cached", stale)
+    calls = []
+
+    def catalogue(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        body = json.loads(request.content)
+        if body["method"] == "notifications/initialized":
+            return httpx.Response(202)
+        result = (
+            {
+                "tools": [
+                    {
+                        "name": "memory_flag_list",
+                        "inputSchema": {"type": "object"},
+                        "annotations": {
+                            "readOnlyHint": str(request.url) != actual_url,
+                            "destructiveHint": str(request.url) == actual_url,
+                        },
+                    }
+                ]
+            }
+            if body["method"] == "tools/list"
+            else {}
+        )
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    real_init = httpx.AsyncClient.__init__
+
+    def external_init(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("transport", httpx.MockTransport(catalogue))
+        kwargs["trust_env"] = False
+        real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", external_init)
+    async with harness.factory.begin() as db:
+        await set_rule(
+            db,
+            tenant_id=harness.tenant.id,
+            agent_id="ag_daimon",
+            agent_name="daimon",
+            tool_key="slack/memory_flag_list",
+            server_url=SLACK_SERVER["url"],
+            rule="allow",
+            scope="chat_and_routines",
+            set_by=OWNER_A,
+            actor=Subject(is_admin=True),
+        )
+    upstream.kill_first_send = recovery
+    upstream.pause_call = ("slack", "memory_flag_list", {})
+    upstream.scripts = [pause_on_public_send] * (2 if recovery else 1)
+    reply = await harness.routine()
+    (decision,) = upstream.events(reply.session_id, "user.tool_confirmation")
+    assert decision["result"] == "deny"
+    assert calls and set(calls) == {actual_url}
+    assert upstream.create_agents == ["ag_daimon"] * (2 if recovery else 1)
+
+
+async def test_channel_routine_stays_headless_without_personal_memory(harness: Harness):
+    async with harness.factory.begin() as db:
+        row = await create_routine(
+            db,
+            tenant_id=harness.tenant.id,
+            created_by_user_id=OWNER_A,
+            agent_id="ag_daimon",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="channel work",
+            destination_kind="channel",
+            destination_id=BUDGET,
+            channel_id=BUDGET,
+            source_provenance_known=True,
+            next_fire_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+    await harness.fire(row)
+    (sid,) = harness.upstream.state.sessions
+    assert len(harness.memory_stores(sid)) == 1
+    assert set(harness.memory_stores(sid).values()) == {"read_only"}
+    assert not harness.gated, "channel execution retains its existing headless path"
+
+
+@pytest.mark.parametrize("gate", ["role", "admin_switch", "dm_disabled", "recipient", "source"])
+async def test_current_authority_refuses_before_session_allocation(harness: Harness, gate: str):
+
+    row = await _routine_row(harness)
+    if gate == "role":
+        policy = TenantAccessPolicy(invoker_role_ids=("123",))
+    elif gate == "admin_switch":
+
+        async def admin(*args: Any, **kwargs: Any) -> Membership:
+            return Membership(is_member=True, is_admin=True)
+
+        harness.resolver = CachedMembershipResolver(admin)
+        policy = TenantAccessPolicy(invoker_user_ids=(OWNER_B,), invoker_admin_bypass=False)
+    elif gate == "dm_disabled":
+        async with harness.factory.begin() as db:
+            await set_dm_enabled(db, tenant_id=row.tenant_id, enabled=False)
+        policy = TenantAccessPolicy()
+    elif gate == "recipient":
+        harness.settings = harness.settings.model_copy(
+            update={
+                "direct_message_policies": {row.tenant_id: DirectMessagePolicy(mode="disabled")}
+            }
+        )
+        policy = TenantAccessPolicy()
+    else:
+        # Legacy unknown provenance must never become a source-free private run.
+        async with harness.factory.begin() as db:
+            await db.execute(
+                text("UPDATE routines SET source_provenance_known = false WHERE id = :id"),
+                {"id": row.id},
+            )
+        policy = TenantAccessPolicy()
+    async with harness.factory.begin() as db:
+        await set_access_policy(db, tenant_id=row.tenant_id, policy=policy)
+    await harness.fire(row)
+    assert not harness.upstream.state.sessions
+    async with harness.factory() as db:
+        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    assert after is not None and after.last_error and after.delivery_payload is None
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+async def test_shutdown_uses_live_dm_best_effort_on_actual_scope(
+    harness: Harness, replacement: bool
+):
+    harness.upstream.kill_first_send = replacement
+    harness.upstream.scripts = [hang, hang] if replacement else [hang]
+    row = await _routine_row(harness)
+    task = asyncio.create_task(harness.fire(row))
+    await harness.upstream.wait(
+        lambda: any(event["type"] == "user.message" for _, event in harness.upstream.sent)
+    )
+    sid = next(sid for sid, event in harness.upstream.sent if event["type"] == "user.message")
+    harness.deps.running_turns.begin_shutdown()
+    await harness.dispatcher.close()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert harness.upstream.events(sid, "user.interrupt")
+    async with harness.factory() as db:
+        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    assert after is not None and after.delivery_payload is None
+
+
+async def test_minimum_work_pool_retains_turn_headroom(harness: Harness, db_schema: str):
+    engine = build_test_engine(
+        harness.factory.kw["bind"].url.render_as_string(hide_password=False),
+        db_schema,
+        pool_size=4,
+        max_overflow=0,
+        pool_timeout=5,
+    )
+    small = Harness(
+        async_sessionmaker(engine, expire_on_commit=False), harness.tenant, harness.upstream
+    )
+    try:
+        a, b = await asyncio.wait_for(
+            asyncio.gather(small.routine(OWNER_A), small.routine(OWNER_B)), 50
+        )
+        assert a.text == b.text == "private answer"
+    finally:
+        await small.dispatcher.close()
+        await engine.dispose()

@@ -356,6 +356,8 @@ async def update_routine_agent_id(
     session: AsyncSession,
     routine_id: _uuid.UUID,
     new_agent_id: str,
+    *,
+    expected_updated_at: datetime | None = None,
 ) -> bool:
     """Update only ``routines.agent_id``. Used by the scheduler resolver path
     when the resolver heals a stale id. Does NOT touch
@@ -363,9 +365,10 @@ async def update_routine_agent_id(
 
     Returns True if a row was updated, False otherwise.
     """
-    result = await session.execute(
-        update(Routine).where(Routine.id == routine_id).values(agent_id=new_agent_id)
-    )
+    statement = update(Routine).where(Routine.id == routine_id)
+    if expected_updated_at is not None:
+        statement = statement.where(Routine.updated_at == expected_updated_at)
+    result = await session.execute(statement.values(agent_id=new_agent_id))
     return cast(CursorResult[Any], result).rowcount > 0
 
 

@@ -235,6 +235,7 @@ async def _build_fire(
     resolver_cache: ResolverCache,
     membership_resolver: MembershipResolver | None = None,
     billing_config: BillingConfig | None = None,
+    dm_turn_deps: TurnDeps | None = None,
 ) -> FireFn:
     """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
 
@@ -260,7 +261,7 @@ async def _build_fire(
         else None
     )
 
-    turn_deps: list[TurnDeps] = []
+    turn_deps: list[TurnDeps] = [] if dm_turn_deps is None else [dm_turn_deps]
 
     def _turn_deps() -> TurnDeps:
         """The ordinary turn dependencies a DM routine runs with, built on first use."""
@@ -685,7 +686,9 @@ async def _build_fire(
             return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
-                await update_routine_agent_id(heal_s, row.id, resolved_agent_id)
+                await update_routine_agent_id(
+                    heal_s, row.id, resolved_agent_id, expected_updated_at=row.updated_at
+                )
 
         # Mount the agent's assembled .env on the headless turn: derive the
         # tenant-scoped agent UUID and pass tenant/agent/session_factory so
@@ -1517,14 +1520,25 @@ async def run(
     health_server = await start_liveness_responder(scheduler_settings.health_port)
 
     deployment_default = parse_deployment_default(settings.defaults_root)
-    caps = _CapsAdapter(sm, billing_config=load_billing_config())
+    billing_config = load_billing_config()
+    caps = _CapsAdapter(sm, billing_config=billing_config)
     resolver_cache = new_resolver_cache()
+    dm_turn_deps = build_turn_deps(
+        settings,
+        client,
+        sm,
+        deployment_default=deployment_default,
+        resolver_cache=resolver_cache,
+        billing_config=billing_config,
+    )
     fire = await _build_fire(
         client=client,
         sm=sm,
         settings=settings,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
+        billing_config=billing_config,
+        dm_turn_deps=dm_turn_deps,
     )
 
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
@@ -1636,6 +1650,12 @@ async def run(
 
         return 0
     finally:
+        # Match live-DM shutdown: grace for accepted turns, then the normal
+        # best-effort current-mapping interrupt. No durable stop obligation.
+        dm_tasks = dm_turn_deps.running_turns.tasks()
+        if dm_tasks:
+            await asyncio.wait(dm_tasks, timeout=60)
+        dm_turn_deps.running_turns.begin_shutdown()
         await dispatcher.close()
         health_server.close()
         await health_server.wait_closed()

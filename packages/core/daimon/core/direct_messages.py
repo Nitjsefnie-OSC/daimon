@@ -907,6 +907,20 @@ async def _scheduled_dm_turn(
             # Re-asked by `reauthorize` right before the session is built.
             grant=replace(admission.grant, dm_source=source, act_for_creator=True),
         )
+        if deps.backend is not None and (deps.turn_path or load_turn_settings().path) == "mux":
+            from mux.drivers.anthropic.sessions_lifecycle import (
+                SESSION_READS_NAMESPACE,
+                SessionReads,
+            )
+            from mux.errors import UnsupportedCapability
+
+            try:
+                deps.backend.extension(SessionReads, namespace=SESSION_READS_NAMESPACE, version=1)
+            except UnsupportedCapability as error:
+                raise DirectMessageAccessRevoked(
+                    MANAGED_AGENTS_ONLY,
+                    message="DM routines require a gateable Managed Agents runtime.",
+                ) from error
         deadline = turn_deadline(now=now)
         prepared = await bind_session(
             deps,
@@ -930,21 +944,32 @@ async def _scheduled_dm_turn(
     async def sealed() -> None:
         raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
 
-    text, session_id = await _run_admitted_dm_turn(
-        deps,
-        prepared,
-        tenant_id=tenant_id,
-        platform="discord",
-        parent_channel_id=scope_id,
-        scope_id=scope_id,
-        external_user_id=owner_user_id,
-        role=Role.ADMIN if grant.subject.is_admin else Role.USER,
-        prompt=prompt,
-        deadline=deadline,
-        on_sealed=sealed,
-        origin="routine",
-        attended=False,
-    )
+    try:
+        text, session_id = await _run_admitted_dm_turn(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            platform="discord",
+            parent_channel_id=scope_id,
+            scope_id=scope_id,
+            external_user_id=owner_user_id,
+            role=Role.ADMIN if grant.subject.is_admin else Role.USER,
+            prompt=prompt,
+            deadline=deadline,
+            on_sealed=sealed,
+            origin="routine",
+            attended=False,
+        )
+    except asyncio.CancelledError:
+        if deps.running_turns.is_drain_cancel():
+            await _settle_shutdown_dm_scope(
+                deps,
+                tenant_id=tenant_id,
+                platform="discord",
+                scope_id=scope_id,
+                account_id=admission.account_id,
+            )
+        raise
     return DmRoutineReply(
         text=text,
         session_id=session_id,
@@ -977,16 +1002,38 @@ async def _settle_shutdown_cancelled_dm(deps: TurnDeps, conversation: DirectMess
     including a replacement made by dead-session recovery. Best effort: a
     database failure is logged and the claim expires on its own.
     """
+    await _settle_shutdown_dm_scope(
+        deps,
+        tenant_id=conversation.tenant_id,
+        platform=conversation.platform,
+        scope_id=conversation.scope_id,
+        account_id=conversation.account_id,
+        conversation=conversation,
+    )
+
+
+async def _settle_shutdown_dm_scope(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    scope_id: str,
+    account_id: uuid.UUID,
+    conversation: DirectMessageRow | None = None,
+) -> None:
+    """Live-DM best-effort drain, scoped to the claim/owner guard's own mapping."""
     try:
         async with deps.sessionmaker.begin() as session:
-            if not await holds_claim(session, conversation=conversation):
+            if conversation is not None and not await holds_claim(
+                session, conversation=conversation
+            ):
                 return
             mapping = await get_live_thread_session(
                 session,
-                tenant_id=conversation.tenant_id,
-                platform=conversation.platform,
-                thread_id=conversation.scope_id,
-                account_id=conversation.account_id,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=scope_id,
+                account_id=account_id,
             )
             if mapping is None:
                 return
@@ -994,8 +1041,8 @@ async def _settle_shutdown_cancelled_dm(deps: TurnDeps, conversation: DirectMess
                 deps.anthropic,
                 session_id=mapping.ma_session_id,
                 scope=resource_scope(
-                    tenant_id=str(conversation.tenant_id),
-                    account_id=str(conversation.account_id),
+                    tenant_id=str(tenant_id),
+                    account_id=str(account_id),
                     authorization_id="dm-shutdown-drain",
                 ),
                 timeout_s=_SHUTDOWN_INTERRUPT_TIMEOUT_S,
@@ -1034,6 +1081,12 @@ async def owner_dm_turn(
         try:
             db = await stack.enter_async_context(deps.sessionmaker.begin())
             await try_fence(db, f"owner_dm:{platform}:{owner}", schema_scoped=True)
+            # Keep the owner's transaction on a dedicated connection. Returning
+            # its pool slot leaves ordinary preparation/mutation headroom even
+            # with the minimum four-connection work pool. Closing this detached
+            # connection physically releases the lock on every local exit.
+            connection = await db.connection()
+            await connection.run_sync(lambda sync: sync.detach())
         except BaseException:
             await stack.aclose()
             raise
