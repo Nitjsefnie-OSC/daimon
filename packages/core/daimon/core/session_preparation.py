@@ -51,6 +51,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import legacy_call
+from daimon.core.platform_system import system_for_platform
 from daimon.core.session_compat import (
     DEFAULT_MA_CAPABILITIES,
     ChangeReason,
@@ -914,7 +915,7 @@ async def _prepare_session_for_turn_locked(
             confirmed_tools=confirmed_tools_for_turn(deps),
             daimon_rule_tools=admission.daimon_rule_tools,
             channel_skills=admission.channel_skills,
-            system_override=admission.system_override,
+            system_override=system_for_platform(admission.agent.system, platform),
         )
         if fresh_start:
             decision = ReplaceSession(reasons=())

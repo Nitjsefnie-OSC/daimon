@@ -226,6 +226,7 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/adapters/scheduler/daimon/adapters/scheduler/settings.py": frozenset({"discord"}),
     "packages/core/daimon/core/agent_guidance.py": frozenset(_APPS),
     "packages/core/daimon/core/platform_system.py": frozenset(_APPS),
+    "packages/core/daimon/core/platform_words.py": frozenset(_APPS),
     "packages/core/daimon/core/microsoft_identity.py": frozenset({"teams"}),
     "packages/core/daimon/core/native_admins.py": frozenset({"discord"}),
     "packages/core/daimon/core/routine_delivery.py": frozenset(_APPS),
@@ -394,15 +395,13 @@ def test_the_skills_a_teams_agent_is_seeded_with_name_no_other_chat_platform() -
     assert offences == []
 
 
-def test_the_teams_system_prompt_names_no_other_chat_platform() -> None:
+@pytest.mark.parametrize("platform", _APPS)
+def test_each_platforms_system_prompt_names_no_other_chat_platform(platform: ChatPlatform) -> None:
     from daimon.core.agent_guidance import apply_credential_guidance
     from daimon.core.platform_system import system_for_platform
 
     spec = yaml.safe_load((_DEFAULTS / "agents" / "daimon.yaml").read_text())
-    system = apply_credential_guidance(spec["system"])
-    variant = system_for_platform(system, "teams")
+    variant = system_for_platform(apply_credential_guidance(spec["system"]), platform)
 
     assert variant is not None
-    assert _OTHER_APPS_FOR_TEAMS.search(variant) is None
-    assert system_for_platform(system, "discord") is None
-    assert system_for_platform(system, "slack") is None
+    _assert_only_own(platform, variant)

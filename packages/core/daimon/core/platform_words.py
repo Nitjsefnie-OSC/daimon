@@ -70,6 +70,8 @@ class Command:
 class PlatformWords:
     """One platform's nouns and commands.
 
+    `label` is the platform's name as people write it, and `works_in` says where Daimon
+    works on it, so the one-platform rule never denies a place it does work.
     `space` is what Daimon is installed in; `admin` is who can change settings, as
     a person reads it; `admin_rule` says who counts as one, for the model.
     `private_chat` names a private chat with Daimon. `commands` holds only the
@@ -78,6 +80,8 @@ class PlatformWords:
     """
 
     platform: ChatPlatform
+    label: str
+    works_in: str
     space: str
     admin: str
     admin_rule: str
@@ -156,6 +160,8 @@ WORDS: Mapping[ChatPlatform, PlatformWords] = MappingProxyType(
     {
         "discord": PlatformWords(
             platform="discord",
+            label="Discord",
+            works_in="in other servers, channels, threads and DMs",
             space="server",
             admin="a server admin",
             admin_rule="the server owner, or anyone with Manage Server or Administrator",
@@ -165,6 +171,8 @@ WORDS: Mapping[ChatPlatform, PlatformWords] = MappingProxyType(
         ),
         "slack": PlatformWords(
             platform="slack",
+            label="Slack",
+            works_in="in other channels, DMs and workspaces it's installed in",
             space="workspace",
             admin="a workspace admin",
             admin_rule="a workspace admin or owner",
@@ -174,6 +182,8 @@ WORDS: Mapping[ChatPlatform, PlatformWords] = MappingProxyType(
         ),
         "teams": PlatformWords(
             platform="teams",
+            label="Teams",
+            works_in="wherever it has been added: other teams, channels, group chats and 1:1 chats",
             space="organisation",
             admin="an admin",
             admin_rule="an owner of Daimon's admin team",
@@ -204,6 +214,19 @@ def words_for(platform: ChatPlatform) -> PlatformWords:
 def space_for(platform: str | None) -> str:
     """The platform's word for its space; the neutral one for a caller with no chat platform."""
     return words_for(platform).space if platform in CHAT_PLATFORMS else NEUTRAL_SPACE
+
+
+def one_platform_rule(platform: ChatPlatform | None = None) -> str:
+    """The rule that keeps a person from learning Daimon runs on other chat apps.
+
+    Scoped to apps: Daimon still works in every place it has been added on this
+    platform, so the model must not deny those. Without a platform (the CLI, a
+    headless run) there is no place list."""
+    rule = "Never name or hint at another chat app, and never say Daimon works in one."
+    if platform is None:
+        return rule
+    words = WORDS[platform]
+    return f"{rule} In {words.label}, Daimon works {words.works_in}."
 
 
 def turn_words(platform: ChatPlatform, *, place: Place) -> dict[str, str]:

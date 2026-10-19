@@ -574,14 +574,29 @@ def test_controls_carry_the_words_for_this_platform_and_place(
     assert words["setup"] == setup, label
     assert words["fresh_start"] == fresh_start, label
     assert "words" in rendered.split("\n")[2], "the prose tells the model to use them"
-    assert NO_OTHER_APPS in rendered, label
+    assert "Never name or hint at another chat app, and never say Daimon works in one." in rendered
 
 
-#: The per-turn rule: nothing the model says may reveal that Daimon runs anywhere else.
-NO_OTHER_APPS = (
-    "Never name another chat app or say Daimon is available anywhere else; "
-    "talk as if this is the only place it runs."
-)
+#: Where Daimon works on each platform, as the rule lists it: it never denies these.
+_PLACES = {
+    "discord": "In Discord, Daimon works in other servers, channels, threads and DMs.",
+    "slack": "In Slack, Daimon works in other channels, DMs and workspaces it's installed in.",
+    "teams": (
+        "In Teams, Daimon works wherever it has been added: other teams, channels, "
+        "group chats and 1:1 chats."
+    ),
+}
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
+def test_each_platforms_controls_list_the_places_daimon_works_there(platform: str) -> None:
+    rendered = render_turn_origin(_origin(platform=platform, thread_id="a:1"))
+    prose = rendered.split("\n", 2)[2].lower()
+
+    assert _PLACES[platform] in rendered
+    assert "only place" not in prose
+    for other in {"discord", "slack", "teams"} - {platform}:
+        assert other not in prose, f"{platform} controls name {other}"
 
 
 def test_each_platforms_words_name_only_its_own_commands_and_admin() -> None:
@@ -607,4 +622,4 @@ def test_controls_for_a_platform_with_no_chat_commands_carry_no_words() -> None:
     rendered = render_turn_origin(_origin(platform="cli"))
 
     assert "words" not in _controls(rendered)
-    assert "Never name another chat app" not in rendered
+    assert "another chat app" not in rendered

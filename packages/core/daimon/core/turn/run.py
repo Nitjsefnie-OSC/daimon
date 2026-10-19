@@ -715,7 +715,11 @@ async def _replace_dead_session_locked(
             # leaving a live, unlinked replacement the next mention would continue
             # on without the lost-workspace framing.
             created = await create_ma_session(
-                deps, admission, tenant_id=tenant_id, predecessor_session_id=dead_session_id
+                deps,
+                admission,
+                tenant_id=tenant_id,
+                predecessor_session_id=dead_session_id,
+                platform=platform,
             )
             fresh = await insert_mapping(
                 db,
