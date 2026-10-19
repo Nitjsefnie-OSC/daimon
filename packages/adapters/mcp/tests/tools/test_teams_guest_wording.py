@@ -6,6 +6,7 @@ who the action is for instead. A local sender keeps the exact text it had.
 
 from __future__ import annotations
 
+import re
 import typing
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -31,6 +32,10 @@ from daimon.core.wizard.spec import Option, Step, StepKind, WizardSpec
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+#: "1:1" as the chat, not inside a time such as "21:15".
+_ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
+
 
 _HOST = "organisation that added Daimon"
 _GROUP_CHAT = "19:group@thread.v2"
@@ -95,7 +100,7 @@ async def test_a_form_refused_in_a_group_chat_names_a_one_to_one_chat_only_to_a_
             short_id="s",
         )
 
-    assert ("1:1" in str(refused.value)) is not foreign
+    assert (_ONE_TO_ONE.search(str(refused.value)) is not None) is not foreign
 
 
 @pytest.mark.parametrize("foreign", [False, True])
@@ -111,7 +116,7 @@ async def test_files_refused_in_a_group_chat_name_a_one_to_one_chat_only_to_a_lo
     ):
         await post_files(MagicMock(), _auth(), MagicMock(), _GROUP_CHAT, "hi", [])
 
-    assert ("1:1" in str(refused.value)) is not foreign
+    assert (_ONE_TO_ONE.search(str(refused.value)) is not None) is not foreign
 
 
 async def _running_turn(

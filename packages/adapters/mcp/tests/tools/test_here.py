@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,6 +20,9 @@ from daimon.core.access_policy import ChannelRule
 from daimon.core.here_card import HereCard
 from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
+
+#: "1:1" as the chat, not inside a time such as "21:15".
+_ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
 
 
 def _auth(*, platform: str = "discord") -> AuthIdentity:
@@ -242,7 +246,7 @@ async def test_teams_card_for_a_guest_from_another_organisation_names_no_one_to_
 
     assert card.foreign is foreign
     if foreign:
-        assert "1:1" not in card.text, card.text
+        assert _ONE_TO_ONE.search(card.text) is None, card.text
         assert "Someone in the organisation that added Daimon can pick one" in card.text
     else:
         assert "1:1 chat" in card.text, "a local sender is told as before"

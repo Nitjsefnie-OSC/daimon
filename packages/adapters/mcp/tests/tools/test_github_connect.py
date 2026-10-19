@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -33,6 +34,9 @@ from daimon.testing.factories import make_account, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+#: "1:1" as the chat, not inside a time such as "21:15".
+_ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
 
 
 @pytest.mark.asyncio
@@ -235,4 +239,4 @@ async def test_teams_connect_link_goes_to_the_requesters_one_to_one_chat(
     )
     assert guest.status == "delivery_failed", "a guest's card cannot be delivered either"
     assert "organisation that added Daimon" in guest.message, "the guest is told who it is for"
-    assert "1:1" not in guest.message and "chat" not in guest.message, guest.message
+    assert _ONE_TO_ONE.search(guest.message) is None and "chat" not in guest.message, guest.message
