@@ -184,7 +184,6 @@ async def run_turn(
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
-    personal_memory: bool = False,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -215,7 +214,6 @@ async def run_turn(
             budget_channel_id=budget_channel_id,
             origin_place=origin_place,
             model_override=model_override,
-            personal_memory=personal_memory,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -246,7 +244,6 @@ async def run_turn(
                 budget_channel_id=budget_channel_id,
                 origin_place=origin_place,
                 model_override=model_override,
-                personal_memory=personal_memory,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -281,7 +278,6 @@ async def run_turn_impl(
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
-    personal_memory: bool = False,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -358,10 +354,7 @@ async def run_turn_impl(
     ``origin_place`` stamps where the routine fires (`routine_origin`), so its
     transcript reads only where a turn there would, and only by its owner.
 
-    ``personal_memory`` also mounts ``account_id``'s personal store, with the
-    same (read-only, for a routine) access as the shared one. The scheduler
-    sets it only for a legacy routine with no destination or channel; explicit
-    DM destinations never enable it (`rule_views.routine_mounts_personal_memory`).
+    Headless turns mount shared memory only, never personal memory.
     """
     turn_scope: Scope | None = None
     if load_turn_settings().path == "mux":
@@ -447,10 +440,6 @@ async def run_turn_impl(
             requester_is_headless=True,
             billing_exempt=billing_exempt,
             memory_read_only=origin == "routine",
-            # Only a legacy owner-only routine, never an explicit DM destination
-            # (`rule_views.routine_mounts_personal_memory`); read-only like the
-            # shared mount, since a routine's memory is always read-only.
-            personal_memory=personal_memory,
             tool_safety=tool_safety,
             budget_channel_id=budget_channel_id,
             origin_channel_id=origin_place.channel_id if origin_place is not None else None,

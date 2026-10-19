@@ -99,6 +99,7 @@ async def _record_fire_error(
     private: bool = False,
     expected_destination: tuple[str | None, str | None],
     expected_private: RoutineRow | None = None,
+    expected_row: RoutineRow | None = None,
 ) -> None:
     """Record a failure on a FRESH session (never reuse fire's session)."""
     try:
@@ -113,7 +114,9 @@ async def _record_fire_error(
                     expected_destination=expected_destination,
                 )
             else:
-                await record_failure(s, routine_id, error=msg, reason=reason)
+                await record_failure(
+                    s, routine_id, error=msg, reason=reason, expected_row=expected_row
+                )
     except Exception:
         log.exception("record_result(error) failed", routine_id=str(routine_id))
 
@@ -190,6 +193,7 @@ async def run_one_tick(
                 private=row.destination_kind == "dm",
                 expected_destination=(row.destination_kind, row.destination_id),
                 expected_private=row if row.destination_kind == "dm" else None,
+                expected_row=row,
             )
             continue
         fireable.append(row)
@@ -227,6 +231,7 @@ async def run_one_tick(
                         private=row.destination_kind == "dm",
                         expected_destination=(row.destination_kind, row.destination_id),
                         expected_private=row if row.destination_kind == "dm" else None,
+                        expected_row=row,
                     )
                 except Exception as err:
                     reason = termination_reason(err)
@@ -242,6 +247,7 @@ async def run_one_tick(
                         private=row.destination_kind == "dm",
                         expected_destination=(row.destination_kind, row.destination_id),
                         expected_private=row if row.destination_kind == "dm" else None,
+                        expected_row=row,
                     )
         except asyncio.CancelledError as err:
             observation.finish(error=err)
@@ -254,6 +260,7 @@ async def run_one_tick(
                 private=row.destination_kind == "dm",
                 expected_destination=(row.destination_kind, row.destination_id),
                 expected_private=row if row.destination_kind == "dm" else None,
+                expected_row=row,
             )
             raise
         finally:

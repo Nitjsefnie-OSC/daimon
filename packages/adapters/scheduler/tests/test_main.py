@@ -2961,13 +2961,12 @@ async def test_once_usage_pass_honours_the_switch(enabled: bool, expected: int) 
     assert calls == expected, f"usage pass ran {calls} times with enabled={enabled}"
 
 
-async def test_channel_routine_excludes_personal_memory_and_legacy_owner_only_can(
+async def test_channel_and_destination_free_routines_have_no_personal_memory_option(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Decided from the row at every fire: the same routine reads its owner's
-    personal memory while it posts nowhere, and stops once it gets a destination."""
+    """Headless routine calls have no personal-memory capability."""
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
@@ -3016,8 +3015,8 @@ async def test_channel_routine_excludes_personal_memory_and_legacy_owner_only_ca
         await fire(posting)
     await fake_client.close()
 
-    assert [call["personal_memory"] for call in calls] == [True, False]
-    assert calls[0]["account_id"] is not None, "the owner's account selects the store"
+    assert len(calls) == 2 and all("personal_memory" not in call for call in calls)
+    assert calls[0]["account_id"] is not None, "owner credentials still use the owner account"
 
 
 async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(

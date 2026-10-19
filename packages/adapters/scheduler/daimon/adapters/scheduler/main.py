@@ -103,7 +103,6 @@ from daimon.core.rule_views import (
     keeps_routine_inside,
     routine_destination_channel,
     routine_destination_place,
-    routine_mounts_personal_memory,
     routine_origin,
 )
 from daimon.core.runtime_health import current_turn_counts, runtime_health
@@ -299,7 +298,7 @@ async def _build_fire(
                 expected_private=row,
             )
         else:
-            await record_failure(s, routine_id, error=error, reason=reason)
+            await record_failure(s, routine_id, error=error, reason=reason, expected_row=row)
 
     async def _refused_over_channel_budget(row: RoutineRow, *, platform: str) -> bool:
         """Record and refuse a fire over its channel budget. Keyed on `row.channel_id`,
@@ -401,6 +400,7 @@ async def _build_fire(
                 producing_agent_id=reply.producing_agent_id,
                 expected_destination=(row.destination_kind, row.destination_id),
                 expected_private=row if row.destination_kind == "dm" else None,
+                expected_row=row,
             )
 
     async def _fire(row: RoutineRow) -> None:
@@ -413,6 +413,7 @@ async def _build_fire(
                     error="routine has no created_by_user_id",
                     expected_destination=(row.destination_kind, row.destination_id),
                     expected_private=row if row.destination_kind == "dm" else None,
+                    expected_row=row,
                 )
             return
 
@@ -426,6 +427,7 @@ async def _build_fire(
                     error="routine tenant not found",
                     expected_destination=(row.destination_kind, row.destination_id),
                     expected_private=row if row.destination_kind == "dm" else None,
+                    expected_row=row,
                 )
                 return
             if tenant.archived_at is not None:
@@ -436,6 +438,7 @@ async def _build_fire(
                     error="routine tenant archived",
                     expected_destination=(row.destination_kind, row.destination_id),
                     expected_private=row if row.destination_kind == "dm" else None,
+                    expected_row=row,
                 )
                 return
             platform = tenant.platform
@@ -453,6 +456,7 @@ async def _build_fire(
                     error="routine DMs are disabled or the owner is not allowed",
                     expected_destination=(row.destination_kind, row.destination_id),
                     expected_private=row if row.destination_kind == "dm" else None,
+                    expected_row=row,
                 )
                 return
             principal = await get_or_create_platform_principal(
@@ -567,6 +571,7 @@ async def _build_fire(
                     error=policy_error,
                     expected_destination=(row.destination_kind, row.destination_id),
                     expected_private=row if row.destination_kind == "dm" else None,
+                    expected_row=row,
                 )
                 return
 
@@ -678,7 +683,7 @@ async def _build_fire(
                     reason=refusal,
                 )
                 async with sm() as pin_s, pin_s.begin():
-                    await record_result(pin_s, row.id, tail=None, error=refusal)
+                    await record_result(pin_s, row.id, tail=None, error=refusal, expected_row=row)
                 return
         # Admission gate: the routine's channel budget, after the cap (run_one_tick),
         # balance and pin gates.
@@ -686,9 +691,12 @@ async def _build_fire(
             return
         if resolved_agent_id != row.agent_id:
             async with sm() as heal_s, heal_s.begin():
-                await update_routine_agent_id(
+                healed = await update_routine_agent_id(
                     heal_s, row.id, resolved_agent_id, expected_updated_at=row.updated_at
                 )
+            if not healed:
+                return
+            row = row.model_copy(update={"agent_id": resolved_agent_id})
 
         # Mount the agent's assembled .env on the headless turn: derive the
         # tenant-scoped agent UUID and pass tenant/agent/session_factory so
@@ -747,13 +755,11 @@ async def _build_fire(
                 if fire_policy is not None
                 else None
             ),
-            # Only a legacy owner-only routine; explicit DMs run in `_fire_dm`.
-            personal_memory=routine_mounts_personal_memory(row),
         )
 
         if row.destination_kind is None:
             async with sm() as s, s.begin():
-                await record_result(s, row.id, tail=result, error=None)
+                await record_result(s, row.id, tail=result, error=None, expected_row=row)
             return
 
         # Fallback post: only when the agent did not deliver to the
@@ -778,6 +784,7 @@ async def _build_fire(
                 delivery="pending" if needs_delivery else "skipped",
                 delivery_note=None if needs_delivery else "agent_posted",
                 expected_destination=(row.destination_kind, row.destination_id),
+                expected_row=row,
             )
 
     return _fire

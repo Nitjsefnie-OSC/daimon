@@ -1652,3 +1652,131 @@ async def test_stale_public_edit_cannot_reclassify_concurrent_private_fire(
     await poll_deliveries_once(
         harness.factory, platform="discord", post=poster, now=datetime.now(UTC)
     )
+
+
+@pytest.mark.parametrize("origin", ["cleared_dm", "legacy"])
+@pytest.mark.parametrize("change", ["agent", "retarget", "aba"])
+@pytest.mark.parametrize("stage", ["running", "pending", "error"])
+async def test_destination_free_fire_has_no_personal_memory_or_reclassified_result(
+    harness: Harness, origin: str, change: str, stage: str
+):
+    from daimon.core.stores import routines
+    from daimon.core.stores.agent_memory_stores import get_personal_memory_store_id
+
+    sentinel = "OWNER_PERSONAL_MEMORY_SENTINEL"
+    async with harness.factory.begin() as db:
+        row = await create_routine(
+            db,
+            tenant_id=harness.tenant.id,
+            created_by_user_id=OWNER_A,
+            agent_id="ag_daimon",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="private work",
+            destination_kind="dm",
+            channel_id=None,
+            source_provenance_known=True,
+            next_fire_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+    # Seed a real owner's memory-bearing session and a persisted private result.
+    harness.upstream.scripts = [answer(sentinel)]
+    await harness.fire(row)
+    dm_sid = next(reversed(harness.upstream.state.sessions))
+    async with harness.factory() as db:
+        personal = await get_personal_memory_store_id(
+            db,
+            tenant_id=row.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=row.tenant_id, ma_agent_id=row.agent_id),
+            account_id=harness.accounts[OWNER_A],
+        )
+    assert personal is not None and personal in harness.memory_stores(dm_sid)
+    async with harness.factory.begin() as db:
+        if origin == "cleared_dm":
+            row = await routines.update_routine(
+                db,
+                row.id,
+                tenant_id=row.tenant_id,
+                clear_destination=True,
+                next_fire_at=datetime.now(UTC) - timedelta(seconds=1),
+            )
+            assert row is not None and row.last_result_tail is None
+        else:
+            await routines.delete_routine(db, row.id, tenant_id=row.tenant_id)
+            row = await create_routine(
+                db,
+                tenant_id=harness.tenant.id,
+                created_by_user_id=OWNER_A,
+                agent_id="ag_daimon",
+                agent_name="daimon",
+                cron_expr="0 9 * * *",
+                timezone_="UTC",
+                trigger_message="legacy work",
+                source_provenance_known=True,
+                next_fire_at=datetime.now(UTC) - timedelta(seconds=1),
+            )
+    assert row.destination_kind is None and row.channel_id is None
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def headless(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
+        await upstream.wait(lambda: bool(upstream.events(sid, "user.message")))
+        assert personal not in harness.memory_stores(sid)
+        assert len(harness.memory_stores(sid)) == 1
+        assert set(harness.memory_stores(sid).values()) == {"read_only"}
+        entered.set()
+        await release.wait()
+        if stage == "error":
+            raise RuntimeError("old producer raw diagnostic")
+        async for chunk in answer("shared-only result")(upstream, sid):
+            yield chunk
+
+    harness.upstream.scripts = [headless]
+    task = asyncio.create_task(harness.fire(row))
+    await asyncio.wait_for(entered.wait(), 15)
+    if stage == "pending":
+        release.set()
+        await task
+        async with harness.factory() as db:
+            completed = await get_routine(db, row.id, tenant_id=row.tenant_id)
+        assert completed is not None and completed.last_result_tail == "shared-only result"
+    async with harness.factory.begin() as db:
+        if change == "agent":
+            await routines.update_routine(
+                db, row.id, tenant_id=row.tenant_id, agent_id="ag_b", agent_name="b"
+            )
+        else:
+            await routines.update_routine(
+                db,
+                row.id,
+                tenant_id=row.tenant_id,
+                destination_kind="channel",
+                destination_id=BUDGET,
+                channel_id=BUDGET,
+            )
+            if change == "aba":
+                await routines.update_routine(
+                    db, row.id, tenant_id=row.tenant_id, clear_destination=True
+                )
+    release.set()
+    await task
+    async with harness.factory() as db:
+        final = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    assert final is not None and final.last_result_tail is None and final.last_error is None
+    assert final.delivery_payload is None and final.delivery_status != "pending"
+
+    async def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("old output must not open an agent or destination")
+
+    await poll_deliveries_once(
+        harness.factory,
+        platform="discord",
+        now=datetime.now(UTC),
+        post=make_discord_routine_poster(
+            harness.factory,
+            fetch_channel=forbidden,
+            open_dm=forbidden,
+            dm_policy=lambda _: DirectMessagePolicy(),
+            membership_resolver=harness.resolver,
+            output_client=harness.upstream.client,
+        ),
+    )

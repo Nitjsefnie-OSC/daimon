@@ -32,9 +32,10 @@ from daimon.core.stores.domain import (
     RoutineRow,
     UnattendedRequester,
 )
-from sqlalchemy import and_, delete, false, func, or_, select, update
+from sqlalchemy import and_, delete, false, func, or_, select, true, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 log = structlog.get_logger(__name__)
 
@@ -46,6 +47,19 @@ FAILURE_NOTICE = "failure_notice"
 
 The poster renders such a payload as a failure notice instead of a result.
 Settling replaces the note as for any post."""
+
+
+def _captured_routine(row: RoutineRow) -> ColumnElement[bool]:
+    """The same producer, destination and configuration revision as the fire."""
+    return and_(
+        Routine.tenant_id == row.tenant_id,
+        Routine.created_by_user_id.is_not_distinct_from(row.created_by_user_id),
+        Routine.agent_id == row.agent_id,
+        Routine.agent_name.is_not_distinct_from(row.agent_name),
+        Routine.updated_at == row.updated_at,
+        Routine.destination_kind.is_not_distinct_from(row.destination_kind),
+        Routine.destination_id.is_not_distinct_from(row.destination_id),
+    )
 
 
 async def create_routine(
@@ -325,15 +339,28 @@ async def update_routine(
     if not values:
         return current
 
-    if current.destination_kind == "dm":
-        # Any edit invalidates the private revision. This also handles agent
-        # reassignment and destination ABA without reclassifying old content.
+    if current.destination_kind == "dm" or (
+        agent_id is not None
+        or agent_name is not None
+        or clear_destination
+        or destination_kind is not None
+        or destination_id is not None
+    ):
+        # Any private edit or producer/destination change invalidates content.
+        # This also erases retained previews from legacy owner-only routines.
+        # Agent reassignment and destination ABA cannot reclassify old content.
         values.update(
             last_result_tail=None,
             last_error=None,
             delivery_payload=None,
             delivery_status="skipped",
-            delivery_note="private_revision_changed",
+            delivery_note=(
+                "private_revision_changed"
+                if current.destination_kind == "dm"
+                else "destination_changed"
+                if clear_destination or destination_kind is not None
+                else "agent_changed"
+            ),
             delivery_lease_owner=None,
             delivery_lease_expires_at=None,
         )
@@ -521,6 +548,7 @@ async def record_result(
     delivery_payload: str | None = None,
     expected_destination: tuple[str | None, str | None] | None = None,
     expected_private: RoutineRow | None = None,
+    expected_row: RoutineRow | None = None,
     producing_agent_id: str | None = None,
 ) -> None:
     """Set `last_result_tail` and `last_error` in a single UPDATE.
@@ -576,6 +604,8 @@ async def record_result(
             Routine.destination_kind.is_not_distinct_from(kind),
             Routine.destination_id.is_not_distinct_from(recipient),
         )
+    if expected_row is not None:
+        statement = statement.where(_captured_routine(expected_row))
     if expected_private is not None:
         statement = statement.where(
             Routine.tenant_id == expected_private.tenant_id,
@@ -595,7 +625,11 @@ async def record_result(
 
 
 async def queue_failure_notice(
-    session: AsyncSession, routine_id: _uuid.UUID, *, notice: str
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    notice: str,
+    expected_row: RoutineRow | None = None,
 ) -> bool:
     """Queue `notice` for the destination if this failure starts a failing streak.
 
@@ -612,6 +646,7 @@ async def queue_failure_notice(
             update(Routine)
             .where(
                 Routine.id == routine_id,
+                _captured_routine(expected_row) if expected_row is not None else true(),
                 Routine.destination_kind.is_not(None),
                 Routine.last_error.is_(None),
                 or_(

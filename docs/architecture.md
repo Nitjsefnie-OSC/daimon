@@ -1844,9 +1844,9 @@ nothing personal is to be recorded. Who else gets one:
 
 - **Routines**: explicit owner DMs use the normal live-DM memory policy, including
   personal memory and ordinary write modes. Channel routines use shared memory
-  read-only without personal memory. Only a legacy headless routine with no
-  destination and no channel (`rule_views.routine_mounts_personal_memory`) mounts
-  its owner's personal store read-only. DM routines run unattended: nobody watches
+  read-only without personal memory, as do legacy destination-free routines and
+  routines switched to No automatic delivery. Only explicit DM routines mount
+  personal memory. DM routines run unattended: nobody watches
   intermediate actions, and permitted tools retain ordinary DM side-effect risk.
 - **MCP**: the hub's `ask` and `start_turn` mount the caller's personal store. A hub
   caller is a person: the hub token comes from Daimon's OAuth proxy after a Discord or

@@ -570,10 +570,14 @@ Late writes compare the captured producer, destination and revision; every chunk
 and file rechecks them.
 An old result cannot acquire a new agent's authority or move to a public target.
 
-Channel routine sessions mount persistent agent memory read-only. They never
-mount personal memory. A legacy routine with neither destination nor channel
-may mount its owner's personal memory read-only. Admins can manage DM routine
-metadata but do not gain access to its private results.
+Only explicit owner-DM routines mount personal memory, through the normal
+live-DM path. Every headless routine uses shared memory read-only and never
+mounts personal memory, including legacy rows with neither destination nor
+channel and routines switched to **No automatic delivery**. Clearing DM delivery
+erases the old private result; the next fire runs headless without personal
+memory. Producer or destination changes erase retained results and diagnostics,
+and late writes compare the captured producer, destination and revision.
+Admins can manage DM routine metadata but do not gain access to its private results.
 
 A channel routine session is stamped like a turn in the channel it fires into: the
 destination's channel (a thread's parent), the thread, and the readers limits

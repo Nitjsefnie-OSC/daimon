@@ -879,7 +879,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         a person are refused, and nobody watches intermediate actions. Permitted
         tools retain ordinary DM side-effect risk. Crash and stop guarantees are
         exactly those of live DMs. A slot skips if the owner has a DM turn running.
-        Channel routines never mount personal memory. Sources must be supported
+        All other routines, including destination-free rows, mount shared memory
+        only. Sources must be supported
         channels/threads in this tenant's guild; the original thread and parent
         remain subject to reader restrictions.
 
