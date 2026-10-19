@@ -925,10 +925,17 @@ async def _run_dm_routine(
         if prepared.backend is not None or grant is None:
             # Admission named Managed Agents; anything else is never sent to.
             raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
-        posture = await _unattended_gate(deps, prepared, tenant_id=tenant_id, scope=scope)
+        posture, server_urls = await _unattended_gate(
+            deps, prepared, tenant_id=tenant_id, scope=scope
+        )
 
         async def replaced(session_id: str, mapping_id: uuid.UUID | None) -> None:
-            await _gate_session(deps, session_id, tenant_id=tenant_id, scope=scope)
+            session = await _gate_session(deps, session_id, tenant_id=tenant_id, scope=scope)
+            if {s.name: s.url for s in session.agent.mcp_servers} != server_urls:
+                raise DirectMessageAccessRevoked(
+                    "replacement_tool_bindings_changed",
+                    message="Replacement session tool bindings changed; the routine was refused.",
+                )
 
         async def sealed() -> None:
             raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
@@ -997,7 +1004,7 @@ async def _gate_session(
 
 async def _unattended_gate(
     deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID, scope: Scope
-) -> ToolConfirmation:
+) -> tuple[ToolConfirmation, dict[str, str]]:
     """Gate a DM routine's Managed Agents session and answer its pauses unattended.
 
     `gate_session_snapshot` rewrites the session's own tool config from the
@@ -1006,7 +1013,7 @@ async def _unattended_gate(
     safety on or off.
     """
     session = await _gate_session(deps, prepared.ma_session_id, tenant_id=tenant_id, scope=scope)
-    return unattended_posture(
+    posture = unattended_posture(
         deps.tool_safety,
         session=session,
         public_url=deps.public_url,
@@ -1016,6 +1023,7 @@ async def _unattended_gate(
         channel_id=None,
         annotations_for=prepared_annotation_lookup(deps, prepared, tenant_id=tenant_id),
     )
+    return posture, {s.name: s.url for s in session.agent.mcp_servers}
 
 
 #: A shutdown drain gives each cancelled turn's cleanup 5 s in total.

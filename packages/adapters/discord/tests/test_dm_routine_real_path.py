@@ -131,6 +131,8 @@ class Upstream:
         self.create_entered = asyncio.Event()
         self.create_gate = asyncio.Event()
         self.creates = 0
+        self.create_agents: list[Any] = []
+        self.replacement_server_url: str | None = None
         self.file_listing_error = False
         self.memory_outage = False
         self.download_hook: Any = None
@@ -178,6 +180,7 @@ class Upstream:
                     503, json={"error": {"type": "api_error", "message": "offline"}}
                 )
             if request.method == "POST" and request.url.path == "/v1/sessions":
+                self.create_agents.append(json.loads(request.content)["agent"])
                 response = fallback(request)
                 self.creates += 1
                 if self.creates == self.create_pause_at:
@@ -185,11 +188,15 @@ class Upstream:
                     await self.create_gate.wait()
                 return response
             if request.method == "GET" and request.url.path == f"/v1/agents/{agent.id}":
-                return httpx.Response(200, json=agent.model_dump(mode="json"))
+                return httpx.Response(200, json=self.state.ma.agents[agent.id])
             if request.method == "POST" and parts[-1] == "events" and parts[1] == "sessions":
                 sid = parts[2]
                 if self.kill_first_send and not self.dead:
                     self.dead.add(sid)
+                    if self.replacement_server_url is not None:
+                        for server in self.state.ma.agents[agent.id]["mcp_servers"]:
+                            if server["name"] == "slack":
+                                server["url"] = self.replacement_server_url
                 if sid in self.dead:
                     return not_found_response(f"no such session: {sid}")
                 body = json.loads(request.content)
@@ -1253,6 +1260,53 @@ async def test_endpoint_bound_rule_allows_the_unattended_pause(harness: Harness)
     reply = await harness.routine()
     (decision,) = harness.upstream.events(reply.session_id, "user.tool_confirmation")
     assert decision["result"] == "allow"
+
+
+async def test_replacement_endpoint_cannot_reuse_predecessor_allow(harness: Harness):
+    from daimon.core.authz import Subject
+    from daimon.core.stores.agent_tool_rules import set_rule
+
+    harness.with_safety(ToolSafetyPolicy(enabled=True, agent_rules=True))
+    upstream = harness.upstream
+    # Already gated custom agent: no hidden servers or tool overrides at creation.
+    agent = upstream.state.ma.agents["ag_daimon"]
+    agent["tools"] = [
+        {
+            **SLACK_TOOLSET,
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_ask"}},
+        }
+    ]
+    agent["mcp_servers"] = [dict(SLACK_SERVER)]
+    upstream.kill_first_send = True
+    upstream.replacement_server_url = "https://replacement.example/mcp"
+    async with harness.factory.begin() as db:
+        for url, rule in (
+            (SLACK_SERVER["url"], "allow"),
+            (upstream.replacement_server_url, "deny"),
+        ):
+            await set_rule(
+                db,
+                tenant_id=harness.tenant.id,
+                agent_id="ag_daimon",
+                agent_name="daimon",
+                tool_key="slack/send_message",
+                server_url=url,
+                rule=rule,
+                scope="chat_and_routines",
+                set_by=OWNER_A,
+                actor=Subject(is_admin=True),
+            )
+    upstream.scripts = [pause_on_public_send]
+    row = await _routine_row(harness)
+    await harness.fire(row)
+    async with harness.factory() as db:
+        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    assert after is not None and after.last_error == "replacement_tool_bindings_changed"
+    assert after.delivery_payload is None
+    assert len(upstream.state.sessions) == 2
+    assert upstream.create_agents == ["ag_daimon", "ag_daimon"]
+    assert not any(event["type"] == "user.message" for _, event in upstream.sent)
+    assert all(intent.state == "stopped" for intent in await harness.intents(row))
 
 
 async def test_trusted_hint_is_read_over_the_real_catalogue_path(

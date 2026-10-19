@@ -309,7 +309,9 @@ nobody can press Approve, so a call that needs one is refused unless
 `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES` or an agent rule for chat and routines
 allows it, and Daimon's protected actions (a backend switch, a Microsoft send)
 are always refused. A replacement session created by dead-session recovery is
-gated the same way before the routine is sent into it. Calls that run without
+gated the same way before the routine is sent into it. If its server name-to-URL
+bindings differ from the original session, the replacement is refused and a
+bounded stop is requested. Calls that run without
 asking in a live DM run here too.
 The final reply goes to the outbox for the owner's DM only; refusals record a
 reason and queue nothing.

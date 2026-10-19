@@ -474,7 +474,7 @@ async def test_a_public_send_in_the_run_is_decided_by_the_unattended_gate(
     )
     monkeypatch.setattr(direct_messages, "prepared_annotation_lookup", lambda *a, **k: None)
 
-    posture = await direct_messages._unattended_gate(  # pyright: ignore[reportPrivateUsage]
+    posture, _ = await direct_messages._unattended_gate(  # pyright: ignore[reportPrivateUsage]
         deps, prepared, tenant_id=tenant.id, scope=Scope.legacy_host_authorized(call_site="test")
     )
     await client.close()
