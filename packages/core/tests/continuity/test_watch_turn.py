@@ -43,7 +43,10 @@ async def test_watch_read_report_refuses_writes_shell_and_builtins_even_with_wri
     assert strict.agent_rules == policy.agent_rules
 
 
-async def test_watch_gate_removes_shell_skills_and_builtin_server_before_send(monkeypatch):
+@pytest.mark.parametrize("session_url", [False, True])
+async def test_watch_gate_removes_shell_skills_and_builtin_server_before_send(
+    monkeypatch, session_url
+):
     from daimon.core.continuity import watch_turn as module
 
     snapshot = ma_session(
@@ -82,6 +85,20 @@ async def test_watch_gate_removes_shell_skills_and_builtin_server_before_send(mo
             ],
         )
     )
+    from daimon.core.mcp_server_url import session_mcp_url
+
+    public_url = "https://DAIMON.invalid:443/mcp/"
+    own_url = "https://daimon.invalid/mcp"
+    if session_url:
+        own_url = session_mcp_url(own_url, str(uuid.uuid4()))
+    snapshot.agent.tools.append(
+        snapshot.agent.tools[1].model_copy(update={"mcp_server_name": "renamed-management"})
+    )
+    snapshot.agent.mcp_servers.append(
+        snapshot.agent.mcp_servers[0].model_copy(
+            update={"name": "renamed-management", "url": own_url}
+        )
+    )
     update = AsyncMock()
     gate = AsyncMock()
     monkeypatch.setattr(module, "update_session_record", update)
@@ -96,7 +113,7 @@ async def test_watch_gate_removes_shell_skills_and_builtin_server_before_send(mo
             principal_id="watch-owner",
             authorization_id="test-grant",
         ),
-        public_url=None,
+        public_url=public_url,
         sessions=MagicMock(),
         tenant_id=uuid.uuid4(),
     )

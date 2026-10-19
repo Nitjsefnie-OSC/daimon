@@ -1728,7 +1728,8 @@ class WatchesSettings(BaseModel):
         default=False,
         description=(
             "Enable OS-signed page-event watch producers and dispatch. Keep disabled "
-            "until execution-bound unattended origin grants and non-gateable cleanup have shipped. "
+            "until the execution-bound unattended origin grants, non-gateable cleanup "
+            "and watch release are reviewed. "
             "The database global gate must also be explicitly enabled by an operator."
         ),
     )

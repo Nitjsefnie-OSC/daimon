@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native OpenAI sessions install isolated MCP session grants before creation, bind them to each executing origin on reuse, and revoke origin authority when the turn ends. Child preparation cannot inherit a parent origin grant.
 
 - Agent chat and hub mutations require a session opened on that headless surface. Same-account platform sessions and legacy sessions without proven headless provenance cannot be continued, cancelled or archived through it. Unauthorized callers are refused before waiting on a session mutation fence.
+- Require execution-bound unattended session grants for page-watch sends; keep
+  watch producers default-off pending release review.
+
 - Restore ordinary session tools after page-watch turns, including cancellation,
   and reconcile tools after interrupted restrictions without losing workspace metadata.
 - Keep fresh page events from being merged into expired watch wakes.

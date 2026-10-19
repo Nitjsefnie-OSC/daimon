@@ -135,7 +135,24 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
         ],
         mcp_servers=[{"name": "linear", "type": "url", "url": "https://linear.example/mcp"}],
     )
-    snapshot = ma_session(id="sess_watch", agent=target)
+    from daimon.core.session_snapshot import (
+        fingerprint_identity,
+        fingerprint_mutable,
+        snapshot_from_retrieved_session,
+    )
+    from daimon.core.stores.thread_sessions import record_snapshot
+
+    grant = str(uuid.uuid4())
+    snapshot = ma_session(id="sess_watch", agent=target, metadata={"daimon_chat_session_id": grant})
+    cached = snapshot_from_retrieved_session(snapshot)
+    async with db_session_factory.begin() as db:
+        await record_snapshot(
+            db,
+            id=mapping.id,
+            snapshot=cached,
+            identity_fingerprint=fingerprint_identity(cached),
+            mutable_fingerprint=fingerprint_mutable(cached),
+        )
     sent = []
     user_sent = asyncio.Event()
     updates = []

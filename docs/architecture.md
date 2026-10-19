@@ -2453,9 +2453,11 @@ are shared by Discord, Slack and Teams; CLI and scheduler do not independently
 execute continuations. Old compatible readers ignore the new reason before batching,
 so unrelated work stays readable during rollback.
 
-A watch turn explicitly passes `attended=False`, uses core admission and S1's
-unattended decider, and revalidates registration, stops, key generation and exact
-session before every driver send. The common gate covers all three chat adapters,
+Migration `0116_watches` follows `0115_origin_session_grants`. A watch turn explicitly
+passes `attended=False`, uses core admission and S1's unattended decider, and
+revalidates registration, stops, key generation and exact session before every
+driver send. Its current execution origin must be unattended and hold the exact
+bound session grant; missing or mismatched grants refuse the send. The common gate covers all three chat adapters,
 including confirmation sends. Watches require a gateable Managed Agents session;
 unsupported backends and implicit session replacement are refused. Deployment and
 agent unattended-write allowances cannot widen watch authority. Shell/custom tools,
@@ -2464,9 +2466,15 @@ session before a send. Sessions carrying skills are refused because skills canno
 be changed mid-session. Third-party reads are classified conservatively; writes are
 refused. Reports use only the registered destination; deleted threads never fall
 back to a parent channel. Evidence is byte-bounded and escaped as untrusted text.
+The runner restores the original tool/server arrays before leaving the turn,
+including on errors and cancellation. Cached tool hashes are invalidated first so
+after interruption the next bind reapplies its ordinary tools. S1 revokes the
+origin session grant after this cleanup.
 
 Revoking a key, stopping a watch or disabling an owner/tenant/global gate cancels
 queued wakes. Re-enabling does not revive them. Evidence expires after seven days;
 independent byte, row and rate quotas prevent a pending batch growing without bound.
 There are no polling sources, enrollment tools or internal-watch migration in this
 adapter build. Authenticated page hosts use core's signing/registration ports.
+Account erasure removes owned registrations, evidence, pending wakes and owner
+stop controls; the privacy preview includes the watches it will erase.

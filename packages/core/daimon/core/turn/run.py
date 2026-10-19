@@ -1303,6 +1303,7 @@ async def run_prepared_turn_impl(
                             gate = watch_gate
                         stack.enter_context(unattended_sends(gate))
                     else:
+                        stack.enter_context(unattended_sends(None))
                         posture = PolicyApproval(decide=refuse_ungated_confirmation)
                 if selected_path == "legacy":
                     yield posture

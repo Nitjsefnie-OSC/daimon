@@ -12,8 +12,11 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_session_agent_update_param import (
     BetaManagedAgentsSessionAgentUpdateParam,
 )
+from daimon.core.mcp_server_url import is_session_mcp_url, same_mcp_url
 from daimon.core.session_ports_compat import update_session_record
 from daimon.core.stores.domain import TaskContinuationRow
+from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.stores.watches import get_firing, get_watch, watch_seed
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy, classify_tool
 from daimon.core.turn.admission import Admission
@@ -21,6 +24,7 @@ from daimon.core.turn.approvals import RuleLookup, unattended_decider
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from daimon.core.turn.unattended import gate_session_snapshot
+from daimon.core.turn_origin import current_execution_origin_id
 from mux.contracts.ids import Revision, Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -64,12 +68,40 @@ async def require_watch_send(
     platform: str,
     thread_id: str,
 ) -> None:
+    origin_id = current_execution_origin_id.get()
+    if origin_id is None:
+        raise AdmissionDenied(reason="invoker_not_allowed")
     async with sessions() as db:
         seed = await watch_seed(db, row, now=datetime.now(UTC))
         firing = await get_firing(db, row.idempotency_key)
         watch = None if firing is None else await get_watch(db, firing.watch_id)
+        origin = await get_active_origin(
+            db,
+            origin_id=origin_id,
+            tenant_id=tenant_id,
+            account_id=admission.account_id,
+            platform=platform,
+            now=datetime.now(UTC),
+        )
+        live = await get_live_thread_session(
+            db,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread_id,
+            account_id=admission.account_id,
+        )
+
     if (
         seed is None
+        or origin is None
+        or origin.attended
+        or not origin.chat_session_id
+        or live is None
+        or live.ma_session_id != session_id
+        or live.effective_config is None
+        or live.effective_config.chat_session_id != origin.chat_session_id
+        or (origin.parent_channel_id, origin.thread_id, origin.responder_ma_agent_id)
+        != (row.parent_channel_id, thread_id, admission.agent.id)
         or watch is None
         or watch.session_id != session_id
         or (
@@ -106,7 +138,7 @@ async def constrain_session(
     own_servers = {
         s.name
         for s in snapshot.agent.mcp_servers
-        if public_url and s.url.rstrip("/") == public_url.rstrip("/")
+        if public_url and (same_mcp_url(s.url, public_url) or is_session_mcp_url(s.url, public_url))
     }
     tools = [
         tool.model_dump(mode="json")

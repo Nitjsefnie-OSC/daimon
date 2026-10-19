@@ -148,9 +148,11 @@ published TLS port. The proxy image is pinned by digest; the application uses
 `DAIMON_LANE_IMAGE` with `DAIMON_LANE_SHA`, as for other lane services.
 
 `DAIMON_WATCHES__ENABLED` defaults to false. Keep it false until the execution-bound
-origin-grant and non-gateable-cleanup prerequisite is reviewed and merged. The S1
-unattended driver gates and attendance changes are compatible dependencies; their
-presence does not automatically enable watches. A separate core-owned database
+origin-grant prerequisite and watch release are reviewed. Migration `0116_watches`
+follows `0115_origin_session_grants`. Every watch send requires its current
+unattended execution origin to hold the bound session grant; missing, attended or
+mismatched grants refuse dispatch. The S1 cleanup, driver gates and attendance
+changes do not automatically enable watches. A separate core-owned database
 `global` gate also defaults false. Operators must explicitly enable both after the
 release gate; the sidecar cannot edit that database control. Disabling either
 blocks new events and future sends; disabling the durable gate also cancels queued

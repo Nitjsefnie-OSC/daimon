@@ -612,7 +612,10 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         turn_path="legacy",
         tool_safety=ToolSafetyPolicy(enabled=False, unattended_writes=("*",)),
     )
-    snapshot = ma_session(id=registered.session_id, agent=agent)
+    grant = str(uuid.uuid4())
+    snapshot = ma_session(
+        id=registered.session_id, agent=agent, metadata={"daimon_chat_session_id": grant}
+    )
     cached = snapshot_from_retrieved_session(snapshot)
     async with db_session_factory.begin() as db:
         live = await get_live_thread_session(
@@ -706,12 +709,38 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         attended=False,
         watch_row=row,
     )
-    if ending in ("normal", "dead_session"):
-        outcome = await call
-        assert not outcome.recovered
-    else:
-        with pytest.raises(asyncio.CancelledError if ending == "cancelled" else RuntimeError):
-            await call
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.turn_origins import get_active_origin
+    from daimon.core.turn_origin import turn_origin
+
+    async with turn_origin(
+        db_session_factory,
+        tenant_id=registered.tenant_id,
+        account_id=registered.owner_account_id,
+        platform=platform,
+        parent_channel_id=registered.parent_channel_id,
+        thread_id=registered.thread_id,
+        responder_ma_agent_id=registered.agent_id,
+        responder_name="analyst",
+        role=Role.USER,
+        attended=False,
+    ) as origin:
+        if ending in ("normal", "dead_session"):
+            outcome = await call
+            assert not outcome.recovered
+        else:
+            with pytest.raises(asyncio.CancelledError if ending == "cancelled" else RuntimeError):
+                await call
+        async with db_session_factory() as db:
+            cleared = await get_active_origin(
+                db,
+                origin_id=origin.id,
+                tenant_id=registered.tenant_id,
+                account_id=registered.owner_account_id,
+                platform=platform,
+                now=datetime.now(UTC),
+            )
+        assert cleared is not None and not cleared.attended and cleared.chat_session_id is None
     constrain.assert_awaited_once()
     restore.assert_awaited_once()
     replacement.assert_not_awaited()
@@ -824,3 +853,96 @@ async def test_account_erasure_removes_watch_evidence_and_pending_wakes(
         )
     repeated = await purge_account(sm=db_session_factory, account_id=registered.owner_account_id)
     assert repeated.db.watches == 0
+
+
+@pytest.mark.parametrize(
+    "grant_case",
+    ["valid", "missing_execution", "missing_grant", "attended", "other_session", "other_thread"],
+)
+async def test_watch_send_requires_current_unattended_session_grant(
+    db_session_factory, registered, grant_case
+):
+    from daimon.core.continuity.watch_turn import require_watch_send
+    from daimon.core.scope import ResolvedConfig
+    from daimon.core.session_snapshot import (
+        fingerprint_identity,
+        fingerprint_mutable,
+        snapshot_from_retrieved_session,
+    )
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.thread_sessions import get_live_thread_session, record_snapshot
+    from daimon.core.stores.turn_origins import bind_origin_session
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn_origin import execution_origin, turn_origin
+    from daimon.testing import ma_agent, ma_environment, ma_session
+
+    wake_key = await deliver(db_session_factory, event(registered))
+    grant = str(uuid.uuid4())
+    agent = ma_agent(id=registered.agent_id, tenant_id=registered.tenant_id)
+    cached = snapshot_from_retrieved_session(
+        ma_session(
+            id=registered.session_id,
+            agent=agent,
+            metadata={"daimon_chat_session_id": grant},
+        )
+    )
+    async with db_session_factory.begin() as db:
+        row = await get_continuation(db, idempotency_key=wake_key)
+        live = await get_live_thread_session(
+            db,
+            tenant_id=registered.tenant_id,
+            platform="discord",
+            thread_id=registered.thread_id,
+            account_id=registered.owner_account_id,
+        )
+        await record_snapshot(
+            db,
+            id=live.id,
+            snapshot=cached,
+            identity_fingerprint=fingerprint_identity(cached),
+            mutable_fingerprint=fingerprint_mutable(cached),
+        )
+    admission = Admission(
+        account_id=registered.owner_account_id,
+        agent=agent,
+        environment=ma_environment(tenant_id=registered.tenant_id),
+        config=ResolvedConfig(agent_name="analyst", environment_name="test"),
+    )
+    async with turn_origin(
+        db_session_factory,
+        tenant_id=registered.tenant_id,
+        account_id=registered.owner_account_id,
+        platform="discord",
+        parent_channel_id=registered.parent_channel_id,
+        thread_id="other-thread" if grant_case == "other_thread" else registered.thread_id,
+        responder_ma_agent_id=registered.agent_id,
+        responder_name="analyst",
+        role=Role.USER,
+        attended=grant_case == "attended",
+    ) as origin:
+        async with db_session_factory.begin() as db:
+            await bind_origin_session(
+                db,
+                origin_id=origin.id,
+                chat_session_id=None
+                if grant_case == "missing_grant"
+                else str(uuid.uuid4())
+                if grant_case == "other_session"
+                else grant,
+            )
+        with execution_origin(None if grant_case == "missing_execution" else origin.id):
+            call = require_watch_send(
+                db_session_factory,
+                row,
+                admission,
+                session_id=registered.session_id,
+                tenant_id=registered.tenant_id,
+                platform="discord",
+                thread_id=registered.thread_id,
+            )
+            if grant_case == "valid":
+                await call
+            else:
+                with pytest.raises(AdmissionDenied):
+                    await call

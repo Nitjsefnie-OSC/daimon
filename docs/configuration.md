@@ -1368,9 +1368,9 @@ Read from `daimon.core.config.WatchesSettings`. Prefix `DAIMON_WATCHES__`.
 
 `bool` · optional · default `False`
 
-Enable OS-signed page-event watch producers and dispatch. Keep disabled until execution-
-bound unattended origin grants and non-gateable cleanup have shipped. The database
-global gate must also be explicitly enabled by an operator.
+Enable OS-signed page-event watch producers and dispatch. Keep disabled until the
+execution-bound unattended origin grants, non-gateable cleanup and watch release are
+reviewed. The database global gate must also be explicitly enabled by an operator.
 
 ## Private Channel Messages
 
