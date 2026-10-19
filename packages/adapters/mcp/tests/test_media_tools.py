@@ -42,6 +42,7 @@ from daimon.testing.factories import (
     make_ledger_entry,
     make_tenant,
 )
+from daimon.testing.membership import FixtureMembershipResolver
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -291,6 +292,7 @@ async def _registered_billing_mcp(
         sessionmaker=sessionmaker,
         billing_config=None,
         markup=markup,
+        membership_resolver=FixtureMembershipResolver("u1"),
     )
     return mcp
 

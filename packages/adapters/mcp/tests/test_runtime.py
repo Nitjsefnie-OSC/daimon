@@ -15,6 +15,7 @@ def test_mcp_runtime_is_frozen_dataclass_with_required_fields() -> None:
     fields = {f.name for f in dataclasses.fields(McpRuntime)}
     assert fields == {
         "session_factory",
+        "membership_resolver",
         "client",
         "settings",
         "deployment_default",

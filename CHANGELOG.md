@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Access policies that keep the default admin bypass remain readable by older deployments during rolling upgrades.
+
 - Discord private conversations retain operational and billing notices while access denials stay silent. Discovery failures after membership and invoker checks show a generic notice without server or agent names.
 
 - Switching providers preserves supported MCP tools when a sibling needs confirmation; unavailable tools require explicit consent and remain blocked.

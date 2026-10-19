@@ -504,8 +504,9 @@ async def test_tool_turn_sweeps_detached_and_same_session_sweeps_chain() -> None
 
 
 async def test_the_sweep_names_the_turns_person_and_replies_to_their_message() -> None:
-    runtime = MagicMock()
-    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    from .harness import make_bot
+
+    bot = make_bot(MagicMock())
     thread = _thread()
     outcome = RunOutcome(
         TurnState(
