@@ -262,7 +262,9 @@ backend switch and Microsoft mail and invites, policy on or off, and on
 Microsoft file changes with it on, and the routine refuses them. See
 [architecture.md](architecture.md). Stopping or cancelling a routine, or reaching
 its turn ceiling, leaves pending calls paused and interrupts without sending
-confirmations, including on runtimes without session reads.
+confirmations, including on runtimes without session reads. This also holds when
+cancellation arrives while the driver drains a completed decision or a Stop
+winner, or retires confirmation cards.
 
 A routine with a destination sends its trigger message after a
 `<turn_controls>` block (`render_routine_controls` in

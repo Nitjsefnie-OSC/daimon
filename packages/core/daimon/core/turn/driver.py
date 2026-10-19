@@ -204,10 +204,9 @@ USAGE_RECONCILIATION_TIMEOUT_S: float = 30.0
 async def _bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> None:
     """Wait for `task` at most `CLEANUP_BUDGET_S`; cancel it after that.
 
-    Never raises and never waits longer than the budget: `asyncio.wait` with a
-    timeout returns instead of raising, and a task still running then is
-    cancelled and left to unwind on its own — its next await raises
-    `CancelledError`, so it does not linger.
+    Child failures are logged; cancellation of the caller still propagates.
+    `asyncio.wait` returns on timeout, and a task still running then is cancelled
+    and left to unwind on its own.
     """
     done, _pending = await asyncio.wait({task}, timeout=CLEANUP_BUDGET_S)
     if task in done:
@@ -275,7 +274,7 @@ async def _decide_or_refuse_on_cancel(
 
     This function owns the decide task and its cancel waiter. Whatever ends
     the wait — a decision, a cancel, or this coroutine itself being cancelled
-    by the turn ceiling or a caller — the `finally` cancels and joins both, so
+    by the turn ceiling or a caller — cleanup cancels and joins both, so
     a card hook never outlives the turn; the hooks retire their cards on that
     cancellation. An outside cancellation also cleans up pending ids: unattended
     calls stay paused and the session is interrupted; attended calls are refused.
@@ -286,18 +285,55 @@ async def _decide_or_refuse_on_cancel(
         _decide_blocked(tool_confirmation, state, fresh, answered), name="turn.decide_blocked"
     )
     cancel_task = asyncio.create_task(cancel.wait(), name="turn.decide_cancel_waiter")
-    # Set once the wait ends on its own (a decision or the cancel event); if
-    # the `finally` runs with it unset, this coroutine is being torn down from
-    # outside (the turn ceiling, a caller) and pending ids need abort cleanup.
-    settled = False
-    ready = False
+    retire_task: asyncio.Task[None] | None = None
+
+    async def join_children() -> None:
+        for task in (decide_task, cancel_task):
+            if not task.done():
+                task.cancel()
+            await _bounded(task, what="decide_task_join", session_id=session_id)
+
+    async def retire() -> None:
+        nonlocal retire_task
+        # Reuse this task if cancellation interrupts the wait for card cleanup.
+        # _bounded leaves its child alive until the budget expires.
+        if retire_task is None:
+            retire_task = asyncio.create_task(
+                _retire_unsent(
+                    tuple(
+                        result.retire_unsent
+                        for result in answered.values()
+                        if result.allow and result.retire_unsent is not None
+                    ),
+                    session_id=session_id,
+                ),
+                name="turn.retire_unsent_confirmations",
+            )
+        await _bounded(retire_task, what="retire_unsent_confirmations", session_id=session_id)
+
+    async def abort() -> None:
+        await join_children()
+        await retire()
+        await _bounded(
+            asyncio.create_task(
+                _refuse_blocked(
+                    io,
+                    session_id,
+                    fresh,
+                    message="This turn ended before the call was approved; it did not run.",
+                    interrupt_unattended=True,
+                ),
+                name="turn.refuse_blocked",
+            ),
+            what="deadline_refusal",
+            session_id=session_id,
+        )
+
     try:
         await asyncio.wait({decide_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
-        settled = True
         if decide_task.done() and not cancel.is_set():
             events = decide_task.result()
-            ready = True
-            return _DecisionBatch(
+            batch = _DecisionBatch(
                 events,
                 tuple(
                     result.retire_unsent
@@ -305,59 +341,33 @@ async def _decide_or_refuse_on_cancel(
                     if result.allow and result.retire_unsent is not None
                 ),
             )
-    finally:
-        # Cleanup is bounded: a card hook retiring its card, or the deny
-        # below, talks to a chat API or MA, and an outage there must not hold
-        # the turn past its ceiling or a Stop. Each step gets
-        # `CLEANUP_BUDGET_S`, then is cancelled and abandoned.
-        for task in (decide_task, cancel_task):
-            if not task.done():
-                task.cancel()
-            await _bounded(task, what="decide_task_join", session_id=session_id)
-        if not ready:
-            await _bounded(
-                asyncio.create_task(
-                    _retire_unsent(
-                        tuple(
-                            result.retire_unsent
-                            for result in answered.values()
-                            if result.allow and result.retire_unsent is not None
-                        ),
-                        session_id=session_id,
-                    ),
-                    name="turn.retire_unsent_confirmations",
+            await join_children()
+            return batch
+        await join_children()
+        await retire()
+        await _bounded(
+            asyncio.create_task(
+                _refuse_blocked(
+                    io,
+                    session_id,
+                    fresh,
+                    message="The user stopped this turn; the call did not run.",
                 ),
-                what="retire_unsent_confirmations",
-                session_id=session_id,
-            )
-        if not settled:
-            await _bounded(
-                asyncio.create_task(
-                    _refuse_blocked(
-                        io,
-                        session_id,
-                        fresh,
-                        message="This turn ended before the call was approved; it did not run.",
-                        interrupt_unattended=True,
-                    ),
-                    name="turn.refuse_blocked",
-                ),
-                what="deadline_refusal",
-                session_id=session_id,
-            )
-    await _bounded(
-        asyncio.create_task(
-            _refuse_blocked(
-                io,
-                session_id,
-                fresh,
-                message="The user stopped this turn; the call did not run.",
+                name="turn.refuse_blocked",
             ),
-            name="turn.refuse_blocked",
-        ),
-        what="stop_refusal",
-        session_id=session_id,
-    )
+            what="stop_refusal",
+            session_id=session_id,
+        )
+    except BaseException:
+        # Cancellation can first arrive during any cleanup await, after the
+        # decision has already settled. Keep the entire handoff inside this
+        # handler, and finish bounded abort cleanup even on repeated cancellation.
+        abort_task = asyncio.create_task(abort(), name="turn.decision_abort")
+        while not abort_task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(abort_task)
+        abort_task.result()
+        raise
     raise _InterruptInConsume()
 
 

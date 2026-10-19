@@ -1068,7 +1068,11 @@ unattended wakes, and future watches or completion turns), this also covers
 dead-session recovery. Platform queue dispatchers explicitly mark timers and
 worker-completion wakes unattended. User-initiated handoffs and private-input
 continuations retain their attended approval surfaces. Managed Agents runtimes refresh
-the snapshot before **every** confirmation batch. A non-Anthropic runtime, or an injected mux
+the snapshot before **every** confirmation batch. Decision-task joins and card
+retirement remain inside the driver's abort boundary:
+an outside cancellation, including one during Stop cleanup, finishes bounded,
+shielded interruption and leaves unattended calls unanswered before propagating.
+A non-Anthropic runtime, or an injected mux
 backend without a session read, refuses every unattended confirmation with
 a plain explanation that it cannot refresh the tool safety gate. This rule
 applies with safety on or off; the model receives a denial and the turn can

@@ -3626,17 +3626,31 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
 
 
 @pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
-@pytest.mark.parametrize("abort", ["stop", "cancel", "ceiling", "normal"])
+@pytest.mark.parametrize(
+    "abort,boundary",
+    [
+        ("stop", "pending"),
+        ("cancel", "pending"),
+        ("ceiling", "pending"),
+        ("normal", "pending"),
+        ("cancel", "decision_join"),
+        ("ceiling", "decision_join"),
+        ("cancel", "stop_join"),
+        ("ceiling", "stop_join"),
+    ],
+)
 async def test_prepared_runtime_without_session_reads_aborts_without_confirmations(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     replay: bool,
     abort: str,
+    boundary: str,
 ) -> None:
     """Exercise the actual prepared non-gateable context and real driver/transport."""
     from daimon.core.mux_backend import managed_agents, resource_ref
     from daimon.core.tool_safety import ToolCall
+    from daimon.core.turn import driver
     from daimon.core.turn.posture import ToolConfirmationResult
     from daimon.core.turn.prepare import admitted_session_scope
     from daimon.core.turn.unattended import refuse_ungated_confirmation
@@ -3723,10 +3737,22 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
     )
     entered = asyncio.Event()
     cancel = asyncio.Event()
+    joining = asyncio.Event()
+    original_bounded = driver._bounded
+
+    async def bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> None:
+        if boundary != "pending" and what == "decide_task_join" and not joining.is_set():
+            # First outside cancellation lands after the decision race, while
+            # joining either a completed refusal or the Stop-cancelled decider.
+            joining.set()
+            await asyncio.Event().wait()
+        await original_bounded(task, what=what, session_id=session_id)
+
+    monkeypatch.setattr(driver, "_bounded", bounded)
 
     async def refusal(call: ToolCall) -> ToolConfirmationResult:
         entered.set()
-        if abort != "normal":
+        if abort != "normal" and boundary != "decision_join":
             await asyncio.Event().wait()
         return await refuse_ungated_confirmation(call)
 
@@ -3750,9 +3776,12 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
         )
     )
     await asyncio.wait_for(entered.wait(), timeout=5)
-    if abort == "stop":
+    if abort == "stop" or boundary == "stop_join":
         cancel.set()
-    elif abort == "cancel":
+    if boundary != "pending":
+        await asyncio.wait_for(joining.wait(), timeout=5)
+        assert not turn.done()
+    if abort == "cancel":
         turn.cancel()
     if abort == "cancel":
         with pytest.raises(asyncio.CancelledError):
@@ -3768,6 +3797,15 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
     else:
         assert confirmations == []
         assert any(event["type"] == "user.interrupt" for event in sent)
+
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and task.get_name().startswith(
+            ("turn.decide", "turn.retire_unsent", "turn.refuse_blocked", "turn.decision_abort")
+        )
+    ]
 
 
 @pytest.mark.parametrize(

@@ -144,7 +144,8 @@ In-process unattended runs leave pending calls paused and interrupt the session
 when a decision is cancelled, its turn ceiling expires, or its confirmation
 gate fails. Stop, cancellation and ceiling cleanup send no confirmations, including
 on runtimes without a confirmation gate. Those runtimes still refuse unattended
-confirmations during a normal, uninterrupted decision.
+confirmations during a normal, uninterrupted decision. Cancellation during decision-task
+or card cleanup also finishes bounded interrupt cleanup before propagating.
 
 Reading a session never answers a tool call. If the service restarts while an
 agent-chat turn waits on one, the turn stays paused, and `get_session` and
