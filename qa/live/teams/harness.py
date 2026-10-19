@@ -42,7 +42,7 @@ def _graph_path(path: str) -> tuple[str, str]:
     for prefix in ("/v1.0/", "/beta/"):
         if path.startswith(prefix):
             version, path = prefix.strip("/"), path[len(prefix) - 1 :]
-    if not path.startswith("/") or "://" in path or _escapes(path.split("?", 1)[0]):
+    if not path.startswith("/") or "://" in path or "#" in path or _escapes(path.split("?", 1)[0]):
         raise ValueError("invalid_path")
     return version, path
 

@@ -136,6 +136,7 @@ async def test_the_team_library_takes_uploads_only(
         "/groups/{team}/drive/%252e%252e/x/content",
         "/teams/{team}/channels/a%2F..%2Fb/messages",
         "/teams/{team}/channels/a%2Fb/messages",
+        "/groups/{team}/drive/root:/x%3A/invite#:/content",
     ],
 )
 @pytest.mark.asyncio
