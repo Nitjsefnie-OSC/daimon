@@ -38,7 +38,8 @@ _CHANNEL_READS = {"slack": "read_channel, read_thread, get_message, search_messa
 #: Appended to the controls' prose whenever `words` is present.
 WORDS_SENTENCE = (
     " When you tell a person how to reach a Daimon command or who can change a setting, "
-    "use `words` from these controls, never a command from another platform."
+    "use `words` from these controls, never a command from another platform. Saying how "
+    "to do something, where to do it or who can is not a setup detail: answer it for anyone."
 )
 _TEAMS_CHANNEL_SUFFIXES = ("@thread.tacv2", "@thread.skype")
 current_origin_id: ContextVar[uuid.UUID | None] = ContextVar("turn_origin_id", default=None)
