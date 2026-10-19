@@ -6,10 +6,10 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -46,6 +46,7 @@ from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_ledger_entry, make_tenant
 from daimon.testing.ma import build_fake_anthropic, combine_handlers, make_fake_memory_store_handler
 from daimon.testing.ma_models import ma_session
+from daimon.testing.membership import FixtureMembershipResolver
 from fastmcp.server.context import Context
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -179,6 +180,7 @@ async def _setup(
             api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport))
         )
     deps = TurnDeps(
+        membership_resolver=FixtureMembershipResolver("42"),
         anthropic=client,
         sessionmaker=sessionmaker,
         deployment_default=DeploymentDefault(agent_name="test-agent", environment_name="test-env"),
@@ -382,7 +384,7 @@ async def test_discord_refuses_a_departed_member_before_running_a_dm(
     bot = MagicMock()
     bot.draining = False
     bot.runtime.sessionmaker = db_session_factory
-    bot.runtime.turn_deps = deps
+    bot.runtime.turn_deps = replace(deps, membership_resolver=FixtureMembershipResolver())
     bot.get_guild.return_value = None
     message = MagicMock(spec=discord.Message)
     message.author.bot = False
@@ -392,7 +394,8 @@ async def test_discord_refuses_a_departed_member_before_running_a_dm(
     message.channel.send = AsyncMock()
     await DirectMessageCog(bot).on_message(message)
     assert not created
-    message.channel.send.assert_awaited_once()
+    # Revoked membership is a silent private-route denial.
+    message.channel.send.assert_not_awaited()
 
 
 async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_error(
@@ -400,12 +403,21 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
 ):
     tenant, deps, admission, *_ = await _setup(db_session, db_session_factory)
     await _start(tenant, deps, admission)
-    runtime = MagicMock()
-    runtime.sessionmaker = db_session_factory
-    runtime.turn_deps = deps
-    runtime.settings.discord.max_concurrent_turns = 1
-    runtime.settings.turn_queue = TurnQueueSettings()
-    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    settings = MagicMock()
+    settings.discord.max_concurrent_turns = 1
+    settings.turn_queue = TurnQueueSettings()
+    runtime = DiscordRuntime(
+        settings=settings,
+        anthropic=deps.anthropic,
+        sessionmaker=db_session_factory,
+        notebook_rate_limiter=MagicMock(),
+        billing_config=None,
+        deployment_default=deps.deployment_default,
+        resolver_cache=deps.resolver_cache,
+        turn_deps=deps,
+    )
+    bot = DaimonBot(runtime=runtime, intents=discord.Intents.default())
+    bot.runtime = replace(bot.runtime, turn_deps=deps)
     guild = MagicMock(spec=discord.Guild)
     member = MagicMock(spec=discord.Member)
     member.id = 42
@@ -447,7 +459,8 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
     with (
         patch.object(bot, "get_guild", return_value=guild),
         patch(
-            "daimon.adapters.discord.commands.direct_messages.reply_to_dm", side_effect=slow_reply
+            "daimon.adapters.discord.commands.direct_messages.reply_to_dm",
+            side_effect=slow_reply,
         ),
     ):
         first = asyncio.create_task(DirectMessageCog(bot).on_message(message(1)))
@@ -530,12 +543,21 @@ async def test_discord_drain_stops_a_running_dm_and_never_starts_a_queued_one(
     db_session_factory = async_sessionmaker(engine, expire_on_commit=False)
     tenant, deps, admission, sent, *_ = await _setup(db_session, db_session_factory)
     route = await _start(tenant, deps, admission)
-    runtime = MagicMock()
-    runtime.sessionmaker = db_session_factory
-    runtime.turn_deps = deps
-    runtime.settings.discord.max_concurrent_turns = 1
-    runtime.settings.turn_queue = TurnQueueSettings()
-    bot = DaimonBot(runtime=cast(DiscordRuntime, runtime), intents=discord.Intents.default())
+    settings = MagicMock()
+    settings.discord.max_concurrent_turns = 1
+    settings.turn_queue = TurnQueueSettings()
+    runtime = DiscordRuntime(
+        settings=settings,
+        anthropic=deps.anthropic,
+        sessionmaker=db_session_factory,
+        notebook_rate_limiter=MagicMock(),
+        billing_config=None,
+        deployment_default=deps.deployment_default,
+        resolver_cache=deps.resolver_cache,
+        turn_deps=deps,
+    )
+    bot = DaimonBot(runtime=runtime, intents=discord.Intents.default())
+    bot.runtime = replace(bot.runtime, turn_deps=deps)
     bot.close = AsyncMock()  # type: ignore[method-assign]
     guild = MagicMock(spec=discord.Guild)
     member = MagicMock(spec=discord.Member)

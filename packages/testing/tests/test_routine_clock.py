@@ -21,6 +21,7 @@ from daimon.core.stores.routines import create_routine, get_routine, record_resu
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.discord_surface import DiscordSurfaceHarness, OfflineDiscordGateway
 from daimon.testing.factories import make_tenant
+from daimon.testing.membership import FixtureMembershipResolver
 from daimon.testing.routine_clock import (
     ClockedRoutineJobs,
     LongWaitUnavailable,
@@ -208,6 +209,7 @@ async def _bound(
         fetch_channel=fetch,
         open_dm=dm,
         dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=FixtureMembershipResolver("103"),
     )
     jobs = ClockedRoutineJobs(
         sessionmaker=sm,

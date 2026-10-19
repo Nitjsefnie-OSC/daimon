@@ -18,6 +18,7 @@ import os
 import re
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -44,6 +45,7 @@ from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
 )
+from daimon.testing.membership import FixtureMembershipResolver
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _AGENT_TEXT = "Hello from the agent!"
@@ -104,6 +106,11 @@ def _make_bot(runtime: DiscordRuntime) -> DaimonBot:
     intents = discord.Intents.default()
     intents.message_content = True
     bot = DaimonBot(runtime=runtime, intents=intents)
+    bot.membership_resolver = FixtureMembershipResolver("111")  # type: ignore[assignment]
+    bot.runtime = replace(
+        bot.runtime,
+        turn_deps=replace(bot.runtime.turn_deps, membership_resolver=bot.membership_resolver),
+    )
     bot._connection.user = MagicMock(spec=discord.ClientUser)  # pyright: ignore[reportPrivateUsage]
     bot._connection.user.id = 999  # pyright: ignore[reportPrivateUsage]
     bot._connection.user.mentioned_in = MagicMock(return_value=True)  # pyright: ignore[reportPrivateUsage]
