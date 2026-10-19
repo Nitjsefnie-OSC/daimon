@@ -79,7 +79,7 @@ def build_cascade_preview_container(
         "📋 **What is intentionally kept elsewhere**",
         "",
         "-# Usage records are retained for service integrity and cannot be erased on request.",
-        "-# Uploaded skill files stay in Managed Agents; guild agents may keep using them.",
+        "-# Uploaded skill files stay in Managed Agents; shared agents may keep using them.",
         "-# The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications.",
         "",

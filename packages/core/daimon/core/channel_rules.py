@@ -151,7 +151,7 @@ def render_rule_refusal(
     name = agent_name or "the agent answering here"
     match reason:
         case "admin_required":
-            return "Only a server or workspace admin can change channel and agent rules."
+            return "Only an admin can change channel and agent rules."
         case "invalid":
             return "That rule can't be set there."
         case "own_on_both":

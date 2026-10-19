@@ -153,7 +153,7 @@ def check_backend(
     """Admit `revision`, or raise `BackendUnsupported`."""
     if enabled_backends is not None and not backend_is_enabled(revision.backend, enabled_backends):
         log_backend_unsupported("workspace_policy", reason="backend_not_enabled", revision=revision)
-        raise BackendUnsupported("This backend is not enabled for this workspace.")
+        raise BackendUnsupported("This backend is not enabled here.")
     try:
         admission = admit(revision, get_profile(revision.profile))
     except (UnsupportedCapability, InvalidConfig) as err:

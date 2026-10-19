@@ -332,5 +332,5 @@ async def test_only_a_text_that_asks_for_an_admin_gets_the_line(
     runtime = await _named_runtime(db_session_factory, installs={TEAM: "Leads"})
     asked = await with_admin_team_if_asked(runtime, "Daimon can't reply here.\n\nAsk an admin.")
     assert asked.endswith("\n\nAdmins are the owners of the Leads team.")
-    for text in ("Too many chats are in flight right now.", "Cancelling the administration."):
+    for text in ("Too many chats at once right now.", "Cancelling the administration."):
         assert await with_admin_team_if_asked(runtime, text) == text

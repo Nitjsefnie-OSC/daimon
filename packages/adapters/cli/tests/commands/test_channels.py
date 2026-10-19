@@ -143,7 +143,7 @@ async def test_add_list_and_remove_a_channel_skill_audited(
     args = {"rt": rt, "console": console, "platform": "slack", "workspace_id": "T1"}
 
     await channels_skills_add(**args, channel_id="C1:1717.5", skill="pdf-tools")
-    with pytest.raises(DaimonError, match="No skill of this workspace"):
+    with pytest.raises(DaimonError, match="No skill here"):
         await channels_skills_add(**args, channel_id="C1", skill="missing")
     json_console = _console()
     await channels_skills_list(**{**args, "console": json_console}, channel_id=None, as_json=True)

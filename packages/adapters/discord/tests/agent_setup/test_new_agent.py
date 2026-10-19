@@ -516,7 +516,7 @@ async def test_real_discord_name_collision_is_rendered_without_a_sentry_capture(
     interaction.followup.send.assert_called_once()
     message = interaction.followup.send.call_args.args[0]
     assert message.startswith(
-        "This workspace already has an agent with that name. Pick a different name.\n\n-# Ref "
+        "This server already has an agent with that name. Pick a different name.\n\n-# Ref "
     ), "the caller sees the reason and a short ref, without an exception body"
 
 

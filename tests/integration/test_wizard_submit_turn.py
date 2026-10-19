@@ -1191,7 +1191,7 @@ async def test_a_submit_over_the_per_tenant_cap_with_a_full_queue_runs_no_turn_a
         for call in channel.send.call_args_list
         if call.args and isinstance(call.args[0], str)
     ]
-    assert any("recorded" in text and "in flight" in text for text in posted_texts), (
+    assert any("recorded" in text and "chats at once" in text for text in posted_texts), (
         f"the refusal must say the answers were recorded and the server is busy, "
         f"got: {posted_texts}"
     )

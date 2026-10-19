@@ -529,7 +529,7 @@ async def remove_agent_repo(
 
 _ACCESS_RANK = {"none": 0, "read": 1, "write": 2}
 
-SERVER_WIDE_GRANT_MESSAGE = "Only a server admin can add a repo connected for the whole server."
+SERVER_WIDE_GRANT_MESSAGE = "Only an admin can add a repo connected for everyone here."
 
 
 async def require_may_grant(

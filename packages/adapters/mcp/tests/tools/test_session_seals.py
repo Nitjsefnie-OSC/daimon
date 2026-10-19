@@ -882,6 +882,6 @@ async def test_a_signed_bearer_is_refused_when_the_policy_cannot_be_read(world: 
         )
 
     assert result["result"].get("isError"), result
-    assert "access settings can't be read" in str(result), result
+    assert "access settings here can't be read" in str(result), result
     create.assert_not_awaited()
     assert world.sent == []

@@ -33,16 +33,17 @@ from daimon.adapters.teams.setup_card import PAGE_SIZE as TEAMS_PAGE_SIZE
 from daimon.core.agent_detail_lists import DETAIL_LIST_COLLAPSED_COUNT
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.platform_words import words_for
 from daimon.core.routing_facts import (
-    PRECEDENCE_LINE,
     UNROUTED_LINE,
     build_routing_request,
     build_unrouted_note,
+    precedence_line,
 )
 from daimon.core.scope import ChannelScopeRef, TenantScopeRef
 from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, shared_keys_sentence
 from daimon.core.stores.agent_files import put_agent_file
-from daimon.core.stores.domain import Platform
+from daimon.core.stores.domain import ChatPlatform, Platform
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing import ma_agent, tenant_metadata
 from daimon.testing.factories import make_tenant
@@ -765,7 +766,8 @@ async def test_who_answers_where_states_the_precedence_and_the_routing_request(
     )
     label = _REQUEST_LABEL.get(driver.param_id, _CHANNEL_LABEL)
     request = build_routing_request(agent_name=_UNROUTED, channel_label=label)
-    assert routing.says(f"{PRECEDENCE_LINE} Tell Daimon: {request}"), (
+    rule = precedence_line(words_for(cast(ChatPlatform, driver.param_id)).space)
+    assert routing.says(f"{rule} Tell Daimon: {request}"), (
         f"{driver.param_id}: the map states the rule, then the request that acts on it"
     )
     here = _HERE.get(driver.param_id, _CHANNEL_LABEL)

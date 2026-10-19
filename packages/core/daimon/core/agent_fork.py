@@ -243,7 +243,7 @@ async def copy_agent(
             "This agent has an agent rule limiting where it runs, so it can't be copied."
         )
     if not decision:
-        raise UserFacingError("Only a workspace or server admin can copy an agent.")
+        raise UserFacingError("Only an admin can copy an agent.")
     source_ma = await retrieve_agent(
         anthropic, source.id, scope=resource_scope(tenant_id=str(tenant_id))
     )
@@ -387,7 +387,7 @@ async def fork_host_agent(
                 "This agent has an agent rule limiting where it runs, so it can't be copied."
             )
         if not decision:
-            raise UserFacingError("Only a workspace or server admin can copy an agent.")
+            raise UserFacingError("Only an admin can copy an agent.")
 
     await recheck(source.revision.agent)
     made = await host.fork(

@@ -22,7 +22,7 @@ from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.mux_backend import resource_scope
 from daimon.core.permissions import dm_source_limited, limited_ids
-from daimon.core.platform_words import words_for
+from daimon.core.platform_words import space_for, words_for
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import (
@@ -372,7 +372,9 @@ async def reply_to_dm(
         async with deps.sessionmaker() as session:
             tenant = await get_tenant(session, conversation.tenant_id)
         if tenant is None or tenant.archived_at is not None or tenant.provision_status != "ready":
-            raise UserFacingError("This workspace is not available. No DM turn was started.")
+            raise UserFacingError(
+                f"This {space_for(platform)} is not available. No DM turn was started."
+            )
         await _require_source_still_unsealed(deps, conversation)
         admission = await admit(
             deps,

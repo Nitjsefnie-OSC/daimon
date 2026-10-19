@@ -259,7 +259,7 @@ async def test_a_full_tenant_queue_refuses_with_the_plain_notice(queued_bot: Dai
     await queued_bot.on_message(message)
 
     message.channel.send.assert_awaited_once_with(  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-        "This server has too many chats in flight right now — try again in a moment."
+        "This server has too many chats at once right now — try again in a moment."
     )
 
 

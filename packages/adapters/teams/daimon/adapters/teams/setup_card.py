@@ -25,8 +25,9 @@ from daimon.core.github_panel import GrantsPanel
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
+from daimon.core.platform_words import words_for
 from daimon.core.roster import Page, Roster, RosterAgent
-from daimon.core.routing_facts import PRECEDENCE_LINE, build_routing_request
+from daimon.core.routing_facts import build_routing_request, precedence_line
 from daimon.core.scope import AnsweringPlace
 from daimon.core.setup_conversations import (
     EMPTY_ROSTER_COPY,
@@ -361,7 +362,7 @@ def routing_card(
     request = build_routing_request(
         agent_name=request_agent or "an agent", channel_label="a channel"
     )
-    body.append(_text(f"{PRECEDENCE_LINE} {lead}{request}", subtle=True))
+    body.append(_text(f"{precedence_line(words_for('teams').space)} {lead}{request}", subtle=True))
     actions: list[Action] = [*_pager(page, "routing"), _button("Back", "agents")]
     if changes_channels:
         settings = OpenDialogData(CHANNEL_DIALOG)

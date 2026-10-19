@@ -94,7 +94,7 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     kept_text = (
         "📋 *What is intentionally kept elsewhere*\n\n"
         "• Usage records are retained for service integrity and cannot be erased on request.\n"
-        "• Uploaded skill files stay in Managed Agents; guild agents may keep using them.\n"
+        "• Uploaded skill files stay in Managed Agents; shared agents may keep using them.\n"
         "• The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications."
     )
@@ -336,7 +336,7 @@ def build_post_delete_view(
     rows += [
         "",
         "• Usage records are retained for service integrity and cannot be erased on request.",
-        "• Uploaded skill files stay in Managed Agents; guild agents may keep using them.",
+        "• Uploaded skill files stay in Managed Agents; shared agents may keep using them.",
         "• The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications.",
     ]

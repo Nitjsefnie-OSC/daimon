@@ -57,7 +57,7 @@ from daimon.core.config import TurnSettings
 from daimon.core.github_repo_auth import RepoAccess, RepoAccessKind
 from daimon.core.models_catalog import list_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
-from daimon.core.routing_facts import PRECEDENCE_LINE, UNROUTED_LINE
+from daimon.core.routing_facts import UNROUTED_LINE, precedence_line
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
 from daimon.core.stores.domain import (
     AgentFileRow,
@@ -986,7 +986,9 @@ def test_routing_view_renders_channel_mentions_not_raw_ids_and_names_deployment_
     assert "_Not used while a workspace default is set._" in rendered, (
         "a workspace default consumes the deployment fall-through, and the view says so"
     )
-    assert PRECEDENCE_LINE in rendered, "the precedence rule is stated once, from the core"
+    assert precedence_line("workspace") in rendered, (
+        "the precedence rule is stated once, from the core"
+    )
     assert "Tell Daimon: Make research-bot answer in <#C0HERE1111>." in rendered, (
         "an admin gets the request in their own voice"
     )

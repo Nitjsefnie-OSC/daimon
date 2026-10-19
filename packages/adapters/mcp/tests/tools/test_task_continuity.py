@@ -403,7 +403,7 @@ async def test_handoff_refuses_an_agent_nobody_can_reach_and_writes_nothing(
         responder_name="daimon",
         role=Role.USER,
     ) as origin:
-        with pytest.raises(ToolError, match="does not answer anywhere in this workspace"):
+        with pytest.raises(ToolError, match="does not answer anywhere here"):
             await _hand_off_task_impl(
                 runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
             )

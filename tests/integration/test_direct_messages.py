@@ -315,7 +315,7 @@ async def test_new_selection_resets_scope_and_rejects_a_stale_membership_check(
     )
     new = await _start(other, new_deps, new_admission, workspace="456", context="new source")
     assert new.scope_id != old.scope_id
-    with pytest.raises(DaimonError, match="workspace changed"):
+    with pytest.raises(DaimonError, match="private conversation changed"):
         await _reply(deps, old, message_id="late-event", role=Role.ADMIN)
     await _reply(new_deps, new, message_id="new-event")
     assert "old private text" not in json.dumps(new_sent[-1])

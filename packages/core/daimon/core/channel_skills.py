@@ -83,7 +83,7 @@ _TRUNCATED = re.compile(r"~[0-9a-f]{4}$")
 ChannelSkillRefusal = Literal["not_found", "not_usable", "no_version", "too_many", "mount_clash"]
 
 REFUSALS: Final[dict[ChannelSkillRefusal, str]] = {
-    "not_found": "No skill of this workspace has that name or id. Nothing changed.",
+    "not_found": "No skill here has that name or id. Nothing changed.",
     "not_usable": (
         "That skill was uploaded to an agent that doesn't answer in this channel, so the "
         "channel can't add it. Nothing changed."

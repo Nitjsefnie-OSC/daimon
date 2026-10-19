@@ -1229,7 +1229,7 @@ async def test_real_cap_admin_three_admissions_wait_then_release(
                 for p in waiting.ingress.posts
             )
             assert all("Queued" not in post_text(waiting, m["id"]) for m in messages[:2])
-            assert not re.search(r"(?i)too many chats in flight|try again later", text)
+            assert not re.search(r"(?i)too many chats at once|try again later", text)
             clock.advance(29)
             one.release.set()
             three = await wire.running(3)

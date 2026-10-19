@@ -216,6 +216,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.output_delivery import NoticedFiles
+from daimon.core.platform_words import words_for
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role, TaskContinuationRow
@@ -283,7 +284,9 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger()
-TENANT_CAP_NOTICE = "This workspace has too many chats in flight right now — try again in a moment."
+TENANT_CAP_NOTICE = (
+    f"This {words_for('slack').space} has too many chats at once right now — try again in a moment."
+)
 
 # Grace window for graceful shutdown drain. Must be strictly less
 # than the deployment's 60s kill timeout to leave headroom for client.close()

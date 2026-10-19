@@ -389,7 +389,7 @@ async def test_set_channel_rule_refuses_or_copies_and_releases(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     world, runtime = await _world(committing_sessionmaker, keep_own=False)
-    with pytest.raises(ToolError, match="Only a server or workspace admin"):
+    with pytest.raises(ToolError, match="Only an admin"):
         await _set_channel_rule_impl(
             runtime, world.auth(admin=False), channel_id=ROOM, readers="own", writers="own"
         )

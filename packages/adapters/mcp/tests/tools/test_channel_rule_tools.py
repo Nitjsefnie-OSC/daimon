@@ -140,7 +140,7 @@ async def test_set_agent_rule_needs_a_server_admin_and_an_agent(
 ) -> None:
     tenant_id, account_id, runtime = await _world(committing_sessionmaker)
     member = _auth(tenant_id, account_id)
-    with pytest.raises(ToolError, match="Only a server or workspace admin"):
+    with pytest.raises(ToolError, match="Only an admin"):
         await _set_agent_rule_impl(runtime, member, agent_name="own", runs_in=[ROOM])
     admin = _auth(tenant_id, account_id, admin=True)
     with pytest.raises(ToolError, match="There is no agent named ghost"):

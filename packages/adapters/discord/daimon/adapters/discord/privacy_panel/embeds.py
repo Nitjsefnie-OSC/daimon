@@ -31,7 +31,7 @@ def build_post_delete_container(
     if result.db.github_user_links > 0:
         rows.append(f"-# ✓ {result.db.github_user_links} GitHub user link(s) removed")
     if result.db.mcp_tokens > 0:
-        rows.append(f"-# ✓ {result.db.mcp_tokens} per-agent MCP token(s) revoked")
+        rows.append(f"-# ✓ {result.db.mcp_tokens} per-agent connection token(s) revoked")
     if result.db.accounts > 0:
         rows.append("-# ✓ Account row removed")
     if result.sessions.deleted > 0:
@@ -48,7 +48,7 @@ def build_post_delete_container(
     rows += [
         "",
         "-# Usage records are retained for service integrity and cannot be erased on request.",
-        "-# Uploaded skill files stay in Managed Agents; guild agents may keep using them.",
+        "-# Uploaded skill files stay in Managed Agents; shared agents may keep using them.",
         "-# The GitHub-side OAuth authorization stays on your GitHub account"
         " — revoke it at github.com/settings/applications.",
     ]

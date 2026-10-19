@@ -181,7 +181,7 @@ async def test_server_repo_settings_clamp_live_access_and_disconnect(
     overview = await connected_summary(db_session, tenant_id=tenant_id)
     assert overview.count == 2 and overview.owners == ("example",)
     assert overview.agent_count == 1
-    with pytest.raises(ValueError, match="Only a server"):
+    with pytest.raises(ValueError, match="Only an admin"):
         await set_repo_ability(
             db_session, tenant_id=tenant_id, repo_id=101, ability="read", account_id=member_id
         )
@@ -397,7 +397,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         )
     )
     await db_session.flush()
-    with pytest.raises(ValueError, match="workspace admin"):
+    with pytest.raises(ValueError, match="Only an admin"):
         await connect_link(
             db_session,
             settings=settings,
@@ -409,7 +409,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
     account = await db_session.get(Account, member_id)
     assert account is not None
     assert account.role == "user"
-    with pytest.raises(ValueError, match="workspace admin"):
+    with pytest.raises(ValueError, match="Only an admin"):
         await sync_connect_admin(
             db_session,
             tenant_id=tenant_id,
@@ -439,7 +439,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
         platform_user_id="former-holder",
         verified_tenant_admin=True,
     )
-    with pytest.raises(ValueError, match="workspace admin"):
+    with pytest.raises(ValueError, match="Only an admin"):
         await connect_link(
             db_session,
             settings=settings,

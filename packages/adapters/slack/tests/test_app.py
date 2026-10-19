@@ -6016,7 +6016,7 @@ async def test_ceiling_breach_releases_tenant_slot_and_thread_flag(
         for (_, url), reqs in fake_slack_web_client.mock.requests.items()
         if url == URL("https://slack.com/api/chat.postEphemeral")
         for req in reqs
-        if "too many chats in flight" in req.kwargs["json"].get("text", "")
+        if "too many chats at once" in req.kwargs["json"].get("text", "")
     ]
     assert shed_ephemeral == [], (
         "the second mention must not receive the concurrency-shed ephemeral notice"

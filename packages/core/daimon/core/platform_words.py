@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
-from daimon.core.stores.domain import ChatPlatform
+from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
 
 #: Where a message was sent: a private chat with Daimon, a channel, or a group chat.
 Place = Literal["dm", "channel", "group"]
@@ -31,6 +31,11 @@ Action = Literal[
     "support",
     "help",
 ]
+
+#: What a caller with no chat platform (the CLI, an MCP client) is told: no platform's
+#: own word, and no command.
+NEUTRAL_SPACE = "workspace"
+NEUTRAL_ADMIN = "an admin"
 
 #: Where a command works: anywhere, only in a channel of the space, or only in a private chat.
 Reach = Literal["anywhere", "space", "chat"]
@@ -194,6 +199,11 @@ WORDS: Mapping[ChatPlatform, PlatformWords] = MappingProxyType(
 
 def words_for(platform: ChatPlatform) -> PlatformWords:
     return WORDS[platform]
+
+
+def space_for(platform: str | None) -> str:
+    """The platform's word for its space; the neutral one for a caller with no chat platform."""
+    return words_for(platform).space if platform in CHAT_PLATFORMS else NEUTRAL_SPACE
 
 
 def turn_words(platform: ChatPlatform, *, place: Place) -> dict[str, str]:

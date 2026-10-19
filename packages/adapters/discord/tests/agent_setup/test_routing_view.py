@@ -30,13 +30,15 @@ from daimon.core.answering_map import AnsweringMap, ChannelAnswer, SetupThreadRe
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent, paginate
-from daimon.core.routing_facts import PRECEDENCE_LINE
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import build_stub_anthropic
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession
+
+PRECEDENCE_LINE = "A channel's own choice beats the server default."
+
 
 _SET_AT = dt.datetime(2026, 2, 1, tzinfo=dt.UTC)
 
