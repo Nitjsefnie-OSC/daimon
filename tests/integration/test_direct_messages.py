@@ -38,6 +38,7 @@ from daimon.core.stores.direct_messages import (
 )
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn_queue import TurnQueue
@@ -192,6 +193,7 @@ async def _setup(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     admission = await admit(
         deps,
@@ -1283,6 +1285,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
             agent_uuid=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=admission.agent.id),
             session_factory=db_session_factory,
             mcp_settings=deps.mcp,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
         # Retired bearer families fail authentication, even with a valid signature.
         for legacy in (
