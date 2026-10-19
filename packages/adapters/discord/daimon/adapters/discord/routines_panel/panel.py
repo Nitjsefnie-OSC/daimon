@@ -166,6 +166,7 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                     session,
                     row.id,
                     tenant_id=row.tenant_id,
+                    expected_updated_at=row.updated_at,
                     destination_kind="dm" if self.values[0] == "dm" else None,
                     clear_destination=self.values[0] == "none",
                 )

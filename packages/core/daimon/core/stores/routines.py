@@ -236,17 +236,27 @@ async def update_routine(
     destination_id: str | None = None,
     clear_destination: bool = False,
     channel_id: str | None = None,
+    expected_updated_at: datetime | None = None,
 ) -> RoutineRow | None:
     """PATCH: `None` leaves a field alone. A destination is set as a pair, with
     the `channel_id` it resolves to; `clear_destination=True` removes the pair
     (and any pending delivery) but keeps the source channel/thread provenance
-    and `channel_id`, so the routine's spend still counts toward the same budget."""
+    and `channel_id`, so the routine's spend still counts toward the same budget.
+    A concurrent edit raises StoreError; callers can also supply the revision
+    used for authorization so a stale authorized view cannot be applied.
+    """
+    # Read exactly once: validation, erasure and the write share this revision.
+    # A concurrent edit must fail the CAS rather than reuse stale classification.
+    current = await get_routine(session, routine_id, tenant_id=tenant_id)
+    if current is None:
+        return None
+    if expected_updated_at is not None and current.updated_at != expected_updated_at:
+        raise StoreError("Routine changed while being edited; reload it and try again.")
     values: dict[str, str | bool | datetime | None] = {}
     if clear_destination:
         if destination_kind is not None or destination_id is not None:
             raise StoreError("clear_destination cannot be combined with a new destination")
-        current = await get_routine(session, routine_id, tenant_id=tenant_id)
-        if current is not None and current.destination_kind == "dm":
+        if current.destination_kind == "dm":
             values.update(last_result_tail=None, last_error=None)
         values.update(
             destination_kind=None,
@@ -256,9 +266,6 @@ async def update_routine(
             delivery_note=None,
         )
     elif destination_kind is not None or destination_id is not None:
-        current = await get_routine(session, routine_id, tenant_id=tenant_id)
-        if current is None:
-            return None
         destination_id = await _resolve_destination(
             session, tenant_id, destination_kind, destination_id, current.created_by_user_id
         )
@@ -290,13 +297,7 @@ async def update_routine(
                 delivery_payload=None,
             )
     # Metadata-only edits must also respect a seal added after conversion.
-    current = await get_routine(session, routine_id, tenant_id=tenant_id)
-    if (
-        current is not None
-        and current.destination_kind == "dm"
-        and not clear_destination
-        and destination_kind is None
-    ):
+    if current.destination_kind == "dm" and not clear_destination and destination_kind is None:
         await validate_dm_source(
             session,
             tenant_id,
@@ -322,9 +323,9 @@ async def update_routine(
     if next_fire_at is not None:
         values["next_fire_at"] = next_fire_at
     if not values:
-        return await get_routine(session, routine_id, tenant_id=tenant_id)
+        return current
 
-    if current is not None and current.destination_kind == "dm":
+    if current.destination_kind == "dm":
         # Any edit invalidates the private revision. This also handles agent
         # reassignment and destination ABA without reclassifying old content.
         values.update(
@@ -339,7 +340,11 @@ async def update_routine(
 
     stmt = (
         update(Routine)
-        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
+        .where(
+            Routine.id == routine_id,
+            Routine.tenant_id == tenant_id,
+            Routine.updated_at == current.updated_at,
+        )
         .values(
             **values,
             updated_at=func.greatest(
@@ -352,7 +357,7 @@ async def update_routine(
     result = await session.execute(stmt)
     orm = result.scalar_one_or_none()
     if orm is None:
-        return None
+        raise StoreError("Routine changed while being edited; reload it and try again.")
     await session.flush()
     return RoutineRow.model_validate(orm)
 

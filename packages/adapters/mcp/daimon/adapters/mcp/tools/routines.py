@@ -819,6 +819,7 @@ async def _update_routine_impl(
             session,
             routine_id,
             tenant_id=tenant_id,
+            expected_updated_at=row.updated_at,
             cron_expr=cron_expr,
             timezone_=timezone,
             trigger_message=trigger_message,

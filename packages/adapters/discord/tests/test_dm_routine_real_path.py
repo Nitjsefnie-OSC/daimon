@@ -1535,3 +1535,120 @@ async def test_routine_origin_cannot_promote_handoffs_to_attended(harness: Harne
     harness.upstream.scripts = [inspect]
     result = await harness.routine()
     assert result.text == "unattended parent" and observed == [False]
+
+
+@pytest.mark.parametrize("change", ["agent", "retarget"])
+@pytest.mark.parametrize("stage", ["running", "pending"])
+async def test_stale_public_edit_cannot_reclassify_concurrent_private_fire(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, change: str, stage: str
+):
+    from daimon.core.errors import StoreError
+    from daimon.core.stores import routines
+
+    # Independent transactions: T1 reads public, T2 converts to DM, then a
+    # real scheduler fire uses private memory before T1 attempts its write.
+    async with harness.factory.begin() as db:
+        public = await routines.create_routine(
+            db,
+            tenant_id=harness.tenant.id,
+            created_by_user_id=OWNER_A,
+            agent_id="ag_daimon",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="private work",
+            destination_kind="channel",
+            destination_id=BUDGET,
+            channel_id=BUDGET,
+            source_provenance_known=True,
+            next_fire_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+    read, release_edit = asyncio.Event(), asyncio.Event()
+    entered, release_fire = asyncio.Event(), asyncio.Event()
+    original_get = routines.get_routine
+    edits = (
+        {"agent_id": "ag_b", "agent_name": "b"}
+        if change == "agent"
+        else {"destination_kind": "channel", "destination_id": "789", "channel_id": "789"}
+    )
+
+    async def stale_edit() -> None:
+        from sqlalchemy.sql.dml import Update
+
+        async with harness.factory.begin() as db:
+            execute = db.execute
+
+            async def paused_execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
+                if isinstance(statement, Update) and statement.table.name == "routines":
+                    # Pause AFTER every read/validation, immediately before the
+                    # final write. The old implementation would retain T2's
+                    # private output using its cached public classification.
+                    read.set()
+                    await release_edit.wait()
+                return await execute(statement, *args, **kwargs)
+
+            monkeypatch.setattr(db, "execute", paused_execute)
+            await routines.update_routine(db, public.id, tenant_id=public.tenant_id, **edits)
+
+    async def private_answer(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
+        await upstream.wait(lambda: bool(upstream.events(sid, "user.message")))
+        entered.set()
+        await release_fire.wait()
+        upstream.state.write_output(sid, "secret.txt", b"private producer A file")
+        async for chunk in answer("private producer A text")(upstream, sid):
+            yield chunk
+
+    harness.upstream.scripts = [private_answer]
+    edit_task = asyncio.create_task(stale_edit())
+    await asyncio.wait_for(read.wait(), 15)
+    async with harness.factory.begin() as db:
+        private = await routines.update_routine(
+            db, public.id, tenant_id=public.tenant_id, destination_kind="dm"
+        )
+    assert private is not None
+    fire_task = asyncio.create_task(harness.fire(private))
+    await asyncio.wait_for(entered.wait(), 15)
+    if stage == "pending":
+        release_fire.set()
+        await fire_task
+        async with harness.factory() as db:
+            pending = await original_get(db, public.id, tenant_id=public.tenant_id)
+        assert pending is not None and pending.delivery_status == "pending"
+        assert pending.delivery_payload and "secret.txt" in pending.delivery_payload
+    release_edit.set()
+    with pytest.raises(StoreError, match="changed while being edited"):
+        await edit_task
+    async with harness.factory() as db:
+        unchanged = await original_get(db, public.id, tenant_id=public.tenant_id)
+    assert unchanged is not None
+    assert unchanged.updated_at == private.updated_at
+    assert unchanged.destination_kind == "dm" and unchanged.agent_id == "ag_daimon"
+
+    # An explicit retry reads the DM revision, so erasure and the new
+    # classification happen together. Late enqueue also compares that revision.
+    async with harness.factory.begin() as db:
+        changed = await routines.update_routine(db, public.id, tenant_id=public.tenant_id, **edits)
+    assert changed is not None and changed.updated_at > private.updated_at
+    release_fire.set()
+    await fire_task
+    async with harness.factory() as db:
+        final = await original_get(db, public.id, tenant_id=public.tenant_id)
+    assert final is not None
+    assert final.last_result_tail is None and final.last_error is None
+    assert final.delivery_payload is None and final.delivery_lease_owner is None
+    assert final.delivery_status != "pending"
+
+    async def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("reclassified private text/files must not open any destination")
+
+    poster = make_discord_routine_poster(
+        harness.factory,
+        fetch_channel=forbidden,
+        open_dm=forbidden,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=harness.resolver,
+        output_client=harness.upstream.client,
+    )
+    await poll_deliveries_once(
+        harness.factory, platform="discord", post=poster, now=datetime.now(UTC)
+    )
