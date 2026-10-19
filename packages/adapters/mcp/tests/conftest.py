@@ -38,7 +38,7 @@ async def isolate_confirmation_workers() -> AsyncIterator[None]:
     from daimon.adapters.mcp.tools import _agent_chat_safety
 
     yield
-    workers = list(_agent_chat_safety._workers.values())  # pyright: ignore[reportPrivateUsage]
+    workers = [w.task for w in _agent_chat_safety._workers.values()]  # pyright: ignore[reportPrivateUsage]
     _agent_chat_safety._workers.clear()  # pyright: ignore[reportPrivateUsage]
     for worker in workers:
         worker.cancel()

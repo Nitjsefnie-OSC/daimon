@@ -66,7 +66,19 @@ NOT_RESUMABLE_MSG = (
 _MAX_TURN_PAGES = 20
 _POLL_S = 1.0
 
-_workers: dict[tuple[int, str], asyncio.Task[bool]] = {}
+
+@dataclass(frozen=True)
+class _Worker:
+    """This process's confirmation worker for a handle, and the turn it owns."""
+
+    task: asyncio.Task[bool]
+    turn_event_id: str
+
+    def owns(self, turn_event_id: str | None) -> bool:
+        return not self.task.done() and self.turn_event_id == turn_event_id
+
+
+_workers: dict[tuple[int, str], _Worker] = {}
 
 
 def require_session_driver(session: BetaManagedAgentsSession, auth: AuthIdentity) -> None:
@@ -207,17 +219,17 @@ def watch_turn(
     """
     key = (id(runtime), handle)
     if (previous := _workers.get(key)) is not None:
-        previous.cancel()
+        previous.task.cancel()
     task = asyncio.create_task(
         _watch(
             runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=rules_channel_id
         ),
         context=contextvars.Context(),
     )
-    _workers[key] = task
+    _workers[key] = _Worker(task=task, turn_event_id=turn_event_id)
 
     def finished(done: asyncio.Task[bool]) -> None:
-        if _workers.get(key) is done:
+        if (current := _workers.get(key)) is not None and current.task is done:
             _workers.pop(key, None)
 
     task.add_done_callback(finished)
@@ -345,10 +357,10 @@ async def turn_status(
     """
     if not await _paused(runtime, auth, session):
         return None
-    worker = _workers.get((id(runtime), session.id))
-    if worker is not None and not worker.done():
-        return ("running", None)
     turn = await _read_turn(runtime, auth, session.id)
+    worker = _workers.get((id(runtime), session.id))
+    if worker is not None and worker.owns(turn.boundary_id):
+        return ("running", None)
     recorded = await _recorded_turn(runtime, session.id)
     ours = recorded is not None and recorded.turn_event_id == turn.boundary_id
     return ("paused", PAUSED_HINT if ours else AWAITING_CARD_HINT)
@@ -377,12 +389,17 @@ async def resume_paused(
     if turn.boundary_id is None or recorded is None or recorded.turn_event_id != turn.boundary_id:
         raise ToolError(NOT_RESUMABLE_MSG)
     worker = _workers.get((id(runtime), session.id))
-    if worker is None or worker.done():
-        worker = watch_turn(
+    # Reuse only the worker that owns this very turn; one left watching an
+    # older turn is replaced (`watch_turn` cancels it).
+    task = (
+        worker.task
+        if worker is not None and worker.owns(turn.boundary_id)
+        else watch_turn(
             runtime,
             auth,
             session.id,
             turn_event_id=turn.boundary_id,
             rules_channel_id=recorded.rules_channel_id,
         )
-    return Resumed(worker=worker, turn_event_id=turn.boundary_id)
+    )
+    return Resumed(worker=task, turn_event_id=turn.boundary_id)

@@ -173,7 +173,7 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _drain() -> None:
-    workers = list(safety._workers.values())  # pyright: ignore[reportPrivateUsage]
+    workers = [w.task for w in safety._workers.values()]  # pyright: ignore[reportPrivateUsage]
     if workers:
         await asyncio.wait_for(asyncio.gather(*workers), timeout=5)
 
