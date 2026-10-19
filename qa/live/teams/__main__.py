@@ -16,7 +16,7 @@ import httpx
 from qa.live.teams.config import TeamsQaConfig
 from qa.live.teams.evidence import write_summary
 from qa.live.teams.graph import CHAT, TARGET, GraphTeamsDriver
-from qa.live.teams.harness import read, send, wait
+from qa.live.teams.harness import graph
 from qa.live.teams.journeys import resolve_journey, run_journey
 from qa.live.teams.login import (
     AccessFlowAuthorizer,
@@ -27,7 +27,7 @@ from qa.live.teams.login import (
 from qa.live.teams.tokens import ReauthRequired, TokenStore, token_claims
 
 ALL_JOURNEYS = ("routines-admin", "routines-member", "billing-admin", "billing-member")
-HARNESS_VERBS = ("send", "read", "wait")
+HARNESS_VERBS = ("graph",)
 
 
 async def execute(args: argparse.Namespace, config: TeamsQaConfig) -> bool:
@@ -100,12 +100,7 @@ async def execute(args: argparse.Namespace, config: TeamsQaConfig) -> bool:
         async with httpx.AsyncClient(timeout=15) as http:
             driver = GraphTeamsDriver(config, tokens, http)
             if args.command in HARNESS_VERBS:
-                if args.command == "send":
-                    result = await send(driver, args.persona, args.to, args.text)
-                elif args.command == "read":
-                    result = await read(driver, args.persona, args.source, args.since)
-                else:
-                    result = await wait(driver, args.persona, args.after, args.timeout, args.source)
+                result = await graph(driver, args.persona, args.method, args.path, args.body)
                 print(json.dumps(result))
                 return bool(result["ok"])
             if args.command == "verify-target":
@@ -146,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             *HARNESS_VERBS,
         ],
     )
-    parser.add_argument("text", nargs="?", help="message text for send")
+    parser.add_argument("path", nargs="?", help="Graph path for graph, e.g. /me/joinedTeams")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--config-secret")
     parser.add_argument("--persona")
@@ -161,16 +156,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-turns", type=int, default=1)
     parser.add_argument("--go", action="store_true")
     parser.add_argument("--results", type=Path)
-    parser.add_argument("--to", choices=["chat", "channel"], help="send target")
-    parser.add_argument(
-        "--from", dest="source", default="chat", help="chat, channel or thread:<message id>"
-    )
-    parser.add_argument("--since", default="5m", help="read window, for example 30s, 5m, 1h")
-    parser.add_argument("--after", help="wait for bot messages after this message id")
-    parser.add_argument("--timeout", type=float, default=60.0, help="wait timeout in seconds")
+    parser.add_argument("--method", default="GET", help="Graph method for graph")
+    parser.add_argument("--body", help="JSON request body for graph")
     args = parser.parse_intermixed_args(argv)
-    if args.command != "send" and (args.text is not None or args.to is not None):
-        parser.error("text and --to require send")
+    if args.command != "graph" and args.path is not None:
+        parser.error("a path requires graph")
+    if args.command != "graph" and (args.body is not None or args.method != "GET"):
+        parser.error("--method and --body require graph")
     if args.command != "login" and (args.manual or args.access_flow):
         parser.error("login mode flags require login")
     if args.command not in {"smoke", "refresh"} and (args.journey or args.all):
@@ -190,10 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command in {"login", "status", "logout", "verify-target", *HARNESS_VERBS}:
         if not args.persona:
             parser.error("--persona is required")
-        if args.command == "send" and (args.to is None or not args.text):
-            parser.error("send requires --to and text")
-        if args.command == "wait" and not args.after:
-            parser.error("wait requires --after")
+        if args.command == "graph" and not args.path:
+            parser.error("graph requires a path")
     try:
         config = (
             TeamsQaConfig.load(args.config, args.config_secret)

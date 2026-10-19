@@ -92,7 +92,6 @@ class GraphTeamsDriver:
         self.http = http
         self.now = now
         self.sleep = sleep
-        self._verified_targets: set[str] = set()
 
     @property
     def channel(self) -> str:
@@ -163,12 +162,6 @@ class GraphTeamsDriver:
             raise ValueError("channel target mismatch")
         if not self.config.bot_app_id:
             raise ValueError("bot app identity missing")
-
-    async def ensure_target_verified(self, persona: str) -> None:
-        """Verify the configured target once per driver process before posting."""
-        if persona not in self._verified_targets:
-            await self.verify_target(persona)
-            self._verified_targets.add(persona)
 
     def require_distinct_personas(self) -> dict[str, str]:
         """Resolve both roles from access tokens before sending any command."""
@@ -323,14 +316,6 @@ class GraphTeamsDriver:
             path = next_link.removeprefix(BASE)
         return frozenset(seen)
 
-    async def channel_messages(
-        self, persona: str, deadline: float | None = None
-    ) -> list[dict[str, Any]]:
-        """Read at most four recent channel pages using the smoke read scope."""
-        return await self._paged_messages(
-            persona, self.channel + "/messages?$top=50", self.channel, deadline
-        )
-
     async def _paged_messages(
         self, persona: str, path: str, prefix: str, deadline: float | None
     ) -> list[dict[str, Any]]:
@@ -410,16 +395,6 @@ class GraphTeamsDriver:
             raise ValueError("invalid message id")
         prefix = self.channel + f"/messages/{message_id}/replies"
         return await self._paged_messages(persona, prefix, prefix, deadline)
-
-    async def channel_message(
-        self, persona: str, message_id: str, deadline: float | None = None
-    ) -> dict[str, Any]:
-        """Read one channel parent to anchor a thread wait in server time."""
-        if not message_id or "/" in message_id:
-            raise ValueError("invalid message id")
-        return await self._request(
-            persona, READ, "GET", self.channel + f"/messages/{message_id}", deadline=deadline
-        )
 
     async def wait_for_reply(
         self,
