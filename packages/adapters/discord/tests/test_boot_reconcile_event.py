@@ -178,17 +178,25 @@ async def test_failed_when_an_unjoined_tenant_reconcile_fails() -> None:
     assert events[0]["failed"] == 1
 
 
-@pytest.mark.parametrize("escape", [RuntimeError("escaped"), asyncio.CancelledError()])
-async def test_failed_when_a_reconcile_task_raises_or_is_cancelled(
-    escape: BaseException,
+@pytest.mark.parametrize(
+    "escape",
+    [RuntimeError("escaped"), asyncio.CancelledError(), None],
+    ids=["raises", "cancelled", "skip_without_running_task"],
+)
+async def test_failed_when_a_reconcile_task_raises_is_cancelled_or_is_unknown(
+    escape: BaseException | None,
 ) -> None:
+    """`None` is a skip whose running task could not be identified: its outcome is
+    unknown, so it must not read as complete."""
     ok_id, bad_id = 910000031, 910000032
     bad_tenant = _tenant(bad_id)
     bot = _bot([ok_id, bad_id])
     original_seed = bot._seed_tenant_defaults  # pyright: ignore[reportPrivateUsage]
 
-    async def seed(*, tenant_id: uuid.UUID, guild: discord.Guild, was_ready: bool) -> bool | None:
+    async def seed(*, tenant_id: uuid.UUID, guild: discord.Guild, was_ready: bool) -> object:
         if tenant_id == bad_tenant.id:
+            if escape is None:
+                return None
             raise escape
         return await original_seed(tenant_id=tenant_id, guild=guild, was_ready=was_ready)
 
@@ -215,6 +223,59 @@ async def test_zero_tenants_still_completes_promptly() -> None:
     events = _boot_events(logs)
     assert [entry["event"] for entry in events] == ["discord.boot_reconcile_complete"]
     assert events[0]["tenants"] == 0
+
+
+@pytest.mark.parametrize("other_seed_fails", [False, True], ids=["other_ok", "other_fails"])
+async def test_the_event_waits_for_a_seed_already_in_flight_from_another_path(
+    other_seed_fails: bool,
+) -> None:
+    """A tenant already being seeded elsewhere (the message hot path, a join) makes
+    the boot seed skip. The watcher waits for that other seed and counts its
+    result, so `complete` cannot fire while it can still write."""
+    gid = 910000045
+    tenant = _tenant(gid)
+    bot = _bot([gid])
+    release = asyncio.Event()
+    calls: list[uuid.UUID] = []
+
+    async def reconcile(*_args: object, tenant_id: uuid.UUID, **_kwargs: object) -> ApplyReport:
+        calls.append(tenant_id)
+        await release.wait()
+        if other_seed_fails:
+            raise DaimonError("provider down")
+        return ApplyReport()
+
+    with (
+        patch(f"{_BOT}.list_tenants_by_platform", new_callable=AsyncMock, return_value=[tenant]),
+        patch(f"{_BOT}.reconcile_tenant_defaults", side_effect=reconcile),
+        patch(f"{_BOT}.set_provision_status", new_callable=AsyncMock),
+        structlog.testing.capture_logs() as logs,
+    ):
+        other = asyncio.create_task(
+            bot._seed_tenant_defaults(  # pyright: ignore[reportPrivateUsage]
+                tenant_id=tenant.id, guild=_guild(gid), was_ready=True
+            )
+        )
+        while not calls:
+            await asyncio.sleep(0)
+        await bot.on_ready()
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert calls == [tenant.id], "the boot seed skipped: one reconcile is running"
+        assert _boot_events(logs) == [], "no boot event while the other seed is running"
+        release.set()
+        await other
+        await _drain(bot)
+
+    events = _boot_events(logs)
+    assert len(events) == 1
+    assert events[0]["in_flight"] == 1
+    if other_seed_fails:
+        assert events[0]["event"] == "discord.boot_reconcile_failed"
+        assert (events[0]["succeeded"], events[0]["failed"]) == (0, 1)
+    else:
+        assert events[0]["event"] == "discord.boot_reconcile_complete"
+        assert (events[0]["succeeded"], events[0]["failed"]) == (1, 0)
 
 
 async def test_a_second_on_ready_emits_nothing_new() -> None:

@@ -299,6 +299,10 @@ _DRAIN_NOTICES_S: float = 10.0
 # only 5 of 16 tenants' skills before 429ing; the agent reconcile then failed
 # attaching skills the sweep had never created.
 _SWEEP_CONCURRENCY = 2
+# What a tenant reconcile returns: True on success, False on failure, or the
+# task already reconciling that tenant when the in-flight guard skipped this
+# call (None only if that task could not be identified).
+type _ReconcileOutcome = bool | asyncio.Task[Any] | None
 _TURN_CARD_RECOVERY_CONCURRENCY = 4
 
 
@@ -763,12 +767,13 @@ class DaimonBot(commands.Bot):
             if runtime.settings.discord is not None
             else 600.0
         )
-        # In-flight seed guard: tenant_ids with a reconcile in progress.
-        self._seeding: set[uuid.UUID] = set()
+        # In-flight seed guard: tenant_ids with a reconcile in progress, mapped
+        # to the task running it so the boot reconcile watcher can wait on it.
+        self._seeding: dict[uuid.UUID, asyncio.Task[Any] | None] = {}
         # Separate guard for unjoined-guild refreshes, so a rejoin during one
         # still runs its own seed and flips the tenant back to ready. The
         # reconcile's per-tenant advisory lock serializes the two.
-        self._unjoined_reconciling: set[uuid.UUID] = set()
+        self._unjoined_reconciling: dict[uuid.UUID, asyncio.Task[Any] | None] = {}
         self._seed_sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
         # Gateway lifecycle callbacks run as separate tasks. Serialize only the
         # tenant provision/archive transitions so an earlier remove cannot
@@ -1334,7 +1339,7 @@ class DaimonBot(commands.Bot):
 
     async def _seed_tenant_defaults(
         self, *, tenant_id: uuid.UUID, guild: discord.Guild, was_ready: bool
-    ) -> bool | None:
+    ) -> _ReconcileOutcome:
         """Background MA seed. Owns the pending/failed→ready/failed status flip.
         Posts the ✅/⚠️ follow-up on terminal state ONLY when the tenant was not
         already ready -- a fresh install or one recovering from `failed`. An
@@ -1356,13 +1361,13 @@ class DaimonBot(commands.Bot):
         and the tenant stays `ready`.
 
         Returns True when the reconcile succeeded, False when it failed (a
-        failing report, a missing default agent or a caught exception) and
-        None when another seed for the tenant was already in flight. Only the
-        boot reconcile watcher reads it.
+        failing report, a missing default agent or a caught exception) and the
+        task already seeding the tenant when the in-flight guard skipped this
+        call. Only the boot reconcile watcher reads it.
         """
         if tenant_id in self._seeding:
-            return None
-        self._seeding.add(tenant_id)
+            return self._seeding[tenant_id]
+        self._seeding[tenant_id] = asyncio.current_task()
         # Without public_url, reconcile's daimon-mcp merge is a no-op and the
         # seeded agent gets none of the MCP tools its system prompt advertises.
         public_url = (
@@ -1473,16 +1478,17 @@ class DaimonBot(commands.Bot):
                 await self._post_to_guild(guild, _build_snag_embed())
             return False
         finally:
-            self._seeding.discard(tenant_id)
+            self._seeding.pop(tenant_id, None)
 
-    async def _reconcile_unjoined_tenant_defaults(self, tenant_id: uuid.UUID) -> bool | None:
+    async def _reconcile_unjoined_tenant_defaults(self, tenant_id: uuid.UUID) -> _ReconcileOutcome:
         """Refresh defaults for a registered tenant without changing its install state.
 
-        Returns True on success, False on failure and None when a refresh for
-        the tenant was already in flight, as `_seed_tenant_defaults` does."""
+        Returns True on success, False on failure and the task already
+        refreshing the tenant when the in-flight guard skipped this call, as
+        `_seed_tenant_defaults` does."""
         if tenant_id in self._unjoined_reconciling:
-            return None
-        self._unjoined_reconciling.add(tenant_id)
+            return self._unjoined_reconciling[tenant_id]
+        self._unjoined_reconciling[tenant_id] = asyncio.current_task()
         public_url = (
             str(self.runtime.settings.mcp.public_url)
             if self.runtime.settings.mcp.public_url is not None
@@ -1510,7 +1516,7 @@ class DaimonBot(commands.Bot):
             log.exception("unjoined_guild_reconcile_failed", tenant_id=str(tenant_id))
             return False
         finally:
-            self._unjoined_reconciling.discard(tenant_id)
+            self._unjoined_reconciling.pop(tenant_id, None)
 
     def _guild_lifecycle_lock_for(self, guild_id: int) -> asyncio.Lock:
         """Return the process-local lifecycle lock for one Discord guild."""
@@ -2098,7 +2104,7 @@ class DaimonBot(commands.Bot):
         # holds on_ready or changes what is reconciled.
         watch_boot_reconcile = not self._boot_reconcile_watched
         self._boot_reconcile_watched = True
-        boot_tasks: list[asyncio.Task[bool | None]] = []
+        boot_tasks: list[asyncio.Task[_ReconcileOutcome]] = []
         try:
             tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
             known_tenants = {tr.external_id: tr for tr in tenants}
@@ -2251,32 +2257,45 @@ class DaimonBot(commands.Bot):
             log.warning("tree_sync_global_failed", error=str(exc))
 
     async def _watch_boot_reconcile(
-        self, tasks: list[asyncio.Task[bool | None]], *, aborted: bool
+        self, tasks: list[asyncio.Task[_ReconcileOutcome]], *, aborted: bool
     ) -> None:
         """Log one aggregate event once every boot reconcile task has finished.
 
-        `asyncio.wait` does not cancel the tasks if this watcher is cancelled
-        at shutdown, so their lifetimes stay their own. A task that raised or
-        was cancelled, or returned False, counts as failed; None means another
-        reconcile for that tenant was already in flight. `aborted` is set when
-        on_ready raised before it had started every tenant's reconcile.
+        A boot reconcile the in-flight guard skipped returns the task already
+        reconciling that tenant (another path got there first); the watcher
+        waits for that task too and counts its result, so `complete` never
+        fires while a reconcile can still write. `asyncio.wait` does not cancel
+        anything if this watcher is cancelled at shutdown, so every task keeps
+        its own lifetime. A task that raised, was cancelled or returned False
+        counts as failed, as does a skip whose running task is unknown.
+        `aborted` is set when on_ready raised before it had started every
+        tenant's reconcile.
         """
         started = monotonic()
         if tasks:
             await asyncio.wait(tasks)
-        succeeded = failed = skipped = 0
+        succeeded = failed = 0
+        in_flight: list[asyncio.Task[Any]] = []
         for task in tasks:
+            result = None if task.cancelled() or task.exception() is not None else task.result()
+            if isinstance(result, asyncio.Task):
+                in_flight.append(result)
+            elif result is False or result is None:
+                failed += 1
+            else:
+                succeeded += 1
+        if in_flight:
+            await asyncio.wait(in_flight)
+        for task in in_flight:
             if task.cancelled() or task.exception() is not None or task.result() is False:
                 failed += 1
-            elif task.result() is None:
-                skipped += 1
             else:
                 succeeded += 1
         fields: dict[str, object] = {
             "tenants": len(tasks),
             "succeeded": succeeded,
             "failed": failed,
-            "skipped": skipped,
+            "in_flight": len(in_flight),
             "duration_s": round(monotonic() - started, 3),
         }
         if failed or aborted:
