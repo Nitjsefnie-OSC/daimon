@@ -53,6 +53,7 @@ INTERRUPTED_NOTICE = (
     "@mention Daimon with your request to try again."
 )
 CANCELLED_NOTICE = "Stopped.\nSend a message to start again."
+STOPPING_HEADLINE = "Stopping…"
 TOOLS_DONE_NOTICE = "Done."
 # A group chat closed mid-turn: no word of the turn's work.
 ASK_HUMAN = f"{ESCALATE} {ASK_THE_TEAM}"
@@ -70,6 +71,13 @@ class CardState:
     is_working: bool = False
     tool_lines: tuple[str, ...] = ()
     draft: str | None = None
+    # Stop was clicked: the turn is winding down, so the card offers no Stop.
+    stopping: bool = False
+
+
+def on_stop(state: CardState) -> CardState:
+    """Stop was clicked: every later render shows the stopping card."""
+    return dataclasses.replace(state, stopping=True)
 
 
 def on_message(state: CardState, text: str) -> CardState:
@@ -88,15 +96,29 @@ def _card(body: list[CardElement], *, fallback: str) -> MessageActivityInput:
 
 
 def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActivityInput:
+    """The live card as a message. See `live_card`."""
+    return MessageActivityInput().add_card(live_card(state, now=now, cancel_key=cancel_key))
+
+
+def live_card(state: CardState, *, now: float, cancel_key: str) -> AdaptiveCard:
     """The live card. `cancel_key` routes a Cancel click to this turn.
 
+    Once Stop is clicked it reads "Stopping…" and has no Stop button; the
+    answer to the click is this card too (`handle_cancel`).
     A TextBlock renders no code fence and drops single line breaks, so the
     tool lines are a monospace block with one paragraph each.
     """
     elapsed = now - state.started_at
-    headline = format_headline(
-        is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: f"**{word}**"
-    )
+    if state.stopping:
+        headline = f"**{STOPPING_HEADLINE}**"
+        fallback = STOPPING_HEADLINE
+    else:
+        headline = format_headline(
+            is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: f"**{word}**"
+        )
+        fallback = format_headline(
+            is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: word
+        )
     body: list[CardElement] = [TextBlock(text=headline, wrap=True)]
     if state.tool_lines:
         lines = "\n\n".join(state.tool_lines)
@@ -105,22 +127,20 @@ def status_card(state: CardState, *, now: float, cancel_key: str) -> MessageActi
     if state.draft:
         body.append(TextBlock(text=state.draft, is_subtle=True, wrap=True))
     body.append(TextBlock(text=format_duration(elapsed), is_subtle=True, size="Small", wrap=True))
-    body.append(
-        ActionSet(
-            actions=[
-                ExecuteAction(
-                    title="Stop",
-                    verb=CANCEL_VERB,
-                    data={"action": CANCEL_VERB, "turn": cancel_key},
-                    style="destructive",
-                )
-            ]
+    if not state.stopping:
+        body.append(
+            ActionSet(
+                actions=[
+                    ExecuteAction(
+                        title="Stop",
+                        verb=CANCEL_VERB,
+                        data={"action": CANCEL_VERB, "turn": cancel_key},
+                        style="destructive",
+                    )
+                ]
+            )
         )
-    )
-    fallback = format_headline(
-        is_working=state.is_working, elapsed_seconds=elapsed, bold=lambda word: word
-    )
-    return _card(body, fallback=fallback)
+    return AdaptiveCard(body=body, fallback_text=fallback)
 
 
 def termination_text(notice: TerminationNotice) -> str:

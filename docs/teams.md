@@ -67,7 +67,8 @@ is supported; government and China clouds use other Bot Framework hosts.
   memory is read-only. See [permissions.md](permissions.md).
 
 A turn shows one status card, edited in place, with a Stop button only the
-author can use. The answer replaces the card, split across messages when long,
+author can use. Stop turns the card into "Stopping…", without the button, until
+the turn has stopped and the card says so. The answer replaces the card, split across messages when long,
 then a card follows with the summary line (agent, time, cost, money left; see
 [billing.md](billing.md)) and the controls below. When a tool call named the
 outputs folder, that card waits for file delivery (30 seconds at most, or

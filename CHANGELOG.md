@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- In Teams, clicking Stop on a reply's status card now turns that card into "Stopping…" without a Stop button right away. It used to show a "Cancelling…" banner that stayed on the card after the reply had stopped.
+
 - A turn stopped, or cut off by its time limit, just after Daimon created its Managed Agents session no longer leaves that session running upstream with nothing pointing at it. The same goes for a database error at that moment. Daimon now archives the session before giving up; sessions it reuses or adopts from another turn are never archived.
 
 - An agent's stored keys are listed, and written to its mounted `.env`, in the same order on every Postgres: by codepoint, whatever collation the database was created with. On a glibc or ICU `en_US` database (such as Cloud SQL) the order used to follow that collation, so `.env` bytes and their hash depended on the database. After upgrading, a live session whose keys sort differently (mixed case, or `API_KEY` beside `APIKEY`) has its `.env` swapped in place once, on its next turn.

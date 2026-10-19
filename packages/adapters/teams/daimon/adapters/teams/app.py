@@ -22,7 +22,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import anthropic
 import daimon.core.turn.bookkeeping as turn_bookkeeping
@@ -40,7 +40,7 @@ from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
 from daimon.adapters.teams.budget_notice import with_budget_notifier
 from daimon.adapters.teams.card import CANCELLED_NOTICE
-from daimon.adapters.teams.card_actions import toast
+from daimon.adapters.teams.card_actions import replace_card, toast
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.channel_subscriptions import ChannelSubscriptions, SeenChannel
 from daimon.adapters.teams.commands import CommandHandler
@@ -203,7 +203,16 @@ _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats at once right now. Try again in a moment."
 _CANCEL_NOT_AUTHOR = "Only the person who asked can cancel this reply."
 _CANCEL_TURN_ENDED = "This reply has already finished — there is nothing left to cancel."
-_CANCELLING = "Cancelling…"
+
+
+class _CancelEntry(NamedTuple):
+    """What a Stop click needs of a running turn."""
+
+    cancel: asyncio.Event
+    author: str  # The asker's Entra id.
+    lifecycle: TeamsTurnLifecycle  # The current attempt, which shows the stopping card.
+
+
 # Everything a turn can raise that is not a bug in this adapter.
 _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
 _DB_ERRORS = (SQLAlchemyError, OSError)
@@ -398,8 +407,8 @@ class TeamsApp:
         self._held_controls: dict[str, TeamsTurnLifecycle] = {}
         # Per-tenant turn slots, with the queue a turn waits in at the cap.
         self.turn_queue = TurnQueue.from_settings(runtime.settings.turn_queue, platform="teams")
-        # cancel_key (the card intent id) -> (cancel Event, author's Entra id).
-        self._cancel_registry: dict[str, tuple[asyncio.Event, str]] = {}
+        # cancel_key (the card intent id) -> the turn's cancel Event, author and current attempt.
+        self._cancel_registry: dict[str, _CancelEntry] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         # Not `spawn`: a reaction never holds up a drain.
         self._reactions = TeamsReactions(react)
@@ -1334,7 +1343,6 @@ class TeamsApp:
             requester = Account(id=inbound.user_id, name=inbound.user_name or "you")
 
         def new_lifecycle(cancel: asyncio.Event, adopt: str | None) -> TeamsTurnLifecycle:
-            self._cancel_registry[cancel_key] = (cancel, inbound.user_id)
             attempt = TeamsTurnLifecycle(
                 sender=self._sender,
                 conversation_id=inbound.conversation_id,
@@ -1366,6 +1374,7 @@ class TeamsApp:
                 hold_controls=True,
             )
             holder.append(attempt)
+            self._cancel_registry[cancel_key] = _CancelEntry(cancel, inbound.user_id, attempt)
             return attempt
 
         cancel = asyncio.Event()
@@ -1550,8 +1559,10 @@ class TeamsApp:
 
         def recovery_lifecycle(fresh_cancel: asyncio.Event) -> TurnLifecycle:
             # Keep rendering into the card the person is already watching.
+            previous = holder[-1]
             adopted = new_lifecycle(fresh_cancel, lifecycle.message_id)
             adopted.answer_prefix = lifecycle.answer_prefix
+            adopted.inherit_stop(previous)
             return adopted
 
         reader = self._reader
@@ -1918,13 +1929,17 @@ class TeamsApp:
     async def handle_cancel(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
     ) -> AdaptiveCardInvokeResponse:
-        """Cancel button: only the turn's author may stop it."""
+        """Stop button: only the turn's author may stop it; the answer is the stopping card."""
         action = ctx.activity.value.action
         entry = self._cancel_registry.get(str(action.data.get("turn") or ""))
         if entry is None:
             return toast(_CANCEL_TURN_ENDED)
-        cancel, author = entry
-        if canonical_uuid(ctx.activity.from_.aad_object_id) != author:
+        if canonical_uuid(ctx.activity.from_.aad_object_id) != entry.author:
             return toast(_CANCEL_NOT_AUTHOR)
-        cancel.set()
-        return toast(_CANCELLING)
+        stopping = entry.lifecycle.request_stop()
+        if stopping is None:  # The closing notice is already on its way.
+            return toast(_CANCEL_TURN_ENDED)
+        entry.cancel.set()
+        # The clicker sees the card stopping at once; the card in the chat is
+        # only ever edited by the turn's own lifecycle.
+        return replace_card(stopping)
