@@ -97,6 +97,15 @@ def test_reap_orphans_skips_dead_pids(tmp_path: Path) -> None:
     assert load_pids(path) == {}, "pids file must be cleared after sweep"
 
 
+def _process_state(child: subprocess.Popen[bytes]) -> str:
+    """What the reaper saw of ``child``, for a failure message: exit status and /proc argv."""
+    try:
+        cmdline = Path(f"/proc/{child.pid}/cmdline").read_bytes().split(b"\x00")
+    except OSError as err:
+        cmdline = [repr(err).encode()]
+    return f"returncode={child.poll()!r}, /proc cmdline={cmdline!r}"
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="identity check reads /proc, Linux only")
 def test_reap_orphans_kills_live_process_whose_cmdline_matches_slug(tmp_path: Path) -> None:
     """A live PID whose cmdline still identifies it as that slug's marimo is SIGTERM'd."""
@@ -123,7 +132,8 @@ def test_reap_orphans_kills_live_process_whose_cmdline_matches_slug(tmp_path: Pa
         reaped = reap_orphans(path, term_wait_seconds=3.0)
 
         assert [r.slug for r in reaped] == ["live"], (
-            "a live PID whose cmdline still names this slug's marimo must be reaped"
+            "a live PID whose cmdline still names this slug's marimo must be reaped; "
+            f"the child's {_process_state(child)}"
         )
         # The child should now be dead — give it a moment to exit cleanly
         # under SIGTERM and confirm via wait().
