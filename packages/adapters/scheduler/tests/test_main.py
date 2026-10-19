@@ -3325,3 +3325,170 @@ async def test_legacy_public_routines_still_fire_with_unknown_creation_source(
     assert saved is not None and saved.delivery_status == "pending"
     assert not saved.source_provenance_known
     await client.close()
+
+
+@pytest.mark.parametrize("agent_posted", [False, True])
+async def test_fire_collects_outputs_from_real_headless_turn(
+    db_session, db_session_factory, monkeypatch, agent_posted
+):
+    """Exercise scheduler → headless SSE reducer → settled output listing → outbox."""
+    from anthropic.types.beta import FileMetadata
+    from daimon.core.routine_files import decode_payload
+    from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, sse_response
+    from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+
+    tenant = await make_tenant(db_session, platform="slack")
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="U1",
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="0 9 * * 1",
+        timezone_="UTC",
+        trigger_message="go",
+        destination_kind="channel",
+        destination_id="C123",
+    )
+    await db_session.commit()
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda r, m: httpx.Response(200, json=ma_agent(id="ag").model_dump(mode="json")),
+    )
+    router.add(
+        "GET",
+        r"/v1/environments/([^/]+)",
+        lambda r, m: httpx.Response(200, json=ma_environment(id="env").model_dump(mode="json")),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions",
+        lambda r, m: httpx.Response(
+            200,
+            json=ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
+                mode="json"
+            ),
+        ),
+    )
+    router.add(
+        "POST", r"/v1/sessions/[^/]+/events", lambda r, m: httpx.Response(200, json={"data": None})
+    )
+    now = datetime.now(UTC)
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events/stream",
+        lambda r, m: sse_response(
+            [
+                *(
+                    [
+                        {
+                            "id": "evt_tool",
+                            "type": "agent.mcp_tool_use",
+                            "name": "send_message",
+                            "mcp_server_name": "daimon-mcp",
+                            "input": {"channel_id": "C123", "content": "Report"},
+                            "processed_at": now.isoformat(),
+                        },
+                        {
+                            "id": "evt_result",
+                            "type": "agent.mcp_tool_result",
+                            "mcp_tool_use_id": "evt_tool",
+                            "content": [{"type": "text", "text": "posted"}],
+                            "is_error": False,
+                            "processed_at": now.isoformat(),
+                        },
+                    ]
+                    if agent_posted
+                    else []
+                ),
+                {
+                    "id": "evt_msg",
+                    "type": "agent.message",
+                    "processed_at": now.isoformat(),
+                    "content": [{"type": "text", "text": "Here is the report."}],
+                },
+                {
+                    "id": "evt_end",
+                    "type": "session.status_idle",
+                    "processed_at": now.isoformat(),
+                    "stop_reason": {"type": "end_turn"},
+                },
+            ]
+        ),
+    )
+    router.add(
+        "GET",
+        r"/v1/files",
+        lambda r, m: list_response(
+            [
+                FileMetadata(
+                    id="file_report",
+                    created_at=now,
+                    filename="report.csv",
+                    mime_type="text/csv",
+                    size_bytes=4,
+                    type="file",
+                    downloadable=True,
+                ).model_dump(mode="json")
+            ]
+        ),
+    )
+    router.add(
+        "GET", r"/v1/vaults", lambda r, m: httpx.Response(200, json={"data": [], "has_more": False})
+    )
+    router.add(
+        "POST",
+        r"/v1/vaults",
+        lambda r, m: httpx.Response(
+            200,
+            json={
+                "id": "vlt_session",
+                "type": "vault",
+                "display_name": "test",
+                "metadata": None,
+                "archived_at": None,
+                "created_at": now.isoformat(),
+            },
+        ),
+    )
+    router.add(
+        "POST",
+        r"/v1/vaults/[^/]+/archive",
+        lambda r, m: httpx.Response(200, json={"id": "vlt_session", "type": "vault"}),
+    )
+    router.add(
+        "GET",
+        r"/v1/vaults/[^/]+/credentials",
+        lambda r, m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.resolve_agent", unittest.mock.AsyncMock(return_value="ag")
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.resolve_environment",
+        unittest.mock.AsyncMock(return_value="env"),
+    )
+    settings = _make_test_settings(monkeypatch)
+    settings = settings.model_copy(
+        update={"mcp": settings.mcp.model_copy(update={"public_url": None})}
+    )
+    fire = await _build_fire(
+        client=build_fake_anthropic(router.dispatch),
+        sm=db_session_factory,
+        settings=settings,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    await fire(row)
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    assert after.last_error is None
+    assert after.delivery_status == "pending"
+    payload = decode_payload(after.delivery_payload)
+    assert payload.text == ("" if agent_posted else "Here is the report.")
+    assert [file.file_id for file in payload.files] == ["file_report"]
+    assert after.last_result_tail == "Here is the report."

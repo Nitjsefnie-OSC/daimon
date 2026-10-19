@@ -483,10 +483,26 @@ async def test_claims_are_per_platform(db_session: AsyncSession) -> None:
 
 async def test_clearing_the_destination_drops_a_pending_post(db_session: AsyncSession) -> None:
     row = await _routine(db_session)
-    await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
+    from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
+
+    payload = (
+        PREFIX
+        + RoutinePayload(
+            text="t",
+            files=[
+                RoutineFile(
+                    file_id="file_report", filename="report.csv", mime_type="text/csv", size_bytes=4
+                )
+            ],
+        ).model_dump_json()
+    )
+    await record_result(
+        db_session, row.id, tail="t", error=None, delivery="pending", delivery_payload=payload
+    )
     await update_routine(db_session, row.id, tenant_id=row.tenant_id, clear_destination=True)
     after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
     assert after is not None
+    assert after.delivery_payload is None
     assert (after.destination_kind, after.destination_id, after.delivery_status) == (
         None,
         None,
@@ -699,3 +715,21 @@ def test_dm_controls_require_host_delivery_and_never_count_channel_tool_as_deliv
     assert "Do not call messaging tools" in text
     assert not agent_posted_to(TurnState(content=[_post_block("123")]), row)
     assert delivery_target(row, platform="discord") is None
+
+
+async def test_delivery_failure_never_logs_signed_upload_url(db_session, db_session_factory):
+    from structlog.testing import capture_logs
+
+    row = await _routine(db_session)
+    await record_result(db_session, row.id, tail="Report", error=None, delivery="pending")
+    await db_session.commit()
+    sentinel = "https://upload.invalid/signed?token=secret-sentinel"
+
+    async def post(claimed):
+        raise RuntimeError(sentinel)
+
+    with capture_logs() as logs:
+        await poll_deliveries_once(db_session_factory, platform="discord", post=post, now=_NOW)
+    assert sentinel not in str(logs)
+    failures = [entry for entry in logs if entry["event"] == "routine.delivery_failed"]
+    assert failures[0]["error_type"] == "RuntimeError"

@@ -41,6 +41,7 @@ from daimon.core.routine_delivery import (
     render_fallback_post,
     teams_thread_id,
 )
+from daimon.core.routine_files import payload_for, unsupported_files_note
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -76,7 +77,9 @@ def make_teams_routine_poster(
                 return DeliveryOutcome(status="skipped", note=reason)
             chat = await teams.open_chat(member)
             for chunk in split_fenced(
-                render_fallback_dm(row, reason), TEAMS_LIMIT, word_boundary=True
+                render_fallback_dm(row, reason) + unsupported_files_note(payload_for(row)),
+                TEAMS_LIMIT,
+                word_boundary=True,
             ):
                 await teams.post(chat, chunk)
         except TEAMS_SEND_ERRORS as err:
@@ -124,7 +127,7 @@ def make_teams_routine_poster(
                 "routine.delivery_refused", routine_id=str(row.id), reason="creator_cannot_post"
             )
             return await fallback("creator_cannot_post")
-        text = render_fallback_post(row)
+        text = render_fallback_post(row) + unsupported_files_note(payload_for(row))
         conversation = teams_thread_id(target)
         try:
             ids = [

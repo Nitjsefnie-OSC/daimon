@@ -184,6 +184,7 @@ async def run_turn(
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     on_state: Callable[[TurnState], None] | None = None,
+    on_session: Callable[[str], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
@@ -214,6 +215,7 @@ async def run_turn(
             deadline=deadline,
             tool_safety=tool_safety,
             on_state=on_state,
+            on_session=on_session,
             budget_channel_id=budget_channel_id,
             origin_place=origin_place,
             model_override=model_override,
@@ -244,6 +246,7 @@ async def run_turn(
                 deadline=deadline,
                 tool_safety=tool_safety,
                 on_state=on_state,
+                on_session=on_session,
                 budget_channel_id=budget_channel_id,
                 origin_place=origin_place,
                 model_override=model_override,
@@ -278,6 +281,7 @@ async def run_turn_impl(
     deadline: datetime | None = None,
     tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     on_state: Callable[[TurnState], None] | None = None,
+    on_session: Callable[[str], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
@@ -321,7 +325,8 @@ async def run_turn_impl(
        the hardened render error policy — instead of a bespoke bare drain
        loop with no reconnect and stream-end-as-success.
     4. After the driver returns: ``extract_final_response(state.content)``.
-       ``on_state``, when given, is called first with the final ``TurnState``
+       ``on_session`` receives the successful session id for output collection.
+       ``on_state``, when given, is called with the final ``TurnState``
        of a successful turn, for a caller that needs the tool trail too (the
        scheduler checks whether the agent posted a routine's result itself).
 
@@ -541,6 +546,8 @@ async def run_turn_impl(
         if state.error is not None:
             raise state.error
 
+        if on_session is not None:
+            on_session(session.id)
         if on_state is not None:
             on_state(state)
         return extract_final_response(state.content)

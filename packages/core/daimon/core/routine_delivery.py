@@ -20,7 +20,8 @@ things follow from it, and nothing changes for a routine without one:
    allowed to invoke the agent, settles the row `skipped` instead.
 
 Delivery is at most once: claim (with a lease) → post → settle; a claim whose
-lease ran out is settled `skipped/interrupted`, never re-posted.
+lease ran out is settled `skipped/interrupted`, never replayed by another poll.
+Platform SDKs may retry a single send after a server error or connection reset.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import any_writers_none, limiting_ids_at
+from daimon.core.routine_files import decode_payload, payload_for
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
@@ -369,7 +371,7 @@ def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
     only where `routine_phrase` can say it exactly. A queued failure notice
     says the run failed instead of introducing a result.
     """
-    payload = (row.delivery_payload or "").strip()
+    payload = decode_payload(payload_for(row)).text.strip()
     phrase = routine_phrase(row.cron_expr, row.timezone)
     if row.delivery_note == FAILURE_NOTICE:
         owner = "The" if as_agent else f"{row.agent_name}'s"
@@ -447,7 +449,7 @@ def render_fallback_dm(row: RoutineRow, reason: str) -> str:
     The agent and schedule first, then why the result is here, then the result.
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
-    payload = (row.delivery_payload or "").strip()
+    payload = decode_payload(payload_for(row)).text.strip()
     if row.delivery_note == FAILURE_NOTICE:
         why: tuple[str, ...] = ("Your routine failed, so there's no result this time.",)
     else:
@@ -691,7 +693,9 @@ async def poll_deliveries_once(
             session, platform=platform, owner=lease_owner, now=now, lease=DELIVERY_LEASE
         )
     for row in claimed:
-        if not (row.delivery_payload or "").strip():
+        if not (
+            decode_payload(payload_for(row)).text.strip() or decode_payload(payload_for(row)).files
+        ):
             outcome = DeliveryOutcome(status="skipped", note="no_result")
         else:
             try:
@@ -700,8 +704,17 @@ async def poll_deliveries_once(
                 # Named boundary: the poster is adapter code talking to a chat
                 # API. Settling `skipped` (not back to pending) keeps delivery
                 # at most once — a failure may have landed after the post.
-                log.warning("routine.delivery_failed", routine_id=str(row.id), error=str(err))
-                outcome = DeliveryOutcome(status="skipped", note="post_failed")
+                log.warning(
+                    "routine.delivery_failed", routine_id=str(row.id), error_type=type(err).__name__
+                )
+                outcome = DeliveryOutcome(
+                    status="skipped",
+                    note=(
+                        "File delivery failed or was interrupted; it will not be retried."
+                        if decode_payload(payload_for(row)).files
+                        else "post_failed"
+                    ),
+                )
         async with sessionmaker() as session, session.begin():
             settled = await settle_routine_delivery(
                 session,

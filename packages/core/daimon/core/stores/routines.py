@@ -23,6 +23,7 @@ from daimon.core._models import Account, PlatformPrincipal, Routine, Tenant
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.errors import StoreError
 from daimon.core.permissions import limiting_ids_at
+from daimon.core.routine_files import OUTBOX_FILES, PREFIX, plain_payload
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import (
     CatchUpPolicy,
@@ -491,6 +492,7 @@ async def record_result(
     error: str | None,
     delivery: Literal["pending", "skipped"] | None = None,
     delivery_note: str | None = None,
+    delivery_payload: str | None = None,
     expected_destination: tuple[str | None, str | None] | None = None,
 ) -> None:
     """Set `last_result_tail` and `last_error` in a single UPDATE.
@@ -498,6 +500,9 @@ async def record_result(
     `error=None` clears `last_error` (sets NULL); `error="..."` sets it.
     `tail` accepts the complete final reply. The preview keeps its last 1000
     characters, with an explicit truncation marker when shortened.
+
+    `delivery_payload` may override the reply with a versioned file-reference
+    envelope; the preview always remains plain text.
 
     `delivery` is only passed for a routine with a destination:
     `pending` queues this fire's complete reply for the adapter to post (copied into
@@ -521,10 +526,17 @@ async def record_result(
         preview = marker + preview
     values: dict[str, object] = {"last_result_tail": preview, "last_error": error}
     if delivery is not None:
+        queued_payload = delivery_payload if delivery_payload is not None else plain_payload(tail)
         values.update(
             delivery_status=delivery,
-            delivery_note=delivery_note,
-            delivery_payload=tail if delivery == "pending" else None,
+            delivery_note=(
+                OUTBOX_FILES
+                if delivery == "pending"
+                and queued_payload is not None
+                and queued_payload.startswith(PREFIX)
+                else delivery_note
+            ),
+            delivery_payload=queued_payload if delivery == "pending" else None,
             delivery_lease_owner=None,
             delivery_lease_expires_at=None,
             delivered_at=None,

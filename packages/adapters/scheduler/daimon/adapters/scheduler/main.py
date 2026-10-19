@@ -96,6 +96,7 @@ from daimon.core.routine_delivery import (
     record_failure,
     render_routine_controls,
 )
+from daimon.core.routine_files import collect_routine_files
 from daimon.core.rule_views import (
     keeps_routine_inside,
     routine_destination_channel,
@@ -558,6 +559,7 @@ async def _build_fire(
                 + row.trigger_message
             )
         final_state: list[TurnState] = []
+        output_sessions: list[str] = []
 
         result = await run_turn(
             anthropic=client,
@@ -565,6 +567,7 @@ async def _build_fire(
             environment_id=resolved_env_id,
             trigger_message=trigger_message,
             on_state=final_state.append,
+            on_session=output_sessions.append,
             mcp_settings=settings.mcp,
             account_id=account_id,
             usage_record_factory=usage_record_factory,
@@ -598,14 +601,24 @@ async def _build_fire(
         # Fallback post: only when the agent did not deliver to the
         # destination itself. The chat adapter for `platform` posts it.
         posted = bool(final_state) and agent_posted_to(final_state[0], row)
+        payload = result
+        needs_delivery = not posted
+        if output_sessions:
+            payload = await collect_routine_files(
+                client, session_id=output_sessions[-1], text="" if posted else result
+            )
+            # A messaging tool can have posted the text while leaving generated
+            # outputs behind. Deliver those without repeating the final reply.
+            needs_delivery = needs_delivery or bool(payload)
         async with sm() as s, s.begin():
             await record_result(
                 s,
                 row.id,
                 tail=result,
+                delivery_payload=payload,
                 error=None,
-                delivery="skipped" if posted else "pending",
-                delivery_note="agent_posted" if posted else None,
+                delivery="pending" if needs_delivery else "skipped",
+                delivery_note=None if needs_delivery else "agent_posted",
                 expected_destination=(row.destination_kind, row.destination_id),
             )
 

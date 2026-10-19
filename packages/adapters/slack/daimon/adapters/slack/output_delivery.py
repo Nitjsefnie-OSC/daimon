@@ -172,11 +172,11 @@ class _SweepMention:
         self._mention = None
 
 
-def _build_poster(
+def build_output_poster(
     web_client: AsyncWebClient,
     *,
     channel_id: str,
-    thread_ts: str,
+    thread_ts: str | None,
     mention: _SweepMention | None = None,
 ) -> Callable[[DeliverableFile], Awaitable[None]]:
     async def post(file: DeliverableFile) -> None:
@@ -254,7 +254,7 @@ async def deliver_session_outputs(
     a file over the limit gets one notice rather than one per sweep.
     """
     mention = _SweepMention(requester_user_id)
-    post = _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts, mention=mention)
+    post = build_output_poster(web_client, channel_id=channel_id, thread_ts=thread_ts, mention=mention)
     on_skip = _build_skip_notice(
         web_client,
         channel_id=channel_id,
@@ -313,5 +313,5 @@ async def deliver_provider_output(
         or file.size_bytes > SLACK_MAX_BYTES_PER_FILE
     ):
         return False
-    await _build_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)(file)
+    await build_output_poster(web_client, channel_id=channel_id, thread_ts=thread_ts)(file)
     return True
