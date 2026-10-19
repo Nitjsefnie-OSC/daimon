@@ -132,12 +132,14 @@ elif [ "$1" = push ]; then
         -q|--quiet) quiet=$1; shift ;;
     esac
     [ "$#" -ge 1 ] || push_usage
+    # Plain <src> or <src>:<dst> only: no force (+), delete (:dst) or globs.
     for refspec in "$@"; do
         case "$refspec" in
-            ''|-*) push_usage ;;
+            ''|-*|+*|:*|*'*'*|*:*:*) push_usage ;;
         esac
     done
-    origin_url=$(git config --get remote.origin.url 2>/dev/null || true)
+    # The effective push URL, after pushurl, insteadOf and pushInsteadOf.
+    origin_url=$(git remote get-url --push origin 2>/dev/null || true)
     case "$origin_url" in
         https://github.com/*) origin_repo=${origin_url#https://github.com/} ;;
         *)

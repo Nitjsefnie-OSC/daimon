@@ -408,6 +408,14 @@ def test_push_refuses_origin_mismatch_unmapped_repo_and_every_other_flag(
         (),
         ("-q",),
         ("",),
+        ("+feature",),
+        ("+HEAD:refs/heads/main",),
+        (":refs/heads/main",),
+        ("+:",),
+        (":",),
+        ("refs/heads/*:refs/heads/*",),
+        ("feature:main:extra",),
+        ("-q", "+feature"),
     ):
         refused = _run_in(script, env, clone, "OwnerB/RepoB", "push", *flags)
         assert refused.returncode == 2, flags
@@ -418,3 +426,22 @@ def test_push_refuses_origin_mismatch_unmapped_repo_and_every_other_flag(
     assert wrong_repo.returncode == 2
     assert not pushed.exists()
     assert "opaque-placeholder" not in mismatch.stdout + mismatch.stderr + unmapped.stderr
+
+
+def test_push_refuses_a_push_url_redirected_away_from_the_repo(tmp_path: Path) -> None:
+    script, env, capture, clone = _push_fixture(tmp_path)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    redirects = (
+        ("remote.origin.pushurl", "https://github.com/OwnerA/RepoA.git"),
+        ("remote.origin.pushurl", "git@github.com:OwnerB/RepoB.git"),
+        ("url.ssh://git@evil.example/.pushInsteadOf", "https://github.com/"),
+        ("url.https://github.com/OwnerA/.insteadOf", "https://github.com/ownerb/"),
+    )
+    for key, value in redirects:
+        subprocess.run([real_git, "-C", str(clone), "config", key, value], check=True)
+        refused = _run_in(script, env, clone, "OwnerB/RepoB", "push", "feature")
+        assert refused.returncode == 2, (key, value)
+        assert "opaque-placeholder" not in refused.stdout + refused.stderr
+        subprocess.run([real_git, "-C", str(clone), "config", "--unset", key], check=True)
+    assert not (capture / "push-args").exists()
