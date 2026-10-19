@@ -98,28 +98,29 @@ def _safe_text(value: str) -> str:
 def details_pages(lines: tuple[str, ...]) -> list[str] | None:
     """Escaped Details split on line boundaries into Discord-sized pages; None past the cap.
 
-    Escaping comes first, so no page grows past the limit when it is sent; a
-    line longer than a page is cut, never between a backslash and what it escapes.
+    Escaping comes first, so no page grows past the limit when it is sent. A
+    line longer than a page fills pages of its own, never cut between a
+    backslash and the character it escapes.
     """
     pages: list[str] = []
     current = ""
     for line in (_safe_text(line) for line in lines):
-        pieces: list[str] = []
         while len(line) > DETAILS_PAGE_LIMIT:
             cut = DETAILS_PAGE_LIMIT
-            while cut > 0 and line[cut - 1] == "\\":
+            run = len(line[:cut]) - len(line[:cut].rstrip("\\"))
+            if run % 2:
                 cut -= 1
-            cut = cut or DETAILS_PAGE_LIMIT
-            pieces.append(line[:cut])
+            if current:
+                pages.append(current)
+                current = ""
+            pages.append(line[:cut])
             line = line[cut:]
-        pieces.append(line)
-        for piece in pieces:
-            joined = f"{current}\n{piece}" if current else piece
-            if len(joined) <= DETAILS_PAGE_LIMIT:
-                current = joined
-                continue
-            pages.append(current)
-            current = piece
+        joined = f"{current}\n{line}" if current else line
+        if len(joined) <= DETAILS_PAGE_LIMIT:
+            current = joined
+            continue
+        pages.append(current)
+        current = line
     if current:
         pages.append(current)
     return pages if len(pages) <= DETAILS_MAX_PAGES else None
