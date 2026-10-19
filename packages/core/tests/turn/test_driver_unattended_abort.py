@@ -612,8 +612,10 @@ async def test_abort_during_replay_preprocessing_interrupts(gated: bool, signal:
 
 
 @pytest.mark.parametrize("signal", ["failure", "cancel", "stop", "ceiling"])
-async def test_an_aborted_initial_gate_interrupts(signal: str) -> None:
-    """Finding 2: the gate before the turn's message fails or is cancelled."""
+async def test_an_aborted_initial_gate_leaves_the_session_untouched(signal: str) -> None:
+    """The gate before the turn's message fails or is cancelled: nothing of
+    this turn runs yet, and a refused gate must send the session nothing,
+    an interrupt included (`test_first_send_races`)."""
     fa = FakeAnthropic()
     fa.beta.sessions.events.stream_scripts = [
         [BlockForever()],
@@ -652,8 +654,7 @@ async def test_an_aborted_initial_gate_interrupts(signal: str) -> None:
     else:
         assert isinstance(outcome, TurnState)
         assert outcome.error is not None and outcome.error.kind == "interrupted"
-    assert _sent(fa, "user.message") == [], "the message never went out"
-    assert len(_sent(fa, "user.interrupt")) == 1
+    assert fa.beta.sessions.events.sent_events == [], "no message and no interrupt"
     assert not _live_turn_tasks()
 
 

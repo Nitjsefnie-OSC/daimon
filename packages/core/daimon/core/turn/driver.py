@@ -295,11 +295,21 @@ class _UnattendedAbort:
     handler reuse that task, so no cleanup await and no repeated cancellation
     can skip it or send a second one. `_pump` joins it, bounded, before it
     returns. Attended runs never start it: they refuse on abort and the Stop
-    handler interrupts inline, as before.
+    handler interrupts inline, as before. Nor does an abort before the turn's
+    message is sent: nothing the turn started is running yet, and a refused
+    gate must leave the session untouched.
     """
 
-    def __init__(self, io: TurnIO, *, session_id: str, stop_timeout_s: float) -> None:
+    def __init__(
+        self,
+        io: TurnIO,
+        *,
+        session_id: str,
+        stop_timeout_s: float,
+        message_sent: Callable[[], bool] = lambda: True,
+    ) -> None:
         self.unattended = _UNATTENDED.get()
+        self._message_sent = message_sent
         self._io = io
         self._session_id = session_id
         self._stop_timeout_s = stop_timeout_s
@@ -315,7 +325,7 @@ class _UnattendedAbort:
         A Stop that the Stop handler reports gets the turn's full interrupt
         wait; any other abort gets the cleanup budget.
         """
-        if not self.unattended or self._task is not None:
+        if not self.unattended or self._task is not None or not self._message_sent():
             return
         timeout_s = self._stop_timeout_s if stopped else CLEANUP_BUDGET_S
         if not stopped:
@@ -338,7 +348,7 @@ class _UnattendedAbort:
 
     async def interrupt(self) -> StopObservation | None:
         """The normal Stop handler's interrupt: the owned one when unattended."""
-        if not self.unattended:
+        if not self.unattended or not self._message_sent():
             return await self._io.interrupt(timeout_s=self._stop_timeout_s)
         self.start(stopped=True)
         assert self._task is not None
@@ -883,6 +893,8 @@ async def run_turn(
                 await before_send()
             if (gate := _UNATTENDED_GATE.get()) is not None:
                 await gate()
+            # From here on the session may run this turn: an abort interrupts it.
+            message_sent[0] = True
             try:
                 await io.send(batch)
             except _anthropic.BadRequestError as err:
@@ -895,7 +907,13 @@ async def run_turn(
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session_id
 
+    # Whether this pump's message may have reached the session. Before it,
+    # nothing the turn started is running, and a refused gate must leave the
+    # session untouched, so an abort has nothing to interrupt.
+    message_sent = [False]
+
     def _new_pump() -> Coroutine[Any, Any, TurnState]:
+        message_sent[0] = False
         return _pump(
             io=io,
             anthropic=anthropic,
@@ -913,6 +931,7 @@ async def run_turn(
             billing=billing,
             tool_confirmation=tool_confirmation,
             preset_error=unwedge_failure[0],
+            message_sent=lambda: message_sent[0],
         )
 
     async def _pump_unwedging() -> TurnState:
@@ -1127,6 +1146,7 @@ async def _pump(
     billing: BillingPosture,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
     preset_error: BaseException | None = None,
+    message_sent: Callable[[], bool] = lambda: True,
 ) -> TurnState:
     log.info("turn.started", session_id=session_id, entry=entry)
 
@@ -1158,7 +1178,12 @@ async def _pump(
     billed_event_ids: set[str] = set()
     # Shared by the live stream, every replay and the Stop handler, so an
     # unattended abort sends one interrupt however many paths reach it.
-    abort = _UnattendedAbort(io, session_id=session_id, stop_timeout_s=interrupt_timeout_s)
+    abort = _UnattendedAbort(
+        io,
+        session_id=session_id,
+        stop_timeout_s=interrupt_timeout_s,
+        message_sent=message_sent,
+    )
 
     from daimon.core.turn.render import diff as _diff  # local import to avoid cycles
 
