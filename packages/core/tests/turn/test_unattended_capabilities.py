@@ -347,6 +347,10 @@ async def test_attended_chat_posture_is_unchanged() -> None:
             id="builtin_config_field",
         ),
         pytest.param(
+            lambda: _mutated(lambda s: s["agent"]["tools"][0]["configs"][0].update(type="write")),
+            id="builtin_config_foreign_type",
+        ),
+        pytest.param(
             lambda: _mutated(lambda s: s["agent"]["tools"][1]["configs"][0].update(scope="*")),
             id="mcp_config_field",
         ),
@@ -379,6 +383,12 @@ async def test_attended_chat_posture_is_unchanged() -> None:
             id="duplicate_server",
         ),
         pytest.param(lambda: _mutated(lambda s: s["agent"]["model"].update(tier={})), id="model"),
+        pytest.param(
+            lambda: _mutated(
+                lambda s: s["agent"]["model"].update(effort={"type": "max", "tools": True})
+            ),
+            id="model_effort_field",
+        ),
         pytest.param(lambda: _mutated(lambda s: s.update(sandbox={})), id="session_field"),
         pytest.param(
             lambda: _mutated(lambda s: s["resources"].append({**_FILE, "exec": True})),
@@ -708,3 +718,17 @@ async def test_every_retained_mcp_call_pauses_for_the_decider(
     )
     assert daimon.allow
     assert foreign.allow is not enabled
+
+
+@pytest.mark.parametrize("effort", ["medium", {"type": "medium"}])
+def test_model_inference_settings_daimon_writes_pass(effort: object) -> None:
+    """`inference_geo` and `effort`, which Daimon's driver sets and the SDK does not parse."""
+    session = _mutated(
+        lambda s: s["agent"]["model"].update(inference_geo="us", effort=effort, speed="fast")
+    )
+    require_allowed_capabilities(session)
+
+
+def test_a_builtin_config_may_echo_its_own_name_as_type() -> None:
+    session = _mutated(lambda s: s["agent"]["tools"][0]["configs"][0].update(type="bash"))
+    require_allowed_capabilities(session)

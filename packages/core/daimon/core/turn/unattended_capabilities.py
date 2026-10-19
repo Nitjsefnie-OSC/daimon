@@ -27,13 +27,17 @@ import asyncio
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal, NoReturn, cast
+from typing import Any, Final, Literal, NoReturn, cast, get_args
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
     BetaManagedAgentsAgentToolset20260401,
 )
+from anthropic.types.beta.beta_managed_agents_anthropic_skill import (
+    BetaManagedAgentsAnthropicSkill,
+)
+from anthropic.types.beta.beta_managed_agents_custom_skill import BetaManagedAgentsCustomSkill
 from anthropic.types.beta.beta_managed_agents_mcp_toolset import BetaManagedAgentsMCPToolset
 from anthropic.types.beta.beta_managed_agents_session_agent_update_param import (
     BetaManagedAgentsSessionAgentUpdateParam,
@@ -138,7 +142,16 @@ _SESSION = _fields(
 _AGENT = _fields(
     "id type version name description model system tools mcp_servers skills multiagent"
 )
-_MODEL = _fields("id speed")
+# Inference settings only (Daimon's own driver writes `inference_geo` and
+# `effort`, which the SDK does not parse yet); none of them grants a tool.
+_MODEL = _fields("id speed inference_geo effort")
+_EFFORT = _fields("type")
+# The two skill kinds the SDK knows, by their own `type` literals.
+_SKILL_TYPES = frozenset(
+    kind
+    for model in (BetaManagedAgentsAnthropicSkill, BetaManagedAgentsCustomSkill)
+    for kind in get_args(model.model_fields["type"].annotation)
+)
 _SKILL = _fields("skill_id type version")
 _SERVER = _fields("name type url")
 _TOOLSETS: Final[Mapping[str, frozenset[str]]] = {
@@ -191,7 +204,14 @@ def _require_toolset_configs(
     if len({config.name for config in configs}) != len(configs):
         _refuse()
     for config in configs:
-        _only(config, _CONFIG)
+        if tool.type == BUILTIN_TOOLSET and "type" in (config.model_extra or {}):
+            # A built-in config may echo its own name as `type`, as the
+            # driver's native schema allows; nothing else.
+            if (config.model_extra or {})["type"] != config.name:
+                _refuse()
+            _only(config, _CONFIG | {"type"})
+        else:
+            _only(config, _CONFIG)
     for policy in (tool.default_config.permission_policy, *(c.permission_policy for c in configs)):
         _only(policy, _POLICY)
         if policy.type not in _POLICY_TYPES:
@@ -216,9 +236,14 @@ def require_allowed_capabilities(
     if agent.multiagent is not None or (agent.skills and not allow_skills):
         _refuse()
     _only(agent.model, _MODEL)
+    effort = getattr(agent.model, "effort", None)
+    if isinstance(effort, BaseModel):
+        _only(effort, _EFFORT)
+    elif isinstance(effort, dict) and set(cast("dict[str, object]", effort)) - _EFFORT:
+        _refuse()
     for skill in agent.skills:
         _only(skill, _SKILL)
-        if skill.type not in ("anthropic", "custom"):
+        if skill.type not in _SKILL_TYPES:
             _refuse()
     names = [server.name for server in agent.mcp_servers]
     if len(set(names)) != len(names):
