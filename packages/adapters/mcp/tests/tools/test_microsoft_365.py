@@ -388,6 +388,36 @@ async def test_no_pre_authenticated_link_outside_the_one_to_one_chat(
     )
 
 
+@pytest.mark.parametrize("running", ["guest", "local", "none"])
+async def test_a_file_link_note_without_a_verified_origin_follows_the_person_not_a_guess(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft, running: str
+) -> None:
+    """No `origin_context_id`: a guest's running turn says so, a local sender's says not,
+    and with no running turn nobody is sent to a 1:1 chat on a guess."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    if running != "none":
+        await _origin(committing_sessionmaker, auth, CHANNEL, foreign=running == "guest")
+    fake.graph[("GET", "/me/drive/items/i1/content")] = httpx.Response(
+        302, headers={"location": "https://files.example/download?sig=1"}
+    )
+    fake.graph[("GET", "/me/drive/items/i2")] = httpx.Response(
+        200, content=b"x", headers={"content-type": "application/pdf"}
+    )
+    runtime = _runtime(committing_sessionmaker, fake)
+
+    notes = [
+        (await microsoft_get_impl(runtime, auth, path=path, origin_context_id="")).text or ""
+        for path in ("/me/drive/items/i1/content", "/me/drive/items/i2")
+    ]
+
+    for note in notes:
+        assert ("1:1 chat" in note) is (running == "local"), note
+        assert ("organisation that added Daimon" in note) is (running == "guest"), note
+    if running == "none":
+        assert "can't be given here" in notes[0] and "where one can be given" in notes[1]
+
+
 async def test_graph_error_text_is_not_echoed(
     committing_sessionmaker: async_sessionmaker[AsyncSession], fake: FakeMicrosoft
 ) -> None:

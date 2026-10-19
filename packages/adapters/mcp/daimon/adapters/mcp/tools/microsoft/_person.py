@@ -6,7 +6,7 @@ import uuid
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
+from daimon.adapters.mcp.tools._channel_policy import caller_foreign_status, get_verified_origin
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.stores.domain import TurnOriginRow
@@ -62,12 +62,13 @@ async def require_one_to_one(
 
 async def origin_facts(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool | None]:
     """(is it the person's 1:1 chat, is the sender from another organisation) for the
-    verified turn origin; both False when unverified."""
+    verified turn origin. Without one, the person's running turns say whether they are
+    from another organisation, and None means that is not known."""
     origin = await get_verified_origin(runtime, auth, origin_context_id)
     if origin is None:
-        return False, False
+        return False, await caller_foreign_status(runtime, auth)
     return origin.parent_channel_id.startswith("a:"), origin.sender_foreign
 
 

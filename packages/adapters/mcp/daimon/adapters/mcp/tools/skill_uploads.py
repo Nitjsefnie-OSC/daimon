@@ -37,7 +37,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
-from daimon.adapters.mcp.tools._channel_policy import load_read_policy
+from daimon.adapters.mcp.tools._channel_policy import caller_foreign_status, load_read_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._gemini_resources import gemini_skill_host
 from daimon.adapters.mcp.tools._openai_resources import (
@@ -223,20 +223,32 @@ def _chat_confirms(
     )
 
 
-def _panel(platform: str | None, agent_name: str, *, foreign: bool = False) -> str:
+async def _sender_is_foreign(
+    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow | None
+) -> bool | None:
+    """Whether the sender is from another organisation: the origin says so, and without
+    one (no `origin_context_id` was passed) the person's running turns do. None is not known."""
+    if origin is not None:
+        return origin.sender_foreign
+    if auth.platform != "teams":
+        return False
+    return await caller_foreign_status(runtime, auth)
+
+
+def _panel(platform: str | None, agent_name: str, *, foreign: bool | None = False) -> str:
     if foreign:
         return (
             f"{setup_instruction(platform, foreign=True)}; there, open {agent_name} and use Add "
             "skill: it shows the same preview and adds it on their own click"
         )
     return (
-        f"{setup_instruction(platform)}, open {agent_name} and use Add skill: it shows the same "
-        "preview and adds it on their own click"
+        f"{setup_instruction(platform, foreign=foreign)}, open {agent_name} and use Add skill: "
+        "it shows the same preview and adds it on their own click"
     )
 
 
 def _no_card_preview(
-    platform: str | None, reason: NoCardReason, agent_name: str, *, foreign: bool = False
+    platform: str | None, reason: NoCardReason, agent_name: str, *, foreign: bool | None = False
 ) -> str:
     why, fix = _no_card_text(reason)
     then = f"{fix} Otherwise they" if fix else "To add it they"
@@ -245,7 +257,7 @@ def _no_card_preview(
 
 
 def _no_card_refusal(
-    platform: str | None, reason: NoCardReason, agent_name: str, *, foreign: bool = False
+    platform: str | None, reason: NoCardReason, agent_name: str, *, foreign: bool | None = False
 ) -> str:
     why, fix = _no_card_text(reason)
     then = f"{fix} Otherwise tell them" if fix else "Tell them"
@@ -554,7 +566,7 @@ async def _add_skill_impl(
             )
         chat_confirms = _chat_confirms(auth, origin, no_card)
         if content_hash is not None and no_card is not None and not chat_confirms:
-            foreign = origin is not None and origin.sender_foreign
+            foreign = await _sender_is_foreign(runtime, auth, origin)
             raise ToolError(_no_card_refusal(auth.platform, no_card, agent_name, foreign=foreign))
         async with httpx.AsyncClient(timeout=30.0) as http:
             bundle, source = await _load_bundle(
@@ -601,7 +613,7 @@ async def _add_skill_impl(
                     f"content_hash='{bound}'; they approve it once more on the card."
                 )
             else:
-                foreign = origin is not None and origin.sender_foreign
+                foreign = await _sender_is_foreign(runtime, auth, origin)
                 then = _no_card_preview(auth.platform, no_card, agent_name, foreign=foreign)
             return AddSkillResult(
                 status="preview",

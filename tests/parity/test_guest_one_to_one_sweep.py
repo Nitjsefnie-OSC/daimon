@@ -54,6 +54,9 @@ _CLASSIFIED: dict[tuple[str, str], str] = {
     (_TEAMS + "context.py", "Files can't be attached in a group chat. Mention it only if"): (
         "a guest gets _GROUP_FILES_HINT_FOREIGN"
     ),
+    (_TEAMS + "context.py", "Files can't be attached in a group chat. This person is from"): (
+        "the guest's own hint: it tells the model not to suggest a 1:1 chat"
+    ),
     (_TEAMS + "installations.py", "The documented deep link"): "operator text, not shown",
     (_TEAMS + "private_replies.py", "Private questions aren't supported yet."): (
         "a guest gets NOT_YET_PRIVATE_FOREIGN"
@@ -61,10 +64,11 @@ _CLASSIFIED: dict[tuple[str, str], str] = {
     (_TEAMS + "setup_panel.py", "Open setup from our 1:1 chat"): "shown only inside a 1:1 chat",
     (_TEAMS + "support.py", "(sent in the 1:1 chat)"): "`support` is a command a guest cannot run",
     (_CORE + "agent_guidance.py", "## Your credentials & capabilities"): (
-        "the static prompt; the per-turn files_hint (a guest's has no such advice) governs"
+        "the shipped prompt; Teams sessions run platform_system's swapped passage instead"
     ),
     (_CORE + "platform_system.py", "In a Teams channel or group chat"): (
-        "the static prompt; the per-turn files_hint (a guest's has no such advice) governs"
+        "the shipped passage, which the Teams swap replaces with one that defers to the "
+        "files hint; Discord and Slack drop it"
     ),
     (_CORE + "platform_words.py", "wherever it has been added"): "where Daimon works, a fact",
     (_CORE + "platform_words.py", "1:1 chat"): "the table; a guest's words replace it per turn",

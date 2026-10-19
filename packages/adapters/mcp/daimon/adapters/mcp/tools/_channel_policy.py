@@ -629,12 +629,12 @@ async def list_running_origins(runtime: McpRuntime, auth: AuthIdentity) -> list[
     ]
 
 
-async def caller_is_foreign(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+async def caller_foreign_status(runtime: McpRuntime, auth: AuthIdentity) -> bool | None:
     """Whether the caller is a person from another organisation (Teams), who has no
     1:1 chat with Daimon. It is a fact about the person, so any of their running turns
-    says it; False when they have none."""
+    says it; None when they have none, so nothing is known."""
     if auth.platform is None:
-        return False
+        return None
     async with runtime.session_factory() as session:
         running = await list_active_origins(
             session,
@@ -643,7 +643,14 @@ async def caller_is_foreign(runtime: McpRuntime, auth: AuthIdentity) -> bool:
             platform=auth.platform,
             now=datetime.now(UTC),
         )
+    if not running:
+        return None
     return any(origin.sender_foreign for origin in running)
+
+
+async def caller_is_foreign(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """`caller_foreign_status`, with "nothing known" read as a person who is not."""
+    return await caller_foreign_status(runtime, auth) is True
 
 
 async def get_verified_origin(

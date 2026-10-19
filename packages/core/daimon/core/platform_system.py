@@ -133,6 +133,12 @@ with the bot, a separate conversation where the file would be made again. send_m
 a file there either, so never call it or create_file_upload_url for one.
 
 """
+#: Teams' own wording: a person from another organisation can't open a 1:1 chat, and the
+#: turn's `files_hint` says so. Discord and Slack never see this passage.
+_FILES_ATTRIBUTE_PARAGRAPH_TEAMS = _FILES_ATTRIBUTE_PARAGRAPH.replace(
+    "where the file would be made again.",
+    "where the file would be made again, unless the files hint says this person can't open one.",
+)
 
 #: (shipped passage, replacement) for one platform. Each shipped passage appears
 #: verbatim in the shipped prompt; `test_platform_system` fails when one drifts out.
@@ -151,7 +157,10 @@ def _swaps(platform: ChatPlatform) -> tuple[tuple[str, str], ...]:
         (_SHIPPED_FORMAT, f"{_FORMATTING[platform]}\n\n{one_platform_rule(platform)}"),
         _NEVER_ASSUME,
         (_FILES_SHIPPED, _FILES[platform]),
-        (_FILES_ATTRIBUTE_PARAGRAPH, _FILES_ATTRIBUTE_PARAGRAPH if platform == "teams" else ""),
+        (
+            _FILES_ATTRIBUTE_PARAGRAPH,
+            _FILES_ATTRIBUTE_PARAGRAPH_TEAMS if platform == "teams" else "",
+        ),
     )
 
 

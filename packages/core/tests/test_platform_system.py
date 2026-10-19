@@ -73,6 +73,31 @@ def test_each_platform_gets_only_its_own_formatting_and_file_rules() -> None:
         assert "every chat platform" not in variant and "assume a platform" not in variant
 
 
+def test_the_teams_prompt_defers_to_the_files_hint_for_a_person_with_no_one_to_one_chat() -> None:
+    teams = system_for_platform(_shipped_system(), "teams")
+
+    assert teams is not None
+    assert "suggest a 1:1 chat\nwith the bot, a separate conversation where the file would be " in (
+        teams
+    )
+    assert "again, unless the files hint says this person can't open one." in teams
+
+
+#: What Discord's and Slack's prompts hashed to on main before this change: only Teams'
+#: wording moves, so these sessions are not replaced.
+_PINNED_ON_MAIN = {
+    "discord": "052a5b2e93dbc2a3767988cc4308b6708707bb243f208d309ed4a1e9870d4ea0",
+    "slack": "fc43b4ec83cf7a5d4c9b212a6e2ce2a26d62b8f6c0919f9aa9a5250e71440cb4",
+}
+
+
+@pytest.mark.parametrize("platform", sorted(_PINNED_ON_MAIN))
+def test_the_discord_and_slack_prompts_are_byte_identical_to_main(platform: str) -> None:
+    variant = system_for_platform(_shipped_system(), platform)
+
+    assert hash_system(variant) == _PINNED_ON_MAIN[platform]
+
+
 @pytest.mark.parametrize("platform", [None, "cli", ""])
 def test_a_prompt_without_a_chat_platform_stays_the_agents_own(platform: str | None) -> None:
     assert system_for_platform(_shipped_system(), platform) is None

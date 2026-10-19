@@ -59,6 +59,9 @@ _NO_LINK = (
     "This file's download link is given only in the person's 1:1 chat with Daimon, since "
     "anyone holding it could open the file. Ask them there."
 )
+_NO_LINK_UNKNOWN = (
+    "This file's download link can't be given here, since anyone holding it could open the file."
+)
 _NO_LINK_FOREIGN = (
     "This file's download link works only for people in the organisation that added "
     "Daimon, since anyone holding it could open the file."
@@ -148,16 +151,23 @@ def _next_path(data: dict[str, JsonValue]) -> str | None:
     return None
 
 
-def _result(response: httpx.Response, *, links: bool, foreign: bool = False) -> GraphResult:
+def _no_link(foreign: bool | None) -> str:
+    if foreign is None:
+        return _NO_LINK_UNKNOWN
+    return _NO_LINK_FOREIGN if foreign else _NO_LINK
+
+
+def _result(response: httpx.Response, *, links: bool, foreign: bool | None = False) -> GraphResult:
     """A bounded result: JSON trimmed by dropping list items, text cut, never bytes.
 
-    `links` (the person's 1:1 chat only) returns a /content redirect's link.
+    `links` (the person's 1:1 chat only) returns a /content redirect's link. `foreign` is
+    whether the sender is from another organisation, None when that is not known.
     """
     status = response.status_code
     if response.is_redirect:
         if links:
             return GraphResult(status=status, download_url=response.headers.get("location"))
-        return GraphResult(status=status, text=_NO_LINK_FOREIGN if foreign else _NO_LINK)
+        return GraphResult(status=status, text=_no_link(foreign))
     if not response.content:
         return GraphResult(status=status)
     kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
@@ -186,9 +196,11 @@ def _result(response: httpx.Response, *, links: bool, foreign: bool = False) -> 
     where = (
         "."
         if links
+        else " in the person's 1:1 chat with Daimon."
+        if foreign is False
         else " for people in the organisation that added Daimon."
         if foreign
-        else " in the person's 1:1 chat with Daimon."
+        else " where one can be given."
     )
     text = "Binary content is not returned. GET .../content for a download link"
     return GraphResult(status=status, text=text + where)
