@@ -4267,3 +4267,70 @@ async def _review_replacement(db, factory, *, sealed=False, lift=False):
     )
     assert isinstance(handed, PreparedTurn)
     return tenant, transport, deps, admission_deps, first, handed, transfers
+
+
+async def test_a_conversations_model_choice_is_frozen_kept_and_dropped_by_replacement(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The choice rides the session override: the stored agent keeps its own model."""
+    from daimon.core.thread_models import apply_thread_model, choose_thread_model
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    async def admitted() -> Admission:
+        async with db_session_factory() as session:
+            applied = await apply_thread_model(
+                session,
+                agent=_agent(),
+                tenant_id=tenant.id,
+                platform="discord",
+                conversation_id="thread-1",
+                anthropic_backend=True,
+            )
+        return replace(
+            _admission(account=account, agent=applied.agent),
+            model_override=applied.model_override,
+        )
+
+    first = await _prepare(deps, await admitted(), tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    assert transport.state.sessions[first.ma_session_id].agent.model.id == _MODEL
+
+    await choose_thread_model(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        choice="opus",
+        account_id=account.id,
+    )
+    second = await _prepare(deps, await admitted(), tenant=tenant, account=account)
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id != first.ma_session_id, "the frozen session can't change model"
+    assert second.continuity.applied == ("model",), "the work is carried over as for any model edit"
+    assert transport.state.sessions[second.ma_session_id].agent.model.id == "claude-opus-5-5"
+    assert transport.state.ma.agents[_AGENT_ID]["model"] == {"id": _MODEL}, (
+        "the stored agent is never edited"
+    )
+
+    third = await _prepare(deps, await admitted(), tenant=tenant, account=account)
+    assert isinstance(third, PreparedTurn)
+    assert third.ma_session_id == second.ma_session_id, "the next turn keeps the chosen session"
+
+    await choose_thread_model(
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        choice="default",
+        account_id=account.id,
+    )
+    fourth = await _prepare(deps, await admitted(), tenant=tenant, account=account)
+    assert isinstance(fourth, PreparedTurn)
+    assert fourth.ma_session_id != second.ma_session_id
+    assert transport.state.sessions[fourth.ma_session_id].agent.model.id == _MODEL
