@@ -39,9 +39,16 @@ provenance is written once at creation and never changed by retargeting,
 clearing delivery, changing the budget, or selecting DM. Legacy routines with
 unknown provenance keep ordinary channel/thread edits, clearing and normal firing
 on every platform, but cannot select DM. Recreate the routine from its channel
-or thread to get DM delivery. DM routine runs mount no personal memory. Tenant memory remains read-only, and tool
-authority stays the same as for channel routines; selecting DM delivery does
-not restrict tools to private output.
+or thread to get DM delivery.
+
+A DM routine runs as its owner's own DM with Daimon would: see
+[The turn itself](#the-turn-itself). It reads and writes the owner's personal
+memory under the same rules as a live DM, and has the same web, file,
+internal-tool and connected-tool access. Selecting DM delivery decides where
+Daimon posts the final reply; it does not restrict tools to private output.
+
+!!! warning "Nobody watches a DM routine"
+    A DM routine has your normal DM abilities, but nobody is watching what it does along the way: a mistaken send or publish tool call could expose personal content before you see the final DM. Calls that need an approval are refused unless the unattended permissions already allow them; keeping those permissions narrow is the cheapest protection.
 
 The host queues the final reply through the outbox and sends chunks of at
 most 2,000 characters with mentions disabled. The notification includes the
@@ -232,6 +239,10 @@ it for later ticks and close it at shutdown.
 
 ## The turn itself
 
+A Discord routine whose destination is its owner's DM runs differently; see
+[Owner-DM routines](#owner-dm-routines) below. Every other routine works as
+follows.
+
 A fire resolves the tenant, mints or finds the creator's principal on the
 tenant's own platform, checks the tenant's invoker allowlist against the
 creator (see [architecture.md](architecture.md#how-a-message-becomes-a-turn)),
@@ -257,6 +268,40 @@ in `DAIMON_TOOL_SAFETY__UNATTENDED_WRITES`. Daimon's own tools are not
 affected, apart from an agent's `ask` or `deny` rule on one
 (`daimon-mcp/<tool>`, with `DAIMON_TOOL_SAFETY__AGENT_RULES` on), which a
 routine refuses. See [architecture.md](architecture.md).
+
+### Owner-DM routines
+
+A routine with `destination_kind="dm"` keeps the fire-time checks above (the
+tenant's DM switch and outbound DM policy, the owner's live membership and
+invoker access including the admin-pass switch, the creation source, the
+balance, the agent pin and the channel budget). It then runs as a fresh DM
+turn of its owner, through `run_dm_routine` in
+`packages/core/daimon/core/direct_messages.py`: ordinary DM admission with
+the routine's saved agent (the cold-DM agent rules apply, with no admin
+exemption), `bind_session` and `run_prepared_turn`, the same path a live DM
+reply takes. The session gets what a fresh DM of the same owner with that
+agent gets: the owner's credentials and connected tools, files, web access,
+agents, and the shared and personal memory mounts with the DM memory policy
+(writable unless `dm_memory_read_only` is on). The creation source is
+checked again for a seal whenever the session is built, and a sealed source
+refuses the fire.
+
+Each fire gets a new private scope and a new session. It starts with no
+conversation history, and never selects, reads or changes the owner's active
+DM conversation. Its usage is billed to the routine's budget channel.
+
+The run is unattended. Before anything is sent the session's tool settings
+are rewritten from the current policy (`gate_session_snapshot`), and every
+call that pauses is decided by the shared unattended decider
+(`unattended_posture` in `packages/core/daimon/core/turn/unattended.py`):
+nobody can press Approve, so a call that needs one is refused unless
+`DAIMON_TOOL_SAFETY__UNATTENDED_WRITES` or an agent rule for chat and routines
+allows it, and Daimon's protected actions (a backend switch, a Microsoft send)
+are always refused. Calls that run without asking in a live DM run here too.
+The final reply goes to the outbox for the owner's DM only; refusals record a
+reason and queue nothing.
+
+A DM routine has your normal DM abilities, but nobody is watching what it does along the way: a mistaken send or publish tool call could expose personal content before you see the final DM. Calls that need an approval are refused unless the unattended permissions already allow them; keeping those permissions narrow is the cheapest protection.
 
 A routine with a destination sends its trigger message after a
 `<turn_controls>` block (`render_routine_controls` in
@@ -527,13 +572,14 @@ Routine turns receive core unattended-run framing: avoid clarification questions
 verify evidence, and use delivery tools for requested output. Agents can customize
 it with `context_fragments.routine` in their YAML spec; see [architecture](architecture.md#invocation-context-fragments).
 
-Routine sessions always mount persistent agent memory read-only, regardless of the
-tenant's chat or DM policy. They can use saved memory but cannot change it. A routine
-with a channel/thread destination mounts only shared memory, since others may
-read its answer. Explicit owner-DM routines mount no personal memory and retain
-the same tool authority as channel routines. Only a legacy routine with neither
-destination nor channel may mount the owner's personal memory read-only.
-This is decided at every fire. Admins can manage DM routine metadata but do not
+Channel, thread and legacy routine sessions always mount persistent agent memory
+read-only, regardless of the tenant's chat or DM policy. They can use saved memory but
+cannot change it. A routine with a channel/thread destination mounts only shared
+memory, since others may read its answer. A legacy routine with neither destination
+nor channel may mount the owner's personal memory read-only. An owner-DM routine
+mounts memory exactly as its owner's live DM does, personal memory included and
+writable unless `dm_memory_read_only` is on (see
+[Owner-DM routines](#owner-dm-routines)). This is decided at every fire. Admins can manage DM routine metadata but do not
 receive its private output previews.
 
 A routine session is stamped like a turn in the channel it fires into: the

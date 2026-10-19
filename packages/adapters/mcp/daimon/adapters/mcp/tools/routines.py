@@ -872,9 +872,11 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> RoutineRow:
         """Create a recurring routine with optional channel, thread or owner-DM delivery.
 
-        DM runs mount no personal memory and retain ordinary channel-routine tool
-        authority. Sources must be supported channels/threads in this tenant's guild;
-        the original thread and parent remain subject to reader restrictions.
+        A DM run is the owner's own DM turn: the same tools and personal memory as
+        a live DM, unattended, so calls needing an approval are refused unless
+        unattended permissions allow them. Sources must be supported channels/threads
+        in this tenant's guild; the original thread and parent remain subject to
+        reader restrictions.
 
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
 

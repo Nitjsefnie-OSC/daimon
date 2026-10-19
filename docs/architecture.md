@@ -1805,14 +1805,15 @@ limited readers and in DMs under `dm_memory_read_only`. A session without a pers
 store gets shared-store instructions saying that no personal memory is mounted and
 nothing personal is to be recorded. Who else gets one:
 
-- **Routines**: only a legacy routine with no destination and no channel
-  (`rule_views.routine_mounts_personal_memory`) mounts its owner's personal store,
-  read-only like all routine memory. Every routine with a destination,
-  including an owner-DM destination, gets the shared store alone. DM delivery retains ordinary tool authority and
-  mounts no personal memory. The scheduler decides this from the routine row
-  at every fire, so adding a destination stops it at the next run. The agent can
-  still call a posting tool itself; its instructions say not to quote personal
-  memory where others will read it.
+- **Routines**: an owner-DM routine runs as its owner's DM turn
+  (`direct_messages.run_dm_routine`) and mounts the owner's personal store exactly
+  as a live DM does. On the headless runner only a legacy routine with no destination
+  and no channel (`rule_views.routine_mounts_personal_memory`) mounts its owner's
+  personal store, read-only like all headless routine memory. Every channel or
+  thread routine gets the shared store alone. The scheduler decides this from the
+  routine row at every fire, so a channel destination stops it at the next run. The
+  agent can still call a posting tool itself; its instructions say not to quote
+  personal memory where others will read it.
 - **MCP**: the hub's `ask` and `start_turn` mount the caller's personal store. A hub
   caller is a person: the hub token comes from Daimon's OAuth proxy after a Discord or
   Slack sign-in, `HubIdentityMiddleware` checks its signature, issuer, audience and
@@ -2211,8 +2212,19 @@ reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
 the authenticated owner; the operator CLI has `routines create --destination dm`
 and a verifying dry-run. Slack and Teams explicitly reject DM writes.
 
-DM routine runs mount no personal memory; tenant memory remains read-only and
-tool authority is the same as for channel routines. Source channels and threads
+A DM routine fire does not use the headless runner. After the scheduler's
+routine gates, `_fire_dm` calls `direct_messages.run_dm_routine`, which admits
+the owner as a cold DM with the routine's agent (`admit`, `is_dm`, `cold_dm`,
+`dm_agent_name`) in a fresh `dm:<uuid>` scope, binds a new session with
+`bind_session` (personal memory and the DM memory policy, as a live DM), and
+runs it with `run_prepared_turn(origin="routine", attended=False)` through the
+same helper live DM replies use (`_run_admitted_dm_turn`). The session is gated
+with `gate_session_snapshot` and its pauses answered by `unattended_posture`.
+The owner's selected DM conversation, its history and its session are never
+read or changed. The final text goes to the owner-DM outbox. The run has the
+owner's ordinary DM tool authority while nobody watches it, so a mistaken send
+or publish call could expose personal content before the final DM arrives.
+Source channels and threads
 are verified against the tenant's guild through core Discord REST transport.
 Source channel/thread provenance and its known/unknown marker are written once
 at creation and are immutable through every edit. Delivery and budget targets
