@@ -152,7 +152,7 @@ async def test_cancel_requester_persona_matrix(
             assert len(sent) == 1, "a stranger sends no interrupt to Managed Agents"
             accepted = await post_activity(service, _click(requester, value, channel=channel))
             await finish_turns(service.turns)
-    assert "Cancelling" in json.dumps(accepted), accepted
+    assert card.STOPPING_HEADLINE in json.dumps(accepted, ensure_ascii=False), accepted
     assert [event["type"] for batch in sent for event in batch["events"]] == [
         "user.message",
         "user.interrupt",

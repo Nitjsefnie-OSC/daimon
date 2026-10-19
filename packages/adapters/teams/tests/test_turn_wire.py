@@ -471,11 +471,20 @@ async def test_cancel_from_the_author_interrupts_the_session_and_closes_the_card
     message = "application/vnd.microsoft.activity.message"
     assert refused == {"statusCode": 200, "type": message, "value": app._CANCEL_NOT_AUTHOR}  # pyright: ignore[reportPrivateUsage]
     assert sent_after_refusal == 1, "another person's click sends nothing to MA"
-    assert accepted == {"statusCode": 200, "type": message, "value": app._CANCELLING}  # pyright: ignore[reportPrivateUsage]
+    assert (
+        accepted["statusCode"] == 200
+        and accepted["type"] == "application/vnd.microsoft.card.adaptive"
+    )
+    stopping = json.dumps(accepted["value"], ensure_ascii=False)
+    assert card.STOPPING_HEADLINE in stopping, "the clicker's card says it is stopping"
+    assert card.CANCEL_VERB not in stopping, "without a Stop button"
     events = [e["type"] for body in sent for e in body["events"]]
     assert events == ["user.message", "user.interrupt"], "one interrupt reaches MA"
     assert streams == [] and not release.is_set(), "the interrupt ends the turn, not the stream"
-    _status, closed = teams_api_fake.activity_requests
+    _status, stopping_edit, closed = teams_api_fake.activity_requests
+    assert (stopping_edit.method, _path(stopping_edit)) == ("PUT", _path(status) + "/m-1")
+    assert card.STOPPING_HEADLINE in _texts(stopping_edit)[0], "everyone's card says so"
+    assert card.CANCEL_VERB not in json.dumps(stopping_edit.body), "without a Stop button"
     assert (closed.method, _path(closed)) == ("PUT", _path(status) + "/m-1"), "the card is closed"
     notice, summary = _texts(closed)
     assert notice == card.CANCELLED_NOTICE and _actions(closed) == [], "and says so"
