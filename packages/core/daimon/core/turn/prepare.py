@@ -82,6 +82,7 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
     read_session_seals,
     record_session_seals,
+    thread_ids_for_sessions,
 )
 from daimon.core.turn.admission import Admission, reauthorize, restrict_inherited_memory
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
@@ -576,10 +577,23 @@ async def create_ma_session(
                 retry_after=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=1),
             )
 
+    # False only when a prepared create returned a session recorded by an earlier
+    # attempt under the same operation key (`persistence.mutate` replays it); a row
+    # may already name that one.
+    allocated_here = True
+
     async def allocate(
         call: Callable[[], Awaitable[BetaManagedAgentsSession]], wire: SessionCreateRequest
     ) -> BetaManagedAgentsSession:
         assert preparation is not None and persistence is not None
+        nonlocal allocated_here
+        allocated_here = False
+
+        async def create_upstream(_key: str) -> BetaManagedAgentsSession:
+            nonlocal allocated_here
+            allocated_here = True
+            return await call()
+
         return await persistence.mutate(
             None,
             "session_create",
@@ -597,7 +611,7 @@ async def create_ma_session(
                 ),
                 "create": wire.model_dump(mode="json"),
             },
-            lambda _key: call(),
+            create_upstream,
             BetaManagedAgentsSession,
             lambda _: "processed",
             guard=fence,
@@ -764,19 +778,33 @@ async def create_ma_session(
         from mux.drivers.anthropic.transport import single_attempt_mutation
 
         try:
-            with single_attempt_mutation():
-                await _archive_orphaned_session(
-                    deps.anthropic,
-                    session_id=ma_session.id,
-                    scope=preparation.scope
-                    if preparation is not None
-                    else admitted_session_scope(
-                        admission, tenant_id=tenant_id, session_id=ma_session.id
-                    ),
-                )
+            named = False
+            if not allocated_here:
+                # A replayed session may belong to a row an earlier attempt
+                # committed; archive it only if the read shows none does.
+                async with deps.sessionmaker() as db:
+                    named = bool(
+                        await thread_ids_for_sessions(
+                            db, tenant_id=tenant_id, ma_session_ids=[ma_session.id]
+                        )
+                    )
+            if named:
+                log.info("turn.create_cleanup_skipped_named_session", session_id=ma_session.id)
+            else:
+                with single_attempt_mutation():
+                    await _archive_orphaned_session(
+                        deps.anthropic,
+                        session_id=ma_session.id,
+                        scope=preparation.scope
+                        if preparation is not None
+                        else admitted_session_scope(
+                            admission, tenant_id=tenant_id, session_id=ma_session.id
+                        ),
+                    )
         except Exception as cleanup_error:
-            # Binding validation can fail before the archive task exists; the
-            # error being unwound is the one the caller must see.
+            # The row read or binding validation failed before any archive was
+            # sent: leave the session alone. The error being unwound is the one
+            # the caller must see.
             log.warning(
                 "turn.recovery_orphan_archive_failed",
                 session_id=ma_session.id,

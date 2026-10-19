@@ -3,7 +3,7 @@ before it can hand the session to its caller.
 
 `create_session` archives its own session on any failure up to its return. After
 that return `create_ma_session` still awaits the personal-memory lookup and builds
-the snapshot; a cancel (turn Stop, the `asyncio.wait_for` ceiling) or a database
+the snapshot; a cancel (turn Stop, an expiring ceiling) or a database
 error there unwinds with no `CreatedSession` ever reaching the caller, so no
 caller cleanup runs and no row names the session. Without a cleanup in
 `create_ma_session` the upstream session stays live forever.
@@ -110,6 +110,22 @@ async def _fail() -> None:
     raise _LookupBoom("connection lost during the personal-memory lookup")
 
 
+async def _run_until_ceiling_expires(reached: asyncio.Event, work: Awaitable[Any]) -> Any:
+    """Run `work` under a real timeout (the machinery behind `asyncio.wait_for`) that
+    expires as soon as `work` reaches the blocked lookup, however slow the machine."""
+    ceilings: list[asyncio.Timeout] = []
+
+    async def bounded() -> Any:
+        async with asyncio.timeout(None) as ceiling:
+            ceilings.append(ceiling)
+            return await work
+
+    task = asyncio.create_task(bounded())
+    await asyncio.wait_for(reached.wait(), timeout=10)
+    ceilings[0].reschedule(asyncio.get_running_loop().time() + 0.05)
+    return await task
+
+
 async def _create(deps: TurnDeps, tenant_id: uuid.UUID, account_id: uuid.UUID) -> CreatedSession:
     agent = ma_agent(id="ag_1", tenant_id=tenant_id)
     env = ma_environment(id="env_1", tenant_id=tenant_id)
@@ -141,7 +157,7 @@ async def test_cancel_during_the_personal_memory_lookup_archives_the_created_ses
     )
 
 
-async def test_wait_for_ceiling_during_the_lookup_archives_the_created_session(
+async def test_ceiling_expiring_during_the_lookup_archives_the_created_session(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -152,16 +168,10 @@ async def test_wait_for_ceiling_during_the_lookup_archives_the_created_session(
     upstream = _Upstream()
     reached = _patch_lookup(monkeypatch, _never)
 
-    # The ceiling is a wait_for around the whole preparation: it cancels from outside.
-    ceiling = asyncio.create_task(
-        asyncio.wait_for(
-            _create(upstream.deps(db_session_factory), tenant.id, account.id), timeout=30
+    with pytest.raises(TimeoutError):
+        await _run_until_ceiling_expires(
+            reached, _create(upstream.deps(db_session_factory), tenant.id, account.id)
         )
-    )
-    await asyncio.wait_for(reached.wait(), timeout=10)
-    ceiling.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await ceiling
 
     assert upstream.archived == ["sess_1"]
 
@@ -296,21 +306,17 @@ async def test_ceiling_during_recovery_lookup_archives_the_replacement_session(
     reached = _patch_lookup(monkeypatch, _never)
 
     async with _committing_deps(db_schema, upstream) as (deps, sessionmaker):
-        recovery = asyncio.wait_for(
-            _replace_dead_session(
-                deps,
-                tenant_id=tenant.id,
-                account_id=account.id,
-                mapping_id=row.id,
-                thread_id="thread-lookup-ceiling",
-            ),
-            timeout=30,
-        )
-        task = asyncio.create_task(recovery)
-        await asyncio.wait_for(reached.wait(), timeout=10)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        with pytest.raises(TimeoutError):
+            await _run_until_ceiling_expires(
+                reached,
+                _replace_dead_session(
+                    deps,
+                    tenant_id=tenant.id,
+                    account_id=account.id,
+                    mapping_id=row.id,
+                    thread_id="thread-lookup-ceiling",
+                ),
+            )
         rows = await _recovery_rows(sessionmaker, tenant.id, "thread-lookup-ceiling")
 
     assert [r.ma_session_id for r in rows] == ["sess_old"], "the recovery rolled back"
@@ -480,14 +486,14 @@ async def _prepared_root_create(root_turn, monkeypatch: pytest.MonkeyPatch):
             r.path for r in transport.requests if r.method == "POST" and r.path.endswith("/archive")
         ]
 
-    return create, archive_posts
+    return request, create, archive_posts
 
 
 async def test_prepared_create_archives_the_session_when_the_lookup_fails(
     root_turn, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The recorded `session_create` path binds the archive to the preparation's scope."""
-    create, archive_posts = await _prepared_root_create(root_turn, monkeypatch)
+    _, create, archive_posts = await _prepared_root_create(root_turn, monkeypatch)
     _patch_lookup(monkeypatch, _fail)
 
     with pytest.raises(_LookupBoom):
@@ -496,13 +502,13 @@ async def test_prepared_create_archives_the_session_when_the_lookup_fails(
     assert archive_posts() == ["/v1/sessions/fresh-controlled-root/archive"]
 
 
-async def test_prepared_create_archives_a_replayed_session_when_the_lookup_fails(
+async def test_prepared_create_archives_a_replayed_session_no_row_names(
     root_turn, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A recorded create is replayed by a later call under the same operation key and hands back
-    the same session. `create_session` already treats that session as owned and archives it on
-    its own failures; the lookup window does the same. Pinned so the choice is deliberate."""
-    create, archive_posts = await _prepared_root_create(root_turn, monkeypatch)
+    the same session. With no row naming it (the first attempt died before its insert) the
+    replaying call owns it, so its failed lookup archives it."""
+    _, create, archive_posts = await _prepared_root_create(root_turn, monkeypatch)
     first = await create()
     assert archive_posts() == [], "a successful create archives nothing"
     _patch_lookup(monkeypatch, _fail)
@@ -511,3 +517,51 @@ async def test_prepared_create_archives_a_replayed_session_when_the_lookup_fails
         await create()
 
     assert archive_posts() == [f"/v1/sessions/{first.ma_session_id}/archive"]
+
+
+async def _commit_row_naming(root_turn, request, ma_session_id: str) -> None:
+    deps = root_turn[0]
+    async with deps.sessionmaker.begin() as db:
+        await create_thread_session(
+            db,
+            tenant_id=request.tenant_id,
+            platform=request.platform,
+            thread_id=request.thread_id,
+            account_id=request.admission.account_id,
+            ma_session_id=ma_session_id,
+        )
+
+
+async def test_prepared_create_keeps_a_replayed_session_a_committed_row_names(
+    root_turn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first attempt's mapping committed; a replay hands back the same session and its
+    lookup fails. The session is the live conversation of that row: it must not be archived."""
+    request, create, archive_posts = await _prepared_root_create(root_turn, monkeypatch)
+    first = await create()
+    await _commit_row_naming(root_turn, request, first.ma_session_id)
+    _patch_lookup(monkeypatch, _fail)
+
+    with pytest.raises(_LookupBoom):
+        await create()
+
+    assert archive_posts() == []
+
+
+async def test_prepared_create_keeps_a_replayed_session_when_the_row_read_fails(
+    root_turn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If it cannot be shown that no row names a replayed session, it is left alone."""
+    _, create, archive_posts = await _prepared_root_create(root_turn, monkeypatch)
+    await create()
+    _patch_lookup(monkeypatch, _fail)
+
+    async def unreadable(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise _LookupBoom("connection lost during the row read")
+
+    monkeypatch.setattr(prepare_module, "thread_ids_for_sessions", unreadable)
+
+    with pytest.raises(_LookupBoom, match="personal-memory lookup"):
+        await create()
+
+    assert archive_posts() == []
