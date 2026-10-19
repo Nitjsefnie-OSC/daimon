@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Agents whose GitHub repos span several organizations can now push a clone of a repo from another organization through the mounted GitHub helper (`github-repo.sh owner/repo push <branch>`); they used to push it with the working organization's token and get a 404.
+
 - OpenAI agents with native web search and host-bound MCP now accept the provider's echoed default search fields and empty credential carriers during readback. Nondefault search controls and nonempty native credentials remain refused.
 
 - Fleet workers get distinct names, so later mentions keep reaching the original agent. Defaults updates leave live workers alone.
