@@ -1455,3 +1455,32 @@ async def test_unknown_receipt_paginates_and_resolves_every_scoped_match(harness
     assert set(intent.discovered_session_ids) == {original.id, duplicate.id}
     assert not any(upstream.events(sid, "user.interrupt") for sid in foreign)
     assert all(upstream.state.sessions[sid].status == "running" for sid in foreign)
+
+
+async def test_minimum_turn_pool_keeps_liveness_outside_allocation_budget(
+    harness: Harness, db_schema: str
+):
+    from daimon.adapters.scheduler.main import _acquire_advisory_lock
+
+    url = harness.factory.kw["bind"].url.render_as_string(hide_password=False)
+    turn_engine = build_test_engine(url, db_schema, pool_size=4, max_overflow=0, pool_timeout=2)
+    owner_engine = build_test_engine(url, db_schema, pool_size=1, max_overflow=0, pool_timeout=2)
+    small = Harness(
+        async_sessionmaker(turn_engine, expire_on_commit=False), harness.tenant, harness.upstream
+    )
+    lock = await _acquire_advisory_lock(turn_engine, randbits(63))
+    assert lock is not None
+    try:
+        async with hold_worker_owner(
+            owner_engine, owner_key=small.supervisor.owner_key, ownership_lost=asyncio.Event()
+        ):
+            row = await _routine_row(small)
+            await small.fire(row)
+            (intent,) = await small.intents(row)
+            assert intent.state == "completed"
+            await small.dispatcher.close()
+    finally:
+        await small.dispatcher.close()
+        await lock.close()
+        await owner_engine.dispose()
+        await turn_engine.dispose()

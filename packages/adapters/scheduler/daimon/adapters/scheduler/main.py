@@ -1487,7 +1487,16 @@ async def run(
 
     owner_key = randbits(63)
     ownership_lost = asyncio.Event()
-    owner_context = hold_worker_owner(engine, owner_key=owner_key, ownership_lost=ownership_lost)
+    # Like Discord, keep process liveness outside the turn preparation and
+    # independent mutation budget. Supplied test engines retain their schema.
+    owner_engine = (
+        engine
+        if _engine_override is not None
+        else build_engine(str(settings.database.url), pool_size=1, max_overflow=3)
+    )
+    owner_context = hold_worker_owner(
+        owner_engine, owner_key=owner_key, ownership_lost=ownership_lost
+    )
     await owner_context.__aenter__()
     supervisor = RoutineSessionSupervisor(sm, client, owner_key=owner_key)
     fire = await _build_fire(
@@ -1621,6 +1630,8 @@ async def run(
             owner_watcher.cancel()
             await asyncio.gather(owner_watcher, return_exceptions=True)
             await owner_context.__aexit__(None, None, None)
+            if owner_engine is not engine:
+                await owner_engine.dispose()
             health_server.close()
             await health_server.wait_closed()
             try:
