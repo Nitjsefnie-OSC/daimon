@@ -137,9 +137,7 @@ async def _add(
                 ),
             )
         except SkillsListTruncatedError as exc:
-            raise ToolError(
-                "This workspace's skills could not all be read. Nothing changed."
-            ) from exc
+            raise ToolError("The skills here could not all be read. Nothing changed.") from exc
         if isinstance(added, str):
             raise ToolError(REFUSALS[added])
         rows = await store.list_channel_skills(

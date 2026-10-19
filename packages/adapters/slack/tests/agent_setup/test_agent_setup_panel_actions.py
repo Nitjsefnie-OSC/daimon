@@ -759,7 +759,7 @@ async def test_coding_tools_action_when_unconfigured_posts_a_note_and_mints_noth
         ("POST", yarl.URL(f"{_SLACK_API_BASE}/chat.postEphemeral")),
     )
     assert len(ephemerals) == 1, "the click is answered even when nothing can be minted"
-    assert "not set up" in ephemerals[0]["text"], "the note names the missing deployment setup"
+    assert "isn't set up" in ephemerals[0]["text"], "the note names the missing deployment setup"
 
 
 async def test_github_link_from_channel_setup_posts_to_channel(

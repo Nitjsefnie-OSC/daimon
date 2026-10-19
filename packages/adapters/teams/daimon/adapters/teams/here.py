@@ -53,7 +53,7 @@ async def _load(context: CommandContext) -> HereCard:
         principal = await find_platform_principal(
             session, tenant_id=context.tenant_id, platform="teams", external_id=asked.user_id
         )
-        return await load_here_card(
+        card = await load_here_card(
             session,
             runtime.anthropic,
             tenant_id=context.tenant_id,
@@ -73,6 +73,8 @@ async def _load(context: CommandContext) -> HereCard:
             bot_can_view=True,
             caller_can_view=True,
         )
+    # Someone from another organisation has no 1:1 chat to send `setup` in.
+    return card.model_copy(update={"foreign": asked.is_foreign})
 
 
 async def show_here(context: CommandContext) -> None:

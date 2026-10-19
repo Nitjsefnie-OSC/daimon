@@ -1119,7 +1119,7 @@ async def test_dm_from_a_sealed_source_is_refused_before_any_dm_exists(
         now=datetime.now(UTC),
     )
     assert admission.source_sealed is True
-    with pytest.raises(DaimonError, match="Only turns inside"):
+    with pytest.raises(DaimonError, match="Only conversations inside"):
         await _start(tenant, deps, admission)
     assert created == [], "no DM session may be created for a sealed source"
     async with db_session_factory() as session:
@@ -1627,7 +1627,7 @@ async def test_discord_dm_move_from_thread_under_sealed_parent_refuses_with_real
 
     thread.history.assert_not_called()
     member.create_dm.assert_not_called()
-    assert "Only turns inside" in interaction.followup.send.await_args.args[0]
+    assert "Only conversations inside" in interaction.followup.send.await_args.args[0]
 
 
 async def test_slack_dm_move_withholds_a_thread_sealed_on_its_own_with_real_admission(

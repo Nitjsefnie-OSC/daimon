@@ -5445,7 +5445,7 @@ async def test_handle_block_action_when_non_author_clicks_cancel_event_unset(
     assert body["channel"] == "C_TEST"
     assert body["user"] == "U_OTHER"
     assert "thread_ts" not in body
-    assert "started this turn" in body["text"]
+    assert "person who asked" in body["text"]
 
 
 async def test_handle_block_action_when_status_ts_not_in_registry_tells_clicker_turn_ended(

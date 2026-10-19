@@ -153,7 +153,7 @@ def check_backend(
     """Admit `revision`, or raise `BackendUnsupported`."""
     if enabled_backends is not None and not backend_is_enabled(revision.backend, enabled_backends):
         log_backend_unsupported("workspace_policy", reason="backend_not_enabled", revision=revision)
-        raise BackendUnsupported("This backend is not enabled here.")
+        raise BackendUnsupported("That model provider isn't turned on here. Pick another.")
     try:
         admission = admit(revision, get_profile(revision.profile))
     except (UnsupportedCapability, InvalidConfig) as err:
@@ -1222,7 +1222,7 @@ def _default_cost(
 ) -> str:
     model = backend_selection(target).model or agent.model
     if model is None:
-        return "List price unavailable: agent model unknown. Worst-case per turn: unknown."
+        return "List price unavailable: agent model unknown. Worst case per reply: unknown."
     if target == DEFAULT_BACKEND and agent.source is not None:
         native_model = agent.source.spec.model
         if native_model.provider == DEFAULT_BACKEND and native_model.id == model:

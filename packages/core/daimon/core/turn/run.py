@@ -636,7 +636,7 @@ async def _replace_dead_session_locked(
                     )
                 )
             ):
-                raise SessionRetired("This session was replaced. Continue in its successor.")
+                raise SessionRetired("This conversation moved. Continue in the new one.")
 
             if live is not None and live.id != dead_mapping_id:
                 # The lock wait above can be long: decide again before adopting
@@ -655,7 +655,9 @@ async def _replace_dead_session_locked(
                         retry_after=datetime.now(UTC) + timedelta(seconds=1),
                     )
                 if live.ma_agent_id is not None and live.ma_agent_id != admission.agent.id:
-                    raise SessionRetired("This session belongs to the handoff successor.")
+                    raise SessionRetired(
+                        "This conversation moved to another agent. Continue there."
+                    )
                 admission = current
                 await stamp_session_seal(
                     deps,

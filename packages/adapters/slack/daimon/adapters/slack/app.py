@@ -301,8 +301,8 @@ _ORPHAN_RECOVERY_MAX_RETRY_DELAY_S: float = 30.0
 # Marks a request queued behind the thread's active turn.
 _PENDING_REACTION = "hourglass_flowing_sand"
 
-_CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
-_CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
+_CANCEL_NOT_AUTHOR = "Only the person who asked can cancel this reply."
+_CANCEL_TURN_ENDED = "This reply has already finished — there is nothing left to cancel."
 
 
 def _log_bg_task_exception(task: asyncio.Task[None]) -> None:
@@ -1999,7 +1999,7 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                 channel=channel,
                 thread_ts=thread_id,
-                text="I couldn't verify your workspace role. Please retry; no turn was started.",
+                text="I couldn't verify your workspace role, so I didn't reply. Please retry.",
             )
             return
         is_admin = requester.is_admin
@@ -2626,9 +2626,7 @@ class SlackApp:
                         now=datetime.now(UTC),
                     )
                 if recovery_origin is None:
-                    raise UserFacingError(
-                        "This turn's setup context expired. Please retry your message."
-                    )
+                    raise UserFacingError("This setup expired. Please retry your message.")
                 return (
                     render_turn_origin(
                         recovery_origin,
@@ -3176,9 +3174,7 @@ class SlackApp:
                     now=datetime.now(UTC),
                 )
             if recovery_origin is None:
-                raise UserFacingError(
-                    "This turn's setup context expired. Please retry your message."
-                )
+                raise UserFacingError("This setup expired. Please retry your message.")
             return (
                 render_turn_origin(
                     recovery_origin,

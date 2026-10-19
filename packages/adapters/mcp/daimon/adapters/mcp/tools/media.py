@@ -260,8 +260,8 @@ def register_upload_tool(mcp: FastMCP, *, runtime: McpRuntime) -> None:
         app_root = runtime.settings.mcp.app_root_url
         if app_root is None:
             raise ToolError(
-                "TERMINAL ERROR: file upload is unavailable — this deployment has no "
-                "configured public URL, so an upload URL cannot be minted."
+                "TERMINAL ERROR: file upload is unavailable — Daimon has no "
+                "public URL set, so an upload URL cannot be made."
             )
 
         async with runtime.session_factory() as session:

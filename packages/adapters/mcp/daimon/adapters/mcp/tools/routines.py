@@ -228,7 +228,7 @@ async def _resolve_slack_destination(
                 raise ToolError(f"no thread {thread_ts} in {channel_id}")
     except SlackApiError as err:
         raise ToolError(
-            f"Slack could not find {destination_id} in this workspace "
+            f"Slack could not find {destination_id} here "
             f"({cast('dict[str, object]', err.response.data).get('error')}). Nothing was saved."  # pyright: ignore[reportUnknownMemberType]
         ) from err
     return None, None
@@ -320,7 +320,7 @@ async def _check_destination(
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
         except AccessPolicyUnreadable as err:
             raise ToolError(
-                "the workspace access policy could not be read; no destination was saved"
+                "the access settings here could not be read; no destination was saved"
             ) from err
     if not authorize(
         policy,
@@ -348,7 +348,7 @@ async def _load_policy_for_save(session: AsyncSession, *, tenant_id: UUID) -> Te
     try:
         return await load_access_policy(session, tenant_id=tenant_id)
     except AccessPolicyUnreadable as err:
-        raise ToolError("the workspace access policy could not be read; nothing was saved") from err
+        raise ToolError("the access settings here could not be read; nothing was saved") from err
 
 
 def _check_agent_pin(
@@ -511,7 +511,7 @@ async def _create_routine_impl(
         name=agent_name,
     )
     if match is None or not caller.sees_agent(match):
-        raise ToolError(f"no agent named {agent_name!r} found for this tenant")
+        raise ToolError(f"no agent named {agent_name!r} found here")
     _check_agent_pin(
         policy,
         platform=auth.platform or "",
@@ -613,9 +613,7 @@ async def _update_routine_impl(
         else:
             destination_channel_id = routine_destination_channel(row)
         if not caller.sees(agent_name or row.agent_name):
-            raise ToolError(
-                f"no agent named {agent_name or row.agent_name!r} found for this tenant"
-            )
+            raise ToolError(f"no agent named {agent_name or row.agent_name!r} found here")
         if clear_destination:
             effective_kind, effective_id = None, None
         elif destination_kind is not None:
@@ -642,7 +640,7 @@ async def _update_routine_impl(
                 name=agent_name,
             )
             if match is None:
-                raise ToolError(f"no agent named {agent_name!r} found for this tenant")
+                raise ToolError(f"no agent named {agent_name!r} found here")
             new_agent_id = match.id
         if any_agent_rules(update_policy) or any_own_readers(update_policy):
             # Check the agent the routine will run, by all its names.

@@ -88,7 +88,7 @@ async def _visible_slack_channel(runtime: McpRuntime, auth: AuthIdentity, channe
     try:
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
     except SlackApiError as err:
-        raise ToolError(f"Slack could not find {channel_id} in this workspace") from err
+        raise ToolError(f"Slack could not find {channel_id} here") from err
     channel = cast("dict[str, object]", info["channel"])
     await check_channel_access(client, channel=channel, user_id=_require_slack_identity(auth))
     return channel_id

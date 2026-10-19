@@ -791,7 +791,7 @@ async def test_fresh_start_marks_the_callers_live_session_without_tearing_it_dow
             account_id=other.id,
         )
     assert still_live is not None and still_live.id == mine.id, (
-        "nothing is removed until the new workspace is ready"
+        "nothing is removed until the new working files are ready"
     )
     assert still_live.fresh_start_requested_at is not None, "the request is recorded for next bind"
     assert neighbour is not None and neighbour.id == theirs.id, (
@@ -999,7 +999,7 @@ async def test_handoff_stays_on_its_side_of_an_isolated_channel(
             )
             assert result.destination_name == _DESTINATION_NAME, "outside, shared agents stay"
         else:
-            with pytest.raises(ToolError, match="not in this workspace"):
+            with pytest.raises(ToolError, match="not here"):
                 await _hand_off_task_impl(
                     runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
                 )

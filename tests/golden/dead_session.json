@@ -801,7 +801,7 @@
           "allowed_mentions": {
             "parse": []
           },
-          "content": "-# test-agent\nI lost the workspace this task was running in and started a new one.\nI have what was posted here, but not the earlier conversation.\nAnything unsaved in the old workspace is gone, and nothing that was running came across.\nTell me what to re-check and I'll go from there.\n\nHello from the agent!",
+          "content": "-# test-agent\nI lost this task's working files and started with new ones.\nI have what was posted here, but not the earlier conversation.\nAnything unsaved there is gone, and nothing that was running came across.\nTell me what to re-check and I'll go from there.\n\nHello from the agent!",
           "view": null
         },
         "receiver": {

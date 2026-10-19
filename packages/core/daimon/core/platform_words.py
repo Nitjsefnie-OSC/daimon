@@ -92,24 +92,43 @@ class PlatformWords:
     def command(self, action: Action) -> Command | None:
         return self.commands.get(action)
 
-    def phrase(self, action: Action, *, place: Place, me: str = "me") -> str | None:
+    @property
+    def host_admin(self) -> str:
+        """Who acts for someone from another organisation, who has no private chat with Daimon."""
+        return f"someone in the {self.space} that added Daimon"
+
+    def phrase(
+        self, action: Action, *, place: Place, me: str = "me", foreign: bool = False
+    ) -> str | None:
         """The command as a noun, e.g. "`/agent-setup`" or "`setup` in a 1:1 chat with me".
 
         Names the place to go when the command doesn't work in `place`; None when
-        this platform has no command for `action`."""
+        this platform has no command for `action`. For a `foreign` sender (from another
+        organisation, with no private chat to go to) it is the bare command."""
         command = self.commands.get(action)
         if command is None:
             return None
         if command.reach == "chat" and place != "dm":
+            if foreign:
+                return f"`{command.word}`"
             return f"`{command.word}` in a {self.private_chat} with {me}"
         if command.reach == "space" and place == "dm":
             return f"`{command.word}` in a {self.space} channel"
         return f"`{command.word}`"
 
-    def say(self, action: Action, *, place: Place, me: str = "me") -> str | None:
-        """How to tell a person to reach `action` from `place`, e.g. "run `/agent-setup`"."""
-        phrase = self.phrase(action, place=place, me=me)
-        return None if phrase is None else f"{self.verb} {phrase}"
+    def say(
+        self, action: Action, *, place: Place, me: str = "me", foreign: bool = False
+    ) -> str | None:
+        """How to tell a person to reach `action` from `place`, e.g. "run `/agent-setup`".
+
+        A `foreign` sender cannot reach a command that needs a private chat, so it is
+        to be asked of someone in the organisation that added Daimon."""
+        phrase = self.phrase(action, place=place, me=me, foreign=foreign)
+        if phrase is None:
+            return None
+        if foreign and place != "dm" and self.commands[action].reach == "chat":
+            return f"ask {self.host_admin} to {self.verb} {phrase}"
+        return f"{self.verb} {phrase}"
 
     def fresh_start(self, *, place: Place) -> str:
         """How a person starts over in `place`."""
@@ -117,13 +136,23 @@ class PlatformWords:
             return "start a new post" if place == "channel" else "send `new`"
         return "start a new thread" if place == "channel" else "ask me to start fresh"
 
-    def top_up(self, *, place: Place = "channel", me: str = "me") -> str:
+    def top_up(self, *, place: Place = "channel", me: str = "me", foreign: bool = False) -> str:
         """Where an admin adds credit, as a noun. On Teams it points to the 1:1 chat,
-        where the billing card does not expire as a private channel reply does."""
+        where the billing card does not expire as a private channel reply does; a
+        `foreign` sender has no such chat, so it is the bare command."""
         command = self.commands["billing"]
         if self.platform == "teams" and place != "dm":
+            if foreign:
+                return f"`{command.word}`"
             return f"`{command.word}` in a {self.private_chat} with {me}"
         return self.phrase("billing", place=place) or f"`{command.word}`"
+
+    def say_top_up(self, *, place: Place = "channel", me: str = "me", foreign: bool = False) -> str:
+        """How to tell a person to add credit; for a `foreign` sender, who to ask."""
+        said = f"{self.verb} {self.top_up(place=place, me=me, foreign=foreign)}"
+        if foreign and self.platform == "teams" and place != "dm":
+            return f"ask {self.host_admin} to {said}"
+        return said
 
 
 # Discord registers every command but /privacy as guild-only.
@@ -229,11 +258,14 @@ def one_platform_rule(platform: ChatPlatform | None = None) -> str:
     return f"{rule} In {words.label}, Daimon works {words.works_in}."
 
 
-def turn_words(platform: ChatPlatform, *, place: Place) -> dict[str, str]:
+def turn_words(platform: ChatPlatform, *, place: Place, foreign: bool = False) -> dict[str, str]:
     """The names the model uses when it tells a person where to go, for one turn.
 
     Rendered into `<turn_controls>` as `words`; the setup skill and the guidance
-    tell the model to use these instead of any command it remembers."""
+    tell the model to use these instead of any command it remembers.
+
+    `foreign` marks a sender from another organisation: Teams opens no private chat
+    with them, so setup and billing are for someone in the organisation that added Daimon."""
     words = WORDS[platform]
     out = {
         "space": words.space,
@@ -241,10 +273,13 @@ def turn_words(platform: ChatPlatform, *, place: Place) -> dict[str, str]:
         "private_chat": words.private_chat,
         "fresh_start": words.fresh_start(place=place),
     }
+    if foreign and place != "dm":
+        out["admin"] = f"{words.host_admin} ({words.admin_rule})"
+        out["private_chat"] = f"none: this person is from another {words.space}"
     for action in ("setup", "here", "help"):
-        said = words.say(action, place=place, me="Daimon")
+        said = words.say(action, place=place, me="Daimon", foreign=foreign)
         if said is not None:
             out[action] = said
     # Credit is added from the billing card, which on Teams lives in the 1:1 chat.
-    out["billing"] = f"{words.verb} {words.top_up(place=place, me='Daimon')}"
+    out["billing"] = words.say_top_up(place=place, me="Daimon", foreign=foreign)
     return out

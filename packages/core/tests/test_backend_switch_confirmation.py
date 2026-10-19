@@ -217,7 +217,7 @@ async def test_server_preview_and_current_admin_are_the_only_card_authority(owne
     assert prepared.admin
     preview = await service.preview(agent, "openai")
     assert prepared.detail_lines[-1] == preview.cost_line
-    assert "worst-case per turn: unknown" in prepared.detail_lines[-1].lower()
+    assert "worst case per reply: unknown" in prepared.detail_lines[-1].lower()
     assert prepared.detail_lines[0].startswith("Unsupported skills: ")
     trace.queue(reply())
     assert await check(prepared, "requester") is None

@@ -100,7 +100,7 @@ def build_archive_environment_note(
     picks = "1 pick" if cleared == 1 else f"{cleared} picks"
     return (
         f"Archived the {environment_name} environment and cleared {picks} of it; where it "
-        "was picked, the next tier's environment applies from the next message."
+        "was picked, the next default's environment applies from the next message."
     )
 
 
@@ -112,7 +112,7 @@ def build_clear_environment_note(
         return f"{_scope_phrase(channel, space)} had no environment of its own; nothing changed."
     return (
         f"{_scope_phrase(channel, space)} no longer picks an environment; from the next message "
-        "it falls through to the next tier."
+        "it falls back to the next default."
     )
 
 
@@ -125,9 +125,9 @@ def build_limited_network_refusal(
         else "the default it would fall back to has"
     )
     return (
-        f"Only turns inside this channel read it, and {what} unrestricted network access, "
-        f"so only {admin} can make that change here. Nothing changed. Pick an "
-        f"environment with limited networking and no allowed hosts, or ask {admin}."
+        f"Only conversations inside this channel can read it, and {what} unrestricted "
+        f"network access, so only {admin} can make that change here. Nothing changed. Pick "
+        f"an environment with limited networking and no allowed hosts, or ask {admin}."
     )
 
 
@@ -179,10 +179,13 @@ def build_environment_resolution_note(
     where = {
         "channel": "this channel's own setting",
         "tenant": f"the {space} default, since this channel has none of its own",
-        "deployment": f"the deployment default, since neither this channel nor the {space} "
+        "deployment": f"the Daimon-wide default, since neither this channel nor the {space} "
         "sets one",
-    }.get(tier or "", "an unrecognised tier")
-    return f"Turns in channel {channel_id} run in the {environment_name} environment, from {where}."
+    }.get(tier or "", "an unknown setting")
+    return (
+        f"Conversations in channel {channel_id} run in the {environment_name} environment, "
+        f"from {where}."
+    )
 
 
 def environment_choices(
@@ -640,12 +643,12 @@ async def archive_needs_confirm(
 
 
 LIMITED_OPEN_NETWORK_WARNING: Final = (
-    "This channel runs an environment with open network; an admin should confirm or change it."
+    "This channel's environment has open internet access; an admin should confirm or change it."
 )
 """Sealing a channel whose own pick may predate the seal's network rule."""
 
 LIMITED_NETWORK_UNCHECKED_WARNING: Final = (
-    "This channel's environment could not be checked for an open network; an "
+    "This channel's environment could not be checked for open internet access; an "
     "admin should confirm it."
 )
 """Sealing a channel whose own pick could not be looked up."""

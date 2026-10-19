@@ -63,7 +63,7 @@ async def _set_plain_text_mentions_impl(
         try:
             await set_plain_text_mentions(session, tenant_id=auth.tenant_id, enabled=enabled)
         except StoreError as exc:
-            raise ToolError("internal: the caller's tenant no longer exists") from exc
+            raise ToolError("internal: this chat space no longer exists") from exc
     return PlainTextMentionsStatus(enabled=enabled, note=_note(enabled))
 
 

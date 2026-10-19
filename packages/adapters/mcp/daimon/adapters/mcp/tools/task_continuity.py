@@ -139,14 +139,14 @@ async def _hand_off_task_impl(
     destination = next((agent for agent in agents if agent.id == agent_id), None)
     if destination is None or not caller.sees_agent(destination):
         raise ToolError(
-            "That agent is not in this workspace, or it was recreated and has a new id. "
+            "That agent is not here, or it was recreated and has a new id. "
             "Look it up with list_agents and pass the id it reports now. Nothing was changed."
         )
     destination_name = destination.metadata.get(MA_METADATA_KEY_NAME)
     if not destination_name:
         raise ToolError(
             "That agent has no configuration name, so nobody can reach it by name. "
-            "Choose a named agent in this workspace. Nothing was changed."
+            "Choose a named agent here. Nothing was changed."
         )
     continuation = sanitize_requested_work(continuation, echoes=(destination_name,))
     if continuation is not None and auth.platform_user_id is None:
@@ -298,8 +298,8 @@ async def _hand_off_task_impl(
     )
     if work_withheld:
         confirmation += (
-            f"\n{destination_name} can't read this conversation's history, which only turns "
-            "inside its channel read, so the work you named was not passed on."
+            f"\n{destination_name} can't read this conversation's history, which only "
+            "conversations inside its channel can read, so the work you named was not passed on."
         )
     return TaskHandoffResult(
         destination_name=destination_name,
@@ -452,7 +452,7 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         From the next message here, the agent works in a new empty workspace. It leaves
         behind this task's working files and unfinished work. It keeps everything
         already posted in this thread, and the agent's saved memory, keys and
-        connections. Nothing is removed until the new workspace is ready. Who answers
+        connections. Nothing is removed until the new working files are ready. Who answers
         here does not change.
         """  # noqa: E501
         return await _start_fresh_task_impl(

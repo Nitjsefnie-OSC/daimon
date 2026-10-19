@@ -86,6 +86,8 @@ class HereCard(BaseModel):
     agent_can_read_here: bool | None = None
     category_channels_bot_can_view: tuple[str, ...] = ()
     credentials: tuple[CredentialStatus, ...] = ()
+    #: The asker is from another organisation (Teams): no private chat to send `setup` in.
+    foreign: bool = False
     text: str
 
 
@@ -102,22 +104,31 @@ class HereCardPresentation(BaseModel):
     extras: tuple[str, ...] = ()
 
 
-def _setup_words(words: PlatformWords) -> str:
-    """The setup command as plain text, with where to send it when it works only in a chat."""
+def _setup_words(words: PlatformWords, *, foreign: bool = False) -> str:
+    """The setup command as plain text, with where to send it when it works only in a chat.
+
+    A `foreign` asker has no chat to send it in, so it is the bare command."""
     command = words.command("setup")
     if command is None:
         return "setup"
-    if command.reach == "chat":
+    if command.reach == "chat" and not foreign:
         return f"{command.word}, in a {words.private_chat} with Daimon"
     return command.word
 
 
-def _no_view_fix(platform: Platform) -> str:
+def _who(words: PlatformWords, *, foreign: bool) -> str:
+    """Who can change settings: an admin, or for a `foreign` asker, someone in the
+    organisation that added Daimon."""
+    who = words.host_admin if foreign else "an admin"
+    return who[:1].upper() + who[1:]
+
+
+def _no_view_fix(platform: Platform, *, foreign: bool = False) -> str:
     """What fixes a channel the bot can't see, in the platform's words."""
     if platform == "slack":
         return "Invite it with /invite."
     if platform == "teams":
-        return f"{words_for('teams').admin.capitalize()} can add Daimon to this channel."
+        return f"{_who(words_for('teams'), foreign=foreign)} can add Daimon to this channel."
     return f"{words_for('discord').admin.capitalize()} can let Daimon's role see it."
 
 
@@ -125,7 +136,8 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
     """Choose the approved card copy from existing facts, in priority order."""
     name = " ".join((card.agent_name or "").split())[:100]
     words = words_for("discord" if card.platform == "cli" else card.platform)
-    setup = _setup_words(words)
+    setup = _setup_words(words, foreign=card.foreign)
+    who = _who(words, foreign=card.foreign)
     if card.bot_can_view is False:
         state, title, colour, subline = (
             "no_view",
@@ -133,28 +145,28 @@ def render_here_card(card: HereCard) -> HereCardPresentation:
             if card.platform == "slack"
             else "Daimon can't see this channel",
             "#ED4245",
-            _no_view_fix(card.platform),
+            _no_view_fix(card.platform, foreign=card.foreign),
         )
     elif card.effective_writers == "none":
         state, title, colour, subline = (
             "no_replies",
             "Replies are off here",
             "#ED4245",
-            f"An admin can turn them on in {setup}.",
+            f"{who} can turn them on in {setup}.",
         )
     elif card.agent_name is None:
         state, title, colour, subline = (
             "no_agent",
             "No agent answers here",
             "#95A5A6",
-            f"An admin can pick one in {setup}.",
+            f"{who} can pick one in {setup}.",
         )
     elif card.agent_can_answer_here is False:
         state, title, colour, subline = (
             "blocked",
             f"{name} can't answer here",
             "#F0B429",
-            f"An admin can change where it answers in {setup}.",
+            f"{who} can change where it answers in {setup}.",
         )
     elif card.tier == "thread":
         state, title, colour, subline = (
@@ -338,7 +350,7 @@ def assemble_here_card(
             credentials.append(
                 CredentialStatus(
                     name=server.name,
-                    kind="MCP server",
+                    kind="connection",
                     configured=True,
                     usable_in_session=None,
                 )
@@ -347,7 +359,7 @@ def assemble_here_card(
                 credentials.append(
                     CredentialStatus(
                         name=server.name,
-                        kind="MCP token",
+                        kind="connection token",
                         configured=True,
                         usable_in_session=None,
                     )

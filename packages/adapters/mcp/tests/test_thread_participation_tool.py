@@ -320,8 +320,8 @@ async def test_deployment_disabled_refuses_every_scope(
             _CHANNEL,
         )
 
-    assert "disabled for this deployment" in str(exc_info.value), (
-        "the refusal must say the deployment, not the workspace, said no"
+    assert "turned off for all of Daimon" in str(exc_info.value), (
+        "the refusal must say Daimon, not the workspace, said no"
     )
     assert (await _modes(db_session, tenant_id)).thread is None, "no row may be written"
 

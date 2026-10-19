@@ -950,7 +950,7 @@ async def test_set_agent_rule_limits_where_an_agent_runs(
         default=DEFAULT,
     )
     assert change.answers_outside, "shared is still c3's default"
-    assert "still set to answer outside" in " ".join(change.notes)
+    assert "still the default outside" in " ".join(change.notes)
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
     assert policy.agent_rules == {"shared": AgentRule(runs_in=("c2",))}
     assert await _agent_rule(client, db_session_factory, tenant.id, "shared", None) is None

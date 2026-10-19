@@ -2001,7 +2001,7 @@ async def test_start_dm_refuses_a_sealed_source_admission() -> None:
         source_sealed=True,
     )
     deps = replace(deps_for(None, MagicMock()), turn_path=None)
-    with pytest.raises(DaimonError, match="Only turns inside this channel read it"):
+    with pytest.raises(DaimonError, match="Only conversations inside this channel can read it"):
         await start_dm(
             deps,
             admission,
@@ -2017,7 +2017,7 @@ async def test_start_dm_refuses_a_sealed_source_admission() -> None:
             context=[],
         )
     deps.sessionmaker.assert_not_called()
-    assert "Only turns inside" in SEALED_SOURCE_MESSAGE
+    assert "Only conversations inside" in SEALED_SOURCE_MESSAGE
 
 
 async def test_admit_refuses_a_handed_off_thread_whose_binding_names_the_agent_differently(

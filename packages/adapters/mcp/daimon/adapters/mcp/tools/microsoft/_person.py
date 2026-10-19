@@ -48,8 +48,8 @@ async def require_one_to_one(
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     if not origin.parent_channel_id.startswith("a:"):
         raise ToolError(
-            f"{what} can only be used in the person's 1:1 chat with Daimon, and this turn "
-            "is in a channel or group chat, so nothing was read or sent. Tell them to ask "
+            f"{what} can only be used in the person's 1:1 chat with Daimon, and this "
+            "is a channel or group chat, so nothing was read or sent. Tell them to ask "
             "again in a 1:1 chat."
         )
     return origin

@@ -54,8 +54,9 @@ class _Copy:
 
 _RETRY = "@mention Daimon to try again."
 _CARRY = "@mention Daimon to carry on."
-# Names who can top up and where: `{billing}` is the platform's billing command.
-_TOP_UP = "An admin can top up with {billing}."
+# Names who can top up and where: `{billing}` is the platform's billing command, and
+# `{Who}` is "An admin", or for a sender from another organisation, who to ask instead.
+_TOP_UP = "{Who} can top up with {billing}."
 
 _COPY: dict[TerminationReason, _Copy] = {
     TerminationReason.INTERRUPTED: _Copy(
@@ -130,10 +131,10 @@ _COPY: dict[TerminationReason, _Copy] = {
         "Daimon couldn't accept this request.", "Ask an admin."
     ),
     TerminationReason.MISSING_CONFIG: _Copy(
-        "Daimon isn't set up in this channel yet.", "Ask an admin to {verb} {setup}."
+        "Daimon isn't set up in this channel yet.", "Ask {who} to {verb} {setup}."
     ),
     TerminationReason.RESOLVER_MISS: _Copy(
-        "This channel's setup is out of date.", "Ask an admin to check {setup}."
+        "This channel's setup is out of date.", "Ask {who} to check {setup}."
     ),
     TerminationReason.SESSION_PREPARATION_FAILED: _Copy(
         "A settings change hasn't applied yet.",
@@ -163,17 +164,25 @@ class RefusalNouns:
     setup: str = "`/agent-setup`"
     #: How a person reaches `setup`: "run" a slash command, "send" a Teams word.
     verb: str = "run"
+    #: Who to ask for what needs an admin; for a sender from another organisation, who
+    #: acts for them, since Teams opens no private chat with them.
+    who: str = "an admin"
 
     @classmethod
-    def for_platform(cls, platform: ChatPlatform, *, place: Place = "channel") -> RefusalNouns:
-        """The nouns and commands `platform` uses, from the shared table."""
+    def for_platform(
+        cls, platform: ChatPlatform, *, place: Place = "channel", foreign: bool = False
+    ) -> RefusalNouns:
+        """The nouns and commands `platform` uses, from the shared table.
+
+        `foreign` marks a sender from another organisation, who has no private chat with Daimon."""
         words = words_for(platform)
         return cls(
             scope=words.space,
             admin=words.admin,
-            billing=words.top_up(place=place),
-            setup=words.phrase("setup", place=place) or "an admin",
+            billing=words.top_up(place=place, foreign=foreign),
+            setup=words.phrase("setup", place=place, foreign=foreign) or "an admin",
             verb=words.verb,
+            who=words.host_admin if foreign and place != "dm" else "an admin",
         )
 
     @classmethod
@@ -202,8 +211,8 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "own_agents_only": _COPY[TerminationReason.ADMISSION_CHANNEL_ISOLATED],
     "writers_none": _COPY[TerminationReason.ADMISSION_CHANNEL_PROTECTED],
     "backend_unsupported": _Copy(
-        "This channel uses an unavailable agent backend.",
-        "Ask an admin to change or clear the channel backend.",
+        "This channel uses a model provider that isn't available.",
+        "Ask an admin to change or clear it.",
     ),
 }
 _DM_REFUSALS: dict[AdmissionDenialReason, _Copy] = {
@@ -234,7 +243,12 @@ def admission_refusal_text(
         (
             copy.title.format(agent=agent, setup=nouns.setup),
             copy.next_step.format(
-                agent=agent, setup=nouns.setup, billing=nouns.billing, verb=nouns.verb
+                agent=agent,
+                setup=nouns.setup,
+                billing=nouns.billing,
+                verb=nouns.verb,
+                who=nouns.who,
+                Who=_capitalised(nouns.who),
             ),
         )
     )
@@ -291,6 +305,7 @@ def render_termination_notice(
     setup_command: str = "`/agent-setup`",
     billing_command: str = "`/billing`",
     setup_verb: str = "run",
+    admin: str = "an admin",
     agent_name: str | None = None,
 ) -> TerminationNotice | None:
     """Render one reason using the same words on every platform."""
@@ -320,7 +335,11 @@ def render_termination_notice(
         setup=setup_command,
     )
     next_step = (copy.dm_next_step if in_dm and copy.dm_next_step else copy.next_step).format(
-        setup=setup_command, billing=billing_command, verb=setup_verb
+        setup=setup_command,
+        billing=billing_command,
+        verb=setup_verb,
+        who=admin,
+        Who=_capitalised(admin),
     )
     in_flight: tuple[str, ...] = ()
     finished = 0
@@ -346,6 +365,10 @@ def render_termination_notice(
         finished_tools=finished,
         request_id=request_id,
     )
+
+
+def _capitalised(text: str) -> str:
+    return text[:1].upper() + text[1:]
 
 
 def _error_chain(error: BaseException | None) -> list[BaseException]:

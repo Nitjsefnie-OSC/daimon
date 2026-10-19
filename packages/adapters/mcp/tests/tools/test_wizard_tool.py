@@ -279,7 +279,9 @@ async def test_post_wizard_returns_the_stop_signal(
         channel_id="222",
     )
     assert result == _STOP_SIGNAL, "the tool must return exactly the module's stop-signal constant"
-    assert "end your turn" in result.lower(), "the stop signal must tell the agent to end its turn"
+    assert "end your reply" in result.lower(), (
+        "the stop signal must tell the agent to end its reply"
+    )
 
 
 # ---------------------------------------------------------------------------

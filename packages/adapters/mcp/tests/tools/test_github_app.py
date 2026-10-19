@@ -411,7 +411,7 @@ async def test_post_app_install_link_rejects_unset_slug(
     auth = _auth_identity(platform=platform)
     captured = _outbound_request_count(monkeypatch)
 
-    with pytest.raises(ToolError, match="no GitHub App install link configured") as refused:
+    with pytest.raises(ToolError, match="no GitHub App install link set up") as refused:
         await _post_app_install_link_impl(
             runtime, auth, channel_id="222", purpose="reading a private repo"
         )

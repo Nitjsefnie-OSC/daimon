@@ -328,8 +328,8 @@ async def test_a_new_version_of_another_file_type_is_refused(
     ("channel_id", "origin", "match"),
     [
         (_OTHER_CHANNEL, "", "only a file of the channel this conversation is in"),
-        (_CHANNEL, None, "needs this turn's origin_context_id"),
-        (_CHANNEL, _UNKNOWN_ORIGIN, "needs this turn's origin_context_id"),
+        (_CHANNEL, None, "needs your origin_context_id"),
+        (_CHANNEL, _UNKNOWN_ORIGIN, "needs your origin_context_id"),
     ],
 )
 async def test_only_the_channel_the_turn_started_in_is_written(

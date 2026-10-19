@@ -118,7 +118,7 @@ async def _post_slack_connect_card(
     requested_repo: str | None = None,
 ) -> None:
     if auth.external_id is None:
-        raise ToolError("GitHub setup requires a workspace.")
+        raise ToolError("GitHub setup only works from a chat.")
     card = await resolve_connect_card(
         runtime.session_factory,
         runtime.settings,

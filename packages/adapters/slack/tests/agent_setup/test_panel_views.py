@@ -518,8 +518,8 @@ def test_details_hides_the_unconfigured_coding_tools_note_from_a_member() -> Non
         channel_id=_CHANNEL_ID,
         attribution=None,
     )
-    assert "Coding-tool access is not configured" not in _joined(member)
-    assert "Coding-tool access is not configured" in _joined(admin)
+    assert "Coding-tool access isn't set up" not in _joined(member)
+    assert "Coding-tool access isn't set up" in _joined(admin)
 
 
 def test_details_does_not_offer_add_skill_on_a_built_in_agent_even_to_an_admin() -> None:
@@ -843,7 +843,7 @@ def test_details_view_when_coding_tools_unconfigured_renders_note_not_button() -
     assert ACTION_CODING_TOOLS not in _action_ids(unavailable), (
         "a button that cannot produce a working connection is not offered"
     )
-    assert "Coding-tool access is not configured for this deployment." in _joined(unavailable), (
+    assert "Coding-tool access isn't set up yet." in _joined(unavailable), (
         "the reason the button is missing is stated"
     )
 
@@ -982,7 +982,7 @@ def test_routing_view_renders_channel_mentions_not_raw_ids_and_names_deployment_
     )
     assert "set by <@U1>" in rendered, "a recorded actor is named"
     assert "*Workspace default:* daimon" in rendered, "the workspace default is named"
-    assert "Deployment default: *daimon*" in rendered, "the deployment default is named too"
+    assert "Daimon-wide default: *daimon*" in rendered, "the deployment default is named too"
     assert "_Not used while a workspace default is set._" in rendered, (
         "a workspace default consumes the deployment fall-through, and the view says so"
     )
@@ -1080,7 +1080,7 @@ def test_routing_view_when_nothing_is_set_says_so() -> None:
     )
     rendered = _joined(view)
     assert "*Workspace default:* Not assigned" in rendered, "an unset workspace default is stated"
-    assert "_no deployment default_" in rendered, "an unset deployment default is stated"
+    assert "_no Daimon-wide default_" in rendered, "an unset deployment default is stated"
     assert "_none open_" in rendered, "no open setup conversation is stated"
 
 

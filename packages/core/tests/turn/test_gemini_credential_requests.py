@@ -948,7 +948,7 @@ async def test_shared_resource_binder_refuses_every_foreign_axis(
         value = False if axis == "catalog_enabled" else "foreign"
         monkeypatch.setattr(type(port), field, property(lambda _: value), raising=False)
     before = len(case.wire.requests)
-    with pytest.raises(ToolError, match="different tenant, account or workspace"):
+    with pytest.raises(ToolError, match="belong to someone else"):
         binder(host, auth=auth, workspace=workspace)
     assert len(case.wire.requests) == before and not case.delivery.registered
 

@@ -76,7 +76,7 @@ async def test_missing_bound_responder_is_explicit_and_does_not_reconcile() -> N
             404, json={"type": "error", "error": {"type": "not_found_error", "message": "missing"}}
         )
     )
-    with pytest.raises(UserFacingError, match="Daimon responder is missing"):
+    with pytest.raises(UserFacingError, match="Daimon agent is missing"):
         await get_setup_responder(client, tenant_id=uuid.uuid4(), ma_agent_id="ag_deleted")
 
 

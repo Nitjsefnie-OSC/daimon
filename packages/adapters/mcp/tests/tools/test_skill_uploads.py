@@ -267,14 +267,14 @@ async def test_a_skill_that_changed_since_its_preview_is_not_uploaded(
 
 #: What a preview says for each reason a chat turn can't show the card.
 _NO_CARD_REASONS = {
-    "no_origin_context": "did not pass this turn's origin_context_id",
-    "unverified_origin": "is not this turn's",
-    "not_a_chat_turn": "does not come from a chat turn",
+    "no_origin_context": "did not pass its origin_context_id",
+    "unverified_origin": "is not this chat's",
+    "not_a_chat_turn": "does not come from a chat",
     "agent_key": "runs on an agent key",
-    "no_live_session": "has no live session",
+    "no_live_session": "has no live conversation",
     "other_agents_session": "runs a different agent",
     "session_not_gated": "does not ask before add_skill yet",
-    "session_unreadable": "could not read this thread's session",
+    "session_unreadable": "could not read this thread's conversation",
 }
 
 
@@ -321,7 +321,7 @@ async def test_a_confirm_adds_only_from_a_chat_session_that_asks_the_person_firs
     assert "content_hash=" not in summary and "open helper and use Add skill" in summary
     assert "this conversation can't show one" in summary
     assert _NO_CARD_REASONS[where] in summary, "the preview names why no card can show"
-    assert "turned off on this deployment" not in summary, "the deployment has cards on"
+    assert "turned off here" not in summary, "the deployment has cards on"
     with pytest.raises(ToolError, match="this conversation can't show one") as refused:
         await add(content_hash=preview.preview.content_hash)
     assert _NO_CARD_REASONS[where] in str(refused.value)
@@ -706,10 +706,10 @@ async def test_with_approval_cards_off_the_preview_says_the_deployment_turned_th
     preview = await add()
     summary = preview.summary
     assert "open helper and use Add skill" in summary and "content_hash=" not in summary
-    assert "approval cards are turned off on this deployment" in summary
+    assert "approval cards are turned off here" in summary
     assert "tool_safety.enabled" in summary, "the operator is told which setting"
     assert "this conversation can't show one" not in summary
-    with pytest.raises(ToolError, match="approval cards are turned off on this deployment"):
+    with pytest.raises(ToolError, match="approval cards are turned off here"):
         await add(content_hash=preview.preview.content_hash)
     assert world.created == [], "the confirm staged and uploaded nothing"
 
@@ -909,10 +909,10 @@ async def test_with_cards_off_nobody_else_confirms_and_nowhere_else(
         auth, account_id=other.id, role=Role.ADMIN, is_admin=True, platform_user_id="777"
     )
     async with _reply(world, someone_else, "yes") as theirs:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="is not the person replying"):
             await _add_from(world, someone_else, theirs, content_hash=content_hash)
     async with _reply(world, auth, "yes", thread_id="666666666666666666") as elsewhere:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="is not the person replying"):
             await _add_from(world, auth, elsewhere, content_hash=content_hash)
     assert world.created == []
 
@@ -960,10 +960,10 @@ async def test_with_cards_off_any_other_next_message_cancels(
     preview = await _add_from(world, auth, origin)
 
     async with _reply(world, auth, text) as reply:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="is not the person replying"):
             await _add_from(world, auth, reply, content_hash=preview.preview.content_hash)
     async with _reply(world, auth, "yes") as late_yes:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="is not the person replying"):
             await _add_from(world, auth, late_yes, content_hash=preview.preview.content_hash)
     assert world.created == []
 
@@ -978,7 +978,7 @@ async def test_with_cards_off_a_yes_after_the_ttl_confirms_nothing(
     preview = await _add_from(world, auth, origin)
 
     async with _reply(world, auth, "yes") as reply:
-        with pytest.raises(ToolError, match="did not start with the person replying"):
+        with pytest.raises(ToolError, match="is not the person replying"):
             await _add_from(world, auth, reply, content_hash=preview.preview.content_hash)
     assert world.created == []
 
@@ -991,7 +991,7 @@ async def test_with_cards_off_the_model_cannot_confirm_without_the_persons_yes(
     auth, origin = await _cards_off_turn(world)
     preview = await _add_from(world, auth, origin)
 
-    with pytest.raises(ToolError, match="did not start with the person replying"):
+    with pytest.raises(ToolError, match="is not the person replying"):
         await _add_from(world, auth, origin, content_hash=preview.preview.content_hash)
     with pytest.raises(ToolError, match="approval cards are turned off"):
         await _add_from(world, auth, None, content_hash=preview.preview.content_hash)

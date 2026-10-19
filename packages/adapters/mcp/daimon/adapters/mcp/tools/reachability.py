@@ -108,7 +108,7 @@ async def require_bindable_as_channel_default(
         if decision.reason == "runs_elsewhere":
             raise ToolError(
                 f"'{agent_name}'s rule runs it only in other channels, so it would refuse "
-                "every turn here and cannot be this channel's default. Nothing was changed. "
+                "every request here and cannot be this channel's default. Nothing was changed. "
                 "Pick another agent, or ask an admin to change its rule. Do not retry."
             )
         if auth.is_admin and auth.agent_id is None:

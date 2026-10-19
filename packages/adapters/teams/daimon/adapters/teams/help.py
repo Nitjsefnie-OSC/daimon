@@ -48,8 +48,13 @@ def _note(text: str) -> TextBlock:
     return TextBlock(text=text, spacing="Medium", wrap=True)
 
 
-def help_card(names: Collection[str], *, bot: str, place: Place = "dm") -> AdaptiveCard:
-    """The commands registered and answered in `place`, then how to talk to the agent."""
+def help_card(
+    names: Collection[str], *, bot: str, place: Place = "dm", foreign: bool = False
+) -> AdaptiveCard:
+    """The commands registered and answered in `place`, then how to talk to the agent.
+
+    A `foreign` asker (from another organisation) has no 1:1 chat with Daimon, so the
+    commands that need one are for someone in the organisation that added it."""
     answered = _answered_in(place)
     facts = [
         Fact(title=name, value=line)
@@ -64,7 +69,9 @@ def help_card(names: Collection[str], *, bot: str, place: Place = "dm") -> Adapt
         intro = f"Only you can see this. @mention {bot} with one of these words."
         ask = f"@mention {bot} with your question."
         in_chat = [word for word in _CHAT_ONLY if word in names]
-        if in_chat:
+        if in_chat and foreign:
+            elsewhere.append(_note(f"For {', '.join(in_chat)}, ask {_TEAMS.host_admin}."))
+        elif in_chat:
             elsewhere.append(_note(f"In our {_TEAMS.private_chat}: {', '.join(in_chat)}"))
         if place == "channel":
             elsewhere.append(_note(f"To start over, {_TEAMS.fresh_start(place=place)}."))
@@ -82,4 +89,11 @@ def help_card(names: Collection[str], *, bot: str, place: Place = "dm") -> Adapt
 async def send_help(context: CommandContext, *, names: Collection[str]) -> None:
     """Answer in the card for where `help` was sent: `asked_in` when it moved to the 1:1 chat."""
     place = (context.asked_in or context.inbound).kind
-    await context.send_card(help_card(names, bot=context.inbound.bot_name or "daimon", place=place))
+    await context.send_card(
+        help_card(
+            names,
+            bot=context.inbound.bot_name or "daimon",
+            place=place,
+            foreign=context.inbound.is_foreign,
+        )
+    )

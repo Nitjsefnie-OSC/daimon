@@ -228,7 +228,7 @@ async def copy_agent(
             policy = await load_access_policy(session, tenant_id=tenant_id)
         except AccessPolicyUnreadable as exc:
             raise UserFacingError(
-                "The access policy can't be read. Ask an admin to check it."
+                "The access settings can't be read. Ask an admin to check them."
             ) from exc
     source_name = source.metadata.get(MA_METADATA_KEY_NAME) or source.name
     decision = authorize(
@@ -374,7 +374,7 @@ async def fork_host_agent(
                 policy = await load_access_policy(session, tenant_id=tenant_id)
             except AccessPolicyUnreadable as exc:
                 raise UserFacingError(
-                    "The access policy can't be read. Ask an admin to check it."
+                    "The access settings can't be read. Ask an admin to check them."
                 ) from exc
         decision = authorize(
             policy,

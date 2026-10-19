@@ -167,7 +167,7 @@ async def test_details_offers_a_member_no_coding_tools_button_that_could_only_re
 
     assert "Model:" in details, "the member still reads the agent"
     assert "Use from your coding tools" not in details
-    assert "Coding-tool access is not configured" not in details
+    assert "Coding-tool access isn't set up" not in details
     assert "Set up " in details, "the way to ask for a change stays"
 
 

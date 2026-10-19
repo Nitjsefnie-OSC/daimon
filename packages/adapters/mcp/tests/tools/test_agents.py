@@ -4151,7 +4151,7 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
     # Exact match
-    with pytest.raises(ToolError, match="deployment's own MCP endpoint"):
+    with pytest.raises(ToolError, match="Daimon's own connection"):
         await _attach_mcp_server_impl(
             _runtime(client, public_url=public_url),
             auth,
@@ -4162,7 +4162,7 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
     assert update_calls == [], "#142: public_url guard must fire before any update call"
 
     # With trailing slash stripped
-    with pytest.raises(ToolError, match="deployment's own MCP endpoint"):
+    with pytest.raises(ToolError, match="Daimon's own connection"):
         await _attach_mcp_server_impl(
             _runtime(client, public_url=public_url),
             auth,
@@ -5510,7 +5510,7 @@ async def test_update_agent_refuses_to_repoint_the_reserved_server(
     client = build_fake_anthropic(router.dispatch)
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
 
-    with pytest.raises(ToolError, match="reserved|deployment's own"):
+    with pytest.raises(ToolError, match="reserved|Daimon's own"):
         await _update_agent_impl(
             _runtime(client, public_url=public_url),
             auth,

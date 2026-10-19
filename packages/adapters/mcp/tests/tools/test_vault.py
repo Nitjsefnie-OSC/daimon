@@ -135,7 +135,7 @@ async def test_list_credentials_raises_tool_error_when_no_vault_exists() -> None
         return httpx.Response(404)
 
     client = _make_client(httpx.MockTransport(handler))
-    with pytest.raises(ToolError, match="no MCP vault found"):
+    with pytest.raises(ToolError, match="no connection vault found"):
         await _list_credentials_impl(client, _auth())
 
 

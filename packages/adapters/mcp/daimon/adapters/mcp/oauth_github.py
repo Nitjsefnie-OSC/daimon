@@ -69,7 +69,7 @@ RouteHandler = Callable[[Request], Awaitable[Response]]
 ClientFactory = Callable[[], httpx.AsyncClient]
 _COOKIE = "daimon_gh_connect"
 _log = logging.getLogger(__name__)
-_ADMIN_RETRY = "Couldn't confirm you're still a server or workspace admin. Try again in a minute."
+_ADMIN_RETRY = "Couldn't confirm you're still an admin. Try again in a minute."
 # A save posts one `repo=<id>` per addition plus one shared `access=write`,
 # so 256 KiB covers several thousand repos while bounding what one request can
 # make the server read and parse. The cap is checked before any other work.
@@ -1505,7 +1505,7 @@ def _agent_editor_page(
         '<div class="gh-dialog-head"><h2 id="working-picker-title">Change working repo</h2>'
         '<button id="close-working" class="gh-dialog-close" type="button" '
         f'aria-label="Close working repo chooser">{icon("x")}</button></div>'
-        '<p class="gh-dialog-copy">Opens in the agent\'s workspace.</p>'
+        '<p class="gh-dialog-copy">Opens in the agent\'s project files.</p>'
         '<label class="gh-dialog-copy" for="working-choice">Working repo</label>'
         '<select id="working-choice" class="gh-working-select"></select>'
         '<div class="gh-dialog-footer"><button id="confirm-working" class="gh-primary" '

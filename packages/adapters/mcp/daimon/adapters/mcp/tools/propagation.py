@@ -399,7 +399,7 @@ async def _explain_agent_resolution_impl(
                     )
                     raise ToolError(
                         f"{kind_label} '{thread_id}' in '{channel_id}' was deleted. "
-                        f"Its recorded responder is {binding.responder_name} "
+                        f"Its recorded agent is {binding.responder_name} "
                         f"({binding.responder_ma_agent_id}); configuration target: {target}. "
                         f"{next_step}"
                     )

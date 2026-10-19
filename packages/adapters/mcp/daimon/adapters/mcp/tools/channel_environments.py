@@ -88,7 +88,7 @@ def _needs_admin(auth: AuthIdentity) -> str:
 
 def _missing(environment_name: str | None) -> str:
     return (
-        f"No environment named '{environment_name}' exists in this workspace. Nothing was "
+        f"No environment named '{environment_name}' exists here. Nothing was "
         "changed. Use list_environments to pick an existing one, or create_environment first."
     )
 

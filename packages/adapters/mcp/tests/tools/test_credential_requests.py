@@ -744,7 +744,7 @@ async def test_request_agent_key_rejects_slack_caller_without_workspace(
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
-    with pytest.raises(ToolError, match="workspace context"):
+    with pytest.raises(ToolError, match="chat context"):
         await _request_agent_key_impl(
             runtime, auth, agent_name="daimon", key="OPENAI_API_KEY", purpose="x", channel_id="222"
         )
@@ -757,7 +757,7 @@ async def test_request_mcp_token_rejects_slack_caller_without_workspace(
 ) -> None:
     runtime = _runtime(committing_sessionmaker)
     auth = _auth_identity(platform="slack", external_id=None, platform_user_id="U123")
-    with pytest.raises(ToolError, match="workspace context"):
+    with pytest.raises(ToolError, match="chat context"):
         await _request_mcp_token_impl(
             runtime,
             auth,

@@ -252,7 +252,7 @@ def test_the_deployment_default_is_named_for_its_own_tier() -> None:
         allowed_user_id=42,
     )
 
-    assert "**specialist**\n-# deployment default" in _text(view), (
+    assert "**specialist**\n-# Daimon-wide default" in _text(view), (
         "a deployment default is changed somewhere else than a server default, and must say so"
     )
 

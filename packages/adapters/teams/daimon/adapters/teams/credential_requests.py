@@ -167,12 +167,12 @@ _SHARED_AGENT_SKILLS = (
 _WRONG_ORG = "This request isn't for this organisation — ask again where it was posted."
 _AGENT_GONE = "That agent no longer exists — ask again and a fresh request will be posted."
 _UNCONFIGURED = (
-    "This deployment is not finished being set up. Ask the operator to finish setup, "
+    "Daimon isn't fully set up yet. Ask the operator to finish setup, "
     "then try again. Nothing was saved."
 )
 _UNCONFIGURED_OAUTH = (
-    "This deployment cannot sign you in yet. Ask the operator to finish the daimon-mcp "
-    "setup, then ask again. Nothing was saved."
+    "Sign-in isn't set up yet. Ask whoever runs Daimon to finish it, "
+    "then ask again. Nothing was saved."
 )
 _MESSAGES: dict[Refusal, str] = {
     "invalid": NO_LONGER_VALID_MESSAGE,

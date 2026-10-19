@@ -154,15 +154,15 @@ def post_delete_card(result: AccountPurgeResult, *, bot: str) -> AdaptiveCard:
     """What the purge removed, plus the carve-outs that always apply."""
     db, sessions = result.db, result.sessions
     rows = (
-        (db.platform_principals + db.cli_principals, "linked principal(s) removed"),
+        (db.platform_principals + db.cli_principals, "linked account(s) removed"),
         (db.routines, "routine(s) cancelled"),
-        (db.principal_links, "principal link(s) removed"),
-        (db.user_configs, "user config row(s) removed"),
-        (db.user_skills, "synced skill ledger row(s) removed"),
-        (db.github_user_links, "GitHub user link(s) removed"),
+        (db.principal_links, "link(s) between your accounts removed"),
+        (db.user_configs, "saved setting(s) removed"),
+        (db.user_skills, "synced skill(s) forgotten"),
+        (db.github_user_links, "GitHub account(s) unlinked"),
         (db.microsoft_user_tokens, "Microsoft connection removed"),
-        (db.accounts, "account row removed"),
-        (sessions.deleted, "session transcript(s) deleted from Anthropic"),
+        (db.accounts, "account removed"),
+        (sessions.deleted, "conversation transcript(s) deleted from Anthropic"),
     )
     lines = [f"✓ {count} {label}" for count, label in rows if count > 0]
     if sessions.upstream_error:

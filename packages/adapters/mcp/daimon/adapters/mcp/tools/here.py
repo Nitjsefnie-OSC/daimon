@@ -118,7 +118,7 @@ async def _where_am_i_impl(
         if channel_id not in visible:
             raise ToolError("missing channel access")
     else:
-        raise ToolError("where_am_i is available for channel turns only")
+        raise ToolError("where_am_i works only in a channel conversation")
     if thread_id is not None:
         await _require_thread_in_channel(runtime, auth, channel_id, thread_id)
     async with runtime.session_factory() as session:

@@ -224,7 +224,7 @@ def render_routine_controls(
         # invite a direct write; the poster checks placement and delivers.
         delivery = (
             "Do not post to the destination yourself. daimon delivers your full "
-            "final reply for you, to the destination if the workspace policy allows it "
+            "final reply for you, to the destination if the access settings here allow it "
             "and otherwise to the routine's creator."
         )
     return (

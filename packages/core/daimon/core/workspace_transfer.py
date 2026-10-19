@@ -187,17 +187,16 @@ TransferOutcome = FullHandoff | TranscriptOnly | HistoryOnly
 # What each gap rung means to a person, as a noun phrase — `handoff_context`
 # renders these into "Not carried over: …". Never a reason code.
 _GAP_PHRASING: dict[GapReason | Literal["events_unavailable"], str] = {
-    "session_dead": "the previous workspace's files, because its workspace had already closed",
-    "checkpoint_failed": "the previous workspace's files, because saving them did not finish",
-    "checkpoint_timeout": "the previous workspace's files, because saving them ran out of time",
-    "bundle_oversize": "the previous workspace's files, because together they were too large "
-    "to carry",
-    "upload_failed": "the previous workspace's files, because the saved archive could not be "
+    "session_dead": "the previous working files, because they had already closed",
+    "checkpoint_failed": "the previous working files, because saving them did not finish",
+    "checkpoint_timeout": "the previous working files, because saving them ran out of time",
+    "bundle_oversize": "the previous working files, because together they were too large to carry",
+    "upload_failed": "the previous working files, because the saved archive could not be "
     "transferred",
-    "not_worth_checkpointing": "the previous workspace's files, of which there were none yet",
-    "archive_missing": "the previous workspace's files, because the saved archive was gone "
+    "not_worth_checkpointing": "the previous working files, of which there were none yet",
+    "archive_missing": "the previous working files, because the saved archive was gone "
     "before it could be read",
-    "events_unavailable": "the previous workspace's files and the previous conversation",
+    "events_unavailable": "the previous working files and the previous conversation",
 }
 
 _COMMITTED_DURING_CHECKPOINT = "the agent committed to the repository during checkpoint"
@@ -215,7 +214,7 @@ def _left_out_phrase(paths: tuple[str, ...], more: int) -> str | None:
     if more:
         listed = f"{listed} and {more} more" if named else f"{more} files"
     return (
-        "these files from the previous workspace, left out because the whole workspace was "
+        "these files from before, left out because the whole set was "
         f"too large to carry (regenerate them if the task needs them): {listed}"
     )
 

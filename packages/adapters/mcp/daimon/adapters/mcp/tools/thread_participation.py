@@ -57,13 +57,13 @@ _PLATFORMS: Final = frozenset({"discord", "teams"})
 
 _WRONG_PLATFORM = "Following threads isn't available here yet, so there is nothing to turn on."
 _DEPLOYMENT_DISABLED = (
-    "Participation is disabled for this deployment and cannot be turned on. "
+    "Following is turned off for all of Daimon and cannot be turned on. "
     "I only reply when @mentioned; the operator would have to change that."
 )
 _DISABLED_NEEDS_A_WIDER_SCOPE = (
     "'disabled' is not a thread-level setting — use mode='off' to stop "
-    "following this thread. 'disabled' locks a whole channel or workspace and "
-    "is an admin action at those scopes."
+    "following this thread. 'disabled' locks a whole channel or everything here and "
+    "is an admin action there."
 )
 
 

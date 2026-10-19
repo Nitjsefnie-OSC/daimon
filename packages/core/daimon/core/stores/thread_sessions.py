@@ -140,7 +140,7 @@ async def list_live_sessions_for_agent(
 
 GITHUB_KEY_RESTART_LINE = (
     "GitHub connection updated. Chat restarted. Earlier messages are still here; "
-    "unsaved work in the old workspace is gone."
+    "unsaved work from before is gone."
 )
 
 
@@ -813,7 +813,7 @@ async def require_writable_session(db: AsyncSession, session_id: str) -> None:
             )
         ).first()
         if status != "live" or successor is not None:
-            raise SessionRetired("This session was replaced. Continue in its successor.")
+            raise SessionRetired("This conversation moved. Continue in the new one.")
 
 
 async def read_session_seals(

@@ -96,7 +96,7 @@ def test_a_configuration_this_release_cannot_honour_is_refused(config: BackendCo
     denied = AdmissionDenied(reason="backend_unsupported")
     assert termination_reason(denied) is TerminationReason.ADMISSION_DENIED
     nouns = RefusalNouns(scope="server", admin="a server admin", billing="/billing")
-    assert "backend" in admission_refusal_text("backend_unsupported", nouns)
+    assert "model provider" in admission_refusal_text("backend_unsupported", nouns)
 
 
 async def test_set_and_clear_write_immutable_revisions(db_session: AsyncSession) -> None:

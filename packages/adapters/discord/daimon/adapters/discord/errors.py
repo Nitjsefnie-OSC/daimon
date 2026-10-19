@@ -163,7 +163,7 @@ def render_error(
     """
     if isinstance(exc, SessionAgentMismatch):
         return render_responder_changed_without_handoff(
-            new_responder=new_responder or "the current responder",
+            new_responder=new_responder or "the current agent",
             owner=owner or "the previous agent",
             channel=channel or "this channel",
             offer_button=offer_button,

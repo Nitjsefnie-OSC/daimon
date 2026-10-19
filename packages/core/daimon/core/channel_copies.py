@@ -62,7 +62,7 @@ _REFUSALS: dict[ArchiveRefusal, str] = {
         "That agent wasn't made as a channel's own copy, so this tool doesn't archive it."
     ),
     "other_channel": "That agent was made for another channel.",
-    "default_agent": "That agent is a default for everyone here, or for the deployment.",
+    "default_agent": "That agent is a default for everyone here, or for all of Daimon.",
     "has_rule": (
         "That agent still has a rule naming a channel. Name the channel being closed, or "
         "drop its rule first."

@@ -62,7 +62,7 @@ def render_binding_refusal(reason: BindingRefusal, *, agent_name: str | None) ->
             return f"{name} is another channel's own agent, so it can't be used here."
         case "agent_runs_elsewhere":
             return (
-                f"{name}'s agent rule names other channels, so it would refuse every turn here. "
+                f"{name}'s agent rule names other channels, so it would refuse every request here. "
                 "Pick another agent, or change its rule first."
             )
         case "not_own_agent":

@@ -229,11 +229,11 @@ def origin_place(origin: TurnOriginRow) -> Place:
     return "channel"
 
 
-def _words_for_origin(origin: TurnOriginRow) -> dict[str, str] | None:
+def _words_for_origin(origin: TurnOriginRow, *, foreign: bool = False) -> dict[str, str] | None:
     """The per-turn platform words, or None for a platform with no chat commands (the CLI)."""
     if origin.platform not in CHAT_PLATFORMS:
         return None
-    return turn_words(origin.platform, place=origin_place(origin))
+    return turn_words(origin.platform, place=origin_place(origin), foreign=foreign)
 
 
 def render_turn_origin(
@@ -243,6 +243,7 @@ def render_turn_origin(
     responder_account: ResponderAccount | None = None,
     session_state: SessionState | None = None,
     handoff: HandoffNotice | None = None,
+    foreign_sender: bool = False,
 ) -> str:
     """Render server-provided location and identity separately from user history.
 
@@ -266,7 +267,9 @@ def render_turn_origin(
 
     `words` is what this platform calls things and how to reach its commands from
     where the turn was sent (`platform_words.turn_words`), so the model never
-    tells a person a command from another platform.
+    tells a person a command from another platform. `foreign_sender` marks a person
+    from another organisation (Teams), who has no private chat with Daimon: their
+    words send setup and billing to someone in the organisation that added it.
 
     Every value here is server-supplied except `handoff.requested_work`, which
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
@@ -298,7 +301,7 @@ def render_turn_origin(
             else None
         ),
     }
-    words = _words_for_origin(origin)
+    words = _words_for_origin(origin, foreign=foreign_sender)
     if words is not None:
         controls["words"] = words
     if session_state is not None:

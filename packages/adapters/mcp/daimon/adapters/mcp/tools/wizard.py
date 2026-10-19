@@ -41,7 +41,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 _STOP_SIGNAL: Final[str] = (
-    "WIZARD_POSTED: the form is now live in the channel. End your turn "
+    "WIZARD_POSTED: the form is now live in the channel. End your reply "
     "immediately — do not narrate, do not continue, and do not call another "
     "tool. The user's answers will arrive later as a brand-new message "
     "carrying a keyed block; that is when you resume, with the full history "

@@ -66,9 +66,9 @@ async def _get_tenant_summary_impl(runtime: McpRuntime, auth: AuthIdentity) -> T
                 now=datetime.now(UTC),
             )
         except StoreError as exc:
-            raise ToolError("internal: the caller's tenant no longer exists") from exc
+            raise ToolError("internal: this chat space no longer exists") from exc
         except AccessPolicyUnreadable as exc:
-            raise ToolError("the workspace access policy could not be read") from exc
+            raise ToolError("the access settings here could not be read") from exc
     return await _hide_across_homes(runtime, auth, summary)
 
 

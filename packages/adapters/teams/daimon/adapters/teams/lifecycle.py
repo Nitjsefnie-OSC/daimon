@@ -172,6 +172,7 @@ class TeamsTurnLifecycle:
         agent_name_prefix: str | None = None,
         ask_human: bool = False,
         direct_chat: bool = False,
+        foreign: bool = False,
         agent_name: str | None = None,
         model_id: str | None = None,
         markup: Decimal = Decimal(1),
@@ -208,6 +209,8 @@ class TeamsTurnLifecycle:
         self._requester = requester if self._ping else None
         self._agent_name_prefix = agent_name_prefix
         self._direct_chat = direct_chat
+        # The asker is from another organisation: no 1:1 chat to send them to.
+        self._foreign = foreign
         # Nobody asked, so nothing is owed: no card, no notice, no failure post.
         self._unprompted = unprompted
         self._request_id = request_id
@@ -627,7 +630,7 @@ class TeamsTurnLifecycle:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
             nouns = RefusalNouns.for_platform(
-                "teams", place="dm" if self._direct_chat else "channel"
+                "teams", place="dm" if self._direct_chat else "channel", foreign=self._foreign
             )
             notice = render_termination_notice(
                 reason,
@@ -638,6 +641,7 @@ class TeamsTurnLifecycle:
                 setup_command=nouns.setup,
                 billing_command=nouns.billing,
                 setup_verb=nouns.verb,
+                admin=nouns.who,
                 agent_name=self._agent_name,
             )
             if notice is not None:

@@ -201,21 +201,34 @@ CONTROLS_WAIT_S = 30.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats at once right now. Try again in a moment."
-_CANCEL_NOT_AUTHOR = "Only the person who started this turn can cancel it."
-_CANCEL_TURN_ENDED = "This turn has already finished — there is nothing left to cancel."
+_CANCEL_NOT_AUTHOR = "Only the person who asked can cancel this reply."
+_CANCEL_TURN_ENDED = "This reply has already finished — there is nothing left to cancel."
 _CANCELLING = "Cancelling…"
 # Everything a turn can raise that is not a bug in this adapter.
 _TURN_ERRORS = (DaimonError, anthropic.APIError, SQLAlchemyError, *TEAMS_SEND_ERRORS)
 _DB_ERRORS = (SQLAlchemyError, OSError)
 _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
 TEAMS_REFUSAL_NOUNS = RefusalNouns.for_platform("teams")
-# "Daimon can't answer here": the same words as Discord and Slack, with
-# Teams' `setup` command and where to send it.
-_SETUP = f"{TEAMS_REFUSAL_NOUNS.verb} {TEAMS_REFUSAL_NOUNS.setup}"
-_NOT_SET_UP = f"Daimon isn't set up in this channel yet.\n\nAsk an admin to {_SETUP}."
-_RESOLVER_MISS = (
-    f"This channel's setup is out of date.\n\nAsk an admin to check {TEAMS_REFUSAL_NOUNS.setup}."
-)
+# A sender from another organisation has no 1:1 chat with Daimon to send `setup` or
+# `billing` in, so their refusals name who to ask instead.
+TEAMS_FOREIGN_REFUSAL_NOUNS = RefusalNouns.for_platform("teams", foreign=True)
+
+
+def _not_set_up(nouns: RefusalNouns) -> str:
+    """ "Daimon can't answer here": the same words as Discord and Slack, with Teams'
+    `setup` command and where to send it."""
+    return (
+        "Daimon isn't set up in this channel yet.\n\n"
+        f"Ask {nouns.who} to {nouns.verb} {nouns.setup}."
+    )
+
+
+def _resolver_miss(nouns: RefusalNouns) -> str:
+    return f"This channel's setup is out of date.\n\nAsk {nouns.who} to check {nouns.setup}."
+
+
+_NOT_SET_UP = _not_set_up(TEAMS_REFUSAL_NOUNS)
+_RESOLVER_MISS = _resolver_miss(TEAMS_REFUSAL_NOUNS)
 # The log event each refusal is recorded under.
 _DENIALS: dict[AdmissionDenialReason, str] = {
     "balance_depleted": "turn.skipped.over_balance",
@@ -278,19 +291,21 @@ def _admission_refusal(
     tenant_id: uuid.UUID,
     *,
     in_dm: bool = False,
+    foreign: bool = False,
 ) -> str | None:
     """Log a refused admission; what to tell the person, if anything."""
+    nouns = TEAMS_FOREIGN_REFUSAL_NOUNS if foreign else TEAMS_REFUSAL_NOUNS
     if isinstance(err, MissingTurnConfigError):
         log.info("teams.missing_config", missing=list(err.missing))
-        return _NOT_SET_UP
+        return _not_set_up(nouns)
     if isinstance(err, MAResolverMissError):
         log.warning("teams.resolver.miss", kind=err.kind, daimon_tag=err.daimon_tag)
-        return _RESOLVER_MISS
+        return _resolver_miss(nouns)
     log.info(_DENIALS[err.reason], tenant_id=str(tenant_id))
     # A protected channel hears nothing, a refusal included.
     if err.reason == "writers_none":
         return None
-    return admission_refusal_text(err.reason, TEAMS_REFUSAL_NOUNS, in_dm=in_dm)
+    return admission_refusal_text(err.reason, nouns, in_dm=in_dm)
 
 
 async def _controls_after(sweep: asyncio.Task[None], lifecycle: TeamsTurnLifecycle) -> None:
@@ -1275,7 +1290,9 @@ class TeamsApp:
                 is_dm=inbound.kind == "dm",
             )
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
-            refusal = _admission_refusal(err, tenant_id, in_dm=inbound.kind == "dm")
+            refusal = _admission_refusal(
+                err, tenant_id, in_dm=inbound.kind == "dm", foreign=inbound.is_foreign
+            )
             if refusal is not None and continuation is None:  # queued work settles silently
                 private = isinstance(err, AdmissionDenied) and err.reason in SENDER_ONLY
                 refusal = await with_admin_team_if_asked(self.runtime, refusal)
@@ -1339,6 +1356,7 @@ class TeamsApp:
                 ),
                 ask_human=self._ask_human,
                 direct_chat=inbound.kind == "dm",
+                foreign=inbound.is_foreign,
                 agent_name=admission.agent.name,
                 model_id=admission.agent.model.id,
                 markup=self.runtime.turn_deps.markup,
@@ -1380,7 +1398,10 @@ class TeamsApp:
                             QUEUE_TIMED_OUT_TEXT, direct_chat=inbound.kind == "dm"
                         ),
                         "balance_depleted": admission_refusal_text(
-                            "balance_depleted", TEAMS_REFUSAL_NOUNS
+                            "balance_depleted",
+                            TEAMS_FOREIGN_REFUSAL_NOUNS
+                            if inbound.is_foreign
+                            else TEAMS_REFUSAL_NOUNS,
                         ),
                         "queue_full": _SHED,
                     }[slot]
@@ -1568,6 +1589,7 @@ class TeamsApp:
                 responder_handle=f"@{inbound.bot_name}" if inbound.bot_name else None,
                 session_state=None if quiet else prepared.continuity.session_state(),
                 handoff=notice,
+                foreign_sender=inbound.is_foreign,
             )
             render = functools.partial(
                 render_user_message,

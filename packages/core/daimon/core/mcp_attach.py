@@ -62,8 +62,8 @@ class McpServerReplaceRefusedError(DaimonError):
 
     def __init__(self, *, server_name: str) -> None:
         super().__init__(
-            f"The agent already has an MCP server named '{server_name}' at a different URL. "
-            "Replacing it needs a server or workspace admin. Nothing was changed."
+            f"The agent already has a connection named '{server_name}' at a different address. "
+            "Replacing it needs an admin. Nothing was changed."
         )
         self.server_name = server_name
 

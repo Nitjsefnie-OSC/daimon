@@ -366,7 +366,7 @@ async def test_clone_sparse_override_reaches_the_single_resolver_unchanged() -> 
 
 
 def test_fleet_does_not_lift_existing_self_only_chat_refusal() -> None:
-    with pytest.raises(ToolError, match="chat turn can't open"):
+    with pytest.raises(ToolError, match="chat reply can't open"):
         require_outside_chat_turn(AUTH)
 
 

@@ -49,7 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PLATFORMS = ("discord", "slack", "teams")
 _NEEDS_CHANNEL = (
-    "channel_id is required: pass this turn's origin_context_id, the id from "
+    "channel_id is required: pass your origin_context_id, the id from "
     '<channel role="parent_channel">, or the channel the user named.'
 )
 

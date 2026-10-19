@@ -46,8 +46,8 @@ def build_clear_default_note(*, scope_label: str, cleared: bool, space: str = NE
     if not cleared:
         return f"{scope_label} had no default agent to clear — nothing changed."
     return (
-        f"{scope_label} no longer has a default agent; resolution now falls "
-        f"through to the next tier. Whichever agent answers is still reached "
+        f"{scope_label} no longer has a default agent; it now falls "
+        f"back to the next default. Whichever agent answers is still reached "
         f"only by @mentioning the bot in that channel — there is one bot for "
         f"the whole {space}, not one bot per agent."
     )
@@ -65,16 +65,16 @@ def build_resolution_note(
     if agent_name is None:
         return (
             f"No agent resolves for channel {channel_id} — the channel, the "
-            f"{space}, and the deployment default are all unset, so a mention "
+            f"{space}, and the Daimon-wide default are all unset, so a mention "
             f"there has nothing to answer it."
         )
     where = {
         "channel": f"this channel's own default (channel {channel_id})",
         "tenant": f"the {space} default, since this channel has none of its own",
         "deployment": (
-            f"the deployment default, since neither this channel nor the {space} sets one"
+            f"the Daimon-wide default, since neither this channel nor the {space} sets one"
         ),
-    }.get(tier or "", "an unrecognised tier")
+    }.get(tier or "", "an unknown setting")
     return (
         f"{agent_name} answers in channel {channel_id}, from {where}. Members "
         f"reach it only by @mentioning the bot there — there is one bot for the "
