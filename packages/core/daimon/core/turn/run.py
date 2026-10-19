@@ -30,7 +30,7 @@ from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
     ToolRuleCardReference,
-    backend_switch_tools_for_turn,
+    confirmed_tools_for_turn,
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.errors import TurnError
@@ -644,18 +644,9 @@ async def _replace_dead_session_locked(
                 # seal added since, or a replacement built writable that the
                 # current decision makes read-only, makes this turn wait (rolls
                 # back the dead-mark) so the next turn rebuilds it read-only.
-                # So does one built with the agent's keys for a caller from
-                # another organisation.
                 current = await reauthorize(deps, admission)
                 snapshot = live.effective_config
                 writable = snapshot is None or not snapshot.memory_read_only
-                if (admission.is_external or current.is_external) and (
-                    snapshot is None or not snapshot.is_external
-                ):
-                    raise SessionBusyError(
-                        pending_reasons=("external_caller",),
-                        retry_after=datetime.now(UTC) + timedelta(seconds=1),
-                    )
                 if current.origin_seal_ids != admission.origin_seal_ids or (
                     current.memory_read_only and writable
                 ):
@@ -949,7 +940,7 @@ async def run_prepared_turn_impl(
     breach can never loop into a second wall-clock-priced attempt.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
-    confirmed_tools: frozenset[str] = backend_switch_tools_for_turn(deps)
+    confirmed_tools: frozenset[str] = confirmed_tools_for_turn(deps)
     if confirmed_tools:
         revision = prepared.admission.backend_revision
         if (

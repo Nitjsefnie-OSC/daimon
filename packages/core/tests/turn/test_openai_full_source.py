@@ -44,7 +44,7 @@ from mux.drivers.openai.skills import bundle_digest
 
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import consent_request as consent_request
-from .test_gemini_full_source import DEFAULT, F2_PARAMS, ROOT, archive
+from .test_gemini_full_source import CUSTOM, F2_PARAMS, ROOT, archive
 from .test_gemini_full_source import source_mcp as source_mcp
 from .test_openai_host import Wire
 from .test_openai_runtime_transport import clients_for
@@ -77,6 +77,8 @@ class FullWire(Wire):
         self.agent = {}
         self.created = None
         self.posts = []
+        self.vault = None
+        self.vault_credential = None
         config = RECORDED_ENVIRONMENT["config"]
         self.template = {
             "id": "native-template",
@@ -105,6 +107,24 @@ class FullWire(Wire):
 
     def handle(self, request):
         path = request.url.path.removeprefix("/v1")
+        if path == "/vaults":
+            self.requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(200, json={"data": [], "has_more": False})
+            self.vault = {"id": "caller-session-vault", **json.loads(request.content)}
+            return httpx.Response(200, json=self.vault)
+        if path == "/vaults/caller-session-vault":
+            self.requests.append(request)
+            return httpx.Response(200, json=self.vault)
+        if path == "/vaults/caller-session-vault/credentials":
+            self.requests.append(request)
+            self.vault_credential = {
+                "id": "caller-mcp-credential",
+                "vault_id": "caller-session-vault",
+                "created_at": 0,
+                **json.loads(request.content),
+            }
+            return httpx.Response(200, json=self.vault_credential)
         if path.startswith("/skills"):
             self.requests.append(request)
             if request.method == "POST":
@@ -150,6 +170,7 @@ class FullWire(Wire):
 @pytest.fixture
 async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, request):
     gated = getattr(request, "param", False)
+    native_defaults = gated == "native-defaults"
     request, _, source, actor, accepted, router, source_reads, *_ = consent_request
     sessions = request.deps.sessionmaker
     scope = admitted_session_scope(
@@ -198,6 +219,15 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
     clients = clients_for(monkeypatch, wire.handle)
     mcp_calls = []
     names = ["search_tools", "call_tool", *(["add_skill"] if gated else [])]
+    if native_defaults:
+        names = [
+            "add_skill",
+            "call_tool",
+            "create_attachment_upload_url",
+            "create_notebook_upload_url",
+            "publish_report",
+            "search_tools",
+        ]
     catalogue_state = {"names": names if gated else None}
 
     async def mcp(call):
@@ -246,7 +276,7 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
         usage_revisions=OpenAIUsageRevisions(),
     )
     mappings, archives = [], []
-    for item in DEFAULT["skills"]:
+    for item in CUSTOM:
         name = item["skill_id"]
         directory = ROOT / "defaults/skills" / name
         files = {
@@ -333,7 +363,25 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
     service = AgentBackendService(sessions, enabled=True, capture_source=capture)
     quote = await service.preview(source, "openai")
     expected_drops = ("mcp_tool:daimon-mcp:add_skill", "memory") if gated else ("memory",)
+    if native_defaults:
+        expected_drops = ("builtin_tool:web_fetch", *expected_drops)
     assert quote.allowed and quote.declared_drops == expected_drops
+    if native_defaults:
+        from daimon.core.channel_backend import AgentBackendRefused
+
+        with pytest.raises(AgentBackendRefused) as missing_consent:
+            await service.set_backend(
+                source,
+                "openai",
+                accepted.local,
+                actor,
+                accepted_drops=tuple(
+                    drop for drop in quote.declared_drops if drop != "builtin_tool:web_fetch"
+                ),
+                expected_preview_digest=quote.digest,
+            )
+        assert missing_consent.value.reason == "drops_mismatch"
+        assert wire.posts == []
     accepted = await service.set_backend(
         source,
         "openai",
@@ -460,7 +508,11 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
     body = wire.posts[0]
     assert len(body["environment"]["skills"]) == 11
     mcp = body["agent"]["tools"][0]
-    assert mcp["transport"]["authorization"] == "Bearer " + token
+    assert "authorization" not in mcp["transport"]
+    assert body["vault_ids"] == ["caller-session-vault"]
+    assert mcp["credential_id"] == "caller-mcp-credential"
+    assert wire.vault_credential["auth"]["token"] == token
+    assert token not in json.dumps(body)
     assert mcp["allowed_tools"] == ["search_tools", "call_tool"]
     from daimon.testing.asgi import mcp_session
 
@@ -614,3 +666,69 @@ async def test_no_executable_mcp_tools_never_publishes_empty_allowlist(
     represented = await capture_preparation_source(request, capability_preview=True)
     assert represented.representations == ()
     assert wire.posts == []
+
+
+NATIVE_DEFAULT_PARAMS = {
+    **ASK_PARAMS,
+    "tools": [
+        {
+            **ASK_PARAMS["tools"][0],
+            "configs": [
+                config
+                for config in ASK_PARAMS["tools"][0]["configs"]
+                if config["name"] not in ("web_fetch", "web_search")
+            ],
+            "default_config": {
+                "enabled": True,
+                "permission_policy": {"type": "always_allow"},
+            },
+        },
+        {
+            **ASK_PARAMS["tools"][1],
+            "configs": [
+                {"name": "add_skill", "enabled": True, "permission_policy": {"type": "always_ask"}}
+            ],
+            "default_config": {
+                "enabled": True,
+                "permission_policy": {"type": "always_allow"},
+            },
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize("consent_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
+@pytest.mark.parametrize("full_openai", ["native-defaults"], indirect=True)
+async def test_live_native_defaults_declare_only_fetch_loss_and_preserve_siblings(full_openai):
+    request, _, canonical, wire, *_ = full_openai
+    target = canonical.target_spec
+    assert {tool.name for tool in target.tools} == {"bash", "web_search"}
+    assert len(target.skills) == 11
+    assert target.declared_drops == (
+        "builtin_tool:web_fetch",
+        "mcp_tool:daimon-mcp:add_skill",
+        "memory",
+    )
+    assert "builtin_tool:web_fetch" in target.system
+    expected = [
+        "call_tool",
+        "create_attachment_upload_url",
+        "create_notebook_upload_url",
+        "publish_report",
+        "search_tools",
+    ]
+    assert target.mcp_servers[0].tool_policy["allowed_tools"] == expected
+    prepared = await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=False,
+    )
+    assert prepared.session_ref.provider == "openai"
+    tools = wire.posts[0]["agent"]["tools"]
+    assert any(tool["type"] == "web_search" for tool in tools)
+    assert next(tool for tool in tools if tool["type"] == "mcp")["allowed_tools"] == expected

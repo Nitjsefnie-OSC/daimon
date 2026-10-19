@@ -42,7 +42,7 @@ def source_read_only(request):
 @pytest.fixture
 async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_only, request):
     from mux.contracts.ids import SkillRef
-    from mux.contracts.resources import ToolSpec
+    from mux.contracts.resources import AgentPatch, ToolSpec
 
     resolved_tools = None
     kwargs = {}
@@ -120,6 +120,18 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             captured = await load_backend_agent(
                 client, sm, tenant_id=tenant, agent_name="source", actual_agent=source
             )
+    if variant in {"resolver_fresh", "clone_source"}:
+        from daimon.core.channel_backend import load_backend_agent
+
+        retained_environment = captured.environment
+        source = source.model_copy(
+            update={"metadata": {**source.metadata, "daimon_managed": "true"}}
+        )
+        async with ScriptedTransport().client() as client:
+            captured = await load_backend_agent(
+                client, sm, tenant_id=tenant, agent_name="source", actual_agent=source
+            )
+        captured = captured.model_copy(update={"environment": retained_environment})
     root = replace(
         old.permissions,
         fleet=replace(old.permissions.fleet, depth=0),
@@ -129,6 +141,9 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             update={"deadline": datetime.now(UTC) + timedelta(minutes=10)}
         ),
     )
+    if variant in {"resolver_fresh", "clone_source"}:
+        # Production worker intent inherits the complete root stamps.
+        root = replace(root, spec=root.spec.model_copy(update={"metadata": source.metadata}))
     async with sm.begin() as db:
         await access_policy.set_access_policy(db, tenant_id=tenant, policy=POLICY)
         await tenants.set_funding_mode(db, tenant_id=tenant, funding_mode="prepaid")
@@ -245,9 +260,20 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                 update={"declared_drops": ("memory", "sandbox", "skills", "tools")}
             )
         resolved_tools = None  # The scripted ACK must echo this worker's compiled grant.
+    if variant == "clone_source":
+        assert captured.source is not None
+        root = replace(
+            root,
+            source_agents=(captured.source.ref,),
+            source_revisions=((captured.source.ref, captured.source.revision),),
+        )
+        requested = captured.source
     resolved = resolve_worker_spec(
         root,
         requested,
+        overrides=AgentPatch.model_validate(root.spec.model_dump(mode="json"))
+        if variant == "clone_source"
+        else None,
         policy=POLICY,
         now=datetime.now(UTC),
         resources=root.resources,
@@ -325,6 +351,10 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
                 native["agent"] = native["agent"].model_copy(
                     update={"metadata": payload.get("metadata")}
                 )
+                if variant in {"resolver_fresh", "clone_source"}:
+                    native["agent"] = native["agent"].model_copy(
+                        update={"created_at": source.created_at + timedelta(seconds=1)}
+                    )
                 if live:
                     native["agent"] = native["agent"].model_copy(
                         update={"execution_identity": capture["execution_identity"]}
@@ -386,6 +416,13 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
 
     memory = make_fake_memory_store_handler(FakeMemoryStoreState())
     router.add("POST", r"/v1/memory_stores", lambda call, match: memory(call))
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda call, match: list_response(
+            [source.model_dump(mode="json"), native["agent"].model_dump(mode="json")]
+        ),
+    )
     router.add("POST", r"/v1/agents", resources)
     router.add("POST", r"/v1/sessions", resources)
     router.add("GET", r"/v1/agents/.*", resources)

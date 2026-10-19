@@ -74,7 +74,6 @@ class AccountRow(BaseModel):
     role: Role
     created_at: datetime
     platform_role_ids: tuple[str, ...] = ()
-    is_external: bool = False
 
 
 class AccountIdentityRow(BaseModel):
@@ -95,8 +94,6 @@ class AccountIdentityRow(BaseModel):
     )  # platform_principals.external_id (LEFT JOIN on tenant's platform; null when none)
     # accounts.platform_role_ids as of the account's last chat turn.
     platform_role_ids: tuple[str, ...] = ()
-    # accounts.is_external: the last positive evidence about the account's organisation.
-    is_external: bool = False
 
 
 class ChannelSkillRow(BaseModel):
@@ -268,7 +265,6 @@ class ThreadSessionRow(BaseModel):
     platform: str
     thread_id: str
     account_id: uuid.UUID | None
-    is_external: bool = False
     ma_session_id: str
     ma_agent_id: str | None = None
     channel_id: str | None = None
@@ -464,6 +460,29 @@ class SlackUserTokenRow(BaseModel):
     updated_at: datetime
     expires_at: datetime | None = None
     encrypted_refresh_token: bytes | None = None
+
+
+class MicrosoftUserTokenRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    user_id: str
+    encrypted_refresh_token: bytes
+    scopes: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class MicrosoftSignInRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    state: str
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    user_id: str
+    code_verifier: str
+    expires_at: datetime
+    created_at: datetime
 
 
 class SlackTurnContextRow(BaseModel):
@@ -1095,7 +1114,6 @@ class TurnOriginRow(BaseModel):
     configuration_target_ma_agent_id: str | None
     configuration_target_name: str | None
     is_setup: bool = False
-    is_external: bool = False
     role: Role
     created_at: datetime
     expires_at: datetime
@@ -1118,6 +1136,7 @@ class SourceRepresentation(_Facts):
     target: AgentSpec
     credential_refs: tuple[str, ...] = ()
     unavailable_mcp_tools: tuple[str, ...] = ()
+    unavailable_builtin_tools: tuple[str, ...] = ()
     environment: EnvironmentSpec | None = None
 
 

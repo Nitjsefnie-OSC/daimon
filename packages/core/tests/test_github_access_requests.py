@@ -715,7 +715,7 @@ async def test_confirmed_connection_preserves_grant_limit_error_for_oauth_page(
 
 
 @pytest.mark.asyncio
-async def test_request_cap_and_external_refusal(db_session: AsyncSession) -> None:
+async def test_request_cap(db_session: AsyncSession) -> None:
     tenant_id, asker_id, agent_id = (uuid.uuid4() for _ in range(3))
     db_session.add(Tenant(id=tenant_id, platform="slack", external_id=str(tenant_id)))
     await db_session.flush()
@@ -738,12 +738,6 @@ async def test_request_cap_and_external_refusal(db_session: AsyncSession) -> Non
         await request_access(db_session, thread_id=f"thread-{index}", **args)
     with pytest.raises(ValueError, match="already have requests"):
         await request_access(db_session, thread_id="thread-4", **args)
-    account = await db_session.get(Account, asker_id)
-    assert account is not None
-    account.is_external = True
-    await db_session.flush()
-    with pytest.raises(ValueError, match="unavailable"):
-        await request_access(db_session, thread_id="thread-5", **args)
 
 
 @pytest.mark.asyncio

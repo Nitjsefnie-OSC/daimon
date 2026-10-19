@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Protocol
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.slack_http import SlackHttpSession
+from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.artifacts import ArtifactStore
 from daimon.core.config import Settings
@@ -57,6 +58,8 @@ class McpRuntime:
     fernet: MultiFernet | None = field(default=None)
     artifact_store: ArtifactStore | None = field(default=None)
     teams_client: TeamsBotClient | None = field(default=None)
+    # Teams members' own Microsoft 365 access; None when not configured.
+    microsoft: MicrosoftGraph | None = field(default=None)
     # Re-checks stored Slack groups and Teams teams outside a chat turn; None checks none.
     resolver_cache: ResolverCache = field(default_factory=new_resolver_cache)
     # None (tests) lets slack_sdk open a throwaway session per call.

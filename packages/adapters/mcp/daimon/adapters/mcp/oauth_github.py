@@ -46,7 +46,7 @@ from daimon.core.github_requester_access import list_github_pages
 from daimon.core.native_admins import AdminAttestationUnavailable, attest_discord_admin
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import github_access, github_app_installations, github_connect
-from daimon.core.stores.accounts import get_account_with_tenant, has_external_accounts
+from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import AccountIdentityRow, Role
 from daimon.core.stores.github_access import list_agent_repos
 from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
@@ -1164,7 +1164,6 @@ def _agent_editor_page(
     requested_repo: str | None = None,
     missing_names: tuple[str, ...] = (),
     selection_error: str | None = None,
-    clients_present: bool = False,
     pending_installation: _PendingInstallationRequest | None = None,
     github_user_id: int | None = None,
 ) -> Response:
@@ -1697,7 +1696,6 @@ def _confirmation_page(
     secret: str,
     cancel_url: str,
     installations: list[_Installation],
-    clients_present: bool,
     platform: str,
     workspace: str,
     agent_name: str | None,
@@ -1814,7 +1812,6 @@ def _confirmation_page(
             "<p>The agent can read and change connected repos. People also need their own "
             "GitHub permission to use them."
             + (f" {html.escape(audience_line(agent_name, write=True))}" if agent_name else "")
-            + (" Clients can see what connected agents share." if clients_present else "")
             + "</p></details>",
             '<div class="gh-finish"><div class="gh-finish-status">'
             '<p id="selection-status" aria-live="polite">0 selected</p>'
@@ -1991,11 +1988,7 @@ def build_oauth_github_routes(
         if invitation.agent_id is None:
             return True
         if invitation.operator_issued:
-            return (
-                requester.tenant_id == invitation.tenant_id
-                and requester.role == Role.ADMIN
-                and not requester.is_external
-            )
+            return requester.tenant_id == invitation.tenant_id and requester.role == Role.ADMIN
         if deployment_default is None:
             return False
         metadata = live.metadata if live is not None else {}
@@ -2039,10 +2032,8 @@ def build_oauth_github_routes(
                 if not authenticated:
                     return _already_connected_page(invitation.connected_repo_count)
                 live = await live_agent(invitation)
-                if (
-                    requester is None
-                    or requester.is_external
-                    or not await may_manage_agent(session, invitation, requester, live)
+                if requester is None or not await may_manage_agent(
+                    session, invitation, requester, live
                 ):
                     return _error("You can no longer manage this agent.", 403)
             agent_grants = (
@@ -2307,9 +2298,8 @@ def build_oauth_github_routes(
             requester = await get_account_with_tenant(
                 session, account_id=invitation.requester_account_id
             )
-            if requester is None or requester.is_external:
+            if requester is None:
                 return _error()
-            clients_present = await has_external_accounts(session, tenant_id=invitation.tenant_id)
             agent_repos = (
                 await list_agent_repos(
                     session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
@@ -2348,10 +2338,8 @@ def build_oauth_github_routes(
                 current_requester = await get_account_with_tenant(
                     session, account_id=invitation.requester_account_id
                 )
-                if (
-                    current_requester is None
-                    or current_requester.is_external
-                    or not await may_manage_agent(session, invitation, current_requester, live)
+                if current_requester is None or not await may_manage_agent(
+                    session, invitation, current_requester, live
                 ):
                     return _error("You can no longer manage this agent.", 403)
                 grants = await list_agent_repos(
@@ -2392,7 +2380,6 @@ def build_oauth_github_routes(
                     needed=needed,
                     requested_repo=invitation.requested_repo,
                     missing_names=tuple(missing_names),
-                    clients_present=clients_present,
                     pending_installation=pending_installation,
                     github_user_id=flow.github_user_id,
                 )
@@ -2494,7 +2481,6 @@ def build_oauth_github_routes(
                     needed=needed,
                     requested_repo=invitation.requested_repo,
                     missing_names=tuple(missing_names),
-                    clients_present=clients_present,
                     selection_error="Choose a change to save.",
                 )
             if posted_snapshot != hashlib.sha256(snapshot.encode()).hexdigest():
@@ -2568,10 +2554,8 @@ def build_oauth_github_routes(
                     transaction_requester = await get_account_with_tenant(
                         session, account_id=invitation.requester_account_id
                     )
-                    manages = (
-                        transaction_requester is not None
-                        and not transaction_requester.is_external
-                        and await may_manage_agent(session, invitation, transaction_requester, live)
+                    manages = transaction_requester is not None and await may_manage_agent(
+                        session, invitation, transaction_requester, live
                     )
                     if not manages:
                         return _error("You can no longer manage this agent.", 403)
@@ -2751,7 +2735,6 @@ def build_oauth_github_routes(
                         f"{root}/oauth/github/confirm?{urlencode({'state': state, 'cancel': '1'})}"
                     ),
                     installations=installations,
-                    clients_present=clients_present,
                     platform=requester.platform,
                     workspace=invitation.workspace_label,
                     agent_name=invitation.agent_name,
@@ -3008,7 +2991,6 @@ def build_oauth_github_routes(
             secret=secret,
             cancel_url=cancel_url,
             installations=installations,
-            clients_present=clients_present,
             platform=requester.platform,
             workspace=workspace or f"this {_place_label(requester.platform).lower()}",
             agent_name=invitation.agent_name,

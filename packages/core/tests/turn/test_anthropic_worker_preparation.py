@@ -170,6 +170,12 @@ async def test_lost_native_agent_ack_keeps_one_claim_and_never_recreates(native_
         request.scope, spawn_operation_key(claimed.run_id, 0) + ":agent_create:0"
     )
     assert claim is not None and claim.operation.status == "outcome_unknown"
+    allocated = next(
+        call.json()
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/agents"
+    )
+    assert allocated["metadata"]["daimon_name"] == f"fleet-{claimed.run_id}-{claimed.ordinal}"
 
 
 async def test_missing_explicit_root_memory_grant_refuses_before_native(native_worker):
@@ -437,3 +443,62 @@ async def test_resolved_readback_widening_refuses_before_native_session_allocati
         )
     assert any(call.method == "POST" and call.path == "/v1/agents" for call in trace.requests)
     assert not any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
+
+
+@pytest.mark.parametrize("native_worker", ["resolver_fresh", "clone_source"], indirect=True)
+async def test_worker_allocation_keeps_fresh_mentions_on_original_agent(native_worker):
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.ma_resolver import new_resolver_cache, resolve_agent
+
+    request, root, claimed, trace, _ = native_worker
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Complete the task",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    payload = next(
+        call.json()
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/agents"
+    )
+    expected_name = f"fleet-{claimed.run_id}-{claimed.ordinal}"
+    assert payload["name"] == payload["metadata"][MA_METADATA_KEY_NAME] == expected_name
+    assert payload["metadata"] == {
+        **root.spec.metadata,
+        MA_METADATA_KEY_NAME: expected_name,
+        "daimon_managed": "false",
+    }
+    assert root.spec.metadata["daimon_managed"] == "true"
+    assert root.spec.metadata[MA_METADATA_KEY_NAME] != expected_name
+
+    async def unexpected_apply():
+        pytest.fail("original source disappeared from resolver index")
+
+    # A new channel mention has no cached native id. List the original and
+    # the newly allocated worker through the real SDK/resolver path.
+    selected = await resolve_agent(
+        request.deps.anthropic,
+        tenant_id=request.tenant_id,
+        daimon_tag=root.spec.metadata[MA_METADATA_KEY_NAME],
+        apply_callable=unexpected_apply,
+        cache=new_resolver_cache(),
+    )
+    assert selected == request.admission.agent.id
+
+    from daimon.core.defaults.sweep import sweep_removed_agents
+
+    # Scheduler startup must not archive the live worker as a deleted default.
+    assert (
+        await sweep_removed_agents(
+            request.deps.anthropic,
+            present_names={root.spec.metadata[MA_METADATA_KEY_NAME]},
+            tenant_id=request.tenant_id,
+            dry_run=False,
+        )
+        == []
+    )

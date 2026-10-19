@@ -31,7 +31,7 @@ the adapter provisions that tenant and reconciles its defaults; turns are
 denied until the reconcile succeeds. The adapter fails closed unless the
 conversation tenant equals the configured one and the sender has a well-formed
 `aad_object_id`; in a 1:1 chat the channel-data tenant must match too. A
-channel sender from another tenant, or a guest, is from another organisation (below). Users need no setup: their
+channel or group chat sender from another tenant is a member (below). Users need no setup: their
 principal is created on first contact. Only the commercial Microsoft 365 cloud
 is supported; government and China clouds use other Bot Framework hosts.
 
@@ -77,7 +77,7 @@ from when the turn's last tool call ended, so it rarely adds more than two
 seconds, and Graph thumbnails are requested as each file uploads. Messages sent while a turn
 runs are queued, each marked ⌛ until its turn starts (only where the sender
 may start a turn: not in a protected place, not for someone off the invoker
-allowlist or from another organisation outside an isolated channel), and run
+allowlist), and run
 as one follow-up per author. Work an agent hands off
 (`hand_off_task`) runs right after the turn that queued it; if admission
 refuses that work, it is dropped without a notice, as on Slack. A retried
@@ -110,48 +110,11 @@ form say so, so whoever picks it up answers in the channel.
 
 ### People from another organisation
 
-Two kinds of people count as from another organisation: a shared channel's
-external participants, who join through B2B direct connect and stay in their
-home tenant, and guests (Entra B2B guest accounts in ours), who can be in
-standard and private channels and 1:1 chats. Daimon answers them only inside
-a channel kept to its own agents (`readers: own`) and its threads. Anywhere else an addressed message gets
-one line saying so and runs no turn, and their unmentioned replies are never
-judged for a followed thread. Their turns run as a member (never an admin), commands go to the agent as plain text, and the agent sees
-`external="true"` on their message. Their tool calls get only the
-conversation's tools: reading, searching and posting in it, files into it,
-their own sessions and timers, and signing in to an MCP server the agent
-already has. Anything else, including tools added later, returns a tool
-error the agent relays. Their sessions get none of the agent's keys (no
-`.env`) and none of its shared MCP tokens: a server only such a token
-reaches is left off unless they sign in to it themselves, where it offers a
-sign-in. A session that may hold those credentials is replaced, not reused,
-when they are next answered in it, and none of its work carries over. Files are saved in a shared channel this
-organisation hosts once an admin turned them on there (below); one hosted by
-another organisation keeps its files on that organisation's site.
-
-A sender is placed from these signals, cheapest first: a foreign tenant on
-the activity (`channelData.tenant.id`, `from.tenantId`,
-`from.properties.tenantId`); their Bot Framework roster entry (`tenantId`,
-and `userRole` "guest"); then, in a channel, Graph's member list
-(`allMembers`: `tenantId` and the "guest" role), which needs the
-`ChannelMember.Read.Group` permission in the manifest. A foreign tenant is
-external; a guest is too, unless the tenant access policy lists them as a
-member (`daimon tenants access-policy --add-member-guest <object id>`). The
-list never overrides a foreign tenant. Our tenant with a member's role is
-internal.
-
-Without either, the sender is unknown and nothing is stored. In a channel
-not known to be standard or private (the activity, an earlier activity
-there or the team's channel list says) they are held as external for that
-turn. Elsewhere they are answered as before, unless the account is already
-marked external. Positive evidence is stored on the account, so queued work,
-routines and MCP tokens see it; a held turn's MCP calls are held too.
-Answers are cached in memory (an hour for an external, ten minutes for ours,
-a minute after a failure) and each lookup times out after a few seconds.
-
-`DAIMON_TEAMS__RESTRICT_GUESTS` and `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS`
-(both on) switch these rules off per kind: those people are then treated as
-members, and the lookups only their kind needs are skipped.
+A shared channel's external participants (B2B direct connect) and guests
+(Entra B2B guest accounts in ours) are treated as members, as everyone in a
+Discord server is. Teams opens no 1:1 chat across organisations, so a 1:1
+chat naming another tenant is refused. A shared channel another
+organisation hosts keeps its files on that organisation's site.
 
 ### Commands and admins
 
@@ -182,7 +145,7 @@ chat) and after an @mention (channels) fill in a ready-made request to send.
 | `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Answered in a 1:1 chat instead of a channel whose readers are limited, it says so, since the answer would leave the channel. |
-| `privacy` | See, export or delete what Daimon stores about you. |
+| `privacy` | See, export or delete what Daimon stores about you, or disconnect your Microsoft account. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
 | `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`); Teams requests never go to Discord's or Slack's channel. The post links to where it was asked; requests go to the escalation channel. |
 
@@ -202,8 +165,7 @@ falls back to the last successful one for up to an hour, and demotes no one. If
 the app is removed from the admin team, or no owner list has been read within
 an hour, nobody is an admin in chats and cards until the next good read, while
 stored admin roles stand until then; re-adding the app restores the owners.
-Guests, people from another organisation and anyone in a group chat with
-outsiders are never admins. Admins' turns run with the admin role, and the
+Admins' turns run with the admin role, and the
 panels unlock the admin actions for them. Every card click and dialog
 re-checks the organisation, the clicker and their role. Boot does the same
 demotion; support requests and budget notices for "the admins" reach the team's owners.
@@ -230,18 +192,7 @@ mentions on, a typed name counts too. It never joins in unprompted. A
 targeted message to it runs a command privately, and anything else there
 gets a one-line notice.
 
-Everyone in a group chat sees each answer, so the bot answers only while the
-whole roster is the organisation's: members of the tenant, plus guests listed
-with `--add-member-guest` (or every guest with
-`DAIMON_TEAMS__RESTRICT_GUESTS=false`). Anyone from another tenant, an
-unlisted guest, an anonymous member, or a roster that cannot be read closes
-the chat: the sender gets a private notice and no turn starts. The roster is
-read through Bot Framework and cached for a minute, or until someone joins.
-A running turn checks it again before its card shows any of its work or it
-posts an approval or question card, and reads it afresh before the answer. If
-the chat has closed meanwhile, the turn stops, no such card is posted (the
-approval or question goes unanswered), its card says only that someone from
-outside is in the chat, and the asker gets the private notice once. A group chat has no team, so its settings need a workspace admin.
+Everyone in a group chat sees each answer, whoever is in it. A group chat has no team, so its settings need a workspace admin.
 
 A turn replays the chat like a channel thread (Channel history, below): the
 first turn the newest 25 messages, a later one only newer messages, the
@@ -321,8 +272,7 @@ Graph change notifications for each private or shared channel it is in, so
 replies in followed threads, Replies quoting the bot and typed `@<bot name>`
 mentions (when plain-text mentions are on) work there as in a standard
 channel. Graph's notification carries no content: Daimon reads the new
-message once and routes it exactly as a Bot Framework message, guests and
-external members classified by the same roster lookup. @mentions still
+message once and routes it exactly as a Bot Framework message. @mentions still
 arrive through Bot Framework and are ignored here. Expect a few seconds
 of extra latency.
 
@@ -401,6 +351,23 @@ setting off the routes answer 404 and nothing is subscribed.
   Where they are unavailable, `files_hint` tells the agent that an admin must
   grant `Files.ReadWrite.All`, rather than offer an artifact, report or
   notebook.
+- **Office skills.** A Teams turn of the default agent adds Anthropic's
+  built-in `docx`, `pptx` and `xlsx` skills to its session (Anthropic backend
+  only; see `platforms` in [Defaults](defaults.md)). They count toward the
+  20-skill session limit, so such a channel adds at most 6 skills of its
+  own, or 5 where Microsoft accounts add the `microsoft-365` skill.
+- **Updating a channel file.** A file in the channel's Files folder reaches
+  the agent with its SharePoint link and version (its eTag) beside the
+  download link. `replace_channel_file` saves an edited file over it as a new
+  version instead of a renamed copy; SharePoint's version history keeps the
+  earlier ones. It is refused for a folder, a file outside the folder of the
+  channel the turn runs in, one of another type, or one changed since the
+  agent read it (the version is compared without the eTag's quotes), and
+  SharePoint refuses a file that is locked (open in a desktop app) or whose
+  permissions, retention policy or sensitivity label block app writes; the
+  agent then posts its version as a new file. A write is never retried: when
+  its answer is lost or SharePoint fails with a 5xx, the agent is told the file
+  may or may not have been saved. Slack and Discord have no equivalent.
 - **Inline images.** A PNG, JPEG, GIF or WebP output also shows inline, as a
   base64 data URI downscaled to fit 1024x1024 and re-encoded under 512 KiB
   (PNG, else JPEG). Up to four, in delivery order, are added to the answer's
@@ -504,8 +471,8 @@ registration:
   channel is read only from a turn inside it. Graph has no message search for
   an app, so `search_messages` scans recent posts, bounded, and says when it
   stopped short. A 1:1 chat cannot be read back. A message's files come with
-  a download link where `Files.ReadWrite.All` is granted and the file is in
-  the channel's own Files folder, else by name: the permission ignores
+  a download link, SharePoint link and version where `Files.ReadWrite.All` is
+  granted and the file is in the channel's own Files folder, else by name: the permission ignores
   SharePoint's per-file permissions, so a file from another site, library or
   folder is never linked. The link lasts about an hour
   and anyone holding it can fetch the file, so only messages the read returns
@@ -516,6 +483,12 @@ registration:
   a 1:1 chat they are offered with a file consent card. An agent can edit or
   delete what it posted (`edit_message`, `delete_message`); closing a thread
   (`delete_thread`, `archive_thread`) is not on Teams.
+- **`replace_channel_file`** (Teams only) saves a staged upload over a file
+  in the channel's Files folder as its new version, for a requester who may
+  post there, from a turn in that channel (its `origin_context_id`), only
+  while the file is at the version the agent read (`If-Match`). It returns a
+  link line for the answer, and the link and new version for a further
+  replace.
 - **`send_direct_message`** opens a 1:1 chat with someone who shares a team
   with the caller and Daimon, named by Entra object ID.
 - **GitHub setup.** `github_connect` sends the Connect GitHub card to the
@@ -542,6 +515,88 @@ Nothing app-only lists the teams an app is in, so the adapter records each
 team when the app is added or anyone writes there; an older install shows up
 once someone writes in it. Adding the app posts a welcome (in the team's General
 channel, or the 1:1 chat); removing it from a team forgets that team.
+
+### Microsoft account (optional)
+
+Each person can connect their own Microsoft 365, so the agent reads and
+changes their files, mail, calendar and notes as them, with exactly their
+permissions. Set `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID`, `__CLIENT_SECRET` and
+`__TENANT_ID` (and `__AUTHORITY` for a national cloud), plus
+`DAIMON_CRYPTO__KEYS` and `DAIMON_MCP__PUBLIC_URL`. Set the
+`DAIMON_MICROSOFT_ACCOUNTS__*` values identically on every service that runs
+turns and on the MCP server:
+turn services decide from them which tools ask and whether the skill is
+added, and the MCP server checks the session against the same decision.
+With none of them set the tools and the skill are absent and sessions are
+unchanged; the privacy card still offers **Disconnect Microsoft** to anyone
+whose account was saved earlier. With only some set the tools stay absent
+and the MCP server logs one `microsoft_accounts.disabled` warning naming
+what is missing; a tenant ID that is not a UUID stops startup with an error
+naming the variable, and a blank `__AUTHORITY` means the default.
+
+Register a single-tenant app in the same Entra tenant.
+
+1. Add a **Web** redirect URI `<root>/oauth/microsoft/callback`, where `<root>`
+   is `DAIMON_MCP__PUBLIC_URL` without the trailing `/mcp`, and create a
+   client secret.
+2. Under **API permissions**, add the Microsoft Graph **delegated**
+   permissions `openid`, `profile`, `User.Read`, `offline_access`,
+   `Files.ReadWrite.All`, `Sites.Read.All`, `Mail.Read`, `Mail.Send`,
+   `Calendars.ReadWrite` and `Notes.ReadWrite.All`. Grant admin consent, or let each person consent
+   when they sign in if the tenant allows it.
+
+When a tool needs an account the person has not connected, the agent asks
+whether they want to connect; only if they agree does it call
+`connect_microsoft`, which sends a private card to their own 1:1 chat. No
+new card is sent while the last one is unexpired. Its link works once, for
+ten minutes, and only for them: the account they sign in
+with must be the same Entra user in the same tenant, or nothing is saved.
+Conditional Access applies to that sign-in and to every token refresh; when
+a policy later demands a new sign-in (for example MFA or a compliant
+device), the saved account is dropped and the agent asks them to connect
+again.
+
+Microsoft outages and throttling never drop a saved account: the tool says
+so, with the `Retry-After` wait when Graph sends one (sign-in outages give
+none), and nothing retries on its own. A client
+secret Entra refuses (`invalid_client`, for example once it expires) is
+reported as a setup problem for an administrator and logged as
+`microsoft_accounts.app_rejected`.
+
+Where these settings are configured, a Teams turn of the default agent adds
+the `microsoft-365` skill, which tells the agent when and how to use these
+tools (Anthropic backend only, like
+the Office skills); Slack and Discord sessions never get it.
+
+The tools, all Teams-only and limited to an allowlist of Graph v1.0 paths:
+
+- **`microsoft_search`** and **`microsoft_get`** find and read files,
+  SharePoint lists and Excel workbooks. In the person's 1:1 chat, file
+  content comes back as a short-lived download link for the sandbox; no
+  pre-authenticated link is returned anywhere else, and sharing permissions
+  and thumbnails are refused.
+- **`microsoft_write`** uploads or replaces files, edits workbooks and
+  creates or updates OneNote pages. It has no delete or move call, but
+  replacing a file or a workbook call (clearing or deleting a range or sheet)
+  can still destroy data. With tool safety on, each call waits for the
+  person's Approve.
+- **`microsoft_send`** sends an email or a calendar invite, each time only
+  after the person presses Approve on a card showing every recipient, the
+  subject, time and time zone, location and the start of the message, with
+  the whole message under **Details**, whether or not tool safety is on. A
+  message over 8,000 characters is refused.
+
+Mail, calendar and OneNote are reachable only from the person's 1:1 chat
+with Daimon, never from a channel or group chat. The chat is the one recorded
+for the turn origin the agent passes, which must be a live turn of that
+person with that agent. Results are wrapped as
+untrusted content.
+
+Refresh tokens are stored Fernet-encrypted (`DAIMON_CRYPTO__KEYS`), one row
+per person; access tokens stay in memory. `privacy` → **Disconnect
+Microsoft** deletes the row, and deleting your data removes it too.
+Disconnecting does not revoke Microsoft's own sign-in sessions; people can
+do that from their Microsoft account page.
 
 ### Routines, pings and tables
 

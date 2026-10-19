@@ -14,7 +14,8 @@ github_oauth_states (both kinds where the table permits) -> credential_requests
 (platform only, platform-user-scoped) -> routines (platform only) ->
 principal_links -> principal row -> platform_user_names (platform only,
 platform-user-scoped, after the principal row on purpose: see the call) ->
-teams_messages (Teams principals only, keyed by (tenant, Entra user)).
+teams_messages and microsoft_user_tokens (Teams principals only, keyed by (tenant,
+Entra user)).
 Account-level deletes (mcp_tokens, GitHub connect requests and click intents,
 message_feedback, user_configs, accounts)
 run in `purge_account` after all principal rows are gone; mcp_tokens and
@@ -126,6 +127,7 @@ from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
+from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
 from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import privacy_session_deletes as privacy_deletes_store
 from daimon.core.stores import routines as routines_store
@@ -174,6 +176,7 @@ class PurgeReport(BaseModel):
     agent_post_requesters: int = 0
     platform_user_names: int = 0
     teams_messages: int = 0
+    microsoft_user_tokens: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -204,6 +207,7 @@ class PurgeReport(BaseModel):
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
             platform_user_names=self.platform_user_names + other.platform_user_names,
             teams_messages=self.teams_messages + other.teams_messages,
+            microsoft_user_tokens=self.microsoft_user_tokens + other.microsoft_user_tokens,
         )
 
 
@@ -230,6 +234,7 @@ async def _purge_principal_in_session(
     agent_post_requesters_count = 0
     platform_user_names_count = 0
     teams_messages_count = 0
+    microsoft_user_tokens_count = 0
     if isinstance(principal, PlatformPrincipalRow):
         routines_count = await routines_store.delete_for_principal(
             session,
@@ -372,6 +377,10 @@ async def _purge_principal_in_session(
             teams_messages_count = await teams_admissions_store.delete_teams_messages_for_user(
                 session, tenant_id=principal.tenant_id, user_id=principal.external_id
             )
+            # Their Connect Microsoft refresh token; sign-in links cascade with the account.
+            microsoft_user_tokens_count = await microsoft_tokens_store.delete_microsoft_user_token(
+                session, tenant_id=principal.tenant_id, user_id=principal.external_id
+            )
 
     return PurgeReport(
         routines=routines_count,
@@ -388,6 +397,7 @@ async def _purge_principal_in_session(
         agent_post_requesters=agent_post_requesters_count,
         platform_user_names=platform_user_names_count,
         teams_messages=teams_messages_count,
+        microsoft_user_tokens=microsoft_user_tokens_count,
     )
 
 

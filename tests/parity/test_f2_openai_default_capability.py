@@ -7,7 +7,7 @@ attachment is authenticated (`credential_ref` resolved per session by the
 driver's `mcp_secrets`), and its two read tools are served by the disposable
 loopback host (`daimon.testing.qa_mcp_host`) through its gate. When the driver
 creates the session, the scripted provider does what OpenAI's server-side MCP
-client would: it takes the serialized authorization, calls the real gate, and
+client would: it resolves the attached vault credential, calls the real gate, and
 the turn's `mcp_call` results are the real tool results. F1's own checks then
 judge the whole turn.
 
@@ -70,7 +70,13 @@ def _manifest() -> DefaultManifest:
     """The default agent, as F1's OpenAI test builds it, with an authenticated MCP."""
     raw = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
     skills: list[NamedSkill] = []
-    for name in (item["skill_id"] for item in raw["skills"]):
+    # Anthropic's built-in skills run only there; OpenAI gets the authored ones
+    # that are on the agent, not the platform-limited ones.
+    for name in (
+        item["skill_id"]
+        for item in raw["skills"]
+        if item["type"] == "custom" and "platforms" not in item
+    ):
         directory = ROOT / "defaults/skills" / name
         paths = sorted(path for path in directory.rglob("*") if path.is_file())
         skills.append(
@@ -227,8 +233,32 @@ class _HostServedMcp:
         self.posted_bodies: list[str] = []
         self.results: dict[str, Object] = {}
         self.gate_statuses: list[int] = []
+        self.vaults: dict[str, Object] = {}
+        self.vault_credentials: dict[str, Object] = {}
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/vaults":
+            if request.method == "GET":
+                return httpx.Response(
+                    200, json={"data": list(self.vaults.values()), "has_more": False}
+                )
+            identity = "qa-session-vault-" + str(len(self.vaults))
+            raw = {"id": identity, **json.loads(request.content)}
+            self.vaults[identity] = raw
+            return httpx.Response(200, json=raw)
+        if path.startswith("/v1/vaults/"):
+            identity = path.split("/")[3]
+            if path.endswith("/credentials"):
+                raw = {
+                    "id": "qa-mcp-credential",
+                    "vault_id": identity,
+                    "created_at": 0,
+                    **json.loads(request.content),
+                }
+                self.vault_credentials[identity] = raw
+                return httpx.Response(200, json=raw)
+            return httpx.Response(200, json=self.vaults[identity])
         if (request.method, request.url.path) == ("POST", "/v1/agents/sessions"):
             self.posted_bodies.append(request.content.decode())
             await self._serve(object_json(json.loads(request.content)))
@@ -255,7 +285,13 @@ class _HostServedMcp:
         (server,) = [tool for tool in tools if tool.get("type") == "mcp"]
         transport = object_json(server["transport"])
         assert transport["server_url"] == MCP_URL
-        authorization = str(transport["authorization"])
+        assert "authorization" not in transport
+        (vault_id,) = body["vault_ids"]
+        credential = self.vault_credentials[vault_id]
+        assert credential["id"] == server["credential_id"]
+        auth = object_json(credential["auth"])
+        assert auth["type"] == "static_bearer" and auth["mcp_server_url"] == MCP_URL
+        authorization = "Bearer " + str(auth["token"])
         self.authorizations.append(authorization)
         headers = {**INIT_HEADERS, "Authorization": authorization}
         init = await self.mcp.post(self.gate_url, json=dict(INIT_BODY), headers=headers)
@@ -380,10 +416,10 @@ async def test_f2_default_skills_builtins_and_authenticated_mcp_on_openai(
             # MCP was really served, by the real host, under the run bearer.
             assert served.authorizations == [f"Bearer {qa.bearer.token}"]
             assert served.gate_statuses == [200, 200, 200]
-            # Only the bound attachment carries an authorization into the session
-            # POST, and it is exactly the resolved run bearer: no other, unbound
-            # authorization is copied in.
-            assert served.posted_mcp == [("daimon-mcp", f"Bearer {qa.bearer.token}")]
+            # No bearer enters the session request: the provider reads only its
+            # one attached, caller-scoped vault for the captured MCP destination.
+            assert served.posted_mcp == [("daimon-mcp", None)]
+            assert qa.bearer.token not in "".join(served.posted_bodies)
             assert f2.resolutions == [(SCOPE, CREDENTIAL, MCP_URL)]
             assert "qa-agent" in json.dumps(served.results["describe_agent"])
             assert QA_SESSION_ID in json.dumps(served.results["list_my_sessions"])

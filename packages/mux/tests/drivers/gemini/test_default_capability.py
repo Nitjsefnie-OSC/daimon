@@ -56,7 +56,9 @@ ROOT = Path(__file__).resolve().parents[5]
 
 
 class SkillName(BaseModel):
+    type: str
     skill_id: str
+    platforms: tuple[str, ...] | None = None
 
 
 class ToolName(BaseModel):
@@ -81,6 +83,8 @@ def manifest() -> DefaultManifest:
     )
     skills: list[NamedSkill] = []
     for ref in authored.skills:
+        if ref.type != "custom" or ref.platforms is not None:
+            continue  # Built-ins run only on Anthropic; platform-limited ones stay off the agent.
         directory = ROOT / "defaults/skills" / ref.skill_id
         skills.append(
             NamedSkill(

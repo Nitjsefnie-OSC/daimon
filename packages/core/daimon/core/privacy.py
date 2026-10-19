@@ -37,6 +37,7 @@ from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
+from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
 from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
@@ -94,6 +95,7 @@ class PurgePreview(BaseModel):
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     teams_messages: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    microsoft_user_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def summary_line(preview: PurgePreview) -> str:
@@ -115,6 +117,7 @@ def summary_line(preview: PurgePreview) -> str:
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
         (preview.teams_messages, "Teams message record"),
+        (preview.microsoft_user_tokens, "saved Microsoft account"),
     )
     parts = [
         "saved settings"
@@ -434,6 +437,15 @@ async def collect_purge_preview(
                 teams_messages_total += await teams_admissions_store.count_teams_messages_for_user(
                     session, tenant_id=pp.tenant_id, user_id=pp.external_id
                 )
+        # 20. microsoft_user_tokens — a Teams person's Connect Microsoft token.
+        microsoft_user_tokens_total = 0
+        for pp in pp_list:
+            if pp.platform == "teams":
+                microsoft_user_tokens_total += (
+                    await microsoft_tokens_store.count_microsoft_user_tokens(
+                        session, tenant_id=pp.tenant_id, user_id=pp.external_id
+                    )
+                )
         direct_message_count = await direct_messages_store.count_conversations_for_account(
             session, account_id=account_id
         )
@@ -471,4 +483,5 @@ async def collect_purge_preview(
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
         platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
         teams_messages=PurgePreviewRow(count=teams_messages_total, example=None),
+        microsoft_user_tokens=PurgePreviewRow(count=microsoft_user_tokens_total, example=None),
     )
