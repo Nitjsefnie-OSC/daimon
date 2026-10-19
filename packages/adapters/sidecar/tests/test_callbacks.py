@@ -530,6 +530,7 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         snapshot_from_retrieved_session,
     )
     from daimon.core.stores.thread_sessions import get_live_thread_session, record_snapshot
+    from daimon.core.tool_safety import ToolSafetyPolicy
     from daimon.core.turn import driver
     from daimon.core.turn import run as run_module
     from daimon.core.turn.admission import Admission
@@ -569,6 +570,7 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     deps = replace(
         deps_for(client=build_fake_anthropic(router.dispatch), sm=db_session_factory),
         turn_path="legacy",
+        tool_safety=ToolSafetyPolicy(enabled=False, unattended_writes=("*",)),
     )
     snapshot = ma_session(id=registered.session_id, agent=agent)
     cached = snapshot_from_retrieved_session(snapshot)
@@ -607,6 +609,16 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     )
 
     async def run_driver(**kwargs):
+        from daimon.core.tool_safety import ToolCall
+
+        # Exercise the posture selected by the actual watch turn runner, even
+        # when the deployment would ordinarily allow unattended writes.
+        posture = kwargs["tool_confirmation"]
+        for server, tool in (("linear", "create_issue"), (None, "bash")):
+            verdict = await posture.decide(
+                ToolCall(tool_use_id="refused-watch-action", server_name=server, tool_name=tool)
+            )
+            assert not verdict.allow
         gate = driver._UNATTENDED_GATE.get()
         assert gate is not None
         await gate()

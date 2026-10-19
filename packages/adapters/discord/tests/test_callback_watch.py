@@ -188,13 +188,13 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
             yield sse_response(
                 [
                     {
-                        "id": "evt_watch_report",
+                        "id": f"evt_watch_report_{len(sent_tools)}",
                         "type": "agent.message",
                         "content": [{"type": "text", "text": "The upload is ready."}],
                         "processed_at": now.isoformat(),
                     },
                     {
-                        "id": "evt_watch_idle",
+                        "id": f"evt_watch_idle_{len(sent_tools)}",
                         "type": "session.status_idle",
                         "stop_reason": {"type": "end_turn"},
                         "processed_at": now.isoformat(),
@@ -327,7 +327,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
         user_sent.clear()
         await run_prepared_turn(
             deps,
-            bound[0],
+            replace(bound[0], admission=replace(bound[0].admission, observation=None)),
             tenant_id=tenant.id,
             platform="discord",
             thread_id="4242",
@@ -338,6 +338,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, monk
             reseed_user_message=AsyncMock(return_value="An attended follow-up."),
             recovery_lifecycle=MagicMock(),
             attended=True,
+            operation_key="attended-follow-up",
         )
         assert len(sent_tools) == 2
         assert sent_tools[1] == original_tools
