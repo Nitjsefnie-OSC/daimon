@@ -1038,6 +1038,19 @@ async def run_prepared_turn_impl(
         ),
     )
 
+    unattended_dm = (
+        attended is False
+        and prepared.admission.grant is not None
+        and prepared.admission.grant.is_dm
+    )
+    dm_gate: Callable[[], Awaitable[None]] | None = None
+    if unattended_dm:
+        from daimon.core.turn.unattended import dm_session_authority
+
+        tool_confirmation, dm_gate = await dm_session_authority(
+            deps, prepared.admission, prepared.ma_session_id, tenant_id=tenant_id
+        )
+
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
@@ -1089,6 +1102,8 @@ async def run_prepared_turn_impl(
 
     async def checked_send() -> None:
         await decide_before_send(deps, prepared.admission)()
+        if dm_gate is not None:
+            await dm_gate()
         if worker_finished is not None:
             from daimon.core.neutral_resources import WorkerSpecRefused
             from daimon.core.turn.runtime_manifest import resume_prepared_root
@@ -1149,8 +1164,12 @@ async def run_prepared_turn_impl(
                 image_blocks=image_blocks,
                 system_blocks=prepared.continuity.system_blocks,
                 before_send=checked_send
-                if before_send is not None or root_intent is not None or worker_finished is not None
+                if before_send is not None
+                or root_intent is not None
+                or worker_finished is not None
+                or unattended_dm
                 else decide_before_send(deps, prepared.admission),
+                before_confirmation=checked_send if unattended_dm else None,
                 send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
             )
 
@@ -1275,6 +1294,21 @@ async def run_prepared_turn_impl(
             # words on the privileged channel where the replacement's model
             # takes one, the quoted conversation always in the user message.
             reseeded_message = _with_prefix(loss_user_prefix, await reseed_user_message())
+            recovery_admission = recovery.admission or prepared.admission
+            recovery_posture = tool_confirmation
+            recovery_gate: Callable[[], Awaitable[None]] | None = None
+            if unattended_dm:
+                from daimon.core.turn.unattended import dm_session_authority
+
+                recovery_posture, recovery_gate = await dm_session_authority(
+                    deps, recovery_admission, new_session_id, tenant_id=tenant_id
+                )
+
+            async def recovery_send() -> None:
+                await decide_before_send(deps, recovery_admission)()
+                if recovery_gate is not None:
+                    await recovery_gate()
+
             fresh_cancel = asyncio.Event()
             new_lifecycle = recovery_lifecycle(fresh_cancel)
             # Mirror a LATE cancel on the ORIGINAL event into
@@ -1301,14 +1335,13 @@ async def run_prepared_turn_impl(
                         cancel=fresh_cancel,
                         render_interval_s=render_interval_s,
                         billing=Billed(record=new_record),
-                        tool_confirmation=tool_confirmation,
+                        tool_confirmation=recovery_posture,
                         image_blocks=image_blocks,
                         system_blocks=loss_system_blocks,
                         # Reseeding and opening the stream await platform and MA
                         # calls after recovery's last decision.
-                        before_send=decide_before_send(
-                            deps, recovery.admission or prepared.admission
-                        ),
+                        before_send=recovery_send,
+                        before_confirmation=recovery_send if unattended_dm else None,
                         send_guard=lambda: session_mutation_fence(
                             deps.sessionmaker, recovery.ma_session_id
                         ),

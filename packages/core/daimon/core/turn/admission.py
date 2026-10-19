@@ -59,6 +59,7 @@ from daimon.core.channel_backend import (
 from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
+from daimon.core.config import DirectMessagePolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.ma_identity import derive_agent_uuid
@@ -156,6 +157,7 @@ class AdmissionGrant:
     thread_id: str | None
     is_dm: bool
     cold_dm: bool = False
+    act_for_creator: bool = False
     # Set by the DM path: the conversation's source, whose seal is re-checked.
     dm_source: DmSource | None = None
 
@@ -1123,11 +1125,21 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
             deps.membership_resolver,
             tenant_id=grant.tenant_id,
             user_id=grant.subject.platform_user_id,
+            require_fresh=grant.act_for_creator,
         )
         if subject.verified_membership is not True:
             raise AdmissionDenied(reason="invoker_not_allowed")
         grant = replace(grant, subject=subject)
         admission = replace(admission, grant=grant)
+    if grant.act_for_creator and (
+        not authorize(
+            policy, subject=grant.subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
+        )
+        or not deps.direct_message_policies.get(grant.tenant_id, DirectMessagePolicy()).allows(
+            grant.subject.platform_user_id or ""
+        )
+    ):
+        raise AdmissionDenied(reason="invoker_not_allowed")
     _require_turn_start(policy, grant.subject, grant.turn_place)
     _require_run_agent(policy, grant)
     if deps.backend_selection_enabled and admission.backend_revision is not None:

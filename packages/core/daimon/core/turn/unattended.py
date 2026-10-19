@@ -17,7 +17,8 @@ with it on, the same selection a chat turn asks on.
 from __future__ import annotations
 
 import uuid
-from typing import Any, cast
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
@@ -43,6 +44,10 @@ from daimon.core.turn.approvals import (
 from daimon.core.turn.posture import PolicyApproval
 from mux.contracts.ids import Revision, Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.deps import TurnDeps
 
 
 def protected_tools(policy: ToolSafetyPolicy) -> frozenset[str]:
@@ -142,3 +147,80 @@ def unattended_posture(
             annotations_for=annotations_for,
         )
     )
+
+
+async def dm_session_authority(
+    deps: TurnDeps, admission: Admission, session_id: str, *, tenant_id: uuid.UUID
+) -> tuple[PolicyApproval, Callable[[], Awaitable[None]]]:
+    """Bind every unattended DM authorization input to its actual session.
+
+    Replacements build a new authority. A session changing its frozen identity
+    or endpoints during a batch is refused, rather than mixing authorizations.
+    """
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.session_ports_compat import retrieve_session_record
+    from daimon.core.turn.errors import AdmissionDenied
+
+    scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(admission.account_id),
+        authorization_id="dm-unattended",
+    )
+    actual = await retrieve_session_record(deps.anthropic, session_id, scope=scope)
+    metadata = actual.metadata or {}
+    if (
+        actual.agent.id != admission.agent.id
+        or metadata.get(MA_METADATA_KEY_TENANT) != str(tenant_id)
+        or metadata.get(MA_METADATA_KEY_ACCOUNT) != str(admission.account_id)
+    ):
+        raise AdmissionDenied(reason="invoker_not_allowed")
+    urls = {server.name: server.url for server in actual.agent.mcp_servers}
+    annotations = (
+        mcp_annotation_lookup(
+            server_urls={
+                name: url
+                for name, url in urls.items()
+                if name in deps.tool_safety.trusted_annotations
+            },
+            token_for=agent_mcp_token_for(
+                deps.sessionmaker,
+                fernet=deps.fernet,
+                tenant_id=tenant_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=actual.agent.id),
+            ),
+        )
+        if deps.tool_safety.enabled and deps.tool_safety.trusted_annotations
+        else None
+    )
+    posture = unattended_posture(
+        deps.tool_safety,
+        session=actual,
+        public_url=deps.public_url,
+        session_factory=deps.sessionmaker,
+        tenant_id=tenant_id,
+        channel_id=None,
+        annotations_for=annotations,
+    )
+
+    async def gate() -> None:
+        current = await retrieve_session_record(deps.anthropic, session_id, scope=scope)
+        if (
+            current.agent.id != actual.agent.id
+            or current.metadata != actual.metadata
+            or {server.name: server.url for server in current.agent.mcp_servers} != urls
+        ):
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        await gate_session_snapshot(
+            deps.anthropic,
+            current,
+            deps.tool_safety,
+            scope=scope,
+            public_url=deps.public_url,
+            session_factory=deps.sessionmaker,
+            tenant_id=tenant_id,
+        )
+
+    return posture, gate

@@ -535,6 +535,7 @@ async def run_turn(
     system_blocks: Sequence[BetaManagedAgentsSystemContentBlockParam] = (),
     deadline: datetime | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
+    before_confirmation: Callable[[], Awaitable[None]] | None = None,
     send_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     path: Literal["legacy", "mux"] | None = None,
     backend: ManagedAgents | None = None,
@@ -679,6 +680,7 @@ async def run_turn(
             billing=billing,
             tool_confirmation=tool_confirmation,
             preset_error=unwedge_failure[0],
+            before_confirmation=before_confirmation,
         )
 
     async def _pump_unwedging() -> TurnState:
@@ -882,6 +884,7 @@ async def _pump(
     billing: BillingPosture,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
     preset_error: BaseException | None = None,
+    before_confirmation: Callable[[], Awaitable[None]] | None = None,
 ) -> TurnState:
     log.info("turn.started", session_id=session_id, entry=entry)
 
@@ -1028,6 +1031,7 @@ async def _pump(
                                 delivered_provider_event_ids=delivered_provider_event_ids,
                                 billed_event_ids=billed_event_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
+                                before_confirmation=before_confirmation,
                             )
                     break  # a terminal event was found — exit the outer loop too
                 except _EventlessCycle as cycle:
@@ -1094,6 +1098,8 @@ async def _pump(
                                     pending_confirmation_reconnects = 0
                                     pending_confirmation_retry_ids = frozenset()
                                     confirmed_tool_use_ids.update(fresh)
+                                    if before_confirmation is not None:
+                                        await before_confirmation()
                                     decisions = await _decide_or_refuse_on_cancel(
                                         tool_confirmation,
                                         state_cell[0],
@@ -1118,6 +1124,8 @@ async def _pump(
                                     # confirm-reconnect-confirm spin. A later
                                     # duplicate has no fresh ids and enters
                                     # the bounded echo wait below.
+                                    if before_confirmation is not None:
+                                        await before_confirmation()
                                     await _send_decision_batch(
                                         decisions,
                                         fresh=fresh,
@@ -1523,6 +1531,7 @@ async def _consume_with_reconnect(
     delivered_provider_event_ids: set[str],
     billed_event_ids: set[str],
     stream_read_timeout_s: float,
+    before_confirmation: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """One attempt at the consume leg. On retry, replay + re-fold first."""
     if cancel.is_set():
@@ -1736,6 +1745,8 @@ async def _consume_with_reconnect(
                             # wait races the cancel signal; a cancel refuses
                             # every pending call before the interrupt, so the
                             # session is not left paused on them.
+                            if before_confirmation is not None:
+                                await before_confirmation()
                             decisions = await _decide_or_refuse_on_cancel(
                                 tool_confirmation,
                                 state_cell[0],
@@ -1750,6 +1761,8 @@ async def _consume_with_reconnect(
                             # RUNNING session returns HTTP 200 and is
                             # silently ignored (measured 2026-08-26) -- never
                             # move this send to a running-session position.
+                            if before_confirmation is not None:
+                                await before_confirmation()
                             await _send_decision_batch(
                                 decisions,
                                 fresh=fresh,

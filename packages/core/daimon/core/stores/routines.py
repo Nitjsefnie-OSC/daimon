@@ -324,10 +324,23 @@ async def update_routine(
     if not values:
         return await get_routine(session, routine_id, tenant_id=tenant_id)
 
+    if current is not None and current.destination_kind == "dm":
+        # Any edit invalidates the private revision. This also handles agent
+        # reassignment and destination ABA without reclassifying old content.
+        values.update(
+            last_result_tail=None,
+            last_error=None,
+            delivery_payload=None,
+            delivery_status="skipped",
+            delivery_note="private_revision_changed",
+            delivery_lease_owner=None,
+            delivery_lease_expires_at=None,
+        )
+
     stmt = (
         update(Routine)
         .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(**values, updated_at=func.now())
+        .values(**values, updated_at=func.clock_timestamp())
         .returning(Routine)
         .execution_options(synchronize_session=False)
     )
@@ -494,6 +507,8 @@ async def record_result(
     delivery_note: str | None = None,
     delivery_payload: str | None = None,
     expected_destination: tuple[str | None, str | None] | None = None,
+    expected_private: RoutineRow | None = None,
+    producing_agent_id: str | None = None,
 ) -> None:
     """Set `last_result_tail` and `last_error` in a single UPDATE.
 
@@ -548,6 +563,20 @@ async def record_result(
             Routine.destination_kind.is_not_distinct_from(kind),
             Routine.destination_id.is_not_distinct_from(recipient),
         )
+    if expected_private is not None:
+        statement = statement.where(
+            Routine.tenant_id == expected_private.tenant_id,
+            Routine.created_by_user_id == expected_private.created_by_user_id,
+            Routine.agent_id == expected_private.agent_id,
+            Routine.agent_name == expected_private.agent_name,
+            Routine.updated_at == expected_private.updated_at,
+            Routine.destination_kind == "dm",
+            Routine.destination_id == expected_private.destination_id,
+        )
+        if producing_agent_id is not None:
+            # Persist the actual producer, including resolver self-healing, in
+            # the same fenced write as its content. Delivery verifies THIS ID.
+            values["agent_id"] = producing_agent_id
     await session.execute(statement.values(**values))
     await session.flush()
 
