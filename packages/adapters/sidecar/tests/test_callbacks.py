@@ -381,6 +381,7 @@ async def test_watch_caps_reject_new_evidence_without_extra_wakes(
         assert await db.scalar(text("SELECT count(*) FROM task_continuations")) == 1
 
 
+@pytest.mark.usefixtures("watch_privilege_audit_lock")
 async def test_real_restricted_login_cannot_enumerate_credentials_edit_policy_or_forge_wakes(
     db_engine, db_session_factory, registered
 ):

@@ -440,23 +440,62 @@ async def audit_sidecar_identity(session: AsyncSession) -> None:
         UNION SELECT r.oid,r.rolname,r.rolsuper,r.rolcreatedb,r.rolcreaterole,
             r.rolreplication,r.rolbypassrls
           FROM pg_roles r JOIN pg_auth_members m ON m.roleid=r.oid JOIN roles x ON x.oid=m.member
-      ) SELECT EXISTS(SELECT 1 FROM roles WHERE rolsuper OR rolcreatedb OR rolcreaterole
+      ), approved AS (
+        SELECT p.oid,p.pronamespace FROM pg_proc p
+        JOIN pg_namespace n ON n.oid=p.pronamespace
+        JOIN pg_roles r ON r.oid=p.proowner
+        WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema'
+          AND r.rolname='daimon_watch_ingress_owner' AND NOT r.rolcanlogin
+          AND NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole
+                   OR r.rolbypassrls OR r.rolreplication)
+          AND p.prokind='f' AND p.prosecdef
+          AND NOT EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid)
+          AND p.proconfig=ARRAY['search_path=pg_catalog, pg_temp']::text[]
+          AND ((p.proname='accept_watch_page_event'
+                AND oidvectortypes(p.proargtypes)='uuid, uuid, text, bigint, uuid, text, text, text'
+                AND p.prorettype='uuid'::regtype)
+            OR (p.proname='prune_watch_evidence' AND p.pronargs=0
+                AND p.prorettype='void'::regtype))
+          AND NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+                         WHERE a.grantee=0 AND a.privilege_type='EXECUTE')
+          AND NOT EXISTS(SELECT 1 FROM unnest(ARRAY['watches','watch_capabilities','watch_controls',
+                'watch_inbox','watch_firings','task_continuations','accounts','tenants',
+                'platform_principals','thread_sessions']) AS required(name)
+                WHERE to_regclass(format('%I.%I',n.nspname,required.name)) IS NULL)
+      ), installed AS (
+        SELECT a.pronamespace FROM approved a JOIN approved b USING (pronamespace)
+        WHERE a.oid=to_regprocedure(
+            'accept_watch_page_event(uuid,uuid,text,bigint,uuid,text,text,text)')
+          AND b.oid=to_regprocedure('prune_watch_evidence()')
+      ) SELECT NOT EXISTS(SELECT 1 FROM installed)
+        OR EXISTS(SELECT 1 FROM installed i
+            JOIN pg_namespace n ON n.oid=i.pronamespace,
+            unnest(ARRAY['watches','watch_capabilities','watch_controls','watch_inbox',
+                'watch_firings','task_continuations','accounts','tenants',
+                'platform_principals','thread_sessions']) AS required(name)
+            WHERE to_regclass(required.name) IS DISTINCT FROM
+                  to_regclass(format('%I.%I',n.nspname,required.name)))
+        OR EXISTS(SELECT 1 FROM roles WHERE rolsuper OR rolcreatedb OR rolcreaterole
            OR rolreplication OR rolbypassrls
            OR (rolname<>current_user AND rolname<>'daimon_sidecar'))
         OR NOT EXISTS(SELECT 1 FROM roles WHERE rolname='daimon_sidecar')
-        OR has_schema_privilege(current_user,current_schema(),'CREATE')
+        OR EXISTS(SELECT 1 FROM pg_namespace n WHERE n.nspname !~ '^pg_'
+            AND n.nspname<>'information_schema'
+            AND has_schema_privilege(current_user,n.oid,'CREATE'))
         OR has_database_privilege(current_user,current_database(),'CREATE')
         OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-            WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m')
+            WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema'
+            AND has_schema_privilege(current_user,n.oid,'USAGE') AND c.relkind IN ('r','p','v','m')
             AND (c.relowner=(SELECT oid FROM pg_roles WHERE rolname=current_user)
               OR has_table_privilege(current_user,c.oid,
                  'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
               OR has_any_column_privilege(current_user,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))
         OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-            WHERE n.nspname=current_schema() AND p.prosecdef
-            AND p.proname NOT IN ('accept_watch_page_event','prune_watch_evidence')
+            WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema'
+            AND has_schema_privilege(current_user,n.oid,'USAGE') AND p.prosecdef
+            AND p.oid NOT IN (SELECT oid FROM approved)
             AND has_function_privilege(current_user,p.oid,'EXECUTE'))
     """)
     )
-    if unsafe:
+    if unsafe is not False:
         raise ValueError("Unsafe sidecar database identity")

@@ -1393,7 +1393,12 @@ state and queue privileges. Provision a distinct lane login granted only
 `daimon_sidecar` and no ownership, schema CREATE, policy or credential-table rights.
 Set `DAIMON_SIDECAR__DATABASE_URL` to its local DSN; require TLS across hosts. The
 service checks the actual login's effective privileges at startup and refuses
-unsafe inherited/PUBLIC table access. Its environment is explicitly allowlisted.
+unsafe inherited/PUBLIC table or column access across all accessible application
+schemas. It resolves the installed ingress functions independently of the first
+search-path schema, validates their exact signatures, owner and security settings,
+and refuses missing, shadowed or indeterminate identities. Schema CREATE rights
+and unexpected executable privileged functions also refuse startup. Its environment
+is explicitly allowlisted.
 
 `DAIMON_SIDECAR__SIGNING_KEYS` is a secret JSON map from key IDs to random OS-host
 HMAC keys, each at least 32 bytes. Supply the same authorized key to the relevant
