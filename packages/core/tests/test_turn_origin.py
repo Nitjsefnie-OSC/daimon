@@ -595,6 +595,10 @@ def test_each_platforms_controls_list_the_places_daimon_works_there(platform: st
 
     assert _PLACES[platform] in rendered
     assert "only place" not in prose
+    assert 'put "another app" in place of another app\'s name' in rendered, (
+        "a quote swaps another app's name for a marker rather than dropping it, "
+        "so the meaning survives"
+    )
     for other in {"discord", "slack", "teams"} - {platform}:
         assert other not in prose, f"{platform} controls name {other}"
 

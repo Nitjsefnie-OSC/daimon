@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **No other chat app, even in a quote.** When Daimon quotes or sums up what someone wrote, the per-turn note now has it put "another app" in place of another app's name, so the meaning stays the same.
+
 - Nothing a person sees on one chat platform names another, or says Daimon runs on several. Refusals, privacy panels, tool errors and notices, and the tool descriptions, seeded skills and per-turn instructions the model reads, name only the platform they are on, or none; the per-turn controls now tell the model never to mention another chat app. Each chat platform's sessions run their own system prompt, the shipped one with the other platforms' formatting and file passages replaced by that platform's wording and any line that still names another platform dropped; it is sent as the session's own override, so every existing Discord, Slack and Teams conversation starts a new workspace once. The participation tool names the workspace tier in the platform's own word (organisation on Teams, server on Discord), and `request_github_access` is no longer offered on Teams, where it never worked.
 
 - Refusals, notices, panels and tool errors use everyday words instead of internal terms: a reply or message for a turn, a conversation for a session, a model provider for a backend, a connection for an MCP server, access settings for the access policy, and "Daimon-wide default" for the deployment default. The setup panel's **Model backend** is now **Model provider**, and the privacy receipt lists what was removed in the same words as its preview. `tests/parity/test_plain_words.py` keeps those terms out of person-facing text.
