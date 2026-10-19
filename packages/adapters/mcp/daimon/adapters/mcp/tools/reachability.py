@@ -20,6 +20,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, authorize
 from daimon.core.native_admins import AdminCaller
@@ -58,7 +59,7 @@ async def require_admin(runtime: McpRuntime, auth: AuthIdentity, *, channel_id: 
     if auth.is_admin and auth.agent_id is None:
         return
     raise ToolError(
-        "This change needs a workspace or server admin. Tell the caller who can make "
+        f"This change needs {admin_noun(auth.platform)}. Tell the caller who can make "
         "it and give them a sentence that admin can say, preserving the requested "
         "action and channel. Do not retry."
     )
@@ -101,7 +102,8 @@ async def require_bindable_as_channel_default(
             raise ToolError(
                 "This channel is kept to its own agents (whose rule runs them here alone), so "
                 f"only they can be its default, and '{agent_name}' is not one. Nothing was "
-                "changed. Pick one of its own agents, or ask a server admin. Do not retry."
+                "changed. Pick one of its own agents, or ask "
+                f"{admin_noun(auth.platform)}. Do not retry."
             )
         if decision.reason == "runs_elsewhere":
             raise ToolError(
@@ -112,7 +114,7 @@ async def require_bindable_as_channel_default(
         if auth.is_admin and auth.agent_id is None:
             return
     raise ToolError(
-        "Only a workspace or server admin can make this the channel's default. "
+        f"Only {admin_noun(auth.platform)} can make this the channel's default. "
         "Nothing was changed. Do not retry."
     )
 
@@ -128,6 +130,6 @@ async def require_admin_for_reachable_agent(
     if auth.is_admin and auth.agent_id is None:
         return
     raise ToolError(
-        f"Changing '{agent_name}' needs a workspace or server admin. Ask one to make "
+        f"Changing '{agent_name}' needs {admin_noun(auth.platform)}. Ask one to make "
         "the requested change. Do not retry."
     )

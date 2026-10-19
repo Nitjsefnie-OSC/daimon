@@ -4755,9 +4755,7 @@ async def test_update_agent_impl_rejects_non_admin_system_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(
-        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
-    ):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4806,9 +4804,7 @@ async def test_update_agent_impl_rejects_non_admin_skills_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(
-        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
-    ):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4832,9 +4828,7 @@ async def test_update_agent_impl_rejects_non_admin_mcp_servers_patch_when_agent_
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(
-        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
-    ):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4858,9 +4852,7 @@ async def test_update_agent_impl_rejects_non_admin_tools_patch_when_agent_reacha
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(
-        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
-    ):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4938,9 +4930,7 @@ async def test_attach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(
-        ToolError, match="Changing 'scoped-agent' needs a workspace or server admin"
-    ):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs an admin"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -5007,7 +4997,7 @@ async def test_fork_agent_impl_refuses_a_non_admin_even_for_the_seeded_agent(
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
-    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+    with pytest.raises(ToolError, match="requires an admin"):
         await _fork_agent_impl(
             _runtime(client, session_factory=db_session_factory, fernet=fernet),
             auth,
@@ -5098,7 +5088,7 @@ async def test_fork_agent_impl_refuses_a_non_admin_copying_a_project_agent(
         account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
     )
     fernet = build_multifernet((Fernet.generate_key().decode(),))
-    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+    with pytest.raises(ToolError, match="requires an admin"):
         await _fork_agent_impl(
             _runtime(client, session_factory=db_session_factory, fernet=fernet),
             auth,

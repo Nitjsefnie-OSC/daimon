@@ -487,7 +487,7 @@ async def _channel_protection_state(
     )
 
 
-DISCORD_REFUSAL_NOUNS = RefusalNouns(scope="server", admin="a server admin", billing="`/billing`")
+DISCORD_REFUSAL_NOUNS = RefusalNouns.for_platform("discord")
 
 
 def admission_refusal_message(

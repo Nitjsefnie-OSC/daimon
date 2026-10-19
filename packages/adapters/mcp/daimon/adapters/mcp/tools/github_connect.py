@@ -9,6 +9,7 @@ import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._words import space_noun
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
@@ -179,11 +180,11 @@ async def _github_connect_impl(
     root = runtime.settings.mcp.app_root_url
     config = runtime.settings.github_app
     if runtime.fernet is None:
-        raise ToolError("GitHub setup is unavailable on this server.")
+        raise ToolError(f"GitHub setup is unavailable on this {space_noun(auth.platform)}.")
     if root is None or not all(
         (config.app_id, config.app_slug, config.private_key, config.client_id, config.client_secret)
     ):
-        raise ToolError("GitHub setup is unavailable on this server.")
+        raise ToolError(f"GitHub setup is unavailable on this {space_noun(auth.platform)}.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     target_name = agent_name or origin.configuration_target_name or origin.responder_name
     target_ma_id = expected_ma_agent_id

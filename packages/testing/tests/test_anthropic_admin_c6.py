@@ -287,7 +287,7 @@ async def test_d5_real_member_edit_and_independent_revision_readback(case: Case)
     case.binding.trace.assert_consumed()
     assert receipt.status == "refused" and receipt.code == "ADMIN_MEMBER_EDIT_REFUSED"
     expected_error = (
-        "Changing 'qa-unbound-c6' needs a workspace or server admin. "
+        "Changing 'qa-unbound-c6' needs a server admin. "
         "Ask one to make the requested change. Do not retry."
     )
     assert receipt.observations["errors"] == [

@@ -26,6 +26,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.authz import Action, build_agent_ref
 from daimon.core.continuity.continuation import (
@@ -281,7 +282,9 @@ async def _hand_off_task_impl(
             record_authz_denial(Action.HAND_OFF, refused.refusal.authz_reason)
         raise ToolError(
             _refusal_text(
-                refused.refusal, channel=_channel_mention(platform, origin.parent_channel_id)
+                refused.refusal,
+                channel=_channel_mention(platform, origin.parent_channel_id),
+                admin=admin_noun(platform),
             )
         ) from refused
     except HandoffRefusedInSetupThread as error:
@@ -308,7 +311,7 @@ async def _hand_off_task_impl(
     )
 
 
-def _refusal_text(refusal: HandoffRefused, *, channel: str) -> str:
+def _refusal_text(refusal: HandoffRefused, *, channel: str, admin: str) -> str:
     if refusal.reason == "setup_thread":
         return render_tool_refusal_setup_thread(refusal.destination_name)
     if refusal.reason == "unreachable":
@@ -328,7 +331,7 @@ def _refusal_text(refusal: HandoffRefused, *, channel: str) -> str:
                 f"{refusal.destination_name} is not one of this channel's agents (the one "
                 "it answers with, or one whose agent rule names it), and handing a conversation to "
                 "another agent brings its repository, keys and connectors here, so only "
-                "a server admin can do it.",
+                f"{admin} can do it.",
                 "Tell the caller an admin can make the handoff, or ask in one of that "
                 "agent's own channels.",
                 "Nothing was changed. Do not retry.",

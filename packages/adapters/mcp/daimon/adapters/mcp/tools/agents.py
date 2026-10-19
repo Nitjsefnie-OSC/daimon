@@ -39,6 +39,7 @@ from daimon.adapters.mcp.tools._rule_view import (
     load_isolation_view,
     load_skill_owners,
 )
+from daimon.adapters.mcp.tools._words import admin_noun, space_noun
 from daimon.adapters.mcp.tools.agent_chat import require_outside_chat_turn
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
@@ -360,7 +361,9 @@ async def _reject_guild_name_collision(
     """
     matches = await find_agents_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
     if matches:
-        raise ToolError(f"agent '{name}' already exists in this server — pick another name")
+        raise ToolError(
+            f"agent '{name}' already exists in this {space_noun(auth.platform)} — pick another name"
+        )
 
 
 async def _list_agents_impl(
@@ -815,7 +818,7 @@ async def _require_mcp_replace_allowed(
     if outcome != "allow":
         raise ToolError(
             f"'{agent.name}' already has {', '.join(repr(n) for n in replaced)} at another URL "
-            "and is shared, so repointing it needs a server or workspace admin, and the caller "
+            f"and is shared, so repointing it needs {admin_noun(auth.platform)}, and the caller "
             "is not one. Nothing was changed. Do not retry under another name."
         )
     return True

@@ -267,11 +267,21 @@ def test_depleted_refusal_names_the_billing_command() -> None:
     assert notice.next_step == "An admin can top up with `billing` in a 1:1 chat with me."
 
 
-def test_teams_setup_noun() -> None:
-    nouns = RefusalNouns(
-        scope="organisation", admin="an admin", billing="`billing`", setup="`setup`"
+def test_nouns_for_a_platform_come_from_the_words_table() -> None:
+    teams = RefusalNouns.for_platform("teams")
+    assert (teams.scope, teams.admin) == ("organisation", "an admin")
+    assert teams.billing == "`billing` in a 1:1 chat with me"
+    assert teams.setup == "`setup` in a 1:1 chat with me"
+    assert RefusalNouns.for_platform("teams", place="dm").setup == "`setup`"
+    assert admission_refusal_text("balance_depleted", RefusalNouns.for_platform("discord")) == (
+        "Your team's Daimon credit has run out.\n\nAn admin can top up with `/billing`."
     )
-    assert nouns.setup == "`setup`"
+
+
+def test_nouns_for_a_caller_without_a_chat_platform_name_no_command() -> None:
+    nouns = RefusalNouns.for_caller(None)
+    assert nouns.admin == "an admin"
+    assert "/" not in nouns.billing + nouns.setup
 
 
 def test_dm_refusal_keeps_the_pinned_agent_separate_from_the_bot_name() -> None:

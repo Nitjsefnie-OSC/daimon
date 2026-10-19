@@ -80,7 +80,7 @@ async def test_non_admin_is_refused_and_nothing_is_written(
     """A tenant-wide switch needs an admin; a refused call must not write."""
     tenant_id = await _seed(committing_sessionmaker, "teams")
 
-    with pytest.raises(ToolError, match="requires a workspace or server admin"):
+    with pytest.raises(ToolError, match="requires an admin"):
         await _set_plain_text_mentions_impl(
             _runtime(committing_sessionmaker), _auth(tenant_id, admin=False), True
         )

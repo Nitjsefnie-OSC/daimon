@@ -14,6 +14,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.here_card import HereCard, load_here_card, render_here_card
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.identity import find_platform_principal
 
 import discord
@@ -48,7 +49,7 @@ class HereCog(commands.Cog):
         super().__init__()
         self.bot = bot
 
-    @app_commands.command(name="here", description="Who answers here and what it can use")
+    @app_commands.command(name="here", description=DESCRIPTIONS["here"])
     @require_registered_guild
     async def here(self, interaction: BotInteraction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)

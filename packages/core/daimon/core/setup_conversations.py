@@ -131,6 +131,7 @@ def build_setup_opener(
     bot_mention: str | None,
     is_admin: bool,
     admin_noun: str,
+    conversation_noun: str = "thread",
 ) -> str:
     """Open the thread by saying what it is about and what this person can do.
 
@@ -139,9 +140,13 @@ def build_setup_opener(
     since "a workspace admin" and "someone with Manage Server" are the same
     person on different platforms. ``bot_mention`` is None where every
     message reaches the bot, as in a 1:1 chat, so there is nothing to explain.
+    ``conversation_noun`` names what the setup conversation is on this platform:
+    a thread on Discord and Slack, the chat itself on Teams, which has no threads
+    in a 1:1 chat.
     """
     subject = (
-        f"This thread is about {target_display}. Tell me what to change, or name another agent."
+        f"This {conversation_noun} is about {target_display}. "
+        "Tell me what to change, or name another agent."
         if target_display is not None
         else "Which agent is this about? You can also ask me to make a new one."
     )

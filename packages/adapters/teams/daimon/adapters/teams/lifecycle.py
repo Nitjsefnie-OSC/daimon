@@ -44,7 +44,7 @@ from daimon.core.teams_markdown import has_math
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
-from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
+from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
     ToolUseBlock,
@@ -626,14 +626,18 @@ class TeamsTurnLifecycle:
         try:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
+            nouns = RefusalNouns.for_platform(
+                "teams", place="dm" if self._direct_chat else "channel"
+            )
             notice = render_termination_notice(
                 reason,
                 state=state,
                 request_id=request_id,
                 error=err,
                 in_dm=self._direct_chat,
-                setup_command="`setup`",
-                billing_command=TEAMS_BILLING_COMMAND,
+                setup_command=nouns.setup,
+                billing_command=nouns.billing,
+                setup_verb=nouns.verb,
                 agent_name=self._agent_name,
             )
             if notice is not None:

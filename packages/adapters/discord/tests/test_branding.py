@@ -29,6 +29,7 @@ from daimon.adapters.discord.privacy_panel.panel import (
     build_privacy_main_container,
 )
 from daimon.core.config import DiscordSettings
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.purge import AccountPurgeResult, PurgeReport
 from pydantic import SecretStr
 
@@ -188,21 +189,13 @@ class TestHelpViewConversationalExamples:
 
 
 class TestPrivacyCommandDescription:
-    def test_unset_matches_todays_text(self) -> None:
-        bot = MagicMock()
-        bot.runtime.settings.discord = DiscordSettings(bot_token=SecretStr("test-bot-token"))
-        cog = PrivacyCog(bot)
-        assert cog.privacy.description == "See, export, or delete what daimon stores about you"
-
-    def test_set_name_changes_text(self) -> None:
+    def test_description_is_the_shared_one_whatever_the_bot_is_called(self) -> None:
         bot = MagicMock()
         bot.runtime.settings.discord = DiscordSettings(
             bot_token=SecretStr("test-bot-token"), bot_display_name="daimon-staging"
         )
         cog = PrivacyCog(bot)
-        assert (
-            cog.privacy.description == "See, export, or delete what daimon-staging stores about you"
-        )
+        assert cog.privacy.description == DESCRIPTIONS["privacy"]
 
 
 class TestPrivacyMainContainer:

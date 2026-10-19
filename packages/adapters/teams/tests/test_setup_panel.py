@@ -223,6 +223,9 @@ async def test_manage_switches_the_chat_into_setup_until_new_ends_it(
     assert binding.configuration_target_ma_agent_id == ANALYST_ID
     assert binding.thread_id.startswith(f"{CONVERSATION_ID};setup=")
     assert setup_thread_name("analyst") in json.dumps(teams_api_fake.activity_requests[0].body)
+    opener = json.dumps(teams_api_fake.activity_requests[0].body)
+    assert "This chat is about analyst." in opener, "a 1:1 chat has no threads"
+    assert "This thread" not in opener
     origins = [t["user_message"].replace(" ", "") for t in turns]
     assert ['"is_setup":true' in o for o in origins] == [True, False], "setup, then the usual"
     assert after == [], "new ends the setup conversation"

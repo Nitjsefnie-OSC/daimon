@@ -60,7 +60,7 @@ from daimon.core.stores.routines import (
     routine_platform,
     settle_routine_delivery,
 )
-from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, render_termination_notice
+from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -309,11 +309,16 @@ def failure_notice_text(reason: TerminationReason, *, platform: str) -> str:
 
     Plain words by why the run ended: the raw error never reaches the
     channel, since it can quote a provider message or a file name the readers
-    there should not see. `platform` names its billing command.
+    there should not see. `platform` names its setup and billing commands.
     """
-    billing = TEAMS_BILLING_COMMAND if platform == "teams" else "`/billing`"
+    nouns = RefusalNouns.for_caller(platform)
     if reason in _TURN_NOTICE_FAILURES and (
-        notice := render_termination_notice(reason, billing_command=billing)
+        notice := render_termination_notice(
+            reason,
+            setup_command=nouns.setup,
+            billing_command=nouns.billing,
+            setup_verb=nouns.verb,
+        )
     ):
         return f"{notice.plain_text()}\n\n{_NEXT_RUN}"
     return "\n\n".join(_ROUTINE_FAILURES.get(reason, _OTHER_FAILURE))

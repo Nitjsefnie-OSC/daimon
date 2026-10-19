@@ -25,6 +25,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import CallerView, load_isolation_view
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.channel_budgets import origin_budget_channel
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -464,7 +465,7 @@ async def _require_agent_in_scope(
     raise ToolError(
         f"{agent_name} is neither the agent you are talking to nor the one the destination "
         "channel answers with, and a routine runs with its agent's repository, keys and "
-        "connectors, so only a workspace or server admin can schedule it. Tell the caller "
+        f"connectors, so only {admin_noun(auth.platform)} can schedule it. Tell the caller "
         "who can. Nothing was saved."
     )
 

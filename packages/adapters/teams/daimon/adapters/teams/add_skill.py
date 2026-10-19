@@ -8,7 +8,7 @@ hash; an unchanged one adds. The skill becomes the agent's own copy; the
 shared library and the built-in agents are never touched.
 
 Who may: Discord's rule (`skill_change_refusal`). The panel lives in the 1:1
-chat, outside every channel, so a pinned agent requires a server admin. Opening the form,
+chat, outside every channel, so a pinned agent requires an admin. Opening the form,
 each submit and the add itself re-check live, the last on the re-read agent
 right before the upload and the attach.
 """
@@ -35,6 +35,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.native_admins import load_live_subject
 from daimon.core.operation_policy import decide_operation
+from daimon.core.platform_words import words_for
 from daimon.core.roster import RosterAgent
 from daimon.core.skills.add import SkillAddResult, add_agent_skill
 from daimon.core.skills.ingest import SkillBundle
@@ -42,6 +43,7 @@ from mux.errors import ScopeViolation
 
 log = structlog.get_logger()
 
+_ADMIN: Final = words_for("teams").admin
 BUILT_IN: Final = (
     "You can't change a starting agent.\n\n"
     "Ask me to make you a new agent, or ask an admin to copy this one."
@@ -49,7 +51,7 @@ BUILT_IN: Final = (
 
 
 def needs_admin(agent_name: str) -> str:
-    return f"Adding a skill to {agent_name} needs a server admin."
+    return f"Adding a skill to {agent_name} needs {_ADMIN}."
 
 
 class SkillAddRefused(Exception):

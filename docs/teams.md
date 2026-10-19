@@ -140,9 +140,9 @@ chat) and after an @mention (channels) fill in a ready-made request to send.
 | Command | Does |
 | --- | --- |
 | `new` | Start a fresh conversation, or end a setup conversation. Teams only; Slack and Discord ask the agent. |
-| `help` | List the commands. |
+| `help` | The commands that work where it was sent. In a 1:1 chat it lists them all; in a channel it lists the ones answered there and names the 1:1 chat for `setup` (and `support`); in a group chat it also lists `new`. |
 | `setup` | Agents, their details and who answers where; create an agent, add a skill to one, connect coding tools (admins), mint, list and revoke operator tokens (admins), or open a setup conversation. |
-| `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
+| `here` | Who answers here and what it can use: the status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Answered in a 1:1 chat instead of a channel whose readers are limited, it says so, since the answer would leave the channel. |
 | `privacy` | See, export or delete what Daimon stores about you, or disconnect your Microsoft account. |
@@ -419,7 +419,7 @@ confirmation card. **Add skill** on an agent's Details in `setup` takes a
 pasted SKILL.md (up to 4,000 characters; a dialog has no file input), shows
 what it holds, and adds it on a second Send as the agent's own skill, under
 Discord's and Slack's rule: an admin for any agent, or anyone for an agent nobody else uses. The
-panel is outside every channel, so a pinned agent needs a server admin.
+panel is outside every channel, so a pinned agent needs an admin.
 
 ### Channel files (optional)
 
@@ -513,8 +513,11 @@ expired and stopped cards lose their buttons.
 
 Nothing app-only lists the teams an app is in, so the adapter records each
 team when the app is added or anyone writes there; an older install shows up
-once someone writes in it. Adding the app posts a welcome (in the team's General
-channel, or the 1:1 chat); removing it from a team forgets that team.
+once someone writes in it. Adding the app posts a welcome: in a team's General
+channel a card that says to @mention Daimon in a post, with an **Open chat**
+button that opens the person's 1:1 chat with it; in the 1:1 chat a short note
+that says to ask a question or send a data file. Removing the app from a team
+forgets that team.
 
 ### Microsoft account (optional)
 
@@ -678,5 +681,6 @@ not granted or that another organisation hosts. Removing the app does not
 archive the organisation's tenant: a deployment serves one organisation.
 
 Agent Details shows a read-only GitHub section with one repo per line, the
-working repo (or “No working repo”), and a prompt to ask the agent in the
-setup conversation to change repos.
+working repo (or “No working repo”), and a prompt to ask the agent in chat to
+change repos; the Teams setup card has no Connect GitHub button. A setup
+conversation in the 1:1 chat opens with “This chat is about…”.

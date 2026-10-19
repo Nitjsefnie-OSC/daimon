@@ -34,8 +34,7 @@ def here_card(card: HereCard) -> AdaptiveCard:
     """The shared compact card, as literal text: names cannot format or mention."""
     shown = render_here_card(card)
     lines = [
-        # The shared copy names Slack and Discord's command; Teams' is `setup`.
-        *([shown.subline.replace("/agent-setup", "setup")] if shown.subline else []),
+        *([shown.subline] if shown.subline else []),
         *([f"Reading: {shown.reading}"] if shown.reading else []),
         *([f"Publishing: {shown.publishing}"] if shown.publishing else []),
         *shown.extras,

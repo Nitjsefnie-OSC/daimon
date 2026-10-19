@@ -147,6 +147,21 @@ def test_opener_tells_an_admin_what_only_an_admin_can_do() -> None:
     ), "an admin is told they can route channels, and that the starting agent is forked, not edited"
 
 
+def test_opener_names_the_conversation_the_platform_has() -> None:
+    """Teams 1:1 chats have no threads, so the caller passes "chat"."""
+    opener = build_setup_opener(
+        target_display="Researcher",
+        bot_mention=None,
+        is_admin=True,
+        admin_noun="an admin",
+        conversation_noun="chat",
+    )
+    assert opener.startswith(
+        "This chat is about Researcher. Tell me what to change, or name another agent."
+    )
+    assert "thread" not in opener
+
+
 def test_opener_without_a_mention_ends_at_the_role_line() -> None:
     opener = build_setup_opener(
         target_display=None, bot_mention=None, is_admin=True, admin_noun="an admin"

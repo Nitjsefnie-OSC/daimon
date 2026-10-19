@@ -53,7 +53,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
-from daimon.core.turn.notices import render_termination_notice
+from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.state import (
     TextBlock,
@@ -1596,12 +1596,15 @@ class DiscordTurnLifecycle:
         try:
             reason = state.termination or termination_reason(err)
             request_id = self._request_id()
+            nouns = RefusalNouns.for_platform("discord", place="dm" if self._in_dm else "channel")
             notice = render_termination_notice(
                 reason,
                 state=state,
                 request_id=request_id if self._requester_is_admin else None,
                 error=err,
                 in_dm=self._in_dm,
+                setup_command=nouns.setup,
+                billing_command=nouns.billing,
                 agent_name=self._agent_name,
             )
             if notice is not None:

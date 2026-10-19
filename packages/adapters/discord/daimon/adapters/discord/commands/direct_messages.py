@@ -29,6 +29,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set_dm_enabled
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
@@ -57,7 +58,7 @@ class DirectMessageCog(commands.Cog):
     def __init__(self, bot: DaimonBot) -> None:
         self.bot = bot
 
-    @app_commands.command(name="dm-me", description="Continue privately (an admin turns it on)")
+    @app_commands.command(name="dm-me", description=DESCRIPTIONS["dm_me"])
     @app_commands.guild_only()
     @require_registered_guild
     async def dm(

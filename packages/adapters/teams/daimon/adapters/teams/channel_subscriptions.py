@@ -42,6 +42,7 @@ from typing import Any, Protocol
 import httpx
 import structlog
 from daimon.adapters.teams.admissions import REPLAY_MAX_AGE
+from daimon.adapters.teams.identity import display_bot_name
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow
 from daimon.core.stores.teams_channel_subscriptions import (
@@ -452,7 +453,7 @@ class ChannelSubscriptions:
                     channel_type=channel.type,
                     channel_name=channel.name,
                     team_name=team.name,
-                    bot_name=activity.recipient.name,
+                    bot_name=display_bot_name(activity.recipient.name),
                     service_url=activity.service_url,
                 )
             )

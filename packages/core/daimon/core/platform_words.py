@@ -132,11 +132,12 @@ _DISCORD: Mapping[Action, Command] = MappingProxyType(
     }
 )
 # Slack runs its commands in DMs too, except /dm-me, which names the channel to continue from.
+# A bare /github opens the setup panel's GitHub page; `/github connect [agent]` also works.
 _SLACK: Mapping[Action, Command] = MappingProxyType(
     {
         "here": Command("/here"),
         "setup": Command("/agent-setup"),
-        "github": Command("/github connect"),
+        "github": Command("/github"),
         "memory": Command("/memory"),
         "routines": Command("/routines"),
         "dm_me": Command("/dm-me", "space"),

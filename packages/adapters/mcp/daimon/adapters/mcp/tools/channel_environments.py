@@ -24,6 +24,7 @@ from daimon.adapters.mcp.tools._ctx import (
 )
 from daimon.adapters.mcp.tools._rule_view import load_caller_hidden_environments
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.environments import CONFIRM_OPEN_NETWORK_ASK
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.authz import Action
@@ -81,7 +82,8 @@ async def _environment_channel(
     return _Target(target.channel_id, target.thread_id)
 
 
-_NEEDS_ADMIN: str = "This change needs a workspace or server admin. Do not retry."
+def _needs_admin(auth: AuthIdentity) -> str:
+    return f"This change needs {admin_noun(auth.platform)}. Do not retry."
 
 
 def _missing(environment_name: str | None) -> str:
@@ -123,7 +125,7 @@ async def _require_pick_allowed(
     if not pick.decision and pick.decision.reason != "not_a_reader":
         if target.channel_id is None:
             _require_admin(auth)  # the workspace default's own copy
-        raise ToolError(_NEEDS_ADMIN)
+        raise ToolError(_needs_admin(auth))
     # Only a caller who may make the change learns whether a name exists, and never a hidden one.
     hidden = await load_caller_hidden_environments(runtime, auth)
     if environment_name in hidden:

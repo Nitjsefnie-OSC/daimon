@@ -84,7 +84,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
 from daimon.core.turn.degraded import render_degraded_notice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
-from daimon.core.turn.notices import fit_notice, render_termination_notice
+from daimon.core.turn.notices import RefusalNouns, fit_notice, render_termination_notice
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from daimon.core.turn.state import (
@@ -884,12 +884,16 @@ class SlackTurnLifecycle:
             try:
                 reason = state.termination or termination_reason(err)
                 request_id = self._request_id()
+                in_dm = self._channel.startswith("D")
+                nouns = RefusalNouns.for_platform("slack", place="dm" if in_dm else "channel")
                 notice = render_termination_notice(
                     reason,
                     state=state,
                     request_id=request_id if self._requester_is_admin else None,
                     error=err,
-                    in_dm=self._channel.startswith("D"),
+                    in_dm=in_dm,
+                    setup_command=nouns.setup,
+                    billing_command=nouns.billing,
                     agent_name=self._agent_name,
                 )
                 if notice is not None:

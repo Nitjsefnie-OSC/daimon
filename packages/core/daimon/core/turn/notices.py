@@ -10,12 +10,13 @@ import anthropic
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.errors import TurnError
 from daimon.core.github_app_session import GitHubTokenMintUnavailable
+from daimon.core.platform_words import Place, words_for
+from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
 from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 
 __all__ = [
-    "TEAMS_BILLING_COMMAND",
     "RefusalNouns",
     "TerminationNotice",
     "admission_refusal_text",
@@ -55,8 +56,6 @@ _RETRY = "@mention Daimon to try again."
 _CARRY = "@mention Daimon to carry on."
 # Names who can top up and where: `{billing}` is the platform's billing command.
 _TOP_UP = "An admin can top up with {billing}."
-#: How a person reaches the billing card in Teams, for the top-up line.
-TEAMS_BILLING_COMMAND = "`billing` in a 1:1 chat with me"
 
 _COPY: dict[TerminationReason, _Copy] = {
     TerminationReason.INTERRUPTED: _Copy(
@@ -131,7 +130,7 @@ _COPY: dict[TerminationReason, _Copy] = {
         "Daimon couldn't accept this request.", "Ask an admin."
     ),
     TerminationReason.MISSING_CONFIG: _Copy(
-        "Daimon isn't set up in this channel yet.", "Ask an admin to run {setup}."
+        "Daimon isn't set up in this channel yet.", "Ask an admin to {verb} {setup}."
     ),
     TerminationReason.RESOLVER_MISS: _Copy(
         "This channel's setup is out of date.", "Ask an admin to check {setup}."
@@ -162,6 +161,34 @@ class RefusalNouns:
     admin: str
     billing: str
     setup: str = "`/agent-setup`"
+    #: How a person reaches `setup`: "run" a slash command, "send" a Teams word.
+    verb: str = "run"
+
+    @classmethod
+    def for_platform(cls, platform: ChatPlatform, *, place: Place = "channel") -> RefusalNouns:
+        """The nouns and commands `platform` uses, from the shared table."""
+        words = words_for(platform)
+        return cls(
+            scope=words.space,
+            admin=words.admin,
+            billing=words.top_up(place=place),
+            setup=words.phrase("setup", place=place) or "an admin",
+            verb=words.verb,
+        )
+
+    @classmethod
+    def for_caller(cls, platform: str | None, *, place: Place = "channel") -> RefusalNouns:
+        """`for_platform` when the caller's platform is a chat platform, else words
+        that name no command (a CLI or an MCP client with no chat behind it)."""
+        if platform in CHAT_PLATFORMS:
+            return cls.for_platform(platform, place=place)
+        return cls(
+            scope="workspace",
+            admin="an admin",
+            billing="the billing command",
+            setup="the setup panel",
+            verb="open",
+        )
 
 
 _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
@@ -206,7 +233,9 @@ def admission_refusal_text(
     return "\n\n".join(
         (
             copy.title.format(agent=agent, setup=nouns.setup),
-            copy.next_step.format(agent=agent, setup=nouns.setup, billing=nouns.billing),
+            copy.next_step.format(
+                agent=agent, setup=nouns.setup, billing=nouns.billing, verb=nouns.verb
+            ),
         )
     )
 
@@ -261,6 +290,7 @@ def render_termination_notice(
     in_dm: bool = False,
     setup_command: str = "`/agent-setup`",
     billing_command: str = "`/billing`",
+    setup_verb: str = "run",
     agent_name: str | None = None,
 ) -> TerminationNotice | None:
     """Render one reason using the same words on every platform."""
@@ -290,7 +320,7 @@ def render_termination_notice(
         setup=setup_command,
     )
     next_step = (copy.dm_next_step if in_dm and copy.dm_next_step else copy.next_step).format(
-        setup=setup_command, billing=billing_command
+        setup=setup_command, billing=billing_command, verb=setup_verb
     )
     in_flight: tuple[str, ...] = ()
     finished = 0

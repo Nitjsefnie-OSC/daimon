@@ -2,7 +2,7 @@
 permissions and channel skills of one channel the caller picks.
 
 The panel lives in the 1:1 chat, so the caller names the channel. The rights
-mirror Discord and Slack: server admins set environments, permissions, and
+mirror Discord and Slack: admins set environments, permissions, and
 channel skills. Permissions go through core `set_channel_rule`; skills use
 `add_skill_to_channel`. Every submit re-verifies the clicker, and writes are audited with
 `record_panel_write`.
@@ -60,6 +60,7 @@ from daimon.core.errors import DaimonError, SkillsListTruncatedError
 from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.permissions import channel_rule, own_reader_channels
+from daimon.core.platform_words import words_for
 from daimon.core.routine_delivery import teams_channel_of
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
@@ -76,8 +77,9 @@ log = structlog.get_logger(__name__)
 ChannelNames = Callable[[str], Awaitable[Mapping[str, str | None]]]
 """One team's standard channels by id, with their names; empty when unreadable."""
 
-SERVER_ADMIN_ONLY: Final = (
-    "Only a server admin can change a channel's permissions or skills. Nothing changed."
+_ADMIN: Final = words_for("teams").admin
+ADMIN_ONLY: Final = (
+    f"Nothing changed. Only {_ADMIN} can change this channel's permissions or skills."
 )
 SKILLS_UNREADABLE: Final = "Couldn't read all the skills.\n\nNo skill was added."
 UNKNOWN_CHANNEL: Final = "That isn't a Teams channel id. Nothing changed."
@@ -91,7 +93,7 @@ _MAX_OPTION_VALUE: Final = 250
 
 
 def channels_need_admin_message() -> str:
-    return "Only a server admin can change this."
+    return f"Only {_ADMIN} can change this."
 
 
 async def _guarded[T](work: Awaitable[T], failed: T) -> T:
@@ -253,7 +255,7 @@ class ChannelSettingsDialog:
             return await self._settings(actor, subject, channel_id)
         if audit_op != "environment" and not actor.is_admin:
             await self._audit(actor, audit_op, outcome="denied", reason="needs_admin")
-            return dialog_message(SERVER_ADMIN_ONLY)
+            return dialog_message(ADMIN_ONLY)
         if audit_op == "environment":
             notice = await self._save_environment(actor, subject, channel_id, data)
         elif audit_op == "channel_rule":
@@ -327,7 +329,7 @@ class ChannelSettingsDialog:
         channel_id: str,
         data: Mapping[str, object],
     ) -> str:
-        """A server admin's permissions change, as Slack's and Discord's controls make it."""
+        """A admin's permissions change, as Slack's and Discord's controls make it."""
         readers, writers = as_readers(data.get("readers")), as_writers(data.get("writers"))
         extra = data.get("extra") or "none"
         if readers is None or writers is None or extra not in cards.RULE_EXTRAS:
@@ -350,7 +352,7 @@ class ChannelSettingsDialog:
                 channel_id=channel_id,
                 readers=None if readers == current.readers else readers,
                 writers=None if writers == current.writers else writers,
-                # Only a server admin reaches this, re-checked by the caller.
+                # Only an admin reaches this, re-checked by the caller.
                 subject=build_subject(is_admin=True, platform_user_id=actor.user_id),
                 default=self._runtime.deployment_default,
                 actor_account_id=await get_or_create_account(self._runtime, actor),
@@ -374,7 +376,7 @@ class ChannelSettingsDialog:
         channel_id: str,
         data: Mapping[str, object],
     ) -> str:
-        """A server admin's channel skills, as Slack's form saves them: removals, then an add."""
+        """A admin's channel skills, as Slack's form saves them: removals, then an add."""
         picked = str(data.get("skill_remove") or "")
         remove = [skill_id for skill_id in picked.split(",") if skill_id]
         add = str(data.get("skill_add") or "").strip()

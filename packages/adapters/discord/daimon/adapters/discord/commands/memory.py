@@ -29,6 +29,7 @@ from daimon.core.memory_view import (
 )
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import list_memory_entries, read_memory
+from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.rule_views import is_memory_hidden
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
@@ -164,7 +165,7 @@ class MemoryCog(commands.Cog):
 
     @app_commands.command(
         name="memory",
-        description="What the agent remembers",
+        description=DESCRIPTIONS["memory"],
     )
     @app_commands.describe(
         path=(

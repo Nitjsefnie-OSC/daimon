@@ -23,6 +23,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.agent_chat import (
     _resolve_ma_agent,  # pyright: ignore[reportPrivateUsage]
 )
@@ -206,7 +207,7 @@ async def _require_member_may_remove(
         runtime.client, tenant_id=auth.tenant_id, agent_id=agent_id
     )
     refusal = ToolError(
-        f"Removing {key} needs a workspace or server admin: this agent is shared, and "
+        f"Removing {key} needs {admin_noun(auth.platform)}: this agent is shared, and "
         "an agent key acts as a member. Nothing was removed. Ask a person to remove "
         f"{key} with remove_agent_key."
     )

@@ -9,6 +9,7 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_target import resolve_channel
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._scopes import require_scope, scope_tags
+from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, authorize
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -40,7 +41,7 @@ def _require_rule_access(auth: AuthIdentity, channel_id: str | None) -> None:
     )
     if not decision:
         record_authz_denial(action, decision.reason)
-        raise ToolError("Only a workspace or server admin can manage tool rules.")
+        raise ToolError(f"Only {admin_noun(auth.platform)} can manage tool rules.")
     record_policy_decision(action, "allow")
 
 
