@@ -47,6 +47,7 @@ typo is silent — check the spelling here.
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
 - [Fleet](#fleet)
+- [Watches](#watches)
 - [Private Channel Messages](#private-channel-messages)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
@@ -1359,6 +1360,18 @@ Most worker turns one process runs at once, across all tenants.
 Most times in total a worker is started when it keeps being lost before its turn is
 sent. A worker whose turn was sent is reconciled, never resent.
 
+## Watches
+
+Read from `daimon.core.config.WatchesSettings`. Prefix `DAIMON_WATCHES__`.
+
+### `DAIMON_WATCHES__ENABLED`
+
+`bool` · optional · default `False`
+
+Enable OS-signed page-event watch producers and dispatch. Keep disabled until execution-
+bound unattended origin grants and non-gateable cleanup have shipped. The database
+global gate must also be explicitly enabled by an operator.
+
 ## Private Channel Messages
 
 Read from `daimon.core.config.PrivateChannelMessagesSettings`. Prefix
@@ -1589,6 +1602,14 @@ Read from `daimon.adapters.sidecar.settings.SidecarSettings`. Prefix `DAIMON_SID
 
 Lane database URL for a dedicated login granted only daimon_sidecar. Require TLS for
 remote databases.
+
+### `DAIMON_SIDECAR__SIGNING_KEYS`
+
+`dict[str, SecretStr]` · optional · default unset · secret
+
+OS-host page-event HMAC keys by key ID, each at least 32 random bytes. Supply from lane
+secret management; keys never enter browser HTML or watch rows. Only configured OS page
+hosts may sign events; outside senders are unsupported.
 
 ### `DAIMON_SIDECAR__HOST`
 

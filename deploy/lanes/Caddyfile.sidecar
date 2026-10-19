@@ -9,7 +9,7 @@
     }
     handle @callback {
         request_body {
-            max_size 16KB
+            max_size 4KB
         }
         reverse_proxy sidecar:8780 {
             transport http {

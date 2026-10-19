@@ -2438,19 +2438,35 @@ tool safety disabled.
 
 
 
-### Callback watch entry point
+### Signed page-event watch entry point
 
-`daimon-sidecar` runs the callback adapter. Core registration binds an existing
-conversation to its tenant, human owner, concrete agent and provider session.
-`POST /callbacks/watches/{watch_id}` takes a bearer capability and `X-Event-ID`.
-One restricted database function commits evidence and a `watch_fired` continuation
-atomically. Events coalesce into a pending wake, retaining twenty events and an
-omitted count. The capability login has no direct table access.
+`daimon-sidecar` accepts `POST /callbacks/watches/{watch_id}` from OS page hosts.
+Core registration binds an OS page to its tenant, human owner, concrete agent,
+exact conversation and provider session. The page host signs a versioned envelope
+covering watch/page/key identity, timestamp, event UUID and the raw body digest;
+its signing key stays server-side. Bearer callbacks and outside senders are refused.
+Both ingress and the narrow database function verify the signature and freshness.
+The replay ledger and existing `watch_fired` durable wake commit atomically.
 
-The platform adapter claims the core wake, rechecks the registration, admits the
-owner under current policy, binds the session and runs an explicitly unattended
-turn. S1's unattended decider handles tool pauses; the session's tool policy is
-re-gated before every send. Evidence is escaped inside an untrusted envelope.
-Deleted threads settle explicitly and never redirect to their parent. Compatible
-core queue readers are shared by Discord, Slack and Teams; CLI and scheduler do
-not independently execute continuation rows.
+The producer setting and durable global gate default off. Compatible queue readers
+are shared by Discord, Slack and Teams; CLI and scheduler do not independently
+execute continuations. Old compatible readers ignore the new reason before batching,
+so unrelated work stays readable during rollback.
+
+A watch turn explicitly passes `attended=False`, uses core admission and S1's
+unattended decider, and revalidates registration, stops, key generation and exact
+session before every driver send. The common gate covers all three chat adapters,
+including confirmation sends. Watches require a gateable Managed Agents session;
+unsupported backends and implicit session replacement are refused. Deployment and
+agent unattended-write allowances cannot widen watch authority. Shell/custom tools,
+agent built-ins and the Daimon management proxy are removed from the frozen
+session before a send. Sessions carrying skills are refused because skills cannot
+be changed mid-session. Third-party reads are classified conservatively; writes are
+refused. Reports use only the registered destination; deleted threads never fall
+back to a parent channel. Evidence is byte-bounded and escaped as untrusted text.
+
+Revoking a key, stopping a watch or disabling an owner/tenant/global gate cancels
+queued wakes. Re-enabling does not revive them. Evidence expires after seven days;
+independent byte, row and rate quotas prevent a pending batch growing without bound.
+There are no polling sources, enrollment tools or internal-watch migration in this
+adapter build. Authenticated page hosts use core's signing/registration ports.

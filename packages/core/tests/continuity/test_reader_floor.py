@@ -20,12 +20,15 @@ from .test_worker_finished import _NOW, _dispatch, _read, _run, _seed_reader_fix
 from .test_worker_finished import pooled as pooled
 
 
-def _released_reader():
-    path = Path(__file__).parent / "fixtures/continuation_compatible.txt"
+def _released_reader(name="continuation_compatible.txt"):
+    path = Path(__file__).parent / "fixtures" / name
     source = path.read_bytes()
     assert (
         hashlib.sha256(source).hexdigest()
-        == "c06be9a9b3a33d93f743be008dd412c65099e260ce491eca41a5f50ff2afc767"
+        == {
+            "continuation_compatible.txt": "c06be9a9b3a33d93f743be008dd412c65099e260ce491eca41a5f50ff2afc767",
+            "continuation_watches.txt": "9e67791fcb8da6966f8137ff4d49c0d25774d4518c32a9a4a3d11aed1a868f68",
+        }[name]
     )
     reader = types.ModuleType("released_continuation_selection")
     reader.__dict__.update(
@@ -146,6 +149,11 @@ async def test_current_shared_reader_accepts_watch_for_every_platform(
         max_attempts=5,
     )
     assert [r.idempotency_key for r in rows] == [key]
+    reader = _released_reader("continuation_watches.txt")
+    snapshot = await reader.list_due_wake_rows(
+        db_session, platform=platform, now=NOW, max_attempts=5, limit=1
+    )
+    assert [r.idempotency_key for r in snapshot] == [key]
 
 
 async def test_unknown_reason_cannot_be_produced():
@@ -156,3 +164,16 @@ async def test_unknown_reason_cannot_be_produced():
 
     with pytest.raises(ContinuationReasonUnavailable, match="Unknown"):
         require_writable_reason("future_reason")
+
+
+async def test_watch_producer_requires_explicit_gate(monkeypatch):
+    from daimon.core.continuity.continuation import (
+        ContinuationReasonUnavailable,
+        require_writable_reason,
+    )
+
+    monkeypatch.delenv("DAIMON_WATCHES__ENABLED", raising=False)
+    with pytest.raises(ContinuationReasonUnavailable, match="disabled"):
+        require_writable_reason("watch_fired")
+    monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")
+    require_writable_reason("watch_fired")

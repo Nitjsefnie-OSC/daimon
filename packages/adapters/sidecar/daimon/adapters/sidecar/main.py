@@ -3,28 +3,37 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator
 
 from aiohttp import web
 from daimon.adapters.sidecar.settings import SidecarSettings
-from daimon.core.stores.watches import accept_callback
+from daimon.core.config import load_watches_settings
+from daimon.core.continuity.page_events import MAX_EVENT_BYTES, SignedPageEvent
+from daimon.core.stores.watches import accept_page_event, audit_sidecar_identity, prune_evidence
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-MAX_PAYLOAD = 16384
+MAX_PAYLOAD = MAX_EVENT_BYTES
 
 
 def create_app(
     sessions: async_sessionmaker[AsyncSession],
     *,
+    signing_keys: dict[str, SecretStr] | None = None,
     max_concurrent: int = 8,
     request_timeout_s: float = 10,
+    max_requests_per_minute: int = 1200,
 ) -> web.Application:
     """Only callback POST paths accept input; health is private at the proxy."""
     app = web.Application(client_max_size=MAX_PAYLOAD)
     active = 0
+    recent: deque[float] = deque()
 
     async def health(_: web.Request) -> web.Response:
         try:
@@ -36,6 +45,14 @@ def create_app(
 
     async def callback(request: web.Request) -> web.Response:
         nonlocal active
+        if not load_watches_settings().enabled:
+            return web.Response(status=503)
+        now = time.monotonic()
+        while recent and recent[0] <= now - 60:
+            recent.popleft()
+        if len(recent) >= max_requests_per_minute:
+            return web.Response(status=429)
+        recent.append(now)
         # No wait queue: requests awaiting body reads also consume a slot.
         if active >= max_concurrent:
             return web.Response(status=429)
@@ -46,9 +63,23 @@ def create_app(
                     watch_id = uuid.UUID(request.match_info["watch_id"])
                 except ValueError:
                     return web.Response(status=404)
-                auth = request.headers.get("Authorization", "")
-                event_id = request.headers.get("X-Event-ID", "")
-                if not auth.startswith("Bearer ") or not 1 <= len(event_id) <= 128:
+
+                def header(name: str) -> str:
+                    values = request.headers.getall(name, [])
+                    if len(values) != 1:
+                        raise ValueError("Missing or duplicate signed header")
+                    return values[0]
+
+                try:
+                    page = uuid.UUID(header("X-Page-ID"))
+                    event = uuid.UUID(header("X-Event-ID"))
+                    stamp = int(header("X-Timestamp"))
+                    key_id = header("X-Watch-Key-ID")
+                    signature = header("X-Signature")
+                except ValueError:
+                    return web.Response(status=400)
+                key = (signing_keys or {}).get(key_id)
+                if key is None or request.headers.get("Content-Encoding", "identity") != "identity":
                     return web.Response(status=403)
                 # Streaming bounds work without Content-Length, including chunked senders.
                 body = bytearray()
@@ -57,25 +88,30 @@ def create_app(
                     if len(body) > MAX_PAYLOAD:
                         return web.Response(status=413)
                 try:
-                    payload = body.decode("utf-8")
+                    body.decode("utf-8")
                 except UnicodeDecodeError:
                     return web.Response(status=400)
+                delivery = SignedPageEvent(
+                    watch_id, page, key_id, stamp, event, bytes(body), signature
+                )
                 async with sessions.begin() as session:
-                    key = await accept_callback(
-                        session,
-                        watch_id=watch_id,
-                        capability=auth[7:],
-                        event_id=event_id,
-                        payload=payload,
-                    )
+                    key = await accept_page_event(session, delivery, key=key.get_secret_value())
                 # The context commits before success is observable by the sender.
                 return web.json_response({"accepted": True, "wake_id": str(key)}, status=202)
         except DBAPIError as exc:
             # Never log exception text/parameters, authorization headers or bodies.
             state = getattr(exc.orig, "sqlstate", None)
             return web.Response(
-                status=429 if state == "54000" else 403 if state in ("42501", "22023") else 503
+                status=409
+                if state == "23505"
+                else 429
+                if state == "54000"
+                else 403
+                if state in ("42501", "22023")
+                else 503
             )
+        except (ValueError, UnicodeError):
+            return web.Response(status=403)
         except TimeoutError:
             return web.Response(status=503)
         finally:
@@ -98,13 +134,32 @@ def run() -> None:
     )
     app = create_app(
         async_sessionmaker(engine, expire_on_commit=False),
+        signing_keys=settings.signing_keys,
         max_concurrent=settings.max_concurrent,
         request_timeout_s=settings.request_timeout_s,
     )
 
     async def cleanup(_: web.Application) -> AsyncIterator[None]:
-        yield
-        await engine.dispose()
+        async with async_sessionmaker(engine).begin() as session:
+            await audit_sidecar_identity(session)
+
+        async def prune() -> None:
+            while True:
+                try:
+                    async with asyncio.timeout(10), async_sessionmaker(engine).begin() as db:
+                        await prune_evidence(db)
+                except (DBAPIError, TimeoutError):
+                    pass  # Retry bounded cleanup; no exception/parameter logging.
+                await asyncio.sleep(3600)
+
+        task = asyncio.create_task(prune(), name="sidecar.retention")
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await engine.dispose()
 
     app.cleanup_ctx.append(cleanup)
     # Access logs are deliberately disabled: capabilities belong in headers only.

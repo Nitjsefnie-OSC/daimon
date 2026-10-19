@@ -1401,7 +1401,9 @@ class TeamsApp:
                     holder,
                     markers,
                     new_lifecycle,
-                    attended=continuation is None,
+                    watch_row=continuation
+                    if continuation and continuation.reason == "watch_fired"
+                    else None,
                     role=role or Role.USER,  # admission's: one read per turn
                     handoff=handoff,
                     reraise=reraise,
@@ -1472,7 +1474,7 @@ class TeamsApp:
         new_lifecycle: LifecycleFactory,
         *,
         role: Role,
-        attended: bool = True,
+        watch_row: TaskContinuationRow | None = None,
         handoff: HandoffFactory | None,
         reraise: bool,
         attended: bool,
@@ -1600,8 +1602,8 @@ class TeamsApp:
                 thread_id=inbound.thread_id,
                 external_user_id=inbound.user_id,
                 attended=attended,
+                watch_row=watch_row,
                 origin="handoff" if notice is not None else "chat",
-                attended=attended,
                 user_message=message,
                 lifecycle=lifecycle,
                 cancel=cancel,

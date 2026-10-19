@@ -1,0 +1,153 @@
+"""Read/report authority for page-event turns, independent of agent write grants."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+from typing import Any, cast
+
+from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta.beta_managed_agents_session_agent_update_param import (
+    BetaManagedAgentsSessionAgentUpdateParam,
+)
+from daimon.core.session_ports_compat import update_session_record
+from daimon.core.stores.domain import TaskContinuationRow
+from daimon.core.stores.watches import get_firing, get_watch, watch_seed
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy, classify_tool
+from daimon.core.turn.admission import Admission
+from daimon.core.turn.approvals import RuleLookup, unattended_decider
+from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
+from daimon.core.turn.unattended import gate_session_snapshot
+from mux.contracts.ids import Revision, Scope
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+def read_report_policy(policy: ToolSafetyPolicy) -> ToolSafetyPolicy:
+    # Retain denials/write pins, never let agent or deployment write grants
+    # widen a page-event turn. Read classification is conservative by name.
+    return ToolSafetyPolicy(
+        enabled=True,
+        agent_rules=policy.agent_rules,
+        denied=policy.denied,
+        effects={key: value for key, value in policy.effects.items() if value == "write"},
+    )
+
+
+def watch_posture(
+    policy: ToolSafetyPolicy, *, rules_for: RuleLookup | None = None
+) -> PolicyApproval:
+    strict = read_report_policy(policy)
+    decide = unattended_decider(strict, rules_for=rules_for)
+
+    async def read_only(call: ToolCall) -> ToolConfirmationResult:
+        if call.server_name in (None, DAIMON_SERVER_NAME, "sandbox"):
+            return ToolConfirmationResult(
+                allow=False, deny_message="Watch turns only read and report."
+            )
+        if classify_tool(strict, server_name=call.server_name, tool_name=call.tool_name) != "read":
+            return ToolConfirmationResult(allow=False, deny_message="Watch turns refuse writes.")
+        return await decide(call)
+
+    return PolicyApproval(decide=read_only)
+
+
+async def require_watch_send(
+    sessions: async_sessionmaker[AsyncSession],
+    row: TaskContinuationRow,
+    admission: Admission,
+    *,
+    session_id: str,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+) -> None:
+    async with sessions() as db:
+        seed = await watch_seed(db, row, now=datetime.now(UTC))
+        firing = await get_firing(db, row.idempotency_key)
+        watch = None if firing is None else await get_watch(db, firing.watch_id)
+    if (
+        seed is None
+        or watch is None
+        or watch.session_id != session_id
+        or (
+            row.tenant_id,
+            row.platform,
+            row.thread_id,
+            row.requester_account_id,
+            row.target_ma_agent_id,
+        )
+        != (tenant_id, platform, thread_id, admission.account_id, admission.agent.id)
+    ):
+        raise AdmissionDenied(reason="invoker_not_allowed")
+
+
+async def constrain_session(
+    client: AsyncAnthropic,
+    snapshot: BetaManagedAgentsSession,
+    policy: ToolSafetyPolicy,
+    *,
+    scope: Scope,
+    public_url: str | None,
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+) -> None:
+    """Remove shell/custom/built-in tools before every send, then force pauses.
+
+    No sandbox toolset, delegation or Daimon management proxy is offered.
+    Skills cannot be updated mid-session, so sessions carrying skills are refused.
+    Existing conversation/session identity is preserved. The next ordinary bind
+    can reconcile its own session snapshot; a watch never restores broad tools.
+    """
+    if snapshot.agent.skills:
+        raise AdmissionDenied(reason="backend_unsupported")
+    own_servers = {
+        s.name
+        for s in snapshot.agent.mcp_servers
+        if public_url and s.url.rstrip("/") == public_url.rstrip("/")
+    }
+    tools = [
+        tool.model_dump(mode="json")
+        for tool in snapshot.agent.tools
+        if tool.type == "mcp_toolset"
+        and tool.mcp_server_name not in {DAIMON_SERVER_NAME, "sandbox", *own_servers}
+    ]
+    names = {tool["mcp_server_name"] for tool in tools}
+    servers = [
+        server.model_dump(mode="json")
+        for server in snapshot.agent.mcp_servers
+        if server.name in names
+    ]
+    agent: dict[str, Any] = {"tools": tools, "mcp_servers": servers}
+    await update_session_record(
+        client,
+        snapshot.id,
+        scope=scope,
+        agent_id=snapshot.agent.id,
+        revision=Revision(local=snapshot.agent.version, native=str(snapshot.agent.version)),
+        agent=cast(BetaManagedAgentsSessionAgentUpdateParam, agent),
+    )
+    restricted = snapshot.model_copy(
+        update={
+            "agent": snapshot.agent.model_copy(
+                update={
+                    "tools": [
+                        tool
+                        for tool in snapshot.agent.tools
+                        if tool.type == "mcp_toolset" and tool.mcp_server_name in names
+                    ],
+                    "mcp_servers": [s for s in snapshot.agent.mcp_servers if s.name in names],
+                }
+            )
+        }
+    )
+    await gate_session_snapshot(
+        client,
+        restricted,
+        read_report_policy(policy),
+        scope=scope,
+        public_url=public_url,
+        session_factory=sessions,
+        tenant_id=tenant_id,
+    )

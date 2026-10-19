@@ -1277,12 +1277,22 @@ class WatchRow(BaseModel):
     session_id: str
     instructions: str
     producer: str
+    page_id: uuid.UUID
+    revision: int
     source: str
     status: str
     expires_at: datetime
     max_turns_per_day: int
     max_fires: int | None
     fire_count: int
+    baseline: dict[str, object]
+    rule: dict[str, object]
+    source_state: dict[str, object]
+    lease_owner: str | None
+    lease_expires_at: datetime | None
+    next_check_at: datetime | None
+    backoff_until: datetime | None
+    consecutive_errors: int
 
 
 class WatchEvidenceRow(BaseModel):
@@ -1300,6 +1310,8 @@ class WatchFiringRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
     wake_key: uuid.UUID
     watch_id: uuid.UUID
+    revision: int
+    generation: int
     events: list[dict[str, str]]
     omitted: int
     created_at: datetime

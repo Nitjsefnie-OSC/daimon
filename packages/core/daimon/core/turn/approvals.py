@@ -655,7 +655,7 @@ def chat_tool_confirmation(
     nobody asked for just now (a wake continuing earlier work): it gets the
     unattended rules even though it renders into a thread.
     """
-    if attended and not policy.enabled and not asks_before_publishing and not confirmed_tools:
+    if not policy.enabled and not asks_before_publishing and not confirmed_tools:
         return RequireApproval()
     decide = (
         interactive_decider(

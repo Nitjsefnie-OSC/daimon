@@ -108,6 +108,8 @@ services:
     # No env_file: source ingress receives neither provider nor vault credentials.
     environment:
       DAIMON_SIDECAR__DATABASE_URL: ${DAIMON_SIDECAR__DATABASE_URL:-postgresql+asyncpg://sidecar:unconfigured@postgres:5432/daimon}
+      DAIMON_WATCHES__ENABLED: ${DAIMON_WATCHES__ENABLED:-false}
+      DAIMON_SIDECAR__SIGNING_KEYS: "${DAIMON_SIDECAR__SIGNING_KEYS:-{}}"
       DAIMON_SIDECAR__PORT: "8780"
       DAIMON_SIDECAR__MAX_CONCURRENT: "8"
       DAIMON_SIDECAR__REQUEST_TIMEOUT_S: "10"

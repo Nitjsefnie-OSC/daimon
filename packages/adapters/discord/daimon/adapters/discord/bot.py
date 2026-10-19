@@ -3853,6 +3853,18 @@ class DaimonBot(commands.Bot):
         # stands NOW -- re-read from the guild, never from anything the form
         # or the row recorded. A lookup that fails runs the turn as USER.
         if row.reason == "watch_fired":
+            from daimon.core.stores.tenants import get_tenant
+
+            async with self.runtime.sessionmaker() as db:
+                tenant = await get_tenant(db, tenant_id)
+            if (
+                tenant is None
+                or tenant.archived_at is not None
+                or tenant.external_id != str(thread.guild.id)
+                or row.thread_id != str(thread.id)
+                or row.parent_channel_id != str(thread.parent_id)
+            ):
+                raise AdmissionDenied(reason="invoker_not_allowed")
             try:
                 member = await thread.guild.fetch_member(int(row.requester_external_user_id))
             except (discord.HTTPException, ValueError) as exc:
@@ -3860,7 +3872,11 @@ class DaimonBot(commands.Bot):
             permissions = thread.permissions_for(member)
             if not permissions.view_channel or not permissions.send_messages_in_threads:
                 raise AdmissionDenied(reason="writers_none")
-            role = Role.ADMIN if is_member_guild_admin(member) else Role.USER
+            role = (
+                Role.ADMIN
+                if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
+                else Role.USER
+            )
             _role_ids = member_role_ids(member)
         else:
             role, _role_ids = await _requester_role(thread.guild, row.requester_external_user_id)
@@ -4049,6 +4065,13 @@ class DaimonBot(commands.Bot):
                 member = await thread.guild.fetch_member(int(row.requester_external_user_id))
             except (discord.HTTPException, ValueError) as exc:
                 raise AdmissionDenied(reason="invoker_not_allowed") from exc
+            live_role = (
+                Role.ADMIN
+                if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
+                else Role.USER
+            )
+            if live_role is not role or set(member_role_ids(member)) != set(_role_ids):
+                raise AdmissionDenied(reason="invoker_not_allowed")
             permissions = thread.permissions_for(member)
             if not permissions.view_channel or not permissions.send_messages_in_threads:
                 raise AdmissionDenied(reason="writers_none")
@@ -4206,9 +4229,9 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     thread_id=row.thread_id,
                     external_user_id=row.requester_external_user_id,
-                    attended=False,
+                    watch_row=row if row.reason == "watch_fired" else None,
                     origin="handoff" if handoff_notice is not None else "chat",
-                    attended=continuation_attended(row),
+                    attended=False if row.reason == "watch_fired" else continuation_attended(row),
                     user_message=(
                         render_turn_origin(
                             origin,

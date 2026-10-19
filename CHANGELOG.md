@@ -47,9 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
 
-- Add capability-scoped callback watches with atomic evidence and durable wakes,
-  a restricted sidecar database identity, bounded HTTP ingress, and an optional
-  preview lane service. Continuation turns explicitly use unattended tool policy.
+- Add default-off OS-signed page-event watches with atomic evidence and durable wakes,
+  restricted database identities, replay/retention limits and an optional preview
+  sidecar. Woken turns explicitly use constrained unattended read-and-report authority.
 
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
 

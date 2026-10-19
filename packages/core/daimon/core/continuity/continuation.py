@@ -173,6 +173,11 @@ def require_writable_reason(reason: ContinuationReason) -> None:
     """
     if reason not in get_args(ContinuationReason):
         raise ContinuationReasonUnavailable("Unknown continuation reason")
+    if reason == "watch_fired":
+        from daimon.core.config import load_watches_settings
+
+        if not load_watches_settings().enabled:
+            raise ContinuationReasonUnavailable("Watch producers disabled")
     if reason == "worker_finished":
         raise ContinuationReasonUnavailable(
             "Worker completion enqueueing requires a compatible-reader release"
@@ -481,4 +486,4 @@ async def decide_continuation(
 
 def continuation_attended(row: TaskContinuationRow) -> bool:
     """Retain trusted initiation across handoffs; a wake never grants attendance."""
-    return row.attended and row.reason not in ("timer", "worker_finished")
+    return row.attended and row.reason not in ("timer", "worker_finished", "watch_fired")
