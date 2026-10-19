@@ -2914,9 +2914,9 @@ async def test_cancel_turn_issues_no_status_precheck_between_ownership_and_send(
 
     result = await _cancel_turn_impl(runtime, auth, "ses_test001")
 
-    assert calls == ["retrieve", "send", "retrieve"], (
-        "expected ownership-retrieve, send, status-retrieve in that order with no "
-        f"extra status read between the ownership check and the send; got {calls!r}"
+    assert calls == ["retrieve", "retrieve", "send", "retrieve"], (
+        "expected ownership before and inside the fence, then unconditional send and status; "
+        f"got {calls!r}"
     )
     assert result == {"handle": "ses_test001", "status": "running"}
 

@@ -945,6 +945,7 @@ async def _archive_my_session_impl(
     cross-agent handles.
     """
     require_outside_chat_turn(auth)
+    require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
     async with session_mutation_fence(runtime.session_factory, handle):
         require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
         await archive_session_record(runtime.client, handle, scope=mcp_scope(auth))
@@ -987,6 +988,7 @@ async def _cancel_turn_impl(
     cross-agent handles before any send.
     """
     require_outside_chat_turn(auth)
+    require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
     async with session_mutation_fence(runtime.session_factory, handle):
         require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
         await send_session_events(

@@ -1195,7 +1195,9 @@ Child preparation installs its own isolated grant, independently of inherited
 rendering or execution contexts. Source token expiry and revocation still apply.
 
 Agent-chat session creation records headless provenance. Continue, ask with a
-handle, cancel and archive require it, including inside the mutation fence.
+handle, cancel and archive require it before waiting on the mutation fence
+and again inside it. An unauthorized nested caller cannot wait on the human
+driver it is interrupting.
 A platform session cannot lend its credential or attended origin grant to a
 headless caller. Legacy sessions without this provenance refuse mutation.
 
