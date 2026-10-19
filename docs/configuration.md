@@ -34,6 +34,7 @@ typo is silent — check the spelling here.
 - [Teams](#teams)
 - [GitHub](#github)
 - [GitHub App](#github-app)
+- [Microsoft Accounts](#microsoft-accounts)
 - [Crypto](#crypto)
 - [Credentials](#credentials)
 - [Gemini](#gemini)
@@ -904,6 +905,41 @@ GitHub App client ID for user authorization.
 `SecretStr | None` · optional · default unset · secret
 
 GitHub App client secret for user authorization.
+
+## Microsoft Accounts
+
+Read from `daimon.core.config.MicrosoftAccountsSettings`. Prefix
+`DAIMON_MICROSOFT_ACCOUNTS__`.
+
+Per-person Microsoft 365 access on Teams: the Entra app people sign in to.
+
+Inert until `client_id`, `client_secret` and `tenant_id` are all set.
+
+### `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID`
+
+`str | None` · optional · default unset
+
+Application (client) ID of the Entra app registration people sign in to with Connect
+Microsoft. Its Web redirect URI is `&lt;public root&gt;/oauth/microsoft/callback`.
+
+### `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Client secret of that app registration, sent as client_secret_post.
+
+### `DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID`
+
+`str | None` · optional · default unset
+
+Entra tenant ID (a GUID) people sign in to. Only accounts of this tenant whose object ID
+matches the Teams user asking can connect.
+
+### `DAIMON_MICROSOFT_ACCOUNTS__AUTHORITY`
+
+`HttpUrl` · optional · default `https://login.microsoftonline.com`
+
+Microsoft identity platform host; change it only for a sovereign cloud.
 
 ## Crypto
 

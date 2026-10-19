@@ -71,6 +71,7 @@ __all__ = [
     "ToolVerdict",
     "VerdictReason",
     "backend_switch_tools",
+    "microsoft_send_tools",
     "classify_tool",
     "daimon_endpoint",
     "decide_tool_call",
@@ -159,6 +160,10 @@ ANY_KEY: Final[str] = "*"
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_skill": "content_hash",
     "request_agent_backend_switch": "preview_digest",
+    # Every call names its action, so every call asks.
+    "microsoft_send": "action",
+    # Every call names its method; asks only with tool safety on.
+    "microsoft_write": "method",
 }
 
 
@@ -167,9 +172,26 @@ def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     return frozenset({"request_agent_backend_switch"}) if enabled else frozenset()
 
 
+def microsoft_send_tools(*, enabled: bool, tool_safety_on: bool = False) -> frozenset[str]:
+    """The Microsoft tools a session asks before, where Microsoft accounts are configured.
+
+    Mail and invites sent as the person ask on the card, tool safety on or off.
+    Changes to their files and notes (`microsoft_write`) ask only with it on,
+    so deployments without tool safety, or without Microsoft accounts, keep
+    the session tools they had.
+    """
+    if not enabled:
+        return frozenset()
+    return frozenset({"microsoft_send", *(("microsoft_write",) if tool_safety_on else ())})
+
+
 def _always_confirmed_tools() -> frozenset[str]:
     """Every other confirmation-table entry requires review when policy is on."""
-    return frozenset(CONFIRMED_DAIMON_TOOLS) - backend_switch_tools(enabled=True)
+    return (
+        frozenset(CONFIRMED_DAIMON_TOOLS)
+        - backend_switch_tools(enabled=True)
+        - microsoft_send_tools(enabled=True, tool_safety_on=True)
+    )
 
 
 #: Daimon's own tools that put content behind a link whoever holds it opens.

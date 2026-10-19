@@ -327,13 +327,22 @@ def _default_agent(*, managed: bool = True) -> BetaManagedAgentsAgent:
     )
 
 
+@pytest.mark.parametrize("configured", [True, False], ids=["microsoft-on", "microsoft-off"])
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
-def test_the_default_agents_office_skills_are_added_on_teams_only(platform: str) -> None:
-    """`defaults/` limits docx, pptx and xlsx to Teams; other platforms add nothing."""
-    refs = platform_skill_refs(_default_agent(), platform, load_platform_skills(_DEFAULTS))
-    expected = ["docx", "pptx", "xlsx"] if platform == "teams" else []
+def test_the_default_agents_office_skills_are_added_on_teams_only(
+    platform: str, configured: bool
+) -> None:
+    """`defaults/` limits docx, pptx, xlsx and microsoft-365 to Teams; others add nothing.
+
+    microsoft-365 also requires Microsoft accounts to be set up.
+    """
+    features = frozenset({"microsoft_accounts"} if configured else ())
+    limited = load_platform_skills(_DEFAULTS, features=features)
+    refs = platform_skill_refs(_default_agent(), platform, limited)
+    office = ["docx", "pptx", "xlsx"]
+    expected = (office + ["microsoft-365"] * configured) if platform == "teams" else []
     assert [ref.skill_id for ref in refs] == expected, (
-        "only a Teams turn of the seeded agent gets the Office skills"
+        "only a Teams turn gets the Office skills, and microsoft-365 only where it is set up"
     )
     assert (
         platform_skill_refs(_default_agent(managed=False), "teams", load_platform_skills(_DEFAULTS))
@@ -344,16 +353,17 @@ def test_the_default_agents_office_skills_are_added_on_teams_only(platform: str)
 async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The default agent's 11 skills leave room for 9 channel skills, 6 on Teams.
+    """The default agent's 11 skills leave room for 9 channel skills, 5 on Teams.
 
     The provider's limit counts the whole session `skills` list, so the Office
-    built-ins added on Teams count first; a channel that added 9 runs there with
-    its first 6 and one warning.
+    built-ins and `microsoft-365` added on Teams count first; a channel that
+    added 9 runs there with its first 5 and one warning.
     """
     agent = _default_agent()
     tenant_id = uuid.uuid4()
+    m365 = tenant_scoped_display_title(tenant_id=tenant_id, name="microsoft-365")
     office = await turn_platform_skills(
-        _client([]),
+        _client([_skill("skill_m365", m365)]),
         tenant_id=tenant_id,
         platform="teams",
         agent=agent,
@@ -361,10 +371,22 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
         now=_NOW,
     )
     assert [(s.type, s.skill_id, s.version) for s in office] == [
-        ("anthropic", name, "latest") for name in ("docx", "pptx", "xlsx")
-    ], "the built-ins need no lookup and run at their latest version"
+        *(("anthropic", name, "latest") for name in ("docx", "pptx", "xlsx")),
+        ("custom", "skill_m365", "latest"),
+    ], "the built-ins need no lookup; the seeded upload is found by title; all run at latest"
     assert skill_room(agent) == AGENT_SKILL_CAP - 11, "on Slack and Discord the room is as before"
-    assert skill_room(agent, office) == AGENT_SKILL_CAP - 14, "on Teams the built-ins count too"
+    assert skill_room(agent, office) == AGENT_SKILL_CAP - 15, "on Teams the platform's count too"
+    unconfigured = await turn_platform_skills(
+        _client([_skill("skill_m365", m365)]),
+        tenant_id=tenant_id,
+        platform="teams",
+        agent=agent,
+        platform_skills=load_platform_skills(_DEFAULTS, features=frozenset()),
+        now=_NOW,
+    )
+    assert skill_room(agent, unconfigured) == AGENT_SKILL_CAP - 14 == 6, (
+        "without Microsoft accounts, Teams keeps the room microsoft-365 would take"
+    )
 
     async def turn(count: int, platform_skills: Sequence[MaSkill] = office) -> list[str]:
         picked = await turn_channel_skills(
@@ -383,13 +405,14 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
     with capture_logs() as logs:
         first, second = await turn(9), await turn(9)
         await turn(10)
-    assert first == second == [f"skill_{i}" for i in range(6)], (
-        "the six added first run on every turn, the same six each time"
+    assert first == second == [f"skill_{i}" for i in range(5)], (
+        "the five added first run on every turn, the same five each time"
     )
     warnings = [log["dropped"] for log in logs if log["event"] == "channel_skills.over_cap"]
-    assert warnings == [["skill_6", "skill_7", "skill_8"], [f"skill_{i}" for i in range(6, 10)]], (
-        "the dropped skills are named once, not on every turn, and again only when they change"
-    )
+    assert warnings == [
+        [f"skill_{i}" for i in range(5, 9)],
+        [f"skill_{i}" for i in range(5, 10)],
+    ], "the dropped skills are named once, not on every turn, and again only when they change"
     assert await turn(9, ()) == [f"skill_{i}" for i in range(9)], "without them, nine fit"
 
 
@@ -497,16 +520,16 @@ async def test_a_teams_channel_counts_the_default_agents_office_skills_when_addi
 ) -> None:
     """On Teams the default agent's built-ins count toward the cap and keep their names.
 
-    The default agent holds 11 skills, so a Teams channel may add 6, a Slack
-    one 9; a custom skill named like a built-in would clash with it.
+    The default agent holds 11 skills and Teams adds 4, so a Teams channel may
+    add 5, a Slack one 9; a custom skill named like a built-in would clash with it.
     """
     tenant = await make_tenant(db_session)
     titles = {
         name: tenant_scoped_display_title(tenant_id=tenant.id, name=name)
-        for name in ("report", "docx")
+        for name in ("report", "docx", "microsoft-365")
     }
     client = _client([_skill(f"skill_{name}", title) for name, title in titles.items()])
-    current = [_row(f"skill_{i}", f"s{i}") for i in range(6)]
+    current = [_row(f"skill_{i}", f"s{i}") for i in range(5)]
 
     async def choose(skill: str, platform: str) -> ChannelSkillChoice | str:
         return await choose_channel_skill(
@@ -521,7 +544,7 @@ async def test_a_teams_channel_counts_the_default_agents_office_skills_when_addi
             platform_skills=load_platform_skills(_DEFAULTS),
         )
 
-    assert await choose("report", "teams") == "too_many", "a seventh is refused on Teams"
+    assert await choose("report", "teams") == "too_many", "a sixth is refused on Teams"
     assert not isinstance(await choose("report", "slack"), str), "Slack has room for it"
     assert await choose("docx", "teams") == "mount_clash", "docx is the built-in's name on Teams"
     assert not isinstance(await choose("docx", "slack"), str), "Slack has no docx built-in"

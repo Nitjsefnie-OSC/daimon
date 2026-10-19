@@ -133,7 +133,11 @@ async def test_add_list_and_remove_a_channel_skill_audited(
         db_session_factory,
         anthropic=build_fake_anthropic(handler),
         # Adding reads the defaults' platform skills; none here.
-        settings=SimpleNamespace(cli=FakeCliSettings.cli, defaults_root=Path("/nonexistent")),
+        settings=SimpleNamespace(
+            cli=FakeCliSettings.cli,
+            defaults_root=Path("/nonexistent"),
+            configured_features=frozenset(),
+        ),
     )
     console = _console()
     args = {"rt": rt, "console": console, "platform": "slack", "workspace_id": "T1"}

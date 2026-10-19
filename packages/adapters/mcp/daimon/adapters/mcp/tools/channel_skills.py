@@ -127,7 +127,10 @@ async def _add(
                 skill=skill,
                 default=runtime.deployment_default,
                 actor_account_id=auth.account_id,
-                platform_skills=load_platform_skills(runtime.settings.defaults_root),
+                platform_skills=load_platform_skills(
+                    runtime.settings.defaults_root,
+                    features=runtime.settings.configured_features,
+                ),
             )
         except SkillsListTruncatedError as exc:
             raise ToolError(

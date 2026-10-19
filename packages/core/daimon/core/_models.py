@@ -1805,6 +1805,64 @@ class SlackUserToken(Base):
     )
 
 
+class MicrosoftUserToken(Base):
+    """One person's Microsoft 365 connection: a Fernet-encrypted refresh token.
+
+    Keyed by (tenant, user): `user_id` is the person's Entra object id, which
+    is also their Teams user id, and the sign-in proved the two equal. A
+    privacy purge deletes the row by that key; a tenant's deletion cascades.
+    """
+
+    __tablename__ = "microsoft_user_tokens"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_microsoft_user_tokens_tenants",
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    encrypted_refresh_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    scopes: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MicrosoftSignIn(Base):
+    """One Connect Microsoft link, spent by its callback.
+
+    `state` is both the link's handle and the OAuth state; the callback's
+    delete is the single-use gate. Bound to the person who asked: the callback
+    refuses a sign-in whose object id differs from `user_id`. Lives ten
+    minutes and cascades with the account.
+    """
+
+    __tablename__ = "microsoft_sign_ins"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_microsoft_sign_ins_tenants"
+        ),
+        ForeignKeyConstraint(
+            ["account_id"],
+            ["accounts.id"],
+            ondelete="CASCADE",
+            name="fk_microsoft_sign_ins_accounts",
+        ),
+        Index("ix_microsoft_sign_ins_user", "tenant_id", "user_id"),
+    )
+
+    state: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class SlackConnectPrompt(Base):
     """Once-ever marker: the first-mention connect nudge was shown to this user."""
 

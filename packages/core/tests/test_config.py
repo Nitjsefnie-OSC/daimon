@@ -1177,3 +1177,53 @@ def test_mcp_legacy_window_is_explicit_bounded_and_expired_windows_boot_strict()
     assert McpSettings(
         allow_legacy_tokens=True, legacy_token_cutoff=datetime.now(UTC) - timedelta(minutes=1)
     )
+
+
+def _microsoft_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    for name, value in values.items():
+        monkeypatch.setenv(f"DAIMON_MICROSOFT_ACCOUNTS__{name}", value)
+
+
+def test_blank_microsoft_accounts_variables_leave_the_feature_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose files often pass unset variables through as empty strings."""
+    _microsoft_env(monkeypatch, CLIENT_ID="", CLIENT_SECRET="", TENANT_ID="")
+    settings = load_settings(_env_file=None)
+    assert not settings.microsoft_accounts.configured, "blank values must read as unset"
+    assert settings.microsoft_accounts_missing() == (), "an unused feature must not warn"
+    assert not settings.microsoft_accounts_enabled, "an unused feature must stay off"
+
+
+def test_blank_microsoft_authority_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _microsoft_env(monkeypatch, AUTHORITY="")
+    settings = load_settings(_env_file=None)
+    assert str(settings.microsoft_accounts.authority) == "https://login.microsoftonline.com/", (
+        "a blank authority must read as unset, not stop the service from starting"
+    )
+
+
+def test_partial_microsoft_accounts_setup_names_what_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _microsoft_env(monkeypatch, CLIENT_ID="app-1")
+    settings = load_settings(_env_file=None)
+    assert settings.microsoft_accounts_missing() == (
+        "DAIMON_MICROSOFT_ACCOUNTS__CLIENT_SECRET",
+        "DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID",
+        "DAIMON_CRYPTO__KEYS",
+        "DAIMON_MCP__PUBLIC_URL",
+    ), "a partial setup must name every missing setting"
+    assert not settings.microsoft_accounts_enabled, "a partial setup must leave the feature off"
+
+
+def test_malformed_microsoft_tenant_id_names_the_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _microsoft_env(monkeypatch, TENANT_ID="contoso.onmicrosoft.com")
+    with pytest.raises(ValidationError, match="DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID"):
+        load_settings(_env_file=None)

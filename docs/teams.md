@@ -145,7 +145,7 @@ chat) and after an @mention (channels) fill in a ready-made request to send.
 | `here` | The status card for where it was typed (a channel post's thread, or the 1:1 chat): who answers, what it can read and whether publishing needs approval. |
 | `routines` | List your routines (admins see all); admins create them, admins and creators pause, resume, read the last output or delete. |
 | `memory` | Show what the agent answering where it was typed remembers; add a path to read one file. `memory mine` (and `memory mine /<path>`) shows your own personal memory with that agent, and `memory forget-mine` clears it after you confirm with the code it gives you. Answered in a 1:1 chat instead of a channel whose readers are limited, it says so, since the answer would leave the channel. |
-| `privacy` | See, export or delete what Daimon stores about you. |
+| `privacy` | See, export or delete what Daimon stores about you, or disconnect your Microsoft account. |
 | `billing` | Your usage this month and the credit left, with when timed credit expires, and, typed in a channel with a budget, that budget; admins also see the month's spend, the top spenders and channel budgets, add credit, redeem promo codes and look up one person's spend with the people picker. |
 | `support` | Ask a person: a form whose Send spends one of your support credits. Listed only when `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID` names a Teams channel (`19:…`); Teams requests never go to Discord's or Slack's channel. The post links to where it was asked; requests go to the escalation channel. |
 
@@ -354,7 +354,8 @@ setting off the routes answer 404 and nothing is subscribed.
 - **Office skills.** A Teams turn of the default agent adds Anthropic's
   built-in `docx`, `pptx` and `xlsx` skills to its session (Anthropic backend
   only; see `platforms` in [Defaults](defaults.md)). They count toward the
-  20-skill session limit, so such a channel adds at most 6 skills of its own.
+  20-skill session limit, so such a channel adds at most 6 skills of its
+  own, or 5 where Microsoft accounts add the `microsoft-365` skill.
 - **Updating a channel file.** A file in the channel's Files folder reaches
   the agent with its SharePoint link and version (its eTag) beside the
   download link. `replace_channel_file` saves an edited file over it as a new
@@ -514,6 +515,88 @@ Nothing app-only lists the teams an app is in, so the adapter records each
 team when the app is added or anyone writes there; an older install shows up
 once someone writes in it. Adding the app posts a welcome (in the team's General
 channel, or the 1:1 chat); removing it from a team forgets that team.
+
+### Microsoft account (optional)
+
+Each person can connect their own Microsoft 365, so the agent reads and
+changes their files, mail, calendar and notes as them, with exactly their
+permissions. Set `DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID`, `__CLIENT_SECRET` and
+`__TENANT_ID` (and `__AUTHORITY` for a national cloud), plus
+`DAIMON_CRYPTO__KEYS` and `DAIMON_MCP__PUBLIC_URL`. Set the
+`DAIMON_MICROSOFT_ACCOUNTS__*` values identically on every service that runs
+turns and on the MCP server:
+turn services decide from them which tools ask and whether the skill is
+added, and the MCP server checks the session against the same decision.
+With none of them set the tools and the skill are absent and sessions are
+unchanged; the privacy card still offers **Disconnect Microsoft** to anyone
+whose account was saved earlier. With only some set the tools stay absent
+and the MCP server logs one `microsoft_accounts.disabled` warning naming
+what is missing; a tenant ID that is not a UUID stops startup with an error
+naming the variable, and a blank `__AUTHORITY` means the default.
+
+Register a single-tenant app in the same Entra tenant.
+
+1. Add a **Web** redirect URI `<root>/oauth/microsoft/callback`, where `<root>`
+   is `DAIMON_MCP__PUBLIC_URL` without the trailing `/mcp`, and create a
+   client secret.
+2. Under **API permissions**, add the Microsoft Graph **delegated**
+   permissions `openid`, `profile`, `User.Read`, `offline_access`,
+   `Files.ReadWrite.All`, `Sites.Read.All`, `Mail.Read`, `Mail.Send`,
+   `Calendars.ReadWrite` and `Notes.ReadWrite.All`. Grant admin consent, or let each person consent
+   when they sign in if the tenant allows it.
+
+When a tool needs an account the person has not connected, the agent asks
+whether they want to connect; only if they agree does it call
+`connect_microsoft`, which sends a private card to their own 1:1 chat. No
+new card is sent while the last one is unexpired. Its link works once, for
+ten minutes, and only for them: the account they sign in
+with must be the same Entra user in the same tenant, or nothing is saved.
+Conditional Access applies to that sign-in and to every token refresh; when
+a policy later demands a new sign-in (for example MFA or a compliant
+device), the saved account is dropped and the agent asks them to connect
+again.
+
+Microsoft outages and throttling never drop a saved account: the tool says
+so, with the `Retry-After` wait when Graph sends one (sign-in outages give
+none), and nothing retries on its own. A client
+secret Entra refuses (`invalid_client`, for example once it expires) is
+reported as a setup problem for an administrator and logged as
+`microsoft_accounts.app_rejected`.
+
+Where these settings are configured, a Teams turn of the default agent adds
+the `microsoft-365` skill, which tells the agent when and how to use these
+tools (Anthropic backend only, like
+the Office skills); Slack and Discord sessions never get it.
+
+The tools, all Teams-only and limited to an allowlist of Graph v1.0 paths:
+
+- **`microsoft_search`** and **`microsoft_get`** find and read files,
+  SharePoint lists and Excel workbooks. In the person's 1:1 chat, file
+  content comes back as a short-lived download link for the sandbox; no
+  pre-authenticated link is returned anywhere else, and sharing permissions
+  and thumbnails are refused.
+- **`microsoft_write`** uploads or replaces files, edits workbooks and
+  creates or updates OneNote pages. It has no delete or move call, but
+  replacing a file or a workbook call (clearing or deleting a range or sheet)
+  can still destroy data. With tool safety on, each call waits for the
+  person's Approve.
+- **`microsoft_send`** sends an email or a calendar invite, each time only
+  after the person presses Approve on a card showing every recipient, the
+  subject, time and time zone, location and the start of the message, with
+  the whole message under **Details**, whether or not tool safety is on. A
+  message over 8,000 characters is refused.
+
+Mail, calendar and OneNote are reachable only from the person's 1:1 chat
+with Daimon, never from a channel or group chat. The chat is the one recorded
+for the turn origin the agent passes, which must be a live turn of that
+person with that agent. Results are wrapped as
+untrusted content.
+
+Refresh tokens are stored Fernet-encrypted (`DAIMON_CRYPTO__KEYS`), one row
+per person; access tokens stay in memory. `privacy` → **Disconnect
+Microsoft** deletes the row, and deleting your data removes it too.
+Disconnecting does not revoke Microsoft's own sign-in sessions; people can
+do that from their Microsoft account page.
 
 ### Routines, pings and tables
 

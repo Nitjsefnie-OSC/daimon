@@ -96,6 +96,8 @@ class TurnDeps:
     channel_backends: bool = False
     agent_backends: bool = False
     native_footer_cost: bool = False
+    # Microsoft accounts are configured, so sessions ask before `microsoft_send`.
+    microsoft_send: bool = False
     # Provider owners supply transports and durable stores; no credentials
     # or SDK clients are discovered by profile dispatch.
     turn_runtimes: Mapping[str, TurnRuntime] = field(default_factory=dict[str, TurnRuntime])
@@ -197,10 +199,13 @@ def build_turn_deps(
         agent_github_app=settings.github_app,
         public_url=str(settings.mcp.public_url) if settings.mcp.public_url is not None else None,
         tool_safety=settings.tool_safety,
+        microsoft_send=settings.microsoft_accounts.configured,
         preparation_gate=PreparationGate(_preparation_limit(settings)),
         budget_notices_off=_notices_off(settings),
         fleet_enabled=settings.fleet.enabled,
         fleet_max_workers=settings.fleet.max_workers_per_run,
         fleet_root_grants=fleet_root_grants,
-        platform_skills=load_platform_skills(settings.defaults_root),
+        platform_skills=load_platform_skills(
+            settings.defaults_root, features=settings.configured_features
+        ),
     )

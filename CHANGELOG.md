@@ -102,6 +102,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Teams people can connect their own Microsoft 365.** With
+  `DAIMON_MICROSOFT_ACCOUNTS__*` set, `connect_microsoft` sends a private
+  sign-in card, and `microsoft_search`, `microsoft_get`, `microsoft_write`
+  and `microsoft_send` then work on their files, Excel workbooks, mail,
+  calendar and OneNote as them. Mail, calendar and notes stay in their 1:1
+  chat, every email or invite waits for their Approve (so does every write
+  with tool safety on), and `privacy` → Disconnect Microsoft removes the
+  saved account. Teams sessions of the default agent add a `microsoft-365`
+  skill, leaving room for 5 channel skills instead of 6. Unset, and on Slack
+  and Discord, sessions are unchanged.
+  See [Teams](docs/teams.md#microsoft-account-optional).
 - **Agents edit Office files and update Teams channel files in place.** On
   Teams, the default agent's sessions add Anthropic's built-in `docx`, `pptx`
   and `xlsx` skills; other backends run without them, and Slack and Discord

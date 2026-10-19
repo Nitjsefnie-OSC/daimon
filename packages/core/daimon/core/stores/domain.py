@@ -462,6 +462,29 @@ class SlackUserTokenRow(BaseModel):
     encrypted_refresh_token: bytes | None = None
 
 
+class MicrosoftUserTokenRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    user_id: str
+    encrypted_refresh_token: bytes
+    scopes: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class MicrosoftSignInRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    state: str
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    user_id: str
+    code_verifier: str
+    expires_at: datetime
+    created_at: datetime
+
+
 class SlackTurnContextRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

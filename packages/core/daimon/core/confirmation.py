@@ -28,7 +28,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
 
-from daimon.core.tool_safety import DAIMON_SERVER_NAME, PUBLISH_TOOLS, ToolCall
+from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
+    PUBLISH_TOOLS,
+    ToolCall,
+    microsoft_send_tools,
+)
 from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.ids import Provider
 from mux.contracts.resources import AgentSpec
@@ -44,6 +49,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CONFIRMATION_TIMEOUT",
+    "SEND_BODY_LIMIT",
     "ConfirmationAnswer",
     "ApprovedConfirmation",
     "ConfirmationHook",
@@ -61,6 +67,12 @@ ConfirmationAnswer = Literal["approved", "denied", "expired"]
 #: session sits idle meanwhile (no model spend), and the per-turn ceiling
 #: still bounds the whole turn.
 CONFIRMATION_TIMEOUT: Final[timedelta] = timedelta(minutes=10)
+
+#: Longest `microsoft_send` body, so the whole of it fits behind Details. The
+#: tool refuses a longer one.
+SEND_BODY_LIMIT: Final[int] = 8000
+#: How much of that body the card shows before Details.
+_SEND_PREVIEW: Final[int] = 400
 
 
 class BackendSwitchReference(BaseModel):
@@ -270,6 +282,42 @@ def prompt_for_tool_call(
             f"Shared with: {_short(recipients)}",
             f"Spending cap: ${cap}" if cap is not None else "Spending cap: Not set",
         )
+    elif call.tool_name == "microsoft_send" and server == DAIMON_SERVER_NAME:
+        invite = data.get("action") == "create_event"
+        subject = str(data.get("subject") or "")
+        noun = "invite" if invite else "email"
+        action = f'Send {noun} "{subject}"'
+        title = f"{action}?"
+        denied_action = f"{noun.capitalize()} not sent"
+        # Who and what is shown outside Details: the person approves exactly
+        # that. The body is previewed there and given in full behind Details.
+        body = str(data.get("body") or "")
+        preview = " ".join(body.split())
+        if len(preview) > _SEND_PREVIEW:
+            more = len(preview) - _SEND_PREVIEW
+            preview = f"{preview[:_SEND_PREVIEW]}… (+{more} more characters, see Details)"
+        location = data.get("location")
+        zone = data.get("time_zone") or "UTC"
+        heading = (
+            f"To: {_recipients(data.get('to'))}",
+            *(
+                (f"{'Optional' if invite else 'Cc'}: {_recipients(data.get('cc'))}",)
+                if data.get("cc")
+                else ()
+            ),
+            f"Subject: {subject}",
+            *((f"When: {data.get('start')} to {data.get('end')} ({zone})",) if invite else ()),
+            *((f"Where: {location}",) if invite and location else ()),
+        )
+        lines = [line for line in body[:SEND_BODY_LIMIT].splitlines() if line.strip()]
+        detail_lines = (*heading, "Message:" if lines else "Message: (empty)", *lines)
+        consequence = "\n".join(
+            (
+                "It goes out from your Microsoft account.",
+                *heading,
+                f"Message: {preview or '(empty)'}",
+            )
+        )
     elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
         agent = str(data.get("agent_name") or data.get("agent") or "agent")
         if not name:
@@ -315,9 +363,11 @@ def prompt_for_tool_call(
     )
 
 
-def backend_switch_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
-    """Read the turn's already-injected selector without another feature flag."""
-    return backend_switch_tools(enabled=deps.backend_selection_enabled)
+def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
+    """Daimon's tools this turn's session asks before, from already-injected selectors."""
+    return backend_switch_tools(enabled=deps.backend_selection_enabled) | microsoft_send_tools(
+        enabled=deps.microsoft_send, tool_safety_on=deps.tool_safety.enabled
+    )
 
 
 def backend_switch_callbacks(

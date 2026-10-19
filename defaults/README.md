@@ -24,3 +24,9 @@ They have no directory here and stay off the agent itself: a Teams turn on
 the Anthropic backend adds them to its session (see `docs/defaults.md`).
 
 The default environment installs `gh` for repository work in GitHub App sessions.
+
+`microsoft-365` guides the per-person Microsoft 365 tools
+([Teams](../docs/teams.md#microsoft-account-optional)). It is limited to Teams
+the same way, so the agent and Slack and Discord sessions never carry it,
+and `requires: microsoft_accounts` keeps it off Teams sessions too until
+Microsoft accounts are set up.

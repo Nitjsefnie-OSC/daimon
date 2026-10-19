@@ -14,7 +14,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import UUID
 
 from daimon.core.mcp_server_url import canonical_mcp_url
@@ -28,10 +28,14 @@ from pydantic import (
     HttpUrl,
     PostgresDsn,
     SecretStr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from daimon.core.specs import SettingsFeature
 
 
 class DatabaseSettings(BaseModel):
@@ -1109,6 +1113,70 @@ class CryptoSettings(BaseModel):
     )
 
 
+_ENTRA_AUTHORITY = HttpUrl("https://login.microsoftonline.com")
+
+
+class MicrosoftAccountsSettings(BaseModel):
+    """Per-person Microsoft 365 access on Teams: the Entra app people sign in to.
+
+    Inert until `client_id`, `client_secret` and `tenant_id` are all set.
+    """
+
+    client_id: str | None = Field(
+        default=None,
+        description=(
+            "Application (client) ID of the Entra app registration people sign in to "
+            "with Connect Microsoft. Its Web redirect URI is "
+            "`<public root>/oauth/microsoft/callback`."
+        ),
+    )
+    client_secret: SecretStr | None = Field(
+        default=None,
+        description="Client secret of that app registration, sent as client_secret_post.",
+    )
+    tenant_id: str | None = Field(
+        default=None,
+        description=(
+            "Entra tenant ID (a GUID) people sign in to. Only accounts of this tenant whose "
+            "object ID matches the Teams user asking can connect."
+        ),
+    )
+    authority: HttpUrl = Field(
+        default=_ENTRA_AUTHORITY,
+        description="Microsoft identity platform host; change it only for a sovereign cloud.",
+    )
+
+    @field_validator("client_id", "client_secret", "tenant_id", "authority", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object, info: ValidationInfo) -> object:
+        # A compose file passing an empty variable through means "not set".
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if not (isinstance(raw, str) and not raw.strip()):
+            return value
+        return _ENTRA_AUTHORITY if info.field_name == "authority" else None
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _canonical_tenant(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return str(uuid.UUID(value))
+        except ValueError:
+            raise ValueError(
+                "DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID must be the Entra directory tenant's UUID"
+            ) from None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.client_id and self.client_secret and self.tenant_id)
+
+    @property
+    def touched(self) -> bool:
+        """Whether any of the three is set, so a missing one is worth a warning."""
+        return bool(self.client_id or self.client_secret or self.tenant_id)
+
+
 class CredentialsSettings(BaseModel):
     """Tenant-level credentials for the token broker.
 
@@ -1735,6 +1803,7 @@ class Settings(BaseSettings):
     teams: TeamsSettings | None = None
     github: GithubSettings = Field(default_factory=GithubSettings)
     github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
+    microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
@@ -1777,6 +1846,43 @@ class Settings(BaseSettings):
             "fields — they invite drift."
         ),
     )
+
+    def microsoft_accounts_missing(self) -> tuple[str, ...]:
+        """Settings Connect Microsoft still needs; empty when it is on or wholly unset.
+
+        A partial setup leaves the feature off with one startup warning rather
+        than failing every service, like the other optional integrations.
+        """
+        ms = self.microsoft_accounts
+        if not ms.touched:
+            return ()
+        wanted = (
+            ("DAIMON_MICROSOFT_ACCOUNTS__CLIENT_ID", ms.client_id is not None),
+            ("DAIMON_MICROSOFT_ACCOUNTS__CLIENT_SECRET", ms.client_secret is not None),
+            ("DAIMON_MICROSOFT_ACCOUNTS__TENANT_ID", ms.tenant_id is not None),
+            ("DAIMON_CRYPTO__KEYS", bool(self.crypto.keys)),
+            ("DAIMON_MCP__PUBLIC_URL", self.mcp.public_url is not None),
+        )
+        return tuple(name for name, present in wanted if not present)
+
+    @property
+    def configured_features(self) -> frozenset[SettingsFeature]:
+        """Optional features set up here; a default skill can require one (`SkillRef.requires`).
+
+        Microsoft accounts count on `configured` alone, as for `microsoft_send`.
+        """
+        return (
+            frozenset({"microsoft_accounts"}) if self.microsoft_accounts.configured else frozenset()
+        )
+
+    @property
+    def microsoft_accounts_enabled(self) -> bool:
+        """Whether the MCP server offers Connect Microsoft and the `microsoft_*` tools.
+
+        Turn processes ask before `microsoft_send` on `configured` alone, so
+        they need no crypto keys or public URL to agree.
+        """
+        return self.microsoft_accounts.touched and not self.microsoft_accounts_missing()
 
     @model_validator(mode="after")
     def _private_channel_messages_need_a_public_url(self) -> Settings:

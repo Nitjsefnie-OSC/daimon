@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 116 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 121 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -242,6 +242,18 @@ Media MCP tools: YouTube transcript and file upload.
 | --- | --- | --- |
 | `create_file_upload_url` | all callers | Post, send, or share a file to another channel, or from a routine — step 1 of 2. |
 | `fetch_youtube_transcript` | all callers | Fetch the transcript of a public YouTube video for summarization or Q&A. |
+
+## `microsoft.register`
+
+Register connect_microsoft and the Microsoft Graph tools (Teams only).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `connect_microsoft` | Teams callers | Send the person a private Connect Microsoft card so Daimon can use their Microsoft 365. |
+| `microsoft_get` | Teams callers | GET a Microsoft Graph v1.0 path as the person, e.g. /me/drive/root/children. |
+| `microsoft_search` | Teams callers | Search the person's Microsoft 365 as them: files, SharePoint, mail or calendar. |
+| `microsoft_send` | Teams callers | Send an email or a calendar invite from the person's Microsoft account. |
+| `microsoft_write` | Teams callers | Change the person's files or notes through Microsoft Graph, as them. |
 
 ## `notebook`
 

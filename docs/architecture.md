@@ -1634,6 +1634,21 @@ Existing static-bearer vault credentials are upgraded in place on the next
 session creation. Credential metadata records the identity version so subsequent
 creates leave the token stable; unrelated and OAuth credentials are preserved.
 
+### Microsoft 365 per person
+
+Teams people connect their own Microsoft account (Entra v2 authorization
+code with PKCE, confidential client). `core/microsoft_identity.py` builds the
+link, redeems and refreshes tokens, and checks the id token's tenant and
+object ID against the Teams caller. `microsoft_sign_ins` holds single-use,
+requester-bound state; `microsoft_user_tokens` holds one Fernet-encrypted
+refresh token per (tenant, user), rotated on each refresh and deleted on
+`invalid_grant` or `interaction_required`. Purge and the privacy preview
+cover it. The MCP routes are `/oauth/microsoft/start` and `/callback`; the
+`microsoft_*` tools in `tools/microsoft/` call Graph v1.0 through a path
+allowlist, keep access tokens in memory, and decide 1:1-only scopes (mail,
+calendar, OneNote) from the verified turn origin. `microsoft_send` is a
+confirmed daimon tool, so it always goes through the approval card.
+
 ### Completion signals
 
 The core driver calls an optional `on_acknowledgment` lifecycle hook with
