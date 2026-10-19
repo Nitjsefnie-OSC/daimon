@@ -398,9 +398,23 @@ async def test_discord_refuses_a_departed_member_before_running_a_dm(
     message.channel.send.assert_not_awaited()
 
 
+@pytest.fixture
+async def pooled_dm_sessionmaker(db_schema):
+    # Concurrent membership, reply and pre-delivery reads need independent
+    # connections; the ordinary fixture deliberately shares one transaction.
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, pool_size=8, max_overflow=0
+    )
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
 async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_error(
-    db_session, db_session_factory
+    db_session, pooled_dm_sessionmaker
 ):
+    db_session_factory = pooled_dm_sessionmaker
     tenant, deps, admission, *_ = await _setup(db_session, db_session_factory)
     await _start(tenant, deps, admission)
     settings = MagicMock()
@@ -454,12 +468,12 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
         entered.set()
         if len(replies) == 1:
             await release.wait()
-        return "answer"
+        return await core_direct_messages.reply_to_dm_result(*_args, **_kwargs)
 
     with (
         patch.object(bot, "get_guild", return_value=guild),
         patch(
-            "daimon.adapters.discord.commands.direct_messages.reply_to_dm",
+            "daimon.adapters.discord.commands.direct_messages.reply_to_dm_result",
             side_effect=slow_reply,
         ),
     ):
@@ -482,7 +496,7 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
     with (
         patch.object(bot, "get_guild", return_value=guild),
         patch(
-            "daimon.adapters.discord.commands.direct_messages.reply_to_dm",
+            "daimon.adapters.discord.commands.direct_messages.reply_to_dm_result",
             side_effect=DaimonError("failed"),
         ),
     ):
