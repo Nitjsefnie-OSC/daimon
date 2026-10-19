@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades.
+- Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Serialize migrations per database, keep stamping free of repair DDL, and explain how to upgrade legacy preview stamps before inspection.
 
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
 
