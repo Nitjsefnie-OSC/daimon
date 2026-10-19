@@ -35,7 +35,8 @@ class NativeWire:
         self.requests: list[httpx.Request] = []
         self.posts: list[bytes] = []
         self.cancels: list[bytes] = []
-        self.stamp = datetime(2026, 10, 12, tzinfo=UTC)
+        self.created = datetime.now(UTC)
+        self.stamp = self.created
         self.session: ResourceRef | None = None
         self.sdk: SDKTransport | None = None
         self.events: tuple[Event, ...] = ()
@@ -80,7 +81,7 @@ class NativeWire:
                 else request.url.path.rsplit("/", 1)[-1],
                 "status": self.terminal if self.cancelled else self.initial,
                 "environment_id": "native-workspace",
-                "created": "2026-10-12T00:00:00Z",
+                "created": self.created.isoformat(),
                 "updated": self.stamp.isoformat(),
                 "steps": [],
                 "usage": {
