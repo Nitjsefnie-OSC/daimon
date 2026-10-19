@@ -361,13 +361,20 @@ async def _save_routine_edit(
         # Any private edit or producer/destination change invalidates content.
         # This also erases retained previews from legacy owner-only routines.
         # Agent reassignment and destination ABA cannot reclassify old content.
+        cleared_public = (
+            current.destination_kind != "dm"
+            and "destination_kind" in values
+            and values["destination_kind"] is None
+        )
         values.update(
             last_result_tail=None,
             last_error=None,
             delivery_payload=None,
-            delivery_status="skipped",
+            delivery_status=None if cleared_public else "skipped",
             delivery_note=(
-                "private_revision_changed"
+                None
+                if cleared_public
+                else "private_revision_changed"
                 if current.destination_kind == "dm"
                 else "destination_changed"
                 if "destination_kind" in values
