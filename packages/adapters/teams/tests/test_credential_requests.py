@@ -37,9 +37,11 @@ from daimon.core.posted_controls import (
     WRONG_REQUESTER_MESSAGE,
 )
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG
+from daimon.core.security_audit import AuditDecision, capture_decision
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_files import get_agent_file, list_agent_files, put_agent_file
 from daimon.core.stores.credential_requests import (
+    consume_credential_request,
     create_credential_request,
     peek_credential_request,
 )
@@ -230,7 +232,7 @@ async def test_an_env_value_is_saved_once_and_resumes_the_work(
 ) -> None:
     row = await _request(db_session_factory, account_id)
     fake = TeamsApiFake()
-    with structlog.testing.capture_logs() as logs:
+    with structlog.testing.capture_logs() as logs, capture_decision() as decision:
         async with _running(fake, _runtime(db_session_factory)) as (service, dispatch):
             empty = await post_activity(service, _submit(row.token, secret="  "))
             big = await post_activity(service, _submit(row.token, secret="x" * 5000))
@@ -247,11 +249,21 @@ async def test_an_env_value_is_saved_once_and_resumes_the_work(
         spent = await peek_credential_request(session, token=row.token)
         queued = await get_continuation(session, idempotency_key=row.idempotency_key)
     assert file is not None and file.content == SECRET
+    assert file.created_by_account_id == account_id, "the key is owned by the requesting account"
     assert spent is not None and spent.outcome == "applied"
     assert queued is not None and queued.requested_work == "finish the report with the key"
     assert "✅" in _edits(fake)[-1], "the card becomes the receipt"
     dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
     assert SECRET not in json.dumps([r.body for r in fake.requests]) + repr(logs)
+    assert logs == [
+        {
+            "event": "teams.credential.env",
+            "key": "API_KEY",
+            "state": "applied",
+            "log_level": "info",
+        }
+    ], "one event names the key and the card state it ended in, and never the value"
+    assert decision == AuditDecision(), "adding a key records no policy decision"
 
 
 @pytest.mark.parametrize(
@@ -329,15 +341,27 @@ async def test_a_member_cannot_replace_a_key_on_a_managed_agent(
     row = await _request(db_session_factory, account_id, replaces=old.updated_at)
     fake = TeamsApiFake()
     runtime = _runtime(db_session_factory, managed=True)
-    async with _running(fake, runtime) as (service, dispatch):
-        await post_activity(service, _submit(row.token))
-        await service.turns.drain(5)
+    with structlog.testing.capture_logs() as logs, capture_decision() as decision:
+        async with _running(fake, runtime) as (service, dispatch):
+            await post_activity(service, _submit(row.token))
+            await service.turns.drain(5)
 
     async with db_session_factory() as session:
         file = await get_agent_file(session, tenant_id=TENANT, agent_id=agent_id, key="API_KEY")
     assert file is not None and file.content == "old", "the existing key is unchanged"
     assert "was not replaced" in _edits(fake)[-1]
     dispatch.assert_not_awaited()
+    assert logs == [
+        {
+            "event": "teams.credential.env",
+            "key": "API_KEY",
+            "state": "refused",
+            "log_level": "info",
+        }
+    ], "a refused replacement is logged with the state it rendered"
+    assert decision == AuditDecision(
+        operation="key_replace", denied=True, reason="managed_agent"
+    ), "the audit records the replacement gate refusing a member on a shared agent"
 
 
 @pytest.mark.parametrize("supports_sign_in", [False, True])
@@ -586,7 +610,7 @@ async def _early_check_passes(*_args: object, **_kwargs: object) -> None:
     return None
 
 
-@pytest.mark.parametrize("kind", ["env", "mcp_oauth"])
+@pytest.mark.parametrize("kind", ["env", "env_file", "mcp_oauth"])
 async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
     db_session_factory: async_sessionmaker[AsyncSession],
     account_id: uuid.UUID,
@@ -606,7 +630,10 @@ async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
     runtime = _runtime(db_session_factory, mcp=kind == "mcp_oauth")
     async with _running(TeamsApiFake(), runtime) as (service, dispatch):
         answer = await post_activity(
-            service, _open(row.token) if kind == "mcp_oauth" else _submit(row.token)
+            service,
+            _open(row.token)
+            if kind == "mcp_oauth"
+            else _submit(row.token, secret="API_KEY=submitted\n" if kind == "env_file" else SECRET),
         )
         await service.turns.drain(5)
     if kind == "mcp_oauth":
@@ -652,6 +679,14 @@ async def test_a_multi_line_env_value_is_stored_as_typed(
     assert file is not None and file.content == pem, "stored with its line breaks"
 
 
+async def _owners(db: async_sessionmaker[AsyncSession]) -> set[uuid.UUID | None]:
+    """Who each stored key belongs to."""
+    agent_id = derive_agent_uuid(tenant_id=TENANT, ma_agent_id=MA_ID)
+    async with db() as session:
+        files = await list_agent_files(session, tenant_id=TENANT, agent_id=agent_id)
+    return {file.created_by_account_id for file in files}
+
+
 async def _keys(db: async_sessionmaker[AsyncSession]) -> dict[str, str]:
     agent_id = derive_agent_uuid(tenant_id=TENANT, ma_agent_id=MA_ID)
     async with db() as session:
@@ -666,7 +701,7 @@ async def test_a_pasted_env_file_saves_every_key_once_and_resumes_the_work(
     row = await _request(db_session_factory, account_id, kind="env_file")
     fake = TeamsApiFake()
     body = "ALPHA_KEY=alpha-private\nBETA_TOKEN=beta-private\n"
-    with structlog.testing.capture_logs() as logs:
+    with structlog.testing.capture_logs() as logs, capture_decision() as decision:
         async with _running(fake, _runtime(db_session_factory)) as (service, dispatch):
             bad = await post_activity(service, _submit(row.token, secret="NOT A KEY LINE\n"))
             await service.turns.drain(5)
@@ -681,6 +716,9 @@ async def test_a_pasted_env_file_saves_every_key_once_and_resumes_the_work(
         "ALPHA_KEY": "alpha-private",
         "BETA_TOKEN": "beta-private",
     }
+    assert await _owners(db_session_factory) == {account_id}, (
+        "every imported key is owned by the requesting account"
+    )
     async with db_session_factory() as session:
         spent = await peek_credential_request(session, token=row.token)
     assert spent is not None and spent.outcome == "applied", "spent once, applied"
@@ -688,6 +726,20 @@ async def test_a_pasted_env_file_saves_every_key_once_and_resumes_the_work(
     dispatch.assert_awaited_once_with(TENANT, CONVERSATION_ID, SERVICE_URL)
     sent = json.dumps([r.body for r in fake.requests]) + repr(logs)
     assert "private" not in sent, "no value reaches Teams or the logs"
+    assert logs == [
+        {
+            "event": "teams.credential.env_file_rejected",
+            "rejection": "syntax",
+            "lines": [1],
+            "log_level": "info",
+        },
+        {
+            "event": "teams.credential.env_file_saved",
+            "keys": ["ALPHA_KEY", "BETA_TOKEN"],
+            "log_level": "info",
+        },
+    ], "the events name the lines rejected and the keys saved, and never a value"
+    assert decision == AuditDecision()
 
 
 async def test_a_pasted_env_file_holding_a_stored_key_writes_nothing(
@@ -698,9 +750,10 @@ async def test_a_pasted_env_file_holding_a_stored_key_writes_nothing(
     row = await _request(db_session_factory, account_id, kind="env_file")
     fake = TeamsApiFake()
     body = "ALPHA_KEY=new\nBETA_TOKEN=beta\n"
-    async with _running(fake, _runtime(db_session_factory)) as (service, dispatch):
-        await post_activity(service, _submit(row.token, secret=body))
-        await service.turns.drain(5)
+    with structlog.testing.capture_logs() as logs, capture_decision() as decision:
+        async with _running(fake, _runtime(db_session_factory)) as (service, dispatch):
+            await post_activity(service, _submit(row.token, secret=body))
+            await service.turns.drain(5)
 
     assert await _keys(db_session_factory) == {"ALPHA_KEY": "the-value-in-use"}, "whole-file"
     async with db_session_factory() as session:
@@ -708,6 +761,169 @@ async def test_a_pasted_env_file_holding_a_stored_key_writes_nothing(
     assert spent is not None and spent.outcome == "stale_replacement", "spent, nothing written"
     assert "ALPHA_KEY is already set" in _edits(fake)[-1], "the card names the held key"
     dispatch.assert_not_awaited()
+    assert logs == [
+        {
+            "event": "teams.credential.env_file_refused",
+            "key_count": 2,
+            "collision_count": 1,
+            "log_level": "info",
+        }
+    ], "the event counts keys and collisions and names neither"
+    assert decision == AuditDecision()
+
+
+@pytest.mark.parametrize("kind", ["env", "env_file"])
+@pytest.mark.parametrize("validity", ["expired", "used"])
+async def test_an_expired_or_spent_form_writes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    kind: str,
+    validity: str,
+) -> None:
+    """Neither an expired form nor one already spent stores a key, for a key or a file."""
+    row = await _request(
+        db_session_factory,
+        account_id,
+        kind=kind,
+        expires_in=timedelta(minutes=-1) if validity == "expired" else timedelta(minutes=10),
+    )
+    if validity == "used":
+        async with db_session_factory.begin() as session:
+            await consume_credential_request(session, token=row.token, now=datetime.now(UTC))
+    fake = TeamsApiFake()
+    body = "ALPHA_KEY=alpha-private\n" if kind == "env_file" else SECRET
+    async with _running(fake, _runtime(db_session_factory)) as (service, dispatch):
+        answer = await post_activity(service, _submit(row.token, secret=body))
+        await service.turns.drain(5)
+
+    assert await _keys(db_session_factory) == {}, f"a {validity} form must never produce a write"
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+        queued = await get_continuation(session, idempotency_key=row.idempotency_key)
+    assert spent is not None and spent.outcome is None, "no outcome is recorded for a dead form"
+    assert queued is None, "no turn may be queued on a form that stored nothing"
+    assert answer["task"]["value"] == NO_LONGER_VALID_MESSAGE, "the submitter is told it is dead"
+    dispatch.assert_not_awaited()
+
+
+async def test_a_stale_replacement_leaves_the_stored_value_alone_and_renders_superseded(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """The card promised to replace a specific value; that value has since moved on."""
+    agent_id = derive_agent_uuid(tenant_id=TENANT, ma_agent_id=MA_ID)
+    async with db_session_factory.begin() as session:
+        held = await put_agent_file(
+            session,
+            tenant_id=TENANT,
+            agent_id=agent_id,
+            key="API_KEY",
+            content="someone-elses-value",
+            set_by_account_id=account_id,
+        )
+    row = await _request(
+        db_session_factory, account_id, replaces=held.updated_at - timedelta(hours=1)
+    )
+    fake = TeamsApiFake()
+    with structlog.testing.capture_logs() as logs, capture_decision() as decision:
+        async with _running(fake, _admin_runtime(db_session_factory)) as (service, dispatch):
+            await post_activity(service, _submit(row.token))
+            await service.turns.drain(5)
+
+    assert await _keys(db_session_factory) == {"API_KEY": "someone-elses-value"}, (
+        "a failed precondition leaves the stored value exactly as it was"
+    )
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+        queued = await get_continuation(session, idempotency_key=row.idempotency_key)
+    assert spent is not None and spent.outcome == "stale_replacement", "spent, nothing replaced"
+    assert queued is None, "nothing was saved, so no turn may be queued on it"
+    assert "was not replaced" in _edits(fake)[-1], "the card says the replacement did not happen"
+    assert SECRET not in json.dumps([r.body for r in fake.requests]), "no value reaches Teams"
+    dispatch.assert_not_awaited()
+    assert logs == [
+        {
+            "event": "teams.credential.env",
+            "key": "API_KEY",
+            "state": "superseded",
+            "log_level": "info",
+        }
+    ], "a replacement that lost the race is logged with the state it rendered"
+    assert decision == AuditDecision(operation="key_replace", reason="policy_allow"), (
+        "the audit records the replacement gate allowing the submitter"
+    )
+
+
+async def test_a_pasted_env_file_with_a_key_appearing_mid_write_rolls_back_the_whole_file(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compare-and-set that fails on the second key undoes the first, and the form stays spent."""
+    row = await _request(db_session_factory, account_id, kind="env_file")
+    real_put = credential_submit.put_agent_file_if_unchanged
+    seen: list[str] = []
+
+    async def fails_on_the_second_key(session: AsyncSession, **kwargs: Any) -> Any:
+        seen.append(str(kwargs["key"]))
+        return await real_put(session, **kwargs) if len(seen) == 1 else None
+
+    monkeypatch.setattr(credential_submit, "put_agent_file_if_unchanged", fails_on_the_second_key)
+    fake = TeamsApiFake()
+    body = "FIRST_KEY=first-value\nSECOND_KEY=second-value\n"
+    with structlog.testing.capture_logs() as logs, capture_decision() as decision:
+        async with _running(fake, _runtime(db_session_factory)) as (service, dispatch):
+            await post_activity(service, _submit(row.token, secret=body))
+            await service.turns.drain(5)
+
+    assert seen == ["FIRST_KEY", "SECOND_KEY"], "the write loop reaches the failing key"
+    assert await _keys(db_session_factory) == {}, "the key written before the failure is undone"
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+        queued = await get_continuation(session, idempotency_key=row.idempotency_key)
+    assert spent is not None and spent.used_at is not None, "the form is spent either way"
+    assert spent.outcome == "stale_replacement", "a key that appeared mid-write is a collision"
+    assert queued is None, "nothing was saved, so no turn may be queued on it"
+    assert "SECOND_KEY" in _edits(fake)[-1], "the refusal names the key that was already set"
+    sent = json.dumps([r.body for r in fake.requests])
+    assert "first-value" not in sent and "second-value" not in sent, "no value reaches Teams"
+    dispatch.assert_not_awaited()
+    assert logs == [
+        {
+            "event": "teams.credential.env_file_refused",
+            "key_count": 2,
+            "collision_count": 1,
+            "log_level": "info",
+        }
+    ], "the event counts keys and collisions and names neither"
+    assert decision == AuditDecision()
+
+
+@pytest.mark.parametrize(
+    ("target", "is_admin", "stored"),
+    [
+        ("LD_PRELOAD", True, False),
+        ("DATABASE_URL", False, False),
+        ("SERVICE_URL", True, True),
+        ("OPENAI_BASE_URL", False, False),
+    ],
+)
+async def test_the_submitters_live_role_decides_which_key_names_are_stored(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID,
+    target: str,
+    is_admin: bool,
+    stored: bool,
+) -> None:
+    """A tool-control name is never storable; an identity or URL name needs an admin."""
+    row = await _request(db_session_factory, account_id, target=target)
+    runtime = _admin_runtime(db_session_factory) if is_admin else _runtime(db_session_factory)
+    async with _running(TeamsApiFake(), runtime) as (service, _):
+        await post_activity(service, _submit(row.token))
+        await service.turns.drain(5)
+    async with db_session_factory() as session:
+        spent = await peek_credential_request(session, token=row.token)
+    assert (await _keys(db_session_factory) == {target: SECRET}) is stored, target
+    assert spent is not None and (spent.used_at is not None) is stored, "a refusal spends nothing"
 
 
 def _imported() -> AsyncMock:

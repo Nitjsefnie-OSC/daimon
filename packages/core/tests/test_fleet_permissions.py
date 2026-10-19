@@ -1930,7 +1930,7 @@ def test_frozen_root_remains_narrow_after_current_policy_or_source_changes():
 
 
 async def test_root_freeze_uses_actual_sdk_owner_capture_and_owned_resource_projection(
-    db_preflight, db_nullpool_engine
+    db_preflight, db_committing_engine
 ):
     from daimon.core.authz import build_agent_ref
     from daimon.core.channel_backend import load_backend_agent
@@ -1944,7 +1944,7 @@ async def test_root_freeze_uses_actual_sdk_owner_capture_and_owned_resource_proj
     from daimon.testing.ma_transport import ScriptedTransport
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
     async with sm.begin() as db:
         tenant = await make_tenant(db)

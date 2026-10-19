@@ -25,7 +25,6 @@ from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from discord.webhook.async_ import AsyncWebhookAdapter, async_context
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
@@ -761,7 +760,7 @@ def test_real_bot_flag_off_does_not_construct_a_sender_or_fleet_service():
 
 @pytest.mark.parametrize("recovered_attribution", [False, True])
 async def test_real_webhook_replacement_records_both_accepted_card_messages(
-    db_nullpool_engine, db_clean, monkeypatch, recovered_attribution
+    db_committing_engine, db_clean, monkeypatch, recovered_attribution
 ):
     from daimon.adapters.discord import post_transport
     from daimon.adapters.discord.post_transport import DiscordPostTransport
@@ -775,7 +774,7 @@ async def test_real_webhook_replacement_records_both_accepted_card_messages(
     from .harness import make_bot
     from .test_bot import _make_runtime
 
-    sessionmaker = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessionmaker = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     async with sessionmaker.begin() as session:
         tenant = await make_tenant(session, id=TENANT, platform="discord", workspace_id="60")
         await make_account(session, id=ACCOUNT, tenant=tenant)
@@ -1170,7 +1169,7 @@ async def test_installed_factory_never_discloses_sealed_text_without_proven_abse
 
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_runtime_installs_factory_only_with_opted_in_owner_bindings(
-    db_nullpool_engine, monkeypatch, enabled
+    db_committing_engine, monkeypatch, enabled
 ):
     from pathlib import Path
 
@@ -1181,7 +1180,7 @@ async def test_runtime_installs_factory_only_with_opted_in_owner_bindings(
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1313,7 +1312,7 @@ async def test_stored_replacement_attribution_cannot_be_overridden_before_writin
 
 
 @pytest.fixture
-async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkeypatch, request):
+async def discord_frozen_root(db_preflight, db_committing_engine, db_clean, monkeypatch, request):
     """Reuse the root owner's SDK/PG fixture with Discord destination metadata."""
     from packages.core.tests.turn import test_frozen_root as root_owner
 
@@ -1353,7 +1352,7 @@ async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkey
     monkeypatch.setattr(root_owner, "make_platform_principal", principal)
     monkeypatch.setattr(root_owner, "Subject", original_subject)
     monkeypatch.setattr(root_owner, "parent", permissions)
-    async for value in root_owner.root_turn.__wrapped__(db_preflight, db_nullpool_engine):
+    async for value in root_owner.root_turn.__wrapped__(db_preflight, db_committing_engine):
         if getattr(request, "param", True):
             await root_owner.freeze(value)
         yield value
@@ -1361,7 +1360,7 @@ async def discord_frozen_root(db_preflight, db_nullpool_engine, db_clean, monkey
 
 @pytest.mark.parametrize("actor", ["owner", "admin", "foreign_account", "unbound"])
 async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projection(
-    discord_frozen_root, db_nullpool_engine, db_schema, monkeypatch, actor
+    discord_frozen_root, db_committing_engine, db_schema, monkeypatch, actor
 ):
     from pathlib import Path
 
@@ -1388,7 +1387,7 @@ async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projec
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1559,7 +1558,7 @@ async def test_real_runtime_refreshes_click_subject_without_replacing_root_scope
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("supplied_prices", [False, True])
 async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clients(
-    db_nullpool_engine, monkeypatch, enabled, supplied_prices
+    db_committing_engine, monkeypatch, enabled, supplied_prices
 ):
     from pathlib import Path
 
@@ -1572,7 +1571,7 @@ async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clien
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1686,7 +1685,7 @@ async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clien
 
 
 async def test_runtime_preserves_falsey_injected_fleet_service_ownership(
-    db_nullpool_engine, monkeypatch
+    db_committing_engine, monkeypatch
 ):
     from pathlib import Path
 
@@ -1702,7 +1701,7 @@ async def test_runtime_preserves_falsey_injected_fleet_service_ownership(
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },
@@ -1724,7 +1723,7 @@ async def test_runtime_preserves_falsey_injected_fleet_service_ownership(
 @pytest.mark.parametrize("discord_frozen_root", [False], indirect=True)
 @pytest.mark.parametrize("fleet_enabled", [False, True])
 async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
-    discord_frozen_root, db_nullpool_engine, db_schema, monkeypatch, fleet_enabled
+    discord_frozen_root, db_committing_engine, db_schema, monkeypatch, fleet_enabled
 ):
     from pathlib import Path
 
@@ -1750,7 +1749,7 @@ async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
     settings = Settings.model_validate(
         {
             "database": {
-                "url": db_nullpool_engine.url.render_as_string(hide_password=False),
+                "url": db_committing_engine.url.render_as_string(hide_password=False),
                 "pool_size": 1,
                 "max_overflow": 3,
             },

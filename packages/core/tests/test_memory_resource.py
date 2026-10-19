@@ -497,13 +497,13 @@ async def test_one_failed_personal_archive_does_not_leave_the_others_live(
 
 @pytest.mark.parametrize("change", (None, "clear", "rebind"))
 async def test_exact_warm_memory_refuses_changed_binding_without_provisioning(
-    db_preflight, db_nullpool_engine, change
+    db_preflight, db_committing_engine, change
 ):
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.ma_transport import ScriptedTransport
     from mux.errors import ScopeViolation
 
-    sm = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)
     async with sm.begin() as db:
         tenant = await make_tenant(db)

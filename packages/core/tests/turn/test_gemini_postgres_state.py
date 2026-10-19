@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from daimon.core._models import GeminiRuntimeState
+from daimon.core.stores import gemini_runtime_state
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini_state import PostgresFlashAccounting, PostgresGeminiStorage
 from daimon.testing.factories import make_account, make_tenant
@@ -19,8 +20,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 @pytest.fixture
-async def postgres_state(db_nullpool_engine, db_clean):
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+async def postgres_state(db_committing_engine, db_clean):
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     async with sessions.begin() as db:
         tenant = await make_tenant(db)
         account = await make_account(db, tenant=tenant)
@@ -491,7 +492,7 @@ async def test_account_purge_previews_and_deletes_records_but_retains_financial_
 
 @pytest.mark.parametrize("refused", [False, True])
 async def test_post_dispatch_outcome_waits_past_busy_bound_without_wedging_session(
-    postgres_state, refused
+    postgres_state, refused, monkeypatch
 ):
     from daimon.testing.drivers.gemini.fake import FakeTransport
     from mux.contracts.actions import UserMessage
@@ -558,10 +559,13 @@ async def test_post_dispatch_outcome_waits_past_busy_bound_without_wedging_sessi
         await asyncio.wait_for(dispatched.wait(), 3)
         # The POST has completed, but another session's provider I/O holds the
         # account/project Records row while this outcome needs to be committed.
+        # Shrink the pre-dispatch busy bound and hold the row twice as long,
+        # rather than outlasting the production 5 s.
+        monkeypatch.setattr(gemini_runtime_state, "PRE_DISPATCH_BUSY_BOUND_S", 0.3)
         async with storage.transaction() as records:
             assert records.sessions[session.ref.id].unknown_delivery
             release_response.set()
-            await asyncio.sleep(5.5)
+            await asyncio.sleep(0.6)
             assert not task.done()
         if refused:
             with pytest.raises(ProviderError) as error:

@@ -19,6 +19,8 @@ from collections.abc import Iterator
 import pytest
 from daimon.testing.db import (  # noqa: F401
     db_clean,
+    db_committing_engine,
+    db_committing_pool,
     db_engine,
     db_nullpool_engine,
     db_schema,

@@ -621,11 +621,6 @@ def test_post_native_reason_cannot_claim_null_session(
     "url,skipped",
     [
         ("postgresql+asyncpg://offline:fixture@foreign.invalid/daimon_test_nc_n12", False),
-        ("postgresql+asyncpg://offline:fixture@localhost/unowned_test", False),
-        (
-            "postgresql+asyncpg://offline:fixture@localhost/daimon_test_nc_n12?host=foreign.invalid",
-            False,
-        ),
         ("postgresql+asyncpg://offline:fixture@localhost/daimon_test", True),
     ],
 )

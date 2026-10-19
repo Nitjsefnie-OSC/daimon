@@ -51,8 +51,17 @@ local `daimon_test` outside GitHub Actions CI; a green run against that name
 does not exercise those database tests. CI alone admits `daimon_test` with
 both `GITHUB_ACTIONS=true` and `CI=true` and a registered process-owned schema.
 Remote databases and URL query overrides are refused before I/O.
-Mark a test that runs its own DDL with `@pytest.mark.fresh_schema` to give it a private throwaway schema
-instead, and run `scripts/db/sweep_test_schemas.py` to reclaim schemas left
+A test whose sessions really commit, or that needs several independent
+connections, requests `db_committing_engine`: a pooled engine like production's.
+It fails the test that leaves session state on a pooled connection (a `SET`, a
+temp table, a `LISTEN`, an advisory lock). Use `db_nullpool_engine` for code that
+runs `asyncio.run` per call or takes session-level advisory locks, and set
+`DAIMON_TEST_NULLPOOL=1` to run everything on one connection per checkout.
+`packages/testing/README.md` has the isolation contract.
+Mark a test that runs its own DDL with `@pytest.mark.fresh_schema` to give it the worker's
+reusable DDL schema instead: its transaction is rolled back, and a test that commits DDL gets
+the schema rebuilt for the next one (`DAIMON_TEST_FRESH_SCHEMA=1` gives each such test a
+private throwaway schema). Run `scripts/db/sweep_test_schemas.py` to reclaim schemas left
 behind by a killed run.
 
 Install pre-commit hooks once so the gates below run automatically on every
@@ -93,6 +102,22 @@ Those three pages are written by generators, so a change to a settings field's
 source: re-run the generator without `--check` and commit the result, rather
 than editing the page. `CLAUDE.md` has the table of which change means which
 generator, and which pages are maintained by hand.
+
+CI splits the Postgres-backed pytest run into parallel jobs, and the largest
+suites (`core`, `mcp`, `discord`) into shards by test file with
+`-p daimon.testing.ci_shard --ci-shard-by=file --ci-shard-suite=S --ci-shard-index=N --ci-shard-count=M`.
+Files are placed longest-first on the least-loaded shard using the per-file
+seconds in `packages/testing/daimon/testing/ci_durations.json`; a file missing
+from it still runs, on the shard its path hashes to. Refresh the table from a
+run's junit artifacts with `uv run python scripts/generate_ci_durations.py --run <run-id>`.
+Each job runs `-n 4 --dist worksteal` (the four vCPUs of a hosted runner;
+Discord keeps `-n 2`), so a failure names the failing area in the job list. Add
+a shard by adding a leg to the `pytest-db` matrix (or the `pytest-discord` one)
+in `.github/workflows/ci.yml`. The `shard-check` job
+runs `uv run python scripts/check_ci_shards.py`, which collects each split suite
+once (`--collect-only`, no database), places its files the way CI will, and
+fails if a shard is empty or the shards omit or repeat a test, so a new test
+file lands in exactly one shard without any edit.
 
 The pre-commit hooks from the setup above run the linters and the generator
 checks on `git commit`; `pytest` stays a manual step.

@@ -100,10 +100,10 @@ class ConversationWire(Wire):
 
 @pytest.fixture
 async def conversation_root(
-    db_preflight, db_clean, db_nullpool_engine, monkeypatch, tmp_path, request
+    db_preflight, db_clean, db_committing_engine, monkeypatch, tmp_path, request
 ):
     async with aclosing(
-        root_turn.__wrapped__(db_preflight, db_nullpool_engine, live_root=True)
+        root_turn.__wrapped__(db_preflight, db_committing_engine, live_root=True)
     ) as roots:
         updated, current, source = await default_source_turn(await anext(roots))
         deps, prepared, _, intent, _, scope, _, transport = updated

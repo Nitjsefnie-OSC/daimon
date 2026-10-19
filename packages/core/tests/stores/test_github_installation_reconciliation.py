@@ -205,9 +205,9 @@ async def test_deleted_delivery_fences_a_delayed_repository_snapshot(
 
 
 async def test_delete_and_snapshot_completion_serialize_without_restoring_cache(
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
 ) -> None:
-    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     now = datetime.now(UTC)
     owner = uuid.uuid4()
     async with sessions.begin() as session:

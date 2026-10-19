@@ -279,7 +279,7 @@ async def test_real_orchestrator_dispatch_is_exact_and_replay_does_not_post_agai
 
 
 async def test_shared_preparation_factory_reads_each_actual_root(
-    db_preflight, db_nullpool_engine, root_turn
+    db_preflight, db_committing_engine, root_turn
 ):
     from contextlib import aclosing
     from datetime import UTC, datetime
@@ -288,7 +288,7 @@ async def test_shared_preparation_factory_reads_each_actual_root(
     from daimon.core.turn.runtime_manifest import read_frozen_root
 
     await freeze(root_turn)
-    async with aclosing(root_turn_factory(db_preflight, db_nullpool_engine)) as second_roots:
+    async with aclosing(root_turn_factory(db_preflight, db_committing_engine)) as second_roots:
         second = await anext(second_roots)
         await freeze(second)
         requests, parents = {}, []

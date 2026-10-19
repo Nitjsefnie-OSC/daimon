@@ -77,14 +77,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 @pytest.fixture
 def db_session_factory(
-    db_nullpool_engine: AsyncEngine,
+    db_committing_engine: AsyncEngine,
     db_session: AsyncSession,
 ) -> async_sessionmaker[AsyncSession]:
     """Concurrent fire finalizers need independent connections, as in production.
 
     db_session triggers schema cleanup; these tests commit setup before dispatch.
     """
-    return async_sessionmaker(bind=db_nullpool_engine, expire_on_commit=False)
+    return async_sessionmaker(bind=db_committing_engine, expire_on_commit=False)
 
 
 _TEST_BILLING = BillingConfig(
