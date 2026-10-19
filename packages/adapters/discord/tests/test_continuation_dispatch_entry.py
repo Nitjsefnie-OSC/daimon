@@ -455,7 +455,9 @@ async def _run_continuation(
         row.parent_channel_id,
         str(thread.id),
     )
-    assert run_turn.await_args.kwargs["attended"] is False
+    assert run_turn.await_args.kwargs["attended"] is (
+        row.reason not in ("timer", "worker_finished")
+    )
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message, tenant.id

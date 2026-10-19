@@ -1045,8 +1045,9 @@ The driver-run ones go through one send boundary
 confirmation batch, live or on reconnect, and every send is a single
 attempt; a failed gate stops the send. For `run_prepared_turn` (fleet workers,
 unattended wakes, and future watches or completion turns), this also covers
-dead-session recovery. Platform queue dispatchers explicitly mark these
-background continuation turns unattended. Managed Agents runtimes refresh
+dead-session recovery. Platform queue dispatchers explicitly mark timers and
+worker-completion wakes unattended. User-initiated handoffs and private-input
+continuations retain their attended approval surfaces. Managed Agents runtimes refresh
 the snapshot before **every** confirmation batch. A non-Anthropic runtime, or an injected mux
 backend without a session read, refuses every unattended confirmation with
 a plain explanation that it cannot refresh the tool safety gate. This rule

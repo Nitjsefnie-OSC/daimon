@@ -247,10 +247,7 @@ async def _run_dispatch_scenario(
     """
     tenant_id, account_id = await _seed_funded_tenant(db_session, place)
     router = build_turn_router(
-        str(tenant_id),
-        session_reads=True,
-        fresh_event_ids=True,
-        sent_event_bodies=sent_event_bodies,
+        str(tenant_id), fresh_event_ids=True, sent_event_bodies=sent_event_bodies
     )
 
     posted_1 = await _mention(

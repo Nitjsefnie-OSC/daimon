@@ -78,7 +78,7 @@ async def test_handoff_continuation_dispatches_exactly_one_follow_up_turn(
     # turns 2 and 3 reuse it) and `usage_events` idempotency keys on
     # `(managed_session_id, event_id)`: without fresh event ids per stream
     # open, three turns would silently collapse to one billed row.
-    router = build_turn_router(str(tenant.id), session_reads=True, fresh_event_ids=True)
+    router = build_turn_router(str(tenant.id), fresh_event_ids=True)
     driver = DiscordDriver() if platform == "discord" else TeamsDriver()
 
     # Turn 1: an ordinary mention, no binding/continuation yet -- establishes
@@ -204,7 +204,7 @@ async def test_slack_handoff_continuation_dispatches_exactly_one_follow_up_turn(
     # turns 2 and 3 reuse it) and `usage_events` idempotency keys on
     # `(managed_session_id, event_id)`: without fresh event ids per stream
     # open, three turns would silently collapse to one billed row.
-    router = build_turn_router(str(tenant.id), session_reads=True, fresh_event_ids=True)
+    router = build_turn_router(str(tenant.id), fresh_event_ids=True)
     driver = SlackDriver()
 
     # Turn 1: an ordinary mention, no binding/continuation yet -- establishes

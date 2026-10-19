@@ -1400,7 +1400,8 @@ class TeamsApp:
                     role=role or Role.USER,  # admission's: one read per turn
                     handoff=handoff,
                     reraise=reraise,
-                    attended=continuation is None,
+                    attended=continuation is None
+                    or continuation.reason not in ("timer", "worker_finished"),
                 )
             except asyncio.CancelledError:
                 raise
