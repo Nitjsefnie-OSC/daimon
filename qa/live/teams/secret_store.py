@@ -25,7 +25,7 @@ class SecretResponse(Protocol):
 class SecretClient(Protocol):
     def access_secret_version(self, *, request: dict[str, str]) -> SecretResponse: ...
 
-    def add_secret_version(self, *, request: dict[str, object]) -> object: ...
+    def add_secret_version(self, *, request: dict[str, object]) -> VersionInfo: ...
 
     def list_secret_versions(self, *, request: dict[str, str]) -> Iterable[VersionInfo]: ...
 
@@ -70,7 +70,7 @@ class SecretManagerCacheBackend:
     def write(self, persona: str, serialized: str) -> None:
         name = self.name(persona)
         try:
-            self.api.add_secret_version(
+            added = self.api.add_secret_version(
                 request={"parent": name, "payload": {"data": serialized.encode("utf-8")}}
             )
         except Exception:
@@ -78,7 +78,18 @@ class SecretManagerCacheBackend:
         try:
             # Destroy only this persona's enabled versions beyond the newest
             # three; never another secret's, and never a disabled version.
-            own = f"{name}/versions/"
+            # The API names versions by project number, so the version just
+            # added gives this secret's canonical name in this project.
+            canonical = added.name.rsplit("/versions/", 1)[0]
+            parts = canonical.split("/")
+            if (
+                len(parts) != 4
+                or parts[0] != "projects"
+                or not (parts[1] == self.project or parts[1].isdigit())
+                or parts[2:] != ["secrets", name.split("/")[-1]]
+            ):
+                return
+            own = (f"{name}/versions/", f"{canonical}/versions/")
             versions = self.api.list_secret_versions(request={"parent": name})
             enabled = sorted(
                 (
