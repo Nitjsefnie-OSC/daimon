@@ -60,6 +60,7 @@ from daimon.core.stores import tenant_ledger
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.testing import ma_agent, ma_environment, ma_model_config
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_session
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -224,10 +225,7 @@ def _build_fake_anthropic_factory(
 
     stream_factory = _FakeAsyncIter(events)
     create_mock = AsyncMock(
-        return_value=SimpleNamespace(
-            id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
-        )
+        return_value=ma_session(id="ses_test", agent=live_agent, environment_id=env_id)
     )
     send_mock = AsyncMock(return_value=None)
     close_mock = AsyncMock(return_value=None)
@@ -237,7 +235,9 @@ def _build_fake_anthropic_factory(
     # the full event log to fold in whatever the (single, non-terminal)
     # script already delivered — status "idle" finalizes without reopening
     # the stream.
-    retrieve_mock = AsyncMock(return_value=SimpleNamespace(status="idle"))
+    retrieve_mock = AsyncMock(
+        return_value=ma_session(id="ses_test", agent_id=agent_id, environment_id=env_id)
+    )
 
     class _FakeEvents:
         stream = AsyncMock(return_value=stream_factory)
@@ -293,6 +293,9 @@ def _build_fake_anthropic_factory(
     class _FakeClient:
         beta = _FakeBeta()
         close = close_mock
+
+        def with_options(self, **_kwargs: object) -> _FakeClient:
+            return self
 
     async def factory(_settings: Settings) -> AsyncAnthropic:
         return cast(AsyncAnthropic, _FakeClient())
@@ -546,10 +549,7 @@ def _build_archived_agent_factory(
 
     stream_factory = _FakeAsyncIter(events)
     create_mock = AsyncMock(
-        return_value=SimpleNamespace(
-            id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
-        )
+        return_value=ma_session(id="ses_test", agent=fresh_agent, environment_id=env_id)
     )
 
     class _FakeEvents:
@@ -559,6 +559,9 @@ def _build_archived_agent_factory(
     class _FakeSessions:
         events = _FakeEvents()
         create = create_mock
+        retrieve = AsyncMock(
+            return_value=ma_session(id="ses_test", agent_id=fresh_agent_id, environment_id=env_id)
+        )
 
         @staticmethod
         def list(**_kwargs: object) -> _EmptySessionPage:
@@ -611,6 +614,9 @@ def _build_archived_agent_factory(
     class _FakeClient:
         beta = _FakeBeta()
         close = AsyncMock(return_value=None)
+
+        def with_options(self, **_kwargs: object) -> _FakeClient:
+            return self
 
     async def factory(_settings: Settings) -> AsyncAnthropic:
         return cast(AsyncAnthropic, _FakeClient())
@@ -789,10 +795,7 @@ def _build_two_tenant_fake_anthropic_factory(
         ]
     )
     create_mock = AsyncMock(
-        return_value=SimpleNamespace(
-            id="ses_test",
-            agent=SimpleNamespace(model=SimpleNamespace(id="claude-sonnet-4-5"), system=None),
-        )
+        return_value=ma_session(id="ses_test", agent=agent_a, environment_id=env_id_a)
     )
 
     class _FakeEvents:
@@ -802,6 +805,9 @@ def _build_two_tenant_fake_anthropic_factory(
     class _FakeSessions:
         events = _FakeEvents()
         create = create_mock
+        retrieve = AsyncMock(
+            return_value=ma_session(id="ses_test", agent_id=agent_id_a, environment_id=env_id_a)
+        )
 
         @staticmethod
         def list(**_kwargs: object) -> _EmptySessionPage:
@@ -855,6 +861,9 @@ def _build_two_tenant_fake_anthropic_factory(
     class _FakeClient:
         beta = _FakeBeta()
         close = AsyncMock(return_value=None)
+
+        def with_options(self, **_kwargs: object) -> _FakeClient:
+            return self
 
     async def factory(_settings: Settings) -> AsyncAnthropic:
         return cast(AsyncAnthropic, _FakeClient())
