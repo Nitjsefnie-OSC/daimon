@@ -23,7 +23,7 @@ from daimon.adapters.mcp.tools._untrusted import UntrustedResult
 from daimon.adapters.mcp.tools.microsoft._access import GRAPH_ROOT
 from daimon.adapters.mcp.tools.microsoft._paths import check_write, parse_path
 from daimon.adapters.mcp.tools.microsoft._person import (
-    is_one_to_one,
+    origin_facts,
     require_one_to_one,
     require_person,
 )
@@ -58,6 +58,10 @@ _DOWNLOAD_KEYS = frozenset({"@microsoft.graph.downloadurl", "@content.downloadur
 _NO_LINK = (
     "This file's download link is given only in the person's 1:1 chat with Daimon, since "
     "anyone holding it could open the file. Ask them there."
+)
+_NO_LINK_FOREIGN = (
+    "This file's download link works only for people in the organisation that added "
+    "Daimon, since anyone holding it could open the file."
 )
 
 
@@ -144,7 +148,7 @@ def _next_path(data: dict[str, JsonValue]) -> str | None:
     return None
 
 
-def _result(response: httpx.Response, *, links: bool) -> GraphResult:
+def _result(response: httpx.Response, *, links: bool, foreign: bool = False) -> GraphResult:
     """A bounded result: JSON trimmed by dropping list items, text cut, never bytes.
 
     `links` (the person's 1:1 chat only) returns a /content redirect's link.
@@ -153,7 +157,7 @@ def _result(response: httpx.Response, *, links: bool) -> GraphResult:
     if response.is_redirect:
         if links:
             return GraphResult(status=status, download_url=response.headers.get("location"))
-        return GraphResult(status=status, text=_NO_LINK)
+        return GraphResult(status=status, text=_NO_LINK_FOREIGN if foreign else _NO_LINK)
     if not response.content:
         return GraphResult(status=status)
     kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
@@ -179,11 +183,15 @@ def _result(response: httpx.Response, *, links: bool) -> GraphResult:
     if kind.startswith("text/") or kind in ("application/xhtml+xml", "application/xml"):
         text = response.text
         return GraphResult(status=status, text=text[:_MAX_CHARS], truncated=len(text) > _MAX_CHARS)
-    return GraphResult(
-        status=status,
-        text="Binary content is not returned. GET .../content for a download link"
-        + ("." if links else " in the person's 1:1 chat with Daimon."),
+    where = (
+        "."
+        if links
+        else " for people in the organisation that added Daimon."
+        if foreign
+        else " in the person's 1:1 chat with Daimon."
     )
+    text = "Binary content is not returned. GET .../content for a download link"
+    return GraphResult(status=status, text=text + where)
 
 
 def _hit_path(kind: SearchKind, resource: dict[str, JsonValue]) -> str | None:
@@ -267,7 +275,8 @@ async def microsoft_get_impl(
     )
     if response.is_error:
         raise _refused(response)
-    return _result(response, links=await is_one_to_one(runtime, auth, origin_context_id))
+    one_to_one, foreign = await origin_facts(runtime, auth, origin_context_id)
+    return _result(response, links=one_to_one, foreign=foreign)
 
 
 async def microsoft_write_impl(

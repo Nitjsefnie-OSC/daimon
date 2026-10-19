@@ -60,6 +60,17 @@ async def require_one_to_one(
     return origin
 
 
+async def origin_facts(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str
+) -> tuple[bool, bool]:
+    """(is it the person's 1:1 chat, is the sender from another organisation) for the
+    verified turn origin; both False when unverified."""
+    origin = await get_verified_origin(runtime, auth, origin_context_id)
+    if origin is None:
+        return False, False
+    return origin.parent_channel_id.startswith("a:"), origin.sender_foreign
+
+
 async def is_one_to_one(runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str) -> bool:
     """Whether the verified turn origin is the person's 1:1 chat; False when unverified."""
     origin = await get_verified_origin(runtime, auth, origin_context_id)

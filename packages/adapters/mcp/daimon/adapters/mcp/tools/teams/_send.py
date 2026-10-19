@@ -25,6 +25,7 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import (
+    caller_is_foreign,
     get_verified_origin,
     require_channel_writable,
     turn_origin_place,
@@ -274,7 +275,12 @@ async def _post_teams_wizard_impl(  # pyright: ignore[reportUnusedFunction]  # u
     channel, root = split_thread(conversation_id)
     is_channel = _CHANNEL.fullmatch(channel) is not None
     if not (is_channel or conversation_id.startswith("a:")):
-        raise ToolError("a form goes in a channel, a thread or a 1:1 chat, not a group chat")
+        guest = await caller_is_foreign(runtime, auth)
+        raise ToolError(
+            "a form goes in a channel or a thread, not a group chat"
+            if guest
+            else "a form goes in a channel, a thread or a 1:1 chat, not a group chat"
+        )
     client = await _authorize(runtime, auth, conversation_id)
     card = wizard_card(to_screen(spec, WizardState(short_id=short_id)))
     try:

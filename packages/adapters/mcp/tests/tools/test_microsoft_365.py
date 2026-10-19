@@ -18,6 +18,7 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import caller_is_foreign
 from daimon.adapters.mcp.tools.microsoft import connect as connect_module
 from daimon.adapters.mcp.tools.microsoft import graph as graph_module
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
@@ -28,7 +29,6 @@ from daimon.adapters.mcp.tools.microsoft.graph import (
     microsoft_search_impl,
     microsoft_send_impl,
 )
-from daimon.adapters.mcp.tools.setup_target import caller_is_foreign
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -614,6 +614,64 @@ async def test_failed_card_delivery_withdraws_the_link(
             session, state=urls[0].split("state=", 1)[1], now=datetime.now(UTC)
         )
     assert row is None, "a link nobody received must not stay live"
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+async def test_the_sign_in_card_messages_send_a_guest_to_no_one_to_one_chat(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    monkeypatch: pytest.MonkeyPatch,
+    foreign: bool,
+) -> None:
+    _, auth = await _person(committing_sessionmaker)
+    origin = await _origin(committing_sessionmaker, auth, CHANNEL, foreign=foreign)
+    runtime = _runtime(committing_sessionmaker, fake)
+    delivered = True
+
+    async def send(
+        runtime: McpRuntime, auth: AuthIdentity, *, conversation_id: str, card: dict[str, Any]
+    ) -> None:
+        if not delivered:
+            raise ValueError("caller is not on the conversation's roster")
+
+    monkeypatch.setattr(connect_module, "send_card_to_caller", send)
+    sent = await connect_microsoft_impl(runtime, auth, origin_context_id=origin)
+    again = await connect_microsoft_impl(runtime, auth, origin_context_id=origin)
+    async with committing_sessionmaker.begin() as session:
+        await sign_ins.delete_sign_in(session, state=await _live_state(session, auth))
+    delivered = False
+    failed = await connect_microsoft_impl(runtime, auth, origin_context_id=origin)
+
+    assert (sent.status, again.status, failed.status) == ("sent", "already_sent", "delivery_failed")
+    for message in (sent.message, again.message, failed.message):
+        assert ("1:1" in message) is not foreign, message
+    assert "organisation that added Daimon" in failed.message or not foreign
+
+
+async def _live_state(session: AsyncSession, auth: AuthIdentity) -> str:
+    live = await sign_ins.get_live_sign_in_for_user(
+        session, tenant_id=auth.tenant_id, user_id=OID, now=datetime.now(UTC)
+    )
+    assert live is not None
+    return live.state
+
+
+def _binary_response() -> httpx.Response:
+    return httpx.Response(200, content=b"x", headers={"content-type": "application/pdf"})
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+def test_file_link_notes_send_a_guest_to_no_one_to_one_chat(foreign: bool) -> None:
+    redirect = httpx.Response(302, headers={"location": "https://files.example/x"})
+    notes = [
+        graph_module._result(redirect, links=False, foreign=foreign).text,  # pyright: ignore[reportPrivateUsage]
+        graph_module._result(_binary_response(), links=False, foreign=foreign).text,  # pyright: ignore[reportPrivateUsage]
+    ]
+
+    for note in notes:
+        assert note is not None
+        assert ("1:1" in note) is not foreign, note
+        assert ("organisation that added Daimon" in note) is foreign, note
 
 
 async def test_send_refuses_without_the_approval_card(

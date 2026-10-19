@@ -412,7 +412,10 @@ async def _github_connect_impl(
         return ConnectResult(
             status="delivery_failed",
             message=(
-                "I couldn't send the Connect GitHub link to your 1:1 chat with me. "
+                "I couldn't send the Connect GitHub link: connecting GitHub works only "
+                "for people in the organisation that added Daimon."
+                if auth.platform == "teams" and origin.sender_foreign
+                else "I couldn't send the Connect GitHub link to your 1:1 chat with me. "
                 "Open a chat with me, then try again. A chat can't be opened "
                 "with people from another organisation."
                 if auth.platform == "teams"

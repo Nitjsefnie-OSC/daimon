@@ -330,6 +330,27 @@ def test_unread_history_is_marked_so_the_agent_does_not_guess() -> None:
     assert "untrusted" not in message
 
 
+def test_a_group_chat_files_hint_for_a_guest_suggests_no_one_to_one_chat() -> None:
+    chat = "19:g@thread.v2"
+    messages = {
+        foreign: render_user_message(
+            "<controls/>",
+            dataclasses.replace(
+                make_inbound("hi", conversation=chat, kind="group"), is_foreign=foreign
+            ),
+            is_admin=False,
+            keys="",
+            prefix="",
+            history=unavailable_block("graph 403"),
+        )
+        for foreign in (False, True)
+    }
+
+    assert "1:1 chat" in messages[False], "a local sender is told as before"
+    assert "1:1" not in messages[True] and "suggest no other place" in messages[True]
+    assert 'files="unavailable"' in messages[True]
+
+
 def test_a_group_chat_turn_is_one_place_without_files() -> None:
     chat = "19:g@thread.v2"
     inbound = dataclasses.replace(

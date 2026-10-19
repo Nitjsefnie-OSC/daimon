@@ -223,27 +223,37 @@ def _chat_confirms(
     )
 
 
-def _panel(platform: str | None, agent_name: str) -> str:
+def _panel(platform: str | None, agent_name: str, *, foreign: bool = False) -> str:
+    if foreign:
+        return (
+            f"{setup_instruction(platform, foreign=True)}; there, open {agent_name} and use Add "
+            "skill: it shows the same preview and adds it on their own click"
+        )
     return (
         f"{setup_instruction(platform)}, open {agent_name} and use Add skill: it shows the same "
         "preview and adds it on their own click"
     )
 
 
-def _no_card_preview(platform: str | None, reason: NoCardReason, agent_name: str) -> str:
+def _no_card_preview(
+    platform: str | None, reason: NoCardReason, agent_name: str, *, foreign: bool = False
+) -> str:
     why, fix = _no_card_text(reason)
     then = f"{fix} Otherwise they" if fix else "To add it they"
-    panel = _panel(platform, agent_name)
+    panel = _panel(platform, agent_name, foreign=foreign)
     return f"Adding it from chat needs a confirmation card, and {why}. {then} {panel}."
 
 
-def _no_card_refusal(platform: str | None, reason: NoCardReason, agent_name: str) -> str:
+def _no_card_refusal(
+    platform: str | None, reason: NoCardReason, agent_name: str, *, foreign: bool = False
+) -> str:
     why, fix = _no_card_text(reason)
     then = f"{fix} Otherwise tell them" if fix else "Tell them"
     end = "" if fix else " Do not retry."
     return (
         "Nothing was added. Adding a skill from chat needs the person to press Approve on a "
-        f"confirmation card, and {why}. {then} to {_panel(platform, agent_name)}.{end}"
+        f"confirmation card, and {why}. {then} to "
+        f"{_panel(platform, agent_name, foreign=foreign)}.{end}"
     )
 
 
@@ -544,7 +554,8 @@ async def _add_skill_impl(
             )
         chat_confirms = _chat_confirms(auth, origin, no_card)
         if content_hash is not None and no_card is not None and not chat_confirms:
-            raise ToolError(_no_card_refusal(auth.platform, no_card, agent_name))
+            foreign = origin is not None and origin.sender_foreign
+            raise ToolError(_no_card_refusal(auth.platform, no_card, agent_name, foreign=foreign))
         async with httpx.AsyncClient(timeout=30.0) as http:
             bundle, source = await _load_bundle(
                 runtime,
@@ -590,7 +601,8 @@ async def _add_skill_impl(
                     f"content_hash='{bound}'; they approve it once more on the card."
                 )
             else:
-                then = _no_card_preview(auth.platform, no_card, agent_name)
+                foreign = origin is not None and origin.sender_foreign
+                then = _no_card_preview(auth.platform, no_card, agent_name, foreign=foreign)
             return AddSkillResult(
                 status="preview",
                 agent_name=agent_name,
