@@ -47,16 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The GitHub repo editor now refuses saves over 256 KiB, gives up listing your GitHub repos after 60 seconds, and keeps your ticked repos when Try again follows a GitHub error.
-- **People from another organisation get none of the agent's credentials.**
-  A Teams external participant or guest answered in a `readers: own`
-  channel used to get the agent's keys as a mounted `.env` and its shared
-  MCP tokens in their vault, though their tool calls were already
-  restricted. Their sessions now carry neither: a server only a shared
-  token reaches is left off unless they sign in to it themselves, and their
-  own sign-ins still work. A session that may hold those credentials is
-  replaced, not reused, the next time such a person is answered in it,
-  without carrying its work.
-
 - A Teams channel command whose "answered in your 1:1 chat" notice Teams refuses is still answered in the 1:1 chat. Failed sends now log Teams' error code.
 - Live GitHub tokens have their own index, so the scheduler no longer reads every issued token, revoked ones included, on each tick.
 - Revoked GitHub token records are now deleted 7 days after they expire and unused ones 1 hour after, while live tokens and the security audit log are kept.
@@ -71,8 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DAIMON_TEAMS__ADMIN_TEAM_ID` to the team's Entra group ID and add the app
   to that team; its owners, read live and cached for a minute, are Daimon's
   admins, so adding one needs no redeploy, and a removed one loses admin
-  within about a minute, routines and tools included. Guests and people from
-  another organisation never are. A failed owner read falls back to the last
+  within about a minute, routines and tools included. A failed owner read falls back to the last
   good one for up to an hour and demotes no one; once no owner list has been
   read within an hour, nobody is an admin until the next good read.
   Support requests and channel budget notices for the admins reach these
@@ -153,6 +142,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memory, no Daimon model knobs).
 
 ### Removed
+
+- **Teams treats people from another organisation as members.** A shared
+  channel's external participants and Entra guests are answered wherever a
+  member is, with the same commands, cards, tools, credentials and sessions,
+  as everyone in a Discord server already is. Group chats are answered
+  whoever is in them, and a guest owner of the admin team is an admin. Teams
+  still opens no 1:1 chat across organisations, so one naming another tenant
+  is refused, and a command answered there tells them so instead of pointing
+  them to it. `DAIMON_TEAMS__RESTRICT_GUESTS`,
+  `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS` and `daimon tenants
+  access-policy --add-member-guest` are gone. Slack Connect is unchanged.
 
 - **`DAIMON_TEAMS__ADMIN_USER_IDS` is no longer read.** Make those admins
   owners of the admin team; a leftover value is ignored, and anyone not an
@@ -979,12 +979,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- Teams: leftover `DAIMON_TEAMS__RESTRICT_*` values and stored member guest lists are ignored. Uploading the rebuilt app package (0.6.1) is optional; it only drops the unused `ChannelMember.Read.Group` permission. The `is_external` columns are no longer read or written and are dropped in a later release.
 - Teams Ask a person: a deployment that put a Teams channel (`19:…`) in `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` moves it to `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`; until then Teams offers no Ask a person, and Discord ignores the Teams id.
 - Building the image needs Docker 23 or later: the Dockerfile uses BuildKit instructions the legacy builder rejects.
-- Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying. The new code leaves an empty member guest list out of the stored access policy, so older processes still read it; once one is listed, upgrade every process.
+- Run migrations `0046_account_external` and `0047_turn_origin_external` before deploying.
 - Isolated channels' agents no longer read other channels, nor sessions with no channel stamp: setups that relied on it stop working.
-- Teams guests in standard and private channels and 1:1 chats are no longer answered outside isolated channels unless listed with `daimon tenants access-policy --add-member-guest`, or unless `DAIMON_TEAMS__RESTRICT_GUESTS=false`.
-- Teams: rebuild the app package (version 0.4.1) and upload it again for the new `ChannelMember.Read.Group` permission, which tells guests and external participants apart in channels; a team owner accepts it. Until then, a sender the roster can't place in a shared channel is held as external.
 - Deployments that set `DAIMON_DISCORD__PER_CALLER_THREAD_SESSIONS=false`: each caller in an existing thread starts a fresh session of their own at their next message; the shared session is not carried over.
 - Notebook links change once: after the notebook host upgrades, links shared earlier (scratch notebooks and blogs) stop working. Blogs get a token on their first respawn; `list_notebooks` returns the new links. Upgrade the notebook host before the bot. A host with a non-localhost `DAIMON_NOTEBOOK__PUBLIC_HOST` and no `https://` `DAIMON_NOTEBOOK__PUBLIC_URL_BASE` no longer boots; set one, or `DAIMON_NOTEBOOK__ALLOW_HTTP_LINKS=true` on a trusted private network. Editors need `DAIMON_NOTEBOOK__ALLOW_EDITABLE=true` on both the bot and the host. A public notebook host without `DAIMON_NOTEBOOK__ORIGIN_BASE` refuses every upload until `DAIMON_NOTEBOOK__TENANTS` lists the tenant UUIDs it may serve (comma-separated or a JSON array; `daimon tenants list --json` shows them, and each refusal names the id), and refuses tokens that name no tenant, so upgrade the bot with it. Set `ORIGIN_BASE` (wildcard DNS `*.<domain>` and a wildcard certificate) to serve any tenant in isolation. A `tenant.json` left in the data directory by a pre-release build is ignored and can be deleted.
 - Set `DAIMON_CRYPTO__KEYS` before upgrading: keyless deployments still start and read existing values, but refuse new agent key writes unless `DAIMON_CRYPTO__ALLOW_PLAINTEXT=true`, including the agent's own `self_write_file` notes (the tool error names `DAIMON_CRYPTO__KEYS`). `DAIMON_CRYPTO__KEYS` now also accepts the raw `Fernet.generate_key()` output or a comma-separated list; before this, only a JSON list parsed and a bare key stopped every service at boot. After setting keys and restarting **every** process with them, run `daimon crypto encrypt-plaintext`, then `daimon crypto verify`. Stop old readers/writers before the migration when enabling encryption. Keep keys available for reads and reversible downgrade; see `docs/self-hosting.md`.
@@ -1003,22 +1002,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tier1` (package version 0.4.1). Adding the app to a team does not add it to
   these channels: each one's owner adds it from the channel. Rebuild the
   package and upload it again to use them.
-- **People from another organisation in Teams.** A shared channel's external
-  participants (B2B direct connect) and guests (Entra B2B guest accounts, in
-  any channel or 1:1 chat) are answered only inside an isolated channel, and
-  never in its setup thread. They run as members, never admins or channel
-  admins (whatever team ownership or a grant says), commands
-  reach the agent as plain text, and their tool calls get only the
-  conversation's tools; any other tool, including ones added later, returns
-  an error the agent relays. A sender is placed by the activity's tenant,
-  their roster entry and the channel's Graph member list; one nothing places
-  is held as external for that turn in a channel not known to be standard or
-  private, and nothing is stored. `daimon tenants access-policy
-  --add-member-guest` lists guests to treat as members.
-  `DAIMON_TEAMS__RESTRICT_GUESTS` and
-  `DAIMON_TEAMS__RESTRICT_EXTERNAL_PARTICIPANTS` (both on) switch the rules
-  off per kind. Setup is in `docs/self-hosting.md`, behaviour in
-  `docs/teams.md`.
 - **Operator tokens from the setup panels.** Server admins on Discord, Slack
   and Teams mint, list and revoke operator tokens from Who answers where:
   `tenant:read`, `channels:write`, `agents:archive` and `promo:redeem` only

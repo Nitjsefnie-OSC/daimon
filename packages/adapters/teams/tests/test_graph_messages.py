@@ -7,8 +7,8 @@ gets the message Graph would return, so only routing is under test.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
+import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from daimon.adapters.teams.admissions import HOLDING, admission_channel
 from daimon.adapters.teams.app import TeamsApp
-from daimon.adapters.teams.externals import ExternalParticipants, MemberFacts
 from daimon.adapters.teams.identity import DENIED
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import TeamsChannelSubscriptionRow
@@ -56,7 +55,6 @@ def db_session_factory(
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 PRIVATE = "19:private-1@thread.tacv2"
 ROOT = "1700000000001"
-FOREIGN_TENANT = "99999999-9999-9999-9999-999999999999"
 CHANNEL = TeamsChannelSubscriptionRow(
     tenant_id=TENANT,
     channel_id=PRIVATE,
@@ -168,6 +166,19 @@ async def test_a_typed_bot_name_on_a_root_post_starts_a_thread_turn(
         TEAM_GROUP_ID,
         SERVICE_URL,
     ), "what Graph does not carry comes from the subscription"
+    assert not inbound.is_foreign, "our own tenant"
+
+
+async def test_a_sender_from_another_tenant_is_marked_foreign(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _switch_on(db_session_factory)
+    routed = Routed(_app(db_session_factory))
+    user = {"id": AAD_OBJECT_ID, "displayName": "Ada", "tenantId": str(uuid.UUID(int=99))}
+    await routed.graph(_graph(ROOT, "<p>@Daimon help</p>", reply_to=None, sender={"user": user}))
+
+    [(path, inbound)] = routed.paths
+    assert path == "turn" and inbound.is_foreign, "commands must not point them to a 1:1 chat"
 
 
 async def test_a_reply_quoting_the_bot_is_addressed_to_it(
@@ -202,7 +213,7 @@ async def test_an_untagged_thread_reply_goes_to_participation(
 
     [(path, inbound)] = routed.paths
     assert path == "participation" and inbound.unprompted, "screened for a followed thread"
-    assert inbound.user_id == AAD_OBJECT_ID and not inbound.is_external
+    assert inbound.user_id == AAD_OBJECT_ID
 
 
 async def test_the_bots_own_message_and_an_untagged_root_post_are_skipped(
@@ -213,50 +224,6 @@ async def test_the_bots_own_message_and_an_untagged_root_post_are_skipped(
     await routed.graph(_graph("1700000000003", "<p>Here you go</p>", sender=bot))
     await routed.graph(_graph("1700000000004", "<p>new topic</p>", reply_to=None))
     assert routed.paths == [], "no app's message and no unaddressed root post is routed"
-
-
-async def test_a_guest_is_classified_by_the_roster_not_by_graphs_tenant(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Graph may show a B2B guest's home tenant; the roster, as for Bot Framework, decides."""
-    teams = _app(db_session_factory)
-    lookups: list[tuple[str, str]] = []
-
-    async def roster_member(conversation_id: str, user_id: str) -> MemberFacts | None:
-        lookups.append((conversation_id, user_id))
-        return MemberFacts(tenant_id=ENTRA_TENANT_ID, is_guest=True)
-
-    async def channel_type(_team: str, _channel: str) -> str | None:
-        return "private"
-
-    async def no_members(*_args: object) -> dict[str, MemberFacts]:
-        return {}
-
-    async def no_listed_guests() -> frozenset[str]:
-        return frozenset()
-
-    teams.runtime = dataclasses.replace(
-        teams.runtime,
-        externals=ExternalParticipants(
-            tenant_id=ENTRA_TENANT_ID,
-            roster_member=roster_member,
-            channel_type=channel_type,
-            channel_members=no_members,
-            member_guests=no_listed_guests,
-        ),
-    )
-    routed = Routed(teams)
-    user = {"id": AAD_OBJECT_ID, "displayName": "Bob", "tenantId": FOREIGN_TENANT}
-    await routed.graph(_graph("1700000000003", "<p>hello</p>", sender={"user": user}))
-    [(_path, inbound)] = routed.paths
-    assert not inbound.is_external_known and inbound.home_tenant_id is None, (
-        "Graph's sender tenant is not taken as evidence"
-    )
-    classified = await teams._classified(inbound)  # pyright: ignore[reportPrivateUsage]
-    assert lookups == [(PRIVATE, AAD_OBJECT_ID)], "the Bot Framework roster is asked"
-    assert classified.is_external and classified.home_tenant_id is None, (
-        "a guest is held as one, not as a member of another organisation"
-    )
 
 
 async def test_while_draining_a_message_is_held_and_the_next_boot_runs_it_once(
