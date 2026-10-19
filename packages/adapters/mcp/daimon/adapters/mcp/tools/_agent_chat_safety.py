@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import structlog
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
@@ -68,7 +69,29 @@ NOT_RESUMABLE_MSG = (
 _MAX_TURN_PAGES = 20
 _POLL_S = 1.0
 
-_workers: dict[tuple[int, str], asyncio.Task[bool]] = {}
+
+@dataclass(frozen=True)
+class _Worker:
+    """This process's confirmation worker for a handle, and the turn it owns."""
+
+    task: asyncio.Task[bool]
+    turn_event_id: str
+
+    def owns(self, turn_event_id: str | None) -> bool:
+        return not self.task.done() and self.turn_event_id == turn_event_id
+
+
+_workers: dict[tuple[int, str], _Worker] = {}
+
+
+def single_attempt(runtime: McpRuntime) -> AsyncAnthropic:
+    """The client for a send that changes a session: one attempt, no SDK retry.
+
+    A retried message or confirmation would go out after its gate and its
+    decision, under whatever policy or rule changed meanwhile. A failed or
+    ambiguous attempt raises instead, and is never resent blindly.
+    """
+    return runtime.client.with_options(max_retries=0)
 
 
 def require_session_driver(session: BetaManagedAgentsSession, auth: AuthIdentity) -> None:
@@ -87,7 +110,7 @@ def require_session_driver(session: BetaManagedAgentsSession, auth: AuthIdentity
 async def gate(runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession) -> None:
     """Rewrite `session`'s tool config from the current policy before a send."""
     await gate_session_snapshot(
-        runtime.client,
+        single_attempt(runtime),
         session,
         runtime.settings.tool_safety,
         scope=mcp_scope(auth),
@@ -221,17 +244,17 @@ def watch_turn(
     """
     key = (id(runtime), handle)
     if (previous := _workers.get(key)) is not None:
-        previous.cancel()
+        previous.task.cancel()
     task = asyncio.create_task(
         _watch(
             runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=rules_channel_id
         ),
         context=contextvars.Context(),
     )
-    _workers[key] = task
+    _workers[key] = _Worker(task=task, turn_event_id=turn_event_id)
 
     def finished(done: asyncio.Task[bool]) -> None:
-        if _workers.get(key) is done:
+        if (current := _workers.get(key)) is not None and current.task is done:
             _workers.pop(key, None)
 
     task.add_done_callback(finished)
@@ -268,6 +291,12 @@ async def _watch(
                     stop = turn.state.stop_reason
                     ids = pending_confirmation_ids(stop, confirmed=turn.confirmed | answered)
                     if ids:
+                        # The confirmation resumes the turn: gate it as a message
+                        # would be, and decide on the snapshot that gate left.
+                        await gate(runtime, auth, session)
+                        session = await retrieve_session(
+                            runtime.client, handle, scope=mcp_scope(auth)
+                        )
                         await _answer(
                             runtime, auth, session, turn, ids, rules_channel_id, annotations_for
                         )
@@ -306,7 +335,7 @@ async def _answer(
     ]
     # The session port carries only messages and interrupts; confirmations go
     # through the turn transport the routine driver answers with.
-    await LegacyTurnIO(runtime.client, session.id, scope=mcp_scope(auth)).send(
+    await LegacyTurnIO(single_attempt(runtime), session.id, scope=mcp_scope(auth)).send(
         build_decision_events(decisions)
     )
 
@@ -367,10 +396,10 @@ async def turn_status(
     """
     if not await _paused(runtime, auth, session):
         return None
-    worker = _workers.get((id(runtime), session.id))
-    if worker is not None and not worker.done():
-        return ("running", None)
     turn = await _read_turn(runtime, auth, session.id)
+    worker = _workers.get((id(runtime), session.id))
+    if worker is not None and worker.owns(turn.boundary_id):
+        return ("running", None)
     recorded = await _recorded_turn(runtime, session.id)
     ours = recorded is not None and recorded.turn_event_id == turn.boundary_id
     return ("paused", PAUSED_HINT if ours else AWAITING_CARD_HINT)
@@ -399,12 +428,17 @@ async def resume_paused(
     if turn.boundary_id is None or recorded is None or recorded.turn_event_id != turn.boundary_id:
         raise ToolError(NOT_RESUMABLE_MSG)
     worker = _workers.get((id(runtime), session.id))
-    if worker is None or worker.done():
-        worker = watch_turn(
+    # Reuse only the worker that owns this very turn; one left watching an
+    # older turn is replaced (`watch_turn` cancels it).
+    task = (
+        worker.task
+        if worker is not None and worker.owns(turn.boundary_id)
+        else watch_turn(
             runtime,
             auth,
             session.id,
             turn_event_id=turn.boundary_id,
             rules_channel_id=recorded.rules_channel_id,
         )
-    return Resumed(worker=worker, turn_event_id=turn.boundary_id)
+    )
+    return Resumed(worker=task, turn_event_id=turn.boundary_id)

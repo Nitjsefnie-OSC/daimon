@@ -40,6 +40,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.turn_card_intents import create_turn_card_intent
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import admission as admission_module
 from daimon.core.turn.admission import admit
 from daimon.core.turn.deps import TurnDeps
@@ -172,6 +173,7 @@ async def _run_batch(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     started = asyncio.Event()
     finished = asyncio.Event()

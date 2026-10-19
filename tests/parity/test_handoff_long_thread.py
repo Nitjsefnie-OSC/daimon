@@ -44,6 +44,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
 )
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
@@ -220,6 +221,7 @@ async def test_slack_long_thread_replacement_stays_within_thread_page_limit_and_
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     old_row = await create_thread_session(
         db_session,

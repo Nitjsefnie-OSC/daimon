@@ -22,6 +22,7 @@ from daimon.core.config import McpSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_vault import chat_mcp_credential
 from daimon.core.sessions import create_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing import (
     build_fake_anthropic,
     ma_agent,
@@ -192,6 +193,7 @@ async def test_discord_turn_creates_session_with_discord_guild_id_scope(
             public_url=HttpUrl(PUBLIC_URL),
         ),
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(captured) == 1, "exactly one credential POST on cold path"
@@ -240,6 +242,7 @@ async def test_discord_turn_with_existing_matching_url_vault_skips_rebind(
             public_url=HttpUrl(PUBLIC_URL),
         ),
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     delete_calls = [c for c in call_log if c[0] == "DELETE"]
@@ -281,6 +284,7 @@ async def test_minted_jwt_resolves_to_discord_scoped_identity(
             public_url=HttpUrl(PUBLIC_URL),
         ),
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(captured) == 1

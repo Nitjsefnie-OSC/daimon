@@ -7,6 +7,7 @@ import httpx
 import pytest
 from daimon.core import headless_runner
 from daimon.core.mux_backend import resource_scope
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.ma import MARouter, sse_response
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 from daimon.testing.ma_transport import ScriptedTransport
@@ -76,6 +77,11 @@ async def test_headless_turn_uses_authorized_scope_and_original_requests(
         r"/v1/sessions/session-headless/events$",
         lambda request, match: httpx.Response(200, json={"data": None}),
     )
+    router.add(
+        "GET",
+        r"/v1/sessions/session-headless$",
+        lambda request, match: httpx.Response(200, json=session.model_dump(mode="json")),
+    )
     transport = ScriptedTransport(router=router)
     async with transport.client() as client:
         assert (
@@ -86,6 +92,7 @@ async def test_headless_turn_uses_authorized_scope_and_original_requests(
                 trigger_message="hello",
                 tenant_id=tenant_id,
                 account_id=account_id,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
             == "authorized"
         )
@@ -95,6 +102,7 @@ async def test_headless_turn_uses_authorized_scope_and_original_requests(
         ("GET", "/v1/environments/env-headless"),
         ("POST", "/v1/sessions"),
         ("GET", "/v1/sessions/session-headless/events/stream"),
+        ("GET", "/v1/sessions/session-headless"),
         ("POST", "/v1/sessions/session-headless/events"),
     ]
     turn_scopes = [scope for scope in scopes if scope.authorization_id == "headless-turn"]
@@ -135,5 +143,6 @@ async def test_mux_headless_missing_identity_fails_before_provider_io(
                 trigger_message="hello",
                 tenant_id=tenant_id,
                 account_id=account_id,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
     assert transport.requests == []

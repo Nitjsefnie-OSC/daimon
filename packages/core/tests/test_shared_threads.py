@@ -51,6 +51,7 @@ from daimon.core.stores import mux_state, tenant_ledger, usage_events
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
@@ -257,6 +258,7 @@ def _deps(sessionmaker: async_sessionmaker[AsyncSession], fake: _Fake) -> TurnDe
         github_app_private_key=None,
         public_url=None,
         channel_backends=True,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 

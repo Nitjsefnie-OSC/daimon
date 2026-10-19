@@ -1045,7 +1045,26 @@ meters nothing and logs why.
 It also declares a tool-confirmation posture: what the driver does when MA
 pauses the session on a `requires_action` idle. `RequireApproval` ends the
 turn, `AutoApprove` allows every blocked call, and `PolicyApproval` asks a
-decider per call and sends each answer on the same stream. The decider comes
+decider per call and sends each answer on the same stream. Routines and
+other headless runs use `PolicyApproval` with the unattended decider
+(`unattended_posture`), with tool safety on or off, and so do `daimon run`,
+a workspace transfer's checkpoint turn, fleet workers and unattended wakes.
+The driver-run ones go through one send boundary
+(`turn/driver.unattended_sends`): the session is gated
+(`unattended.session_gate`) right before the message and before every
+confirmation batch, live or on reconnect, and every send is a single
+attempt; a failed gate stops the send. For `run_prepared_turn` (fleet workers,
+unattended wakes, and future watches or completion turns), this also covers
+dead-session recovery. Platform queue dispatchers explicitly mark timers and
+worker-completion wakes unattended. User-initiated handoffs and private-input
+continuations retain their attended approval surfaces. Managed Agents runtimes refresh
+the snapshot before **every** confirmation batch. A non-Anthropic runtime, or an injected mux
+backend without a session read, refuses every unattended confirmation with
+a plain explanation that it cannot refresh the tool safety gate. This rule
+applies with safety on or off; the model receives a denial and the turn can
+continue or end. Unattended turns never invoke a human provider-action hook.
+Tool rules come from the session's
+conversation channel (`session_rules_channel`), never its budget channel. The decider comes
 from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write
 model in `packages/core/daimon/core/tool_safety.py`. With
 `DAIMON_TOOL_SAFETY__AGENT_RULES` on as well, each third-party paused call
@@ -1141,10 +1160,18 @@ endpoint: with the policy on, `create_session` re-points a `daimon-mcp` entry
 naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
 reserved name is gated like any other server. A pending card is owned by the
 turn: stopping the turn, a replayed pause, or the turn ceiling cancels the
-decision, refuses the call and retires the card, so an Approve that arrives
-after Stop never runs anything. That cleanup is best effort within a few
+decision and retires the card, so an Approve that arrives after Stop never
+runs anything. Attended cleanup refuses pending calls. A gated unattended
+turn leaves them paused and interrupts instead: even a denial would resume
+execution without a successful gate. Cancellation during a confirmation
+gate cancels that gate before interrupting; a failed gate sends no confirmations. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.
+
+A queued handoff inherits attendance from its trusted execution origin. Timer
+and worker-completion turns and their model-created handoffs stay unattended;
+a real human message or private-input action supplies attended provenance.
+Queue reasons alone cannot upgrade a turn to human approval surfaces.
 
 Agent-chat turns (`start_turn`, `continue_turn` and `ask`, per agent and on
 the hub) have nobody to press Approve, so they take the unattended rules
@@ -1162,10 +1189,17 @@ boundary and tool-rule channel are recorded on the session's settle row
 one bounded worker for that turn (`_agent_chat_safety.watch_turn`), which
 answers only pauses after its own `user.message` boundary, each decided at
 call time by `unattended_posture`: `unattended_decider` with the agent's
-rules for that channel (`channel_for_tool_rules`), the protected tools
+rules for that channel (`channel_for_tool_rules`, which retains routine
+channels despite their private transcript stamp and excludes genuine DM
+source channels), the protected tools
 refused, never `AutoApprove` and never the session's frozen config.
-Confirmations themselves are not re-gated; the gate before the message
-covers the turn. `annotations_for` is the seam for operator-trusted MCP
+Each confirmation batch resumes the turn, so the worker gates the session
+again before deciding it, and a failed gate sends nothing. Messages,
+confirmations and gate updates go out with one attempt (`single_attempt`,
+no SDK retry), so nothing is resent after its gate and decision; a failed or
+ambiguous attempt raises and is left for a new, fully checked call. The
+registry keeps each worker's turn boundary: a worker reads as `running`, and
+a resume reuses it, only for the turn it owns. `annotations_for` is the seam for operator-trusted MCP
 hints; nothing supplies them yet. A read never answers a pause: `get_session`
 (both), `get_my_session` and hub `get_session` report `running` while this
 process's worker owns the turn and `paused` with a hint otherwise; list tools
@@ -1532,6 +1566,9 @@ admission before any of this runs.
 - **`daimon run`**, in
   `packages/adapters/cli/daimon/adapters/cli/run/command.py`, is a single-turn
   subprocess entry point that calls `run_turn` directly with `BillingExempt`.
+  Nobody answers a card there, so it is unattended: before the message it
+  gates the operator's session (`gate_session_snapshot`, whatever the session
+  was created with) and answers every pause with `unattended_posture`.
 - **Wakes** run a turn in an existing thread later, with nobody mentioning the
   bot: a handoff's first turn for the new agent, work unblocked by a private
   form, a one-shot timer (`daimon.core.continuity.timers`, the `create_timer`

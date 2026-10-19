@@ -35,6 +35,7 @@ from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAg
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.state import TurnState
@@ -327,6 +328,13 @@ class FakeAnthropic:
     """
 
     beta: FakeBeta = field(default_factory=FakeBeta)
+    #: Every `with_options` call: a single-attempt send asks for max_retries=0.
+    options: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
+
+    def with_options(self, **options: object) -> FakeAnthropic:
+        """The same fake (it never retries), with the requested options noted."""
+        self.options.append(options)
+        return self
 
 
 # --- Error constructors (SDK exception shape) -----------------------------
@@ -422,5 +430,6 @@ def deps_for(client: object = None, sm: async_sessionmaker[AsyncSession] | None 
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
         turn_path="mux",
     )

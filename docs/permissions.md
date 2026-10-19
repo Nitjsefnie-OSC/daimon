@@ -114,7 +114,9 @@ agent `allow` rule with `chat_and_routines` covers it), and `deny` always
 refuses. Agent tool rules for the turn's channel apply as well as agent-wide
 ones: the channel of a key minted in a channel, otherwise the channel the
 conversation belongs to (a Slack thread's parent channel; never the source
-channel of a DM). Before every message the session's tool settings are set
+channel of a DM). A routine's private transcript stamp keeps its channel
+rules when the session is continued through the CLI, MCP or a checkpoint.
+Before every message the session's tool settings are set
 again from the current policy, so a session created before tool safety was
 on, or one whose agent allowed a tool outright, still asks. The process that
 sent the turn answers its tool calls, deciding each one when it is made.
@@ -126,6 +128,10 @@ sessions and are refused there. Switching an agent's backend and sending
 Microsoft mail or invites are refused with tool safety on or off; Microsoft
 file changes, which ask in chat only with tool safety on, are refused only
 with it on.
+
+In-process unattended runs leave pending calls paused and interrupt the session
+when a decision is cancelled, its turn ceiling expires, or its confirmation
+gate fails. Cleanup sends no denial confirmations past an unsuccessful gate.
 
 Reading a session never answers a tool call. If the service restarts while an
 agent-chat turn waits on one, the turn stays paused, and `get_session` and

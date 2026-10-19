@@ -22,6 +22,7 @@ from typing import Literal, TypedDict, cast
 import anthropic as _anthropic
 import structlog
 from anthropic.types import RawMessageStreamEvent
+from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_system_content_block_param import (
     BetaManagedAgentsSystemContentBlockParam,
 )
@@ -44,6 +45,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
+from daimon.core.mux_compat import legacy_call
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_mutation import SessionRetired, session_mutation_fence
 from daimon.core.session_preparation_gate import pool_headroom
@@ -62,11 +64,12 @@ from daimon.core.turn.approvals import (
     agent_rule_lookup,
     channel_for_tool_rules,
     chat_tool_confirmation,
+    unattended_decider,
 )
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.driver import run_turn
+from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
@@ -77,7 +80,13 @@ from daimon.core.turn.lifecycle import (
     acknowledge,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
-from daimon.core.turn.posture import Billed, BillingPosture, UsageRecorder
+from daimon.core.turn.posture import (
+    Billed,
+    BillingPosture,
+    PolicyApproval,
+    ToolConfirmation,
+    UsageRecorder,
+)
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
     CreatedSession,
@@ -95,14 +104,16 @@ from daimon.core.turn.provider_actions import (
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn.unattended import protected_tools, refuse_ungated_confirmation, session_gate
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
 from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.profile import SUPPORTED
-from mux.errors import ScopeViolation
-from mux.profiles import get_profile
+from mux.drivers.anthropic.sessions_lifecycle import SESSION_READS_NAMESPACE, SessionReads
+from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.profiles import MANAGED_AGENTS, get_profile
 from sqlalchemy.exc import SQLAlchemyError
 
 
@@ -808,6 +819,12 @@ async def run_prepared_turn(
     turn_card_intent_id: uuid.UUID | None = None,
     worker_finished: TaskContinuationRow | None = None,
 ) -> RunOutcome:
+    """Drive an admitted turn, including fleet workers and unattended wakes.
+
+    Unattended Managed Agents sends re-gate the current session before each
+    message and confirmation batch. Runtimes without a session read refuse
+    unattended confirmations with a plain reason, including with safety off.
+    """
     observation = (
         prepared.admission.observation
         or current_outcome.get()
@@ -912,13 +929,14 @@ async def run_prepared_turn_impl(
     original recorder.
 
     `confirm_write` is the adapter's confirmation-card hook and `attended`
-    says whether a person is waiting on this turn (default: every origin but
-    `routine`). Both only matter while
-    `deps.tool_safety` is enabled: a third-party write then waits for the
-    requester to approve it on a card (`attended=True`) or is refused under
-    the unattended rules (`attended=False`). An adapter that passes no hook
-    gets `no_confirmation_surface`, so its writes are refused, never run
-    unseen. With the policy off the posture stays `RequireApproval`.
+    says whether a person is waiting (default: every origin but `routine`).
+    Unattended turns always use the unattended decider, policy on or off.
+    Managed Agents re-reads and gates the session before every message and
+    confirmation batch, including recovery. Non-Anthropic runtimes and mux
+    backends without a session read refuse every unattended confirmation
+    with a plain reason; a gate failure prevents the batch from being sent.
+    Attended writes use the adapter's card hook when the policy requires it;
+    a missing hook refuses them with `no_confirmation_surface`.
 
     `active_turn_message_id` is the in-flight marker the adapter wrote on
     `prepared.mapping_id` for this turn, if any. A recovery moves it onto the
@@ -942,6 +960,7 @@ async def run_prepared_turn_impl(
     breach can never loop into a second wall-clock-priced attempt.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
+    unattended = not (attended if attended is not None else origin != "routine")
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
@@ -969,25 +988,81 @@ async def run_prepared_turn_impl(
         session_id: str,
         mapping_id: uuid.UUID | None,
         session_ref: ResourceRef | None = None,
-    ) -> AsyncIterator[None]:
-        if (deps.turn_path or load_turn_settings().path) == "legacy":
-            yield
-            return
-        persistence = await prepared_persistence(
-            deps,
-            admission,
-            tenant_id=tenant_id,
-            platform=platform,
-            thread_id=thread_id,
-            session_id=session_id,
-            mapping_id=mapping_id,
-            operation_key=operation_key,
-            session_ref=session_ref,
-            scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
-            fleet_capture=deps.fleet_enabled and prepared._source is not None,  # pyright: ignore[reportPrivateUsage]
-        )
-        with persistence.activate():
-            yield
+        *,
+        confirmation: ToolConfirmation,
+        backend: ManagedAgents | None = None,
+        scope: Scope | None = None,
+    ) -> AsyncIterator[ToolConfirmation]:
+        selected_path = deps.turn_path or load_turn_settings().path
+        posture = confirmation
+        with contextlib.ExitStack() as stack:
+            if unattended:
+                revision = admission.backend_revision
+                gateable = revision is None or revision.profile == MANAGED_AGENTS.profile_id
+                read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None
+                injected = (backend or deps.backend) if selected_path == "mux" else None
+                gate_scope = admitted_session_scope(
+                    admission, tenant_id=tenant_id, session_id=session_id, prepared=scope
+                )
+                if gateable and injected is not None:
+                    # An injected mux runtime must offer the actual snapshot
+                    # read; its profile alone does not prove it can re-gate.
+                    ref = session_ref
+                    if ref is None and deps.backend_session_ref is not None:
+                        ref = deps.backend_session_ref(session_id, gate_scope)
+                    try:
+                        reads = injected.extension(
+                            SessionReads, namespace=SESSION_READS_NAMESPACE, version=1
+                        )
+                    except UnsupportedCapability:
+                        gateable = False
+                    else:
+                        if ref is None:
+                            gateable = False
+                        else:
+
+                            async def read_injected_session() -> BetaManagedAgentsSession:
+                                return BetaManagedAgentsSession.model_validate(
+                                    await legacy_call(reads.read_native(gate_scope, ref))
+                                )
+
+                            read_session = read_injected_session
+
+                if gateable:
+                    stack.enter_context(
+                        unattended_sends(
+                            session_gate(
+                                deps.anthropic,
+                                session_id,
+                                deps.tool_safety,
+                                scope=gate_scope,
+                                public_url=deps.public_url,
+                                session_factory=deps.sessionmaker,
+                                tenant_id=tenant_id,
+                                read_session=read_session,
+                            )
+                        )
+                    )
+                else:
+                    posture = PolicyApproval(decide=refuse_ungated_confirmation)
+            if selected_path == "legacy":
+                yield posture
+                return
+            persistence = await prepared_persistence(
+                deps,
+                admission,
+                tenant_id=tenant_id,
+                platform=platform,
+                thread_id=thread_id,
+                session_id=session_id,
+                mapping_id=mapping_id,
+                operation_key=operation_key,
+                session_ref=session_ref,
+                scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+                fleet_capture=deps.fleet_enabled and prepared._source is not None,  # pyright: ignore[reportPrivateUsage]
+            )
+            with persistence.activate():
+                yield posture
 
     root_intent = turn_card_intent_id if deps.fleet_enabled and origin != "worker" else None
 
@@ -1019,11 +1094,37 @@ async def run_prepared_turn_impl(
             ):
                 confirmed_tools = frozenset()
         prepared_source = prepared._source  # pyright: ignore[reportPrivateUsage]
+        annotations_for = (
+            mcp_annotation_lookup(
+                server_urls={
+                    s.name: s.url
+                    for s in prepared.admission.agent.mcp_servers
+                    if s.name in deps.tool_safety.trusted_annotations
+                },
+                token_for=agent_mcp_token_for(
+                    deps.sessionmaker,
+                    fernet=deps.fernet,
+                    tenant_id=tenant_id,
+                    agent_id=(
+                        prepared_source.agent_id
+                        if prepared_source is not None
+                        else derive_agent_uuid(
+                            tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
+                        )
+                    ),
+                ),
+            )
+            # Only servers the operator trusts for annotations are read; with
+            # none trusted no catalogue is ever listed.
+            if getattr(deps.tool_safety, "enabled", False)
+            and getattr(deps.tool_safety, "trusted_annotations", ())
+            else None
+        )
         tool_confirmation = chat_tool_confirmation(
             deps.tool_safety,
             requester_platform_user_id=external_user_id,
             confirm=confirm_write,
-            attended=attended if attended is not None else origin != "routine",
+            attended=not unattended,
             trusted_servers=trusted_servers_for(deps.public_url),
             asks_before_publishing=prepared.admission.asks_before_publishing,
             confirmed_tools=confirmed_tools,
@@ -1078,40 +1179,41 @@ async def run_prepared_turn_impl(
                     else None
                 )
             ),
-            annotations_for=(
-                mcp_annotation_lookup(
-                    server_urls={
-                        s.name: s.url
-                        for s in prepared.admission.agent.mcp_servers
-                        if s.name in deps.tool_safety.trusted_annotations
-                    },
-                    token_for=agent_mcp_token_for(
+            annotations_for=annotations_for,
+        )
+        if unattended:
+            # A fleet worker or a wake nobody asked for just now: the one
+            # unattended decider, policy on or off, with Daimon's card-only actions
+            # refused, never the chat posture's safety-off shortcuts.
+            tool_confirmation = PolicyApproval(
+                decide=unattended_decider(
+                    deps.tool_safety,
+                    trusted_servers=trusted_servers_for(deps.public_url),
+                    confirmed_tools=confirmed_tools | protected_tools(deps.tool_safety),
+                    daimon_rules=True,
+                    annotations_for=annotations_for,
+                    rules_for=agent_rule_lookup(
                         deps.sessionmaker,
-                        fernet=deps.fernet,
                         tenant_id=tenant_id,
-                        agent_id=(
-                            prepared_source.agent_id
-                            if prepared_source is not None
-                            else derive_agent_uuid(
-                                tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
-                            )
+                        agent_id=str(prepared.admission.agent.id),
+                        server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+                        also_urls=daimon_endpoint(deps.public_url),
+                        channel_id=channel_for_tool_rules(
+                            platform=platform,
+                            channel_id=prepared.admission.origin_channel_id,
+                            private_dm_id=prepared.admission.private_dm_id,
                         ),
                     ),
                 )
-                # Only servers the operator trusts for annotations are read; with
-                # none trusted no catalogue is ever listed.
-                if getattr(deps.tool_safety, "enabled", False)
-                and getattr(deps.tool_safety, "trusted_annotations", ())
-                else None
-            ),
-        )
+            )
 
         ma_session_id = prepared.ma_session_id
         mapping_id = prepared.mapping_id
 
         action_kwargs: _ProviderActionKwargs = {}
         if (
-            provider_action is not None
+            not unattended
+            and provider_action is not None
             and prepared.admission.backend_revision is not None
             and prepared.admission.backend_revision.profile != "anthropic.managed_agents"
         ):
@@ -1125,7 +1227,15 @@ async def run_prepared_turn_impl(
             )
 
         first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
-        async with persisted(prepared.admission, ma_session_id, mapping_id, prepared.session_ref):
+        async with persisted(
+            prepared.admission,
+            ma_session_id,
+            mapping_id,
+            prepared.session_ref,
+            confirmation=tool_confirmation,
+            backend=prepared.backend,
+            scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+        ) as attempt_confirmation:
             state = await run_turn(
                 **_turn_port_kwargs(
                     deps,
@@ -1144,7 +1254,7 @@ async def run_prepared_turn_impl(
                 cancel=cancel,
                 render_interval_s=render_interval_s,
                 billing=prepared_billing(prepared, tenant_id=tenant_id),
-                tool_confirmation=tool_confirmation,
+                tool_confirmation=attempt_confirmation,
                 **action_kwargs,
                 image_blocks=image_blocks,
                 system_blocks=prepared.continuity.system_blocks,
@@ -1285,8 +1395,11 @@ async def run_prepared_turn_impl(
             )
             try:
                 async with persisted(
-                    recovery.admission or prepared.admission, new_session_id, new_mapping_id
-                ):
+                    recovery.admission or prepared.admission,
+                    new_session_id,
+                    new_mapping_id,
+                    confirmation=tool_confirmation,
+                ) as recovery_confirmation:
                     recovered_state = await run_turn(
                         **_turn_port_kwargs(
                             deps,
@@ -1301,7 +1414,7 @@ async def run_prepared_turn_impl(
                         cancel=fresh_cancel,
                         render_interval_s=render_interval_s,
                         billing=Billed(record=new_record),
-                        tool_confirmation=tool_confirmation,
+                        tool_confirmation=recovery_confirmation,
                         image_blocks=image_blocks,
                         system_blocks=loss_system_blocks,
                         # Reseeding and opening the stream await platform and MA

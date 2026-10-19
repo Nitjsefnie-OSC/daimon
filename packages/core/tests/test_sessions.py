@@ -121,6 +121,7 @@ async def test_root_budget_is_compiled_before_allocation_and_read_back(budget):
             native_budget_usd=budget,
             before_create=guard,
             allocation=allocate,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
         assert result.id == "sess_root"
     assert calls == [("POST", "/v1/sessions")] + (
@@ -180,6 +181,7 @@ async def test_root_budget_mismatch_retains_ack_and_cleans_only_owned_session(fa
                 native_budget_usd=Decimal("0.20"),
                 before_create=guard,
                 allocation=allocate,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
     assert retained and calls[:2] == [("POST", "/v1/sessions"), ("GET", "/v1/sessions/sess_root")]
     assert len(calls) == (2 if fault == "foreign" else 3)
@@ -344,6 +346,7 @@ async def test_app_cleanup_respects_native_ownership_and_retains_allocation_ack(
                 native_budget_usd=Decimal("0.20") if budgeted else None,
                 before_create=guard,
                 allocation=allocate,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
         )
         error = (
@@ -417,6 +420,7 @@ async def test_controlled_root_requires_owned_preallocation_hooks_before_http():
                 tenant_id=uuid.uuid4(),
                 account_id=uuid.uuid4(),
                 native_budget_usd=Decimal("0.20"),
+                tool_safety=OPEN_TOOL_SAFETY,
             )
 
 
@@ -486,6 +490,7 @@ async def test_create_session_calls_ma_api_and_returns_sdk_type() -> None:
         client,
         agent=agent,
         environment=env,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     assert isinstance(result, BetaManagedAgentsSession), (
         "create_session must return BetaManagedAgentsSession"
@@ -509,6 +514,7 @@ async def test_create_session_propagates_ma_error() -> None:
             client,
             agent=agent,
             environment=env,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
 
@@ -541,7 +547,9 @@ async def test_create_session_names_a_deleted_agent_skill() -> None:
     client = build_fake_anthropic_http(_unresolved_skill_400("skill_01PBRj", "latest"))
 
     with pytest.raises(SkillUnavailable) as refused:
-        await create_session(client, agent=agent, environment=_make_env())
+        await create_session(
+            client, agent=agent, environment=_make_env(), tool_safety=OPEN_TOOL_SAFETY
+        )
 
     message = str(refused.value)
     assert isinstance(refused.value, UserFacingError), "every adapter shows this copy as written"
@@ -602,6 +610,7 @@ async def test_create_session_names_a_deleted_channel_skill_from_its_rule(
             channel_skills=(
                 BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_chan", version="17916"),
             ),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     assert "this channel adds" in str(refused.value)
@@ -619,7 +628,10 @@ async def test_create_session_keeps_other_400s_unchanged() -> None:
 
     with pytest.raises(anthropic.BadRequestError):
         await create_session(
-            build_fake_anthropic_http(_bad), agent=_make_agent(), environment=_make_env()
+            build_fake_anthropic_http(_bad),
+            agent=_make_agent(),
+            environment=_make_env(),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
 
@@ -651,6 +663,7 @@ async def test_create_session_skips_vault_when_public_url_is_none() -> None:
         agent=agent,
         environment=env,
         mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=None),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(requests) == 1, "must POST only /v1/sessions when public_url is None"
@@ -740,6 +753,7 @@ async def test_create_session_calls_ensure_agent_mcp_vault_when_public_url_set(
             public_url=HttpUrl("https://mcp.example.com/mcp"),
         ),
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert isinstance(result, BetaManagedAgentsSession), (
@@ -911,6 +925,7 @@ async def test_create_session_mounts_env_resource_when_agent_has_secrets(
         tenant_id=tenant.id,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(bodies) == 1, "exactly one session-create call"
@@ -945,6 +960,7 @@ async def test_create_session_omits_resources_when_agent_has_no_secrets(
         tenant_id=tenant.id,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(bodies) == 1, "exactly one session-create call"
@@ -976,7 +992,7 @@ async def test_create_session_omits_resources_when_phase51_params_absent() -> No
 
     client = build_fake_anthropic_http(_handler)
 
-    await create_session(client, agent=agent, environment=env)
+    await create_session(client, agent=agent, environment=env, tool_safety=OPEN_TOOL_SAFETY)
 
     assert len(requests) == 1, "must POST only /v1/sessions; no Files upload attempted"
     body = json.loads(requests[0].content)
@@ -1014,6 +1030,7 @@ async def test_create_session_tags_metadata_with_account_and_tenant_when_both_pr
         environment=env,
         account_id=account_id,
         tenant_id=tenant_id,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(captured_bodies) == 1, "exactly one session-create call"
@@ -1057,6 +1074,7 @@ async def test_create_session_stamps_billing_exempt_reason_only_when_given(
         environment=_make_env(anthropic_id="env_ex"),
         tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000022"),
         billing_exempt=billing_exempt,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     metadata = captured_bodies[0]["metadata"]
@@ -1104,6 +1122,7 @@ async def test_create_session_stamps_the_channel_turn_it_is_opened_for(
         origin_channel_id="chan-1",
         origin_thread_id=thread_id,
         origin_seal_ids=() if sealed is None else (sealed,),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     metadata = captured_bodies[0]["metadata"]
@@ -1146,6 +1165,7 @@ async def test_create_session_stamps_the_budget_channel_apart_from_the_seal_orig
         environment=_make_env(anthropic_id="env_ch"),
         tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000022"),
         budget_channel_id=budget_channel_id,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     metadata = captured_bodies[0]["metadata"]
@@ -1182,6 +1202,7 @@ async def test_create_session_omits_metadata_when_account_and_tenant_both_none()
         account_id=None,
         tenant_id=None,
         mcp_settings=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(captured_bodies) == 1, "exactly one session-create call"
@@ -1299,6 +1320,7 @@ async def test_create_session_composes_resources_alongside_vault_ids(
         tenant_id=tenant.id,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(bodies) == 1, "exactly one session-create call"
@@ -1341,6 +1363,7 @@ async def test_create_session_raises_when_mcp_active_and_agent_uuid_none() -> No
                 jwt_secret=SecretStr("x" * 32),
                 public_url=HttpUrl("https://mcp.example.local/mcp"),
             ),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
 
@@ -1375,6 +1398,7 @@ async def test_create_session_omits_repo_resource_when_unbound(
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         fernet=fernet,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(bodies) == 1, "exactly one session-create call"
@@ -1512,6 +1536,7 @@ async def test_create_session_app_mode_with_zero_grants_has_no_github_access(
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         app_session_unmapped=app_session_unmapped,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     async with db_session_factory() as session:
         registered = await session.get(GitHubAppSessionVault, "sess_zero_grants")
@@ -1582,6 +1607,7 @@ async def test_create_session_app_mode_mounts_the_bot_commit_identity_when_a_tok
         session_factory=db_session_factory,
         agent_github_app=GithubAppSettings(app_slug="daimon"),
         on_app_access=observed_access.append,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     resolve.assert_awaited_once()
@@ -1681,6 +1707,7 @@ async def test_multi_installation_helper_requires_a_delivered_named_token(
         tenant_id=tenant.id,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     grant_view.assert_awaited_once()
     if tokens:
@@ -1758,6 +1785,7 @@ async def test_app_session_attaches_caller_and_session_vaults(
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     assert bodies[0]["vault_ids"] == ["vlt_caller", "vlt_session"]
     grant_view.assert_awaited_once()
@@ -1883,6 +1911,7 @@ async def test_create_session_attaches_memory_store(
         tenant_id=tenant.id,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     memory_resources = [r for r in captured.get("resources", []) if r.get("type") == "memory_store"]
@@ -1934,6 +1963,7 @@ async def test_create_session_degrades_when_memory_provisioning_fails(
         tenant_id=tenant.id,
         agent_uuid=uuid.uuid4(),
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     assert session is not None
     assert all(r.get("type") != "memory_store" for r in captured.get("resources", [])), (
@@ -2014,6 +2044,7 @@ async def test_personal_memory_mounts_the_callers_own_store_beside_the_shared_on
             session_factory=db_session_factory,
             memory_read_only=read_only,
             personal_memory=True,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     (alice_shared, alice_personal), (bob_shared, bob_personal) = (
@@ -2057,6 +2088,7 @@ async def test_without_personal_memory_only_the_shared_store_is_mounted(
         tenant_id=tenant.id,
         agent_uuid=uuid.uuid4(),
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     (shared,) = _memory_mounts(bodies[0])
@@ -2083,6 +2115,7 @@ async def test_a_personal_store_outage_degrades_to_shared_only(
         agent_uuid=uuid.uuid4(),
         session_factory=db_session_factory,
         personal_memory=True,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     (shared,) = _memory_mounts(bodies[0])
@@ -2264,6 +2297,7 @@ async def test_create_session_mirrors_agent_mcp_credential_for_a_caller_who_did_
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         fernet=fernet,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     mirrored = [
@@ -2322,6 +2356,7 @@ async def test_create_session_mirrors_nothing_when_agent_has_no_stored_mcp_crede
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         fernet=fernet,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert cred_bodies == [], "no stored credentials means no credential POSTs"
@@ -2438,6 +2473,7 @@ async def test_create_session_leaves_off_a_server_only_another_member_signed_in_
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     sent_agent = session_bodies[0]["agent"]
@@ -2499,6 +2535,7 @@ async def test_create_session_keeps_the_server_for_the_member_who_signed_in(
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
         fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert session_bodies[0]["agent"] == "ag_personal", (
@@ -2555,6 +2592,7 @@ async def test_read_only_source_projection_keeps_implicit_memory_without_provisi
             account_id=account.id,
             memory_read_only=read_only,
             resource_scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     assert projected.memory_required is True
     assert projected.memory_store_id == ("mem-existing" if warm else None)
@@ -2608,6 +2646,7 @@ async def test_source_projection_requires_app_vault_only_for_a_live_grant(
             account_id=account.id,
             memory_read_only=False,
             resource_scope=scope,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     empty = await project()
@@ -2693,6 +2732,7 @@ async def test_source_projection_refuses_changed_source_before_database_or_nativ
             account_id=account_id,
             memory_read_only=False,
             resource_scope=resource_scope(tenant_id=str(tenant_id), account_id=str(account_id)),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
 
@@ -2753,6 +2793,7 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
             mcp_settings=McpSettings(
                 public_url=HttpUrl("https://mcp.example.test/mcp"), jwt_secret=SecretStr("test-jwt")
             ),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     assert {
         resource.credential_ref
@@ -2804,6 +2845,7 @@ async def test_shared_projection_lists_agent_tokens_but_no_caller_vault(
         projected = await project_session_resources(
             source,
             agent=agent,
+            tool_safety=OPEN_TOOL_SAFETY,
             environment=ma_environment(tenant_id=str(tenant.id)),
             session_factory=sessions,
             tenant_id=tenant.id,
@@ -2966,6 +3008,7 @@ async def worker_source_context(
             account_id=account.id,
             memory_read_only=True,
             resource_scope=worker.permissions.fleet.scope,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     assert captured.agent_id == derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=original.id)
     return sessions, tenant.id, account.id, original, environment, worker, projected
@@ -3068,6 +3111,7 @@ async def test_worker_source_context_refuses_before_resources_or_native_io(
                 worker=worker,
                 before_create=fence,
                 memory_read_only=True,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
     assert trace.requests == []
 
@@ -3152,6 +3196,7 @@ async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
                 resource_source=source,
                 before_create=guard,
                 memory_read_only=True,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
     assert trace.requests == []
 

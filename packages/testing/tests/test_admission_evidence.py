@@ -22,6 +22,7 @@ from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import AdmissionDecision, AdmissionObserver, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, MissingTurnConfigError
@@ -117,6 +118,7 @@ async def setup(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     scope = Scope(
         tenant_id=str(tenant.id),

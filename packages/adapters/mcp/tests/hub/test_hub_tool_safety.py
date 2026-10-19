@@ -45,14 +45,28 @@ _SESSION = "ses_hub_safety"
 
 
 class _Paused:
-    """A session paused on `linear/create_issue`; a confirmation ends the turn."""
+    """A session whose every turn pauses on `linear/create_issue`.
 
-    def __init__(self, account: str) -> None:
+    It starts paused on turn `evt_user` (unless `fresh`); a message starts
+    another such turn, and a confirmation ends the turn with a reply. Its
+    frozen config allows; `updates` records every tool rewrite.
+    """
+
+    def __init__(self, account: str, *, fresh: bool = False) -> None:
         self.account = account
-        self.events: list[dict[str, Any]] = [
-            {"id": "evt_user", "type": "user.message", "content": [{"type": "text", "text": "x"}]},
+        self.policy = "always_allow"
+        self.events: list[dict[str, Any]] = []
+        self.sent: list[dict[str, Any]] = []
+        self.updates: list[dict[str, Any]] = []
+        if not fresh:
+            self._turn("evt_user")
+
+    def _turn(self, boundary: str) -> None:
+        n = len(self.events)
+        self.events += [
+            {"id": boundary, "type": "user.message", "content": [{"type": "text", "text": "x"}]},
             {
-                "id": "evt_tool",
+                "id": f"evt_tool_{n}",
                 "type": "agent.mcp_tool_use",
                 "mcp_server_name": "linear",
                 "name": "create_issue",
@@ -60,12 +74,11 @@ class _Paused:
                 "evaluated_permission": "ask",
             },
             {
-                "id": "evt_pause",
+                "id": f"evt_pause_{n}",
                 "type": "session.status_idle",
-                "stop_reason": {"type": "requires_action", "event_ids": ["evt_tool"]},
+                "stop_reason": {"type": "requires_action", "event_ids": [f"evt_tool_{n}"]},
             },
         ]
-        self.sent: list[dict[str, Any]] = []
 
     def model(self) -> dict[str, Any]:
         return ma_session(
@@ -79,7 +92,7 @@ class _Paused:
                         "configs": [],
                         "default_config": {
                             "enabled": True,
-                            "permission_policy": {"type": "always_ask"},
+                            "permission_policy": {"type": self.policy},
                         },
                     }
                 ],
@@ -95,6 +108,7 @@ class _Paused:
             rf"/v1/sessions/{_SESSION}$",
             lambda _r, _m: httpx.Response(200, json=self.model()),
         )
+        router.add("POST", rf"/v1/sessions/{_SESSION}$", self._update)
         router.add("GET", rf"/v1/sessions/{_SESSION}/events$", self._list)
         router.add("POST", rf"/v1/sessions/{_SESSION}/events$", self._send)
 
@@ -108,18 +122,45 @@ class _Paused:
         limit = int(request.url.params.get("limit") or 100)
         return httpx.Response(200, json={"data": events[:limit], "next_page": None})
 
+    def _update(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        agent = json_body(request)["agent"]
+        self.updates.append(agent)
+        self.policy = agent["tools"][0]["default_config"]["permission_policy"]["type"]
+        return httpx.Response(200, json=self.model())
+
     def _send(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        echoed: list[dict[str, Any]] = []
         for event in json_body(request)["events"]:
             self.sent.append(event)
-            self.events.append({**event, "id": f"evt_sent_{len(self.sent)}"})
-        self.events.append(
-            {"id": "evt_end", "type": "session.status_idle", "stop_reason": {"type": "end_turn"}}
-        )
-        return send_events_response(data=[])
+            if event["type"] == "user.message":
+                boundary = f"evt_message_{len(self.sent)}"
+                self._turn(boundary)
+                echoed.append({**event, "id": boundary})
+            else:
+                n = len(self.events)
+                self.events += [
+                    {**event, "id": f"evt_sent_{n}"},
+                    {
+                        "id": f"evt_reply_{n}",
+                        "type": "agent.message",
+                        "content": [{"type": "text", "text": "done"}],
+                    },
+                    {
+                        "id": f"evt_end_{n}",
+                        "type": "session.status_idle",
+                        "stop_reason": {"type": "end_turn"},
+                    },
+                ]
+        return send_events_response(data=echoed)
 
 
 async def _hub(
-    db_session: AsyncSession, engine: AsyncEngine, *, owner_is_caller: bool, recorded: bool
+    db_session: AsyncSession,
+    engine: AsyncEngine,
+    *,
+    owner_is_caller: bool,
+    recorded: bool,
+    fresh: bool = False,
 ) -> tuple[Any, str, _Paused, async_sessionmaker[AsyncSession]]:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     principal = await make_platform_principal(
@@ -133,7 +174,9 @@ async def _hub(
             await session_settle_state.record_unattended_turn(
                 db, managed_session_id=_SESSION, turn_event_id="evt_user", rules_channel_id=None
             )
-    paused = _Paused(str(principal.account_id) if owner_is_caller else str(uuid.uuid4()))
+    paused = _Paused(
+        str(principal.account_id) if owner_is_caller else str(uuid.uuid4()), fresh=fresh
+    )
     router = MARouter()
     paused.route(router)
     build_turn_router(str(tenant.id), router=router)
@@ -173,7 +216,7 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _drain() -> None:
-    workers = list(safety._workers.values())  # pyright: ignore[reportPrivateUsage]
+    workers = [w.task for w in safety._workers.values()]  # pyright: ignore[reportPrivateUsage]
     if workers:
         await asyncio.wait_for(asyncio.gather(*workers), timeout=5)
 
@@ -247,3 +290,62 @@ async def test_hub_continue_turn_never_answers_what_it_may_not(
     assert result.get("isError") and refusal in str(result.get("content")), result
     await asyncio.sleep(0.05)
     assert paused.sent == []
+
+
+async def test_hub_start_turn_gates_the_new_session_and_refuses_its_write(
+    db_session: AsyncSession, db_nullpool_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registered wrapper, admission included; creation's own fakes are core's."""
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.tools import agent_chat
+
+    monkeypatch.setattr(safety, "_POLL_S", 0.01)
+    app, daimon_id, paused, _ = await _hub(
+        db_session, db_nullpool_engine, owner_is_caller=True, recorded=False, fresh=True
+    )
+    created = AsyncMock(side_effect=lambda *_a, **_k: _session_obj(paused))
+    monkeypatch.setattr(agent_chat, "create_session", created)
+    result = _payload(
+        await call_mcp_tool(
+            app, token=_TOKEN, name="start_turn", arguments={"daimon_id": daimon_id, "message": "x"}
+        )
+    )
+    assert not result.get("isError"), result
+    await _drain()
+    assert created.call_args.kwargs["tool_safety"].enabled
+    assert paused.updates and paused.policy == "always_ask"
+    assert [(e["type"], e.get("result")) for e in paused.sent] == [
+        ("user.message", None),
+        ("user.tool_confirmation", "deny"),
+    ]
+
+
+async def test_hub_ask_with_a_handle_resumes_then_answers_the_new_message(
+    db_session: AsyncSession, db_nullpool_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(safety, "_POLL_S", 0.01)
+    app, daimon_id, paused, _ = await _hub(
+        db_session, db_nullpool_engine, owner_is_caller=True, recorded=True
+    )
+    result = _payload(
+        await call_mcp_tool(
+            app,
+            token=_TOKEN,
+            name="ask",
+            arguments={"daimon_id": daimon_id, "handle": _SESSION, "message": "next"},
+        )
+    )
+    assert not result.get("isError"), result
+    await _drain()
+    assert [(e["type"], e.get("result")) for e in paused.sent] == [
+        ("user.tool_confirmation", "deny"),
+        ("user.message", None),
+        ("user.tool_confirmation", "deny"),
+    ]
+
+
+def _session_obj(paused: _Paused) -> Any:
+    from anthropic.types.beta import BetaManagedAgentsSession
+
+    return BetaManagedAgentsSession.model_validate(paused.model())

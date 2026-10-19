@@ -17,6 +17,7 @@ from daimon.core.neutral_resources import resolve_worker_spec
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
 from daimon.core.stores import access_policy, fleet, mux_state, tenant_ledger, tenants
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -198,6 +199,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
         account_id=account,
         resource_scope=root.fleet.scope,
         memory_read_only=source_read_only,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     if live:
         from daimon.core.authz import build_agent_ref
@@ -471,6 +473,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
             channel_backends=True,
             agent_backends=True,
             state_store=mux_state.PostgresStateStore(sm),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
         grant = AdmissionGrant(
             tenant_id=tenant,
