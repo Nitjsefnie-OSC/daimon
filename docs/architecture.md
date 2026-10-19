@@ -1134,8 +1134,9 @@ every send, `gate_session_snapshot` rewrites the session's own frozen tool
 config from the current policy (every gated toolset's default and per-tool
 configs to `always_ask`, Daimon rule tools, a healed `daimon-mcp` URL) and
 fails the send if the update fails; it never restores attachments the
-session hides. It also makes Daimon's card-only actions (`protected_tools`:
-the backend switch and Microsoft sends and writes) ask and heals a foreign
+session hides. It also makes Daimon's card-only actions (`protected_tools`,
+the same selection as chat: the backend switch and Microsoft sends with the
+policy on or off, Microsoft writes with it on) ask, and heals a foreign
 `daimon-mcp` URL, with the policy on or off. After the send, the turn's
 boundary and tool-rule channel are recorded on the session's settle row
 (`session_settle_state.record_unattended_turn`), and the sending process runs

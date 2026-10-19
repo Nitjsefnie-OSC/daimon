@@ -8,9 +8,10 @@ answers through `unattended_decider` and never `AutoApprove`. Safety off is
 the explicit `enabled=False` policy from settings, under which the decider
 allows ordinary third-party calls.
 
-Daimon's own protected actions (`protected_tools`: a backend switch,
-Microsoft sends and writes) always ask in these sessions and their final call
-is always refused, safety on or off: nobody is there to press the card.
+Daimon's own protected actions (`protected_tools`) ask in these sessions and
+their final call is refused, since nobody is there to press the card: a
+backend switch and Microsoft sends with safety on or off, Microsoft writes
+with it on, the same selection a chat turn asks on.
 """
 
 from __future__ import annotations

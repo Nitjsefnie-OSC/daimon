@@ -16,7 +16,11 @@ from daimon.core.tool_safety import (
     classify_tool,
 )
 from daimon.core.turn.posture import PolicyApproval
-from daimon.core.turn.unattended import gate_session_snapshot, unattended_posture
+from daimon.core.turn.unattended import (
+    gate_session_snapshot,
+    protected_tools,
+    unattended_posture,
+)
 from daimon.testing import ma_agent, ma_session
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body
 
@@ -220,4 +224,28 @@ async def test_posture_refuses_a_protected_final_action(
         tenant_id=uuid.uuid4(),
     )
     call = ToolCall(tool_use_id="tu", server_name="daimon-mcp", tool_name=tool, input=tool_input)
+    assert (await posture.decide(call)).allow is allowed
+
+
+@pytest.mark.parametrize(("enabled", "allowed"), [(True, False), (False, True)])
+async def test_microsoft_write_is_protected_only_with_safety_on(
+    enabled: bool, allowed: bool
+) -> None:
+    """As in chat: file changes ask only with tool safety on; mail asks either way."""
+    policy = ToolSafetyPolicy(enabled=enabled)
+    assert ("microsoft_write" in protected_tools(policy)) is enabled
+    assert "microsoft_send" in protected_tools(policy)
+    posture = unattended_posture(
+        policy,
+        session=_with_daimon("https://daimon.example/mcp"),
+        public_url="https://daimon.example/mcp",
+        session_factory=MagicMock(),
+        tenant_id=uuid.uuid4(),
+    )
+    call = ToolCall(
+        tool_use_id="tu",
+        server_name="daimon-mcp",
+        tool_name="microsoft_write",
+        input={"method": "PATCH"},
+    )
     assert (await posture.decide(call)).allow is allowed

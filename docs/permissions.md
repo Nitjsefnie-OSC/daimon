@@ -121,9 +121,11 @@ sent the turn answers its tool calls, deciding each one when it is made.
 With `DAIMON_TOOL_SAFETY__ENABLED` off, ordinary third-party calls the
 session still asks about are allowed.
 
-Daimon's own actions that wait for a person's card in chat (switching an
-agent's backend, Microsoft mail, invites and file changes) always ask in
-these sessions and are always refused there, with tool safety on or off.
+Daimon's own actions that wait for a person's card in chat ask in these
+sessions and are refused there. Switching an agent's backend and sending
+Microsoft mail or invites are refused with tool safety on or off; Microsoft
+file changes, which ask in chat only with tool safety on, are refused only
+with it on.
 
 Reading a session never answers a tool call. If the service restarts while an
 agent-chat turn waits on one, the turn stays paused, and `get_session` and
