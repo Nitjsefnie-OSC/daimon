@@ -1,0 +1,309 @@
+"""Durable coordinator parity against isolated Postgres and synthetic providers."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+from cryptography.fernet import Fernet
+from daimon.core.github_credentials import build_multifernet
+from daimon.core.lead_intake import IntakeConfig, IntakeResolution, LeadDraft, LeadSource
+from daimon.core.lead_intake_service import EffectRequest, IntakeService, VerifiedSource
+from daimon.core.stores.lead_intake import IntakeStore
+from daimon.testing.factories import make_tenant
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+FIXTURES = json.loads(
+    (Path(__file__).parent / "fixtures/lead_intake/classification.json").read_text()
+)
+
+
+@pytest.fixture
+async def lead_sessions(db_nullpool_engine: AsyncEngine, db_clean: None) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+
+
+class FakePorts:
+    def __init__(self, source_text: str) -> None:
+        self.source_text = source_text
+        self.remote: dict[str, str] = {}
+        self.writes: list[str] = []
+        self.fail_step: str | None = None
+        self.fail_before = False
+        self.recipients = ("intake@example.test",)
+        self.scan_fail = False
+
+    async def source(
+        self, config: IntakeConfig, source: LeadSource, actor_id: str | None
+    ) -> VerifiedSource:
+        return VerifiedSource(
+            source=source,
+            text=self.source_text,
+            raw="sanitized raw text",
+            recipients=self.recipients,
+        )
+
+    async def recover(self, config: IntakeConfig, effect: EffectRequest) -> str | None:
+        return self.remote.get(effect.key)
+
+    async def write(self, config: IntakeConfig, effect: EffectRequest) -> str:
+        if self.fail_before and self.fail_step == effect.step:
+            raise TimeoutError("synthetic response loss")
+        identity = str(len(self.remote) + 100)
+        self.remote[effect.key] = identity
+        self.writes.append(effect.step)
+        if self.fail_step == effect.step:
+            raise TimeoutError("synthetic response loss")
+        return identity
+
+    async def scan(
+        self, config: IntakeConfig, start: datetime, end: datetime, cursor: str | None
+    ) -> tuple[list[str], str | None]:
+        if cursor and self.scan_fail:
+            raise TimeoutError("synthetic page failure")
+        return (["archived-a"], "next") if not cursor else (["archived-b"], None)
+
+
+async def noop() -> None:
+    pass
+
+
+def draft(classification: str = "project", message: str = "immutable-1") -> LeadDraft:
+    return LeadDraft(
+        source=LeadSource(kind="gmail", mailbox="owner@example.test", message_id=message),
+        classification=classification,
+        opportunity_description="Forecast project",
+        thread_title="Synthetic",
+        thread_content="Research summary\nDRAFT reply: Thank you for your enquiry.",
+        enquirer_email="ada@synthetic.example",
+        company_name="Synthetic",
+        company_domain="synthetic.example",
+        enquirer_evidence="From: Ada <ada@synthetic.example>",
+        company_evidence="Ada, Synthetic synthetic.example",
+    )
+
+
+async def setup(
+    sessions: async_sessionmaker[AsyncSession], mode: str = "capture"
+) -> tuple[IntakeStore, IntakeService, FakePorts]:
+    async with sessions() as session, session.begin():
+        tenant = await make_tenant(session)
+    store = IntakeStore(sessions, build_multifernet((Fernet.generate_key().decode(),)), tenant.id)
+    config = IntakeConfig(
+        agent_id=uuid4(),
+        guild_id="1",
+        channel_id="2",
+        source_connection_id="gmail-1",
+        gmail_mailbox="owner@example.test",
+        crm_connection_id="hubspot-1",
+        portal_id="3",
+        recipients=("intake@example.test",),
+        mode=mode,
+        reconciliation_start=datetime.now(UTC) - timedelta(days=1),
+    )
+    await store.configure(config, {"hubspot_access_token": "synthetic"})
+    ports = FakePorts(FIXTURES[-2]["text"])
+    return store, IntakeService(store, ports, noop), ports
+
+
+@pytest.mark.parametrize("row", FIXTURES, ids=[r["kind"] for r in FIXTURES])
+async def test_fake_model_classification_replay(
+    lead_sessions: async_sessionmaker[AsyncSession], row: dict[str, str]
+) -> None:
+    store, service, ports = await setup(lead_sessions, "active")
+    ports.source_text = row["text"]
+    # Replay the recorded model classification, not a keyword filter in core.
+    result = await service.submit(draft(row["classification"]), "7")
+    if row["classification"] == "other":
+        assert result.status == "rejected"
+        assert ports.writes == [], "Junk cannot post, create CRM or archive"
+    else:
+        assert result.status == "completed"
+        assert ports.writes == [
+            "starter",
+            "thread",
+            "dossier:0",
+            "archive",
+            "company",
+            "contact",
+            "deal",
+            "association:companies",
+            "association:contacts",
+        ]
+    assert (await store.get(result.id)).submission == result.submission
+
+
+async def test_capture_and_replay_preserve_original(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, ports = await setup(lead_sessions)
+    first = await service.submit(draft(), "7")
+    ports.source_text = "changed provider text"
+    replay = await service.submit(draft("other"), "8")
+    assert replay.id == first.id
+    assert replay.submission == first.submission
+    assert replay.actor_id == "7"
+    assert ports.writes == []
+    assert len(await store.list()) == 1
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        "starter",
+        "thread",
+        "dossier:0",
+        "archive",
+        "company",
+        "contact",
+        "deal",
+        "association:companies",
+    ],
+)
+async def test_uncertain_response_recovers_without_duplicates(
+    lead_sessions: async_sessionmaker[AsyncSession], step: str
+) -> None:
+    store, service, ports = await setup(lead_sessions, "active")
+    ports.fail_step = step
+    first = await service.submit(draft(), "7")
+    assert first.status == "pending"
+    ports.fail_step = None
+    results = await asyncio.gather(service.resume(first.id), service.resume(first.id))
+    assert all(r.status == "completed" for r in results)
+    assert ports.writes.count(step) == 1
+    assert len(ports.writes) == 9
+    assert (await store.get(first.id)).status == "completed"
+
+
+async def test_uncertain_absence_never_blindly_reposts(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    _, service, ports = await setup(lead_sessions, "active")
+    ports.fail_step, ports.fail_before = "starter", True
+    first = await service.submit(draft(), "7")
+    ports.fail_step = None
+    retry = await service.resume(first.id)
+    assert retry.status == "review"
+    assert retry.error_code == "uncertain_write"
+    assert ports.writes == []
+
+
+async def test_recipient_rejection_precedes_acceptance(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, ports = await setup(lead_sessions, "active")
+    ports.recipients = ("unrelated@example.test",)
+    with pytest.raises(ValueError, match="recipient_mismatch"):
+        await service.submit(draft(), "7")
+    assert await store.list() == []
+    assert ports.writes == []
+
+
+async def test_identity_review_still_delivers_draft(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    _, service, ports = await setup(lead_sessions, "active")
+    ports.source_text = "Uncertain original sender"
+    result = await service.submit(draft(), "7")
+    assert result.status == "review"
+    assert result.error_code == "identity_review"
+    assert ports.writes == ["starter", "thread", "dossier:0", "archive"]
+
+
+async def test_crm_paused_delivers_and_archives(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    _, service, ports = await setup(lead_sessions, "crm_paused")
+    result = await service.submit(draft(), "7")
+    assert result.status == "pending"
+    assert ports.writes == ["starter", "thread", "dossier:0", "archive"]
+
+
+async def test_retention_keeps_only_tombstone_and_tenant_isolation(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, ports = await setup(lead_sessions, "active")
+    first = await service.submit(draft(), "7")
+    async with lead_sessions() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT encrypted_payload, encrypted_raw FROM lead_intakes WHERE tenant_id=:tenant"
+                ),
+                {"tenant": store.tenant_id},
+            )
+        ).one()
+        assert b"synthetic.example" not in bytes(row.encrypted_payload)
+        assert row.encrypted_raw is not None
+    await store.purge(datetime.now(UTC) + timedelta(days=8))
+    async with lead_sessions() as session:
+        assert (
+            await session.execute(
+                text("SELECT encrypted_raw FROM lead_intakes WHERE tenant_id=:tenant"),
+                {"tenant": store.tenant_id},
+            )
+        ).scalar() is None
+    other, _, _ = await setup(lead_sessions)
+    with pytest.raises(ValueError, match="intake_not_found"):
+        await other.get(first.id)
+    assert await other.effect(first.id, "starter") is None
+    await store.purge(datetime.now(UTC) + timedelta(days=91))
+    tombstone = await store.get(first.id)
+    assert tombstone.submission is None
+    assert tombstone.progress.discord_message_id is None
+    assert tombstone.actor_id is None
+    replay = await service.submit(draft(), "7")
+    assert replay.id == first.id and replay.status == "expired"
+    assert ports.writes.count("starter") == 1
+    assert await store.effect(first.id, "starter") is None
+
+
+async def test_scan_failure_preserves_discoveries_without_checkpoint_skip(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, ports = await setup(lead_sessions)
+    ports.scan_fail = True
+    failed = await service.scan()
+    assert failed["error_code"] == "mailbox_scan_failed"
+    assert failed["checkpoint"] is None
+    assert failed["discovered"] == ["archived-a"]
+    ports.scan_fail = False
+    result = await service.scan()
+    assert result["caught_up"] is True
+    state = await store.mailbox("gmail-1")
+    assert state.discovered == ["archived-a", "archived-b"]
+
+
+async def test_resolution_audits_without_changing_source(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, ports = await setup(lead_sessions, "active")
+    ports.source_text = "Uncertain original sender"
+    first = await service.submit(draft(), "7")
+    result = await service.resolve(
+        first.id,
+        IntakeResolution(
+            company_id="200",
+            contact_id="201",
+            evidence="Sales resolver verified original identity against source email.",
+        ),
+        "8",
+    )
+    assert result.status == "completed"
+    assert result.submission == first.submission
+    async with lead_sessions() as session:
+        audit = (
+            await session.execute(
+                text(
+                    "SELECT encrypted_resolution FROM lead_resolution_audit WHERE tenant_id=:tenant"
+                ),
+                {"tenant": store.tenant_id},
+            )
+        ).scalar_one()
+    assert '"actor": "8"' in store.open(audit)
+    assert "verified original identity" in store.open(audit)

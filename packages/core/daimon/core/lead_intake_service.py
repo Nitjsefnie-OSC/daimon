@@ -309,7 +309,12 @@ class IntakeService:
             try:
                 while True:
                     ids, cursor = await self.ports.scan(config, start, end, cursor)
-                    state.discovered = list(dict.fromkeys([*state.discovered, *ids]))
+                    new_ids = [
+                        message
+                        for message in ids
+                        if not await self.store.seen_source(config, message)
+                    ]
+                    state.discovered = list(dict.fromkeys([*state.discovered, *new_ids]))
                     await self.store.save_mailbox(config.source_connection_id, state)
                     if not cursor:
                         break

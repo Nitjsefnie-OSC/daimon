@@ -13,6 +13,7 @@ from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.routine_delivery import record_failure
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.lead_intake import routine_execution
 from daimon.core.stores.routines import (
     advance_stale,
     claim_due_fireable,
@@ -191,7 +192,8 @@ async def run_one_tick(
             async with sem:
                 try:
                     with observation.activate():
-                        await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
+                        async with routine_execution(sm, row.tenant_id, row.id):
+                            await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
                 except TimeoutError as err:
                     observation.finish(error=err, reason=TerminationReason.CEILING)
                     # Capture to Sentry, then keep the existing swallow —

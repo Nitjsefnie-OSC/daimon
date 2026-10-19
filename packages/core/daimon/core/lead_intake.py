@@ -377,6 +377,7 @@ class IntakeConfig(BaseModel):
     guild_id: str
     channel_id: str
     source_connection_id: str
+    gmail_mailbox: str = ""
     crm_connection_id: str
     portal_id: str
     routine_id: UUID | None = None

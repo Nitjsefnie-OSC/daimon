@@ -73,6 +73,7 @@ from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_
 from daimon.adapters.mcp.tools.github_requests import register_github_request_tools
 from daimon.adapters.mcp.tools.github_working_repo import register_github_working_repo_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
+from daimon.adapters.mcp.tools.lead_intake import register_lead_intake_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
@@ -554,6 +555,7 @@ def create_mcp_app(
     agent_chat.register_agent_chat_tools(mcp, runtime, billing_config=effective_billing_config)
     time.register_time_tools(mcp, runtime)
     routines.register_routines_tools(mcp, runtime)
+    register_lead_intake_tools(mcp, runtime)
     register_timer_tools(mcp, runtime)  # one-shot timers on the wake queue
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):

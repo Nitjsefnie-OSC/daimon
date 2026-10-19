@@ -37,6 +37,10 @@ def upgrade() -> None:
             encrypted_resolution BYTEA NOT NULL, created_at TIMESTAMPTZ NOT NULL,
             FOREIGN KEY (tenant_id, intake_id) REFERENCES lead_intakes(tenant_id, id)
             ON DELETE CASCADE);
+        CREATE TABLE lead_intake_executions (
+            tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
+            id UUID NOT NULL, routine_id UUID NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+            expires_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (tenant_id, id));
         CREATE TABLE lead_mailbox_states (
             tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
             connection_id TEXT NOT NULL, encrypted_state BYTEA NOT NULL,

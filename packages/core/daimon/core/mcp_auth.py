@@ -39,6 +39,7 @@ from daimon.core.authz import (
     build_subject,
     build_turn_place,
 )
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
 from daimon.core.stores.domain import McpTokenRow
@@ -115,6 +116,8 @@ def mint_jwt(
     expires_at: dt.datetime | None = None,
     chat_agent_id: uuid.UUID | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
+    routine_id: uuid.UUID | None = None,
+    execution_id: uuid.UUID | None = None,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
@@ -159,6 +162,9 @@ def mint_jwt(
         claims["chat_agent_id"] = str(chat_agent_id)
     if slack_turn_context_id is not None:
         claims["slack_turn_context_id"] = str(slack_turn_context_id)
+    if routine_id is not None and execution_id is not None:
+        claims["routine_id"] = str(routine_id)
+        claims["execution_id"] = str(execution_id)
     if is_admin:
         claims["is_admin"] = True
     return pyjwt.encode(claims, secret, algorithm="HS256")
@@ -211,7 +217,10 @@ async def mint_chat_mcp_token(
         created_at=now,
         expires_at=expires_at,
     )
+    execution = current_intake_execution.get()
     token = mint_jwt(
+        routine_id=execution[0] if execution else None,
+        execution_id=execution[1] if execution else None,
         account_id=account_id,
         chat_agent_id=agent_id,
         secret=secret,

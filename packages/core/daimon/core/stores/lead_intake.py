@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -82,12 +84,18 @@ class IntakeStore:
     async def claim(self, key: str) -> AsyncIterator[None]:
         # A dedicated transaction owns the lock while each intent/result commits
         # independently. Connection death releases it; successors reconcile intents.
-        async with self.sessions() as session, session.begin():
-            await session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                {"key": f"lead:{self.tenant_id}:{key}"},
-            )
-            yield
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            async with self.sessions() as session, session.begin():
+                acquired = await session.scalar(
+                    text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"lead:{self.tenant_id}:{key}"},
+                )
+                if acquired:
+                    yield
+                    return
+            await asyncio.sleep(0.025)
+        raise ValueError("intake_busy")
 
     async def accept(
         self, config: IntakeConfig, submission: LeadSubmission, actor_id: str | None
@@ -151,6 +159,21 @@ class IntakeStore:
             expires_at=row.expires_at,
             raw_expires_at=row.raw_expires_at,
         )
+
+    async def seen_source(self, config: IntakeConfig, message_id: str) -> bool:
+        key = f"gmail:{config.gmail_mailbox.strip().lower()}:{message_id}"
+        digest = hashlib.sha256(
+            f"{self.tenant_id}:{config.source_connection_id}:{key}".encode()
+        ).hexdigest()
+        async with self.sessions() as session:
+            return (
+                await session.scalar(
+                    select(LeadIntakeRecord.id).where(
+                        LeadIntakeRecord.tenant_id == self.tenant_id,
+                        LeadIntakeRecord.source_digest == digest,
+                    )
+                )
+            ) is not None
 
     async def get(self, intake_id: UUID) -> IntakeRecord:
         async with self.sessions() as session:
@@ -290,3 +313,60 @@ class IntakeStore:
                 )
                 .values(encrypted_payload=None, encrypted_raw=None, status="expired")
             )
+
+
+@asynccontextmanager
+async def routine_execution(
+    sessions: async_sessionmaker[AsyncSession], tenant_id: UUID, routine_id: UUID
+) -> AsyncIterator[None]:
+    """A live, expiring grant ends with the scheduler fire, including cancellation."""
+    from daimon.core._models import LeadIntakeExecution
+    from daimon.core.lead_intake_execution import current_intake_execution
+
+    identity = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            LeadIntakeExecution(
+                tenant_id=tenant_id,
+                id=identity,
+                routine_id=routine_id,
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+        )
+    token = current_intake_execution.set((routine_id, identity))
+    try:
+        yield
+    finally:
+        current_intake_execution.reset(token)
+        async with sessions() as session, session.begin():
+            await session.execute(
+                delete(LeadIntakeExecution).where(
+                    LeadIntakeExecution.tenant_id == tenant_id, LeadIntakeExecution.id == identity
+                )
+            )
+
+
+async def execution_is_active(
+    session: AsyncSession, tenant_id: UUID, routine_id: UUID, execution_id: UUID
+) -> bool:
+    from daimon.core._models import LeadIntakeExecution
+
+    row = await session.get(LeadIntakeExecution, (tenant_id, execution_id))
+    return row is not None and row.routine_id == routine_id and row.expires_at > datetime.now(UTC)
+
+
+async def purge_expired(session: AsyncSession, now: datetime) -> None:
+    """Scheduler maintenance uses only ciphertext expiry; no decryption key needed."""
+    expired = select(LeadIntakeRecord.id).where(LeadIntakeRecord.expires_at <= now)
+    for model in (LeadIntakeEffect, LeadResolutionAudit):
+        await session.execute(delete(model).where(model.intake_id.in_(expired)))
+    await session.execute(
+        update(LeadIntakeRecord)
+        .where(LeadIntakeRecord.raw_expires_at <= now)
+        .values(encrypted_raw=None)
+    )
+    await session.execute(
+        update(LeadIntakeRecord)
+        .where(LeadIntakeRecord.expires_at <= now)
+        .values(encrypted_payload=None, encrypted_raw=None, status="expired")
+    )

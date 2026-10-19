@@ -722,6 +722,17 @@ async def _sweep_hub_oauth_kv(sm: async_sessionmaker[AsyncSession]) -> None:
         log.exception("scheduler.hub_oauth_kv_sweep.failed")
 
 
+async def _sweep_lead_intake(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Erase expired lead content independently of mailbox activity."""
+    from daimon.core.stores.lead_intake import purge_expired
+
+    try:
+        async with sm.begin() as session:
+            await purge_expired(session, datetime.now(UTC))
+    except SQLAlchemyError:
+        log.error("scheduler.lead_retention_failed")
+
+
 async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
     """Bound ephemeral credential history without pruning operator/external keys."""
     from daimon.core.mcp_auth import (
@@ -1407,6 +1418,7 @@ async def run(
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
+            await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
@@ -1443,6 +1455,7 @@ async def run(
             await _sweep_retired_turn_card_intents(sm)
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
+            await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)

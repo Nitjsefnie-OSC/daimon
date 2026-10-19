@@ -338,7 +338,17 @@ class IdentityMiddleware(Middleware):
             except ValueError:
                 slack_turn_context_id = None  # Malformed claims fail closed.
         raw_bound_channel = _token.claims.get("bound_channel_id") if _token else None
+
+        def signed_uuid(name: str) -> uuid.UUID | None:
+            value = _token.claims.get(name) if _token else None
+            try:
+                return uuid.UUID(value) if isinstance(value, str) else None
+            except ValueError:
+                return None
+
         identity = AuthIdentity(
+            routine_id=signed_uuid("routine_id"),
+            execution_id=signed_uuid("execution_id"),
             account_id=account_id,
             tenant_id=tenant_id,
             role=role,

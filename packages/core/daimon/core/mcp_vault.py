@@ -28,6 +28,7 @@ from anthropic.types.beta import BetaManagedAgentsVault
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
 from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.mux_compat import (
@@ -182,6 +183,9 @@ async def chat_mcp_credential(
         "daimon_chat_jti": str(jti),
         "daimon_chat_expires_at": expires_at.isoformat(),
     }
+    execution = current_intake_execution.get()
+    if execution is not None:
+        metadata["daimon_routine_execution"] = str(execution[1])
     if slack_turn_context_id is not None:
         metadata["daimon_chat_context"] = str(slack_turn_context_id)
     return {
@@ -206,6 +210,7 @@ async def _refresh_chat_credential_locked(
     registered_payload: dict[str, Any] | None = None,
     create_missing: bool = True,
 ) -> None:
+    execution = current_intake_execution.get()
     target = None
     metadata: dict[str, str] = {}
     async for cred in list_credentials(client, vault_id, scope=scope):
@@ -227,6 +232,8 @@ async def _refresh_chat_credential_locked(
         identity = await get_account_with_tenant(session, account_id=account_id)
         if (
             identity is not None
+            and metadata.get("daimon_routine_execution")
+            == (str(execution[1]) if execution else None)
             and row is not None
             and row.kind == "agent"
             and row.label == chat_token_label(row.jti)

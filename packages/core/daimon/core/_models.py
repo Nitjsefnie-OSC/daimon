@@ -3985,3 +3985,15 @@ class LeadMailboxState(Base):
     )
     connection_id: Mapped[str] = mapped_column(Text, primary_key=True)
     encrypted_state: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+
+class LeadIntakeExecution(Base):
+    __tablename__ = "lead_intake_executions"
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    routine_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("routines.id", ondelete="CASCADE"), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
