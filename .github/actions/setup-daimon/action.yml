@@ -1,0 +1,43 @@
+name: Set up Daimon
+description: >-
+  uv with its cache, the locked workspace, and (optionally) a migrated
+  daimon_test database on the job's Postgres service. The caller checks out
+  the repository first, because a local action is read from the checkout, and
+  declares the service itself, because `services:` cannot live in a composite.
+
+inputs:
+  database:
+    description: "'true' to create daimon_test on the Postgres service and run alembic against it"
+    required: false
+    default: "false"
+  sync-args:
+    description: "Arguments for `uv sync`"
+    required: false
+    default: "--all-extras --all-packages"
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+      with:
+        enable-cache: true
+
+    - name: uv sync
+      shell: bash
+      env:
+        SYNC_ARGS: ${{ inputs.sync-args }}
+      run: uv sync $SYNC_ARGS
+
+    - name: Create daimon_test database
+      if: inputs.database == 'true'
+      shell: bash
+      env:
+        PGPASSWORD: daimon
+      run: psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
+
+    - name: alembic upgrade (test DB)
+      if: inputs.database == 'true'
+      shell: bash
+      env:
+        DAIMON_DATABASE_URL: ${{ env.DAIMON_DATABASE__TEST_URL }}
+      run: uv run alembic upgrade head

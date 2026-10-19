@@ -2,6 +2,7 @@
 
 import glob
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -18,14 +19,26 @@ def _workflow(name: str) -> dict[str, Any]:
     return yaml.safe_load((_WORKFLOWS / name).read_text())
 
 
+def _pytest_commands(job: dict[str, Any]) -> list[str]:
+    """Every `uv run pytest` command of a job, once per matrix leg with the leg's values filled in."""
+    legs: list[dict[str, Any]] = job.get("strategy", {}).get("matrix", {}).get("include") or [{}]
+    commands: list[str] = []
+    for leg in legs:
+        for step in job.get("steps", []):
+            command = " ".join(step.get("run", "").split())
+            if "uv run pytest" not in command:
+                continue
+            for key, value in leg.items():
+                command = command.replace(f"${{{{ matrix.{key} }}}}", str(value))
+            commands.append(command)
+    return commands
+
+
 def test_ci_pytest_commands_collect_top_level_and_performance_tests() -> None:
     """Expand the paths passed to pytest, so newly added tests remain selected."""
     selected: set[Path] = set()
     for job in _workflow("ci.yml")["jobs"].values():
-        for step in job.get("steps", []):
-            command = step.get("run", "")
-            if "uv run pytest" not in command:
-                continue
+        for command in _pytest_commands(job):
             tokens = shlex.split(command)
             paths = tokens[tokens.index("pytest") + 1 :]
             for token in paths:
@@ -49,27 +62,37 @@ def test_ci_pytest_commands_collect_top_level_and_performance_tests() -> None:
 def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     jobs = _workflow("ci.yml")["jobs"]
     deploy = jobs["deploy-gcp"]
-    assert jobs["pytest-core"]["strategy"]["matrix"]["shard"] == [0, 1, 2, 3]
-    assert jobs["pytest-mcp"]["strategy"]["matrix"]["shard"] == [0, 1]
-    for job_name in ("pytest-core", "pytest-mcp"):
-        job = jobs[job_name]
-        shards = job["strategy"]["matrix"]["shard"]
-        command = next(
-            step["run"] for step in job["steps"] if "uv run pytest" in step.get("run", "")
-        )
-        assert f"--ci-shard-count={len(shards)}" in command
+    legs = jobs["pytest-db"]["strategy"]["matrix"]["include"]
+    for suite, count in (("core", 4), ("mcp", 2)):
+        shards = [leg["shard"] for leg in legs if leg["suite"] == suite]
+        assert shards == list(range(count)), f"{suite} must run every shard exactly once"
+        assert {leg["shards"] for leg in legs if leg["suite"] == suite} == {count}
+    # The sharded legs of one suite select the same paths, or a shard would skip tests.
+    for suite in {leg["suite"] for leg in legs}:
+        assert len({leg["paths"] for leg in legs if leg["suite"] == suite}) == 1
+    assert {leg["suite"] for leg in legs} == {"core", "mcp", "slack", "teams", "parity"}
+    shard_options = [
+        " ".join(step["run"].split())
+        for step in jobs["pytest-db"]["steps"]
+        if "uv run pytest" in step.get("run", "")
+    ]
+    assert len(shard_options) == 1
+    assert "--ci-shard-index=${{ matrix.shard }}" in shard_options[0]
+    assert "--ci-shard-count=${{ matrix.shards }}" in shard_options[0]
+    assert "--ci-shard-by=file" in shard_options[0]
+    assert "--ci-shard-suite=${{ matrix.suite }}" in shard_options[0]
     assert set(deploy["needs"]) == {
         "lint",
-        "pytest-core",
-        "pytest-mcp",
+        "shard-check",
+        "pytest-db",
         "pytest-discord",
-        "pytest-slack",
-        "pytest-teams",
-        "pytest-parity",
+        "pytest-light",
         "pytest-notebook-host",
-        "pytest-report-host",
-        "pytest-mux",
         "docker-publish-candidate",
+    }
+    assert {leg["suite"] for leg in jobs["pytest-light"]["strategy"]["matrix"]["include"]} == {
+        "report-host",
+        "mux",
     }
     # No status override: GitHub's default needs gate skips after failure/skip.
     assert not any(status in deploy["if"] for status in ("always()", "failure()", "cancelled()"))
@@ -77,6 +100,75 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     assert "refs/heads/main" in jobs["docker-publish-candidate"]["if"]
     assert "vars.GCP_WIF_PROVIDER == ''" in jobs["docker-build"]["if"]
     assert "docker-publish-candidate" not in jobs["docker-build"].get("needs", [])
+
+
+def test_pytest_jobs_use_four_workers_with_worksteal_except_discord() -> None:
+    jobs = _workflow("ci.yml")["jobs"]
+    pytest_jobs = {name: job for name, job in jobs.items() if _pytest_commands(job)}
+    assert set(pytest_jobs) == {
+        "pytest-db",
+        "pytest-discord",
+        "pytest-light",
+        "pytest-notebook-host",
+    }
+    for name, job in pytest_jobs.items():
+        for command in _pytest_commands(job):
+            assert "-n auto" not in command
+            if name == "pytest-discord":
+                assert " -n 2 " in command
+            elif "-m slow" not in command:
+                assert " -n 4 --dist worksteal " in command
+            if "-m slow" not in command:
+                assert "--durations=20" in command
+                assert "--junitxml=" in command
+
+
+def test_core_legs_check_out_full_history() -> None:
+    """Core's credential-equivalence and native-bounds tests need old commits and branches.
+
+    In a GitHub expression `0` is falsy, so `cond && 0 || 1` quietly yields 1; the depth
+    therefore comes from an explicit per-leg key.
+    """
+    job = _workflow("ci.yml")["jobs"]["pytest-db"]
+    checkout = next(step for step in job["steps"] if "actions/checkout" in step.get("uses", ""))
+    assert checkout["with"]["fetch-depth"] == "${{ matrix.fetch-depth }}"
+    legs = job["strategy"]["matrix"]["include"]
+    core = [leg for leg in legs if leg["suite"] == "core"]
+    assert len(core) == 4
+    assert all(leg["fetch-depth"] == 0 for leg in core), "core must fetch every branch and commit"
+    assert all(isinstance(leg["fetch-depth"], int) for leg in legs)
+
+
+@pytest.mark.parametrize("name", ["ci.yml", "contract.yml", "docs.yml", "formal-models.yml"])
+def test_no_fetch_depth_uses_a_falsy_zero_in_an_expression(name: str) -> None:
+    for line in (_WORKFLOWS / name).read_text().splitlines():
+        if "fetch-depth" in line and "${{" in line:
+            assert not re.search(r"&&\s*0\s*\|\|", line), line
+
+
+def test_shard_check_runs_the_checker_against_the_matrix() -> None:
+    steps = _workflow("ci.yml")["jobs"]["shard-check"]["steps"]
+    assert any(step.get("run") == "uv run python scripts/check_ci_shards.py" for step in steps)
+
+
+@pytest.mark.parametrize("name", ["ci.yml", "contract.yml", "docs.yml", "formal-models.yml"])
+def test_third_party_actions_are_pinned_to_commit_shas(name: str) -> None:
+    text = (_WORKFLOWS / name).read_text()
+    uses = re.findall(r"^\s*(?:-\s+)?uses:\s*(\S+)", text, flags=re.MULTILINE)
+    assert uses
+    for action in uses:
+        if action.startswith("./"):
+            continue
+        assert re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", action), action
+
+
+def test_main_pushes_and_deploys_are_never_cancelled() -> None:
+    concurrency = _workflow("ci.yml")["concurrency"]
+    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+    # Only a pull request shares a group (its ref) with the run it supersedes.
+    assert concurrency["group"] == (
+        "ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}"
+    )
 
 
 def test_candidate_is_not_promotable_until_staging_gates_pass() -> None:
