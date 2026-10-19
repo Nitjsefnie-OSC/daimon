@@ -89,7 +89,11 @@ from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
 from daimon.adapters.teams.turn_hooks import turn_hooks
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
-from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
+from daimon.core.continuity.continuation import (
+    check_wake_responder,
+    continuation_attended,
+    load_asking_agent_id,
+)
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.continuity.messages import (
     render_current_work_must_finish,
@@ -1400,6 +1404,7 @@ class TeamsApp:
                     role=role or Role.USER,  # admission's: one read per turn
                     handoff=handoff,
                     reraise=reraise,
+                    attended=continuation is None or continuation_attended(continuation),
                 )
             except asyncio.CancelledError:
                 raise
@@ -1468,6 +1473,7 @@ class TeamsApp:
         role: Role,
         handoff: HandoffFactory | None,
         reraise: bool,
+        attended: bool,
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
@@ -1544,6 +1550,7 @@ class TeamsApp:
         config = admission.config
         async with turn_origin(
             self.runtime.sessionmaker,
+            attended=attended,
             tenant_id=tenant_id,
             account_id=admission.account_id,
             platform="teams",
@@ -1591,6 +1598,7 @@ class TeamsApp:
                 thread_id=inbound.thread_id,
                 external_user_id=inbound.user_id,
                 origin="handoff" if notice is not None else "chat",
+                attended=attended,
                 user_message=message,
                 lifecycle=lifecycle,
                 cancel=cancel,

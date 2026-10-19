@@ -54,6 +54,7 @@ from daimon.core.ma_resolver import ResolverCache, resolve_agent, resolve_enviro
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import Platform
+from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.usage_recording import record_turn_usage
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -104,6 +105,7 @@ async def run_smoke_check(
     resolver_cache: ResolverCache,
     topup_key: str,
     markup: Decimal,
+    tool_safety: ToolSafetyPolicy,
     timeout_s: float = SMOKE_TIMEOUT_S,
     on_stage: Callable[[str], None],
 ) -> SmokeResult:
@@ -191,6 +193,7 @@ async def run_smoke_check(
                 usage_record_factory=usage_record_factory,
                 session_factory=session_factory,
                 tenant_id=tenant_id,
+                tool_safety=tool_safety,
                 model_override=SMOKE_MODEL,
             )
     except TimeoutError as err:

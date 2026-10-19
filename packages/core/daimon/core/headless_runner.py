@@ -5,7 +5,7 @@ Open a fresh MA session, then delegate the drain to the core turn driver
 A routine turn inherits the driver's full liveness story — status-checked
 eventless-cycle reconnect, the per-call read timeout, the cancel race,
 the hardened render error policy — instead of a bespoke bare drain
-loop, and answers tool confirmations via `headless_tool_confirmation`.
+loop, and answers tool confirmations via `unattended_posture`.
 
 A routine/headless turn is bounded end to end by the core per-turn ceiling
 (`daimon.core.turn.ceiling`, ~45 minutes): one shared deadline covers BOTH
@@ -70,12 +70,6 @@ from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.continuity.wakes import enqueue_worker_finished
 from daimon.core.fleet import TERMINAL, FleetConflict, FleetWorker, spawn_operation_key, worker_slot
 from daimon.core.github_app_session import close_headless_app_session
-from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_tool_annotations import (
-    agent_mcp_token_for,
-    mcp_annotation_lookup,
-    no_mcp_token,
-)
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
@@ -86,20 +80,12 @@ from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import fleet as fleet_store
 from daimon.core.stores.mux_state import PostgresStateStore, database_clock
-from daimon.core.tool_safety import (
-    OPEN_TOOL_SAFETY,
-    ToolSafetyPolicy,
-    daimon_endpoint,
-    trusted_servers_for,
-)
-from daimon.core.turn.approvals import (
-    agent_rule_lookup,
-    daimon_rule_tools_for,
-    headless_tool_confirmation,
-)
+from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn.approvals import daimon_rule_tools_for
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.driver import run_turn as drive_turn
+from daimon.core.turn.driver import unattended_sends
 from daimon.core.turn.io import turn_io
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
@@ -120,6 +106,7 @@ from daimon.core.turn.run import (
 from daimon.core.turn.runtime_manifest import capture_preparation_source
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.unattended import protected_tools, session_gate, unattended_posture
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import TextPart
@@ -191,7 +178,7 @@ async def run_turn(
     github_app_private_key: str | None = None,
     agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     on_state: Callable[[TurnState], None] | None = None,
     on_session: Callable[[str], None] | None = None,
     budget_channel_id: str | None = None,
@@ -288,7 +275,7 @@ async def run_turn_impl(
     github_app_private_key: str | None = None,
     agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     on_state: Callable[[TurnState], None] | None = None,
     on_session: Callable[[str], None] | None = None,
     budget_channel_id: str | None = None,
@@ -317,10 +304,13 @@ async def run_turn_impl(
        even without a per-agent PAT.
     3. The drain is delegated to ``daimon.core.turn.driver.run_turn`` with a
        no-op lifecycle (nothing to render to), ``tool_confirmation`` from
-       ``headless_tool_confirmation(tool_safety)`` (``AutoApprove`` while the
-       tool-safety policy is off; with it on, reads run and third-party
-       writes are refused unless the operator allowed them in unattended
-       runs — nobody is here to press Approve), ``deadline=effective_deadline``
+       ``unattended_posture(tool_safety, ...)`` (with the policy on, reads
+       run and third-party writes are refused unless the operator allowed
+       them in unattended runs; off, ordinary third-party calls are allowed;
+       Daimon's card-only actions are refused — a backend switch and
+       Microsoft mail either way, Microsoft file changes with the policy on;
+       nobody is here to press Approve), each send gated first and sent once
+       (`unattended_sends`), ``deadline=effective_deadline``
        (the same instant that bounded step 1/2's assembly, so the driver's own
        ``remaining_s`` naturally subtracts the time assembly already spent —
        one window, two disjoint legs, no double enforcement), and a billing
@@ -386,6 +376,11 @@ async def run_turn_impl(
         )
 
     effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
+    public_url = (
+        str(mcp_settings.public_url)
+        if mcp_settings is not None and mcp_settings.public_url is not None
+        else None
+    )
     # Decided before the session exists so the session carries it: an
     # unrecorded run is stamped exempt, and the usage sweep then skips it
     # instead of debiting the tenant for a turn nobody meant to bill.
@@ -438,6 +433,8 @@ async def run_turn_impl(
             environment=environment,
             mcp_settings=mcp_settings,
             daimon_rule_tools=daimon_rule_tools,
+            # Daimon's card-only actions ask here and are refused unattended.
+            confirmed_tools=protected_tools(tool_safety),
             account_id=account_id,
             tenant_id=tenant_id,
             agent_uuid=agent_uuid,
@@ -501,71 +498,45 @@ async def run_turn_impl(
         # Driver's own run_turn builds and sends the `user.message` event itself
         # from `user_message=trigger_message` — the drain (steps 3-6 of the old
         # bespoke loop) is fully delegated below.
-        state: TurnState = await drive_turn(
-            anthropic=anthropic,
-            scope=turn_scope,
-            session_id=session.id,
-            user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
-            lifecycle=_NoOpLifecycle(),
-            cancel=asyncio.Event(),  # never set — headless has no cancel source
-            render_interval_s=2.0,  # nothing renders; do not spin the diff timer
-            billing=billing,
-            tool_confirmation=headless_tool_confirmation(
-                tool_safety,
-                rules_for=(
-                    agent_rule_lookup(
-                        session_factory,
-                        tenant_id=tenant_id,
-                        agent_id=agent_id,
-                        server_urls={s.name: s.url for s in session.agent.mcp_servers},
-                        also_urls=daimon_endpoint(
-                            str(mcp_settings.public_url)
-                            if mcp_settings is not None and mcp_settings.public_url is not None
-                            else None
-                        ),
-                        channel_id=origin_place.channel_id if origin_place is not None else None,
-                    )
-                    if tool_safety.enabled
-                    and tool_safety.agent_rules
-                    and session_factory is not None
-                    and tenant_id is not None
-                    else None
-                ),
-                annotations_for=(
-                    mcp_annotation_lookup(
-                        server_urls={
-                            s.name: s.url
-                            for s in session.agent.mcp_servers
-                            if s.name in tool_safety.trusted_annotations
-                        },
-                        # Without a database or tenant no stored credential can
-                        # be resolved, so the catalogue is read anonymously.
-                        token_for=(
-                            agent_mcp_token_for(
-                                session_factory,
-                                fernet=fernet,
-                                tenant_id=tenant_id,
-                                agent_id=agent_uuid
-                                or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id),
-                            )
-                            if session_factory is not None and tenant_id is not None
-                            else no_mcp_token
-                        ),
-                    )
-                    # Only servers the operator trusts for annotations are
-                    # read; with none trusted no catalogue is ever listed.
-                    if tool_safety.enabled and tool_safety.trusted_annotations
-                    else None
-                ),
-                daimon_rules=bool(daimon_rule_tools),
-                trusted_servers=trusted_servers_for(
-                    str(mcp_settings.public_url)
-                    if mcp_settings is not None and mcp_settings.public_url is not None
-                    else None
-                ),
-            ),
-            deadline=effective_deadline,
+        gate_scope = (
+            turn_scope
+            if turn_scope is not None
+            else Scope.legacy_host_authorized(call_site="headless_runner:run_turn:gate")
         )
+        with unattended_sends(
+            session_gate(
+                anthropic,
+                session.id,
+                tool_safety,
+                scope=gate_scope,
+                public_url=public_url,
+                session_factory=session_factory,
+                tenant_id=tenant_id,
+            )
+        ):
+            state: TurnState = await drive_turn(
+                anthropic=anthropic,
+                scope=turn_scope,
+                session_id=session.id,
+                user_message=context_prompt(origin, system=session.agent.system) + trigger_message,
+                lifecycle=_NoOpLifecycle(),
+                cancel=asyncio.Event(),  # never set — headless has no cancel source
+                render_interval_s=2.0,  # nothing renders; do not spin the diff timer
+                billing=billing,
+                # Nobody is here to press a card: the one unattended decider,
+                # from the policy now in force, never `AutoApprove`.
+                tool_confirmation=unattended_posture(
+                    tool_safety,
+                    session=session,
+                    fernet=fernet,
+                    agent_id=agent_uuid,
+                    public_url=public_url,
+                    session_factory=session_factory,
+                    tenant_id=tenant_id,
+                    channel_id=origin_place.channel_id if origin_place is not None else None,
+                ),
+                deadline=effective_deadline,
+            )
 
         if (observation := current_outcome.get()) is not None:
             observation.finish(state=state)

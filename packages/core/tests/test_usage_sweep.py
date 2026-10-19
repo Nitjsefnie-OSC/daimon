@@ -43,6 +43,7 @@ from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import session_settle_state, turn_outcomes
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn.prepare import bind_recorder
@@ -206,6 +207,7 @@ def _chat_recorder(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     return bind_recorder(
         deps,

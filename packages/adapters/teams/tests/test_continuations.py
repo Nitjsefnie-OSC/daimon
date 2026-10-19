@@ -558,3 +558,19 @@ async def test_turn_backend_switch_card_captures_through_its_own_admission(
     assert args[1] is source
     context = kwargs["context"]
     assert context.platform == "teams"
+
+
+@pytest.mark.parametrize("attended", [False, True])
+async def test_handoff_dispatch_retains_attendance(db_session_factory, attended):
+    teams, account_id = await _app(db_session_factory, FakeSender())
+    key = await _hand_off(db_session_factory, account_id)
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    row = row.model_copy(update={"attended": attended, "target_ma_agent_id": "agent_test_id"})
+    bind = AsyncMock()
+    with patched_admission(), patch.object(teams, "_bind_and_run", bind):
+        await teams._run_turn(
+            make_inbound("finish the writeup"), TENANT, continuation=row, reraise=True
+        )
+    assert bind.await_args.kwargs["attended"] is attended

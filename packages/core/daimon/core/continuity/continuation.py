@@ -140,6 +140,7 @@ class ContinuationRequest(BaseModel):
     target_name: str
     requested_work: str | None
     reason: ContinuationReason
+    attended: bool = False
     idempotency_key: uuid.UUID
 
 
@@ -274,6 +275,7 @@ def build_input_continuation(
         target_name=row.target_name,
         requested_work=row.requested_work,
         reason="private_input_applied",
+        attended=True,
         idempotency_key=row.idempotency_key,
     )
 
@@ -312,6 +314,7 @@ async def record_continuation(
             target_ma_agent_id=request.target_ma_agent_id,
             target_name=request.target_name,
             reason=request.reason,
+            attended=request.attended,
             idempotency_key=request.idempotency_key,
             requested_work=request.requested_work,
         )
@@ -346,6 +349,7 @@ async def record_input_continuation(
         target_ma_agent_id=request.target_ma_agent_id,
         target_name=request.target_name,
         reason=request.reason,
+        attended=request.attended,
         idempotency_key=request.idempotency_key,
         requested_work=request.requested_work if carries_work else None,
     )
@@ -463,3 +467,8 @@ async def decide_continuation(
             seed_user_message=render_timer_seed(request.requested_work, set_at=row.created_at),
         )
     return ContinuationDecision(action="dispatch", seed_user_message=request.requested_work)
+
+
+def continuation_attended(row: TaskContinuationRow) -> bool:
+    """Retain trusted initiation across handoffs; a wake never grants attendance."""
+    return row.attended and row.reason not in ("timer", "worker_finished")

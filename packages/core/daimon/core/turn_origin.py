@@ -123,6 +123,7 @@ async def turn_origin(
     configuration_target_ma_agent_id: str | None = None,
     configuration_target_name: str | None = None,
     is_setup: bool = False,
+    attended: bool = True,
     message_text: str | None = None,
     queued_message: bool = False,
     keep_fleet_root: bool = False,
@@ -152,6 +153,7 @@ async def turn_origin(
             expires_at=now + timedelta(hours=2),
             now=now,
             is_setup=is_setup,
+            attended=attended,
         )
         if message_text is not None:
             if not queued_message:

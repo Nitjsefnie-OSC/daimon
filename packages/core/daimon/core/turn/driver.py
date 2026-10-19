@@ -46,8 +46,9 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypeVar, cast
 
@@ -119,13 +120,15 @@ from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.usage import UsageObservation
-from mux.drivers.anthropic.transport import LegacyTurnTransport
+from mux.drivers.anthropic.transport import LegacyTurnTransport, single_attempt_mutation
 from mux.errors import ProviderError
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 
 log = structlog.get_logger(__name__)
 
-InterruptPhase = Literal["pre-stream", "stream-open", "send-initial", "replay", "reattach"]
+InterruptPhase = Literal[
+    "pre-stream", "stream-open", "send-initial", "replay", "reattach", "confirmation-gate"
+]
 
 # Module-level singleton so `run_turn`'s default arg isn't a function call in
 # the signature (ruff B008) — `RequireApproval()` is a frozen, field-less
@@ -223,12 +226,27 @@ async def _bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> No
     log.warning("turn.cleanup_timed_out", session_id=session_id, step=what)
 
 
-async def _refuse_blocked(io: TurnIO, session_id: str, fresh: list[str], *, message: str) -> None:
-    """Send `deny` for every id in `fresh`, best effort.
+async def _refuse_blocked(
+    io: TurnIO,
+    session_id: str,
+    fresh: list[str],
+    *,
+    message: str,
+    interrupt_unattended: bool = False,
+) -> None:
+    """Interrupt gated unattended calls; otherwise send best-effort denials.
 
-    The session is on a `requires_action` idle, so the send is accepted and
-    the session does not stay paused on calls nobody will answer.
+    Gated runs leave the calls paused: their normal cancel handler interrupts,
+    or cleanup interrupts here on an outside cancellation or failed gate.
+    Ungated runtimes retain the ordinary best-effort denial behavior.
     """
+    if _UNATTENDED_GATE.get() is not None:
+        # A denial resumes execution too. Once cancellation or a gate failure
+        # ends the decision boundary, leave calls paused and only interrupt.
+        if interrupt_unattended:
+            with contextlib.suppress(_anthropic.APIError, ProviderError, TurnConnectionLost):
+                await io.interrupt(timeout_s=CLEANUP_BUDGET_S)
+        return
     refusals = build_decision_events(
         (tool_use_id, ToolConfirmationResult(allow=False, deny_message=message))
         for tool_use_id in fresh
@@ -319,6 +337,7 @@ async def _decide_or_refuse_on_cancel(
                         session_id,
                         fresh,
                         message="This turn ended before the call was approved; it did not run.",
+                        interrupt_unattended=True,
                     ),
                     name="turn.refuse_blocked",
                 ),
@@ -341,6 +360,27 @@ async def _decide_or_refuse_on_cancel(
     raise _InterruptInConsume()
 
 
+#: The gate an unattended run installs (`unattended_sends`): awaited right
+#: before the turn's message and before every confirmation batch, live or on a
+#: reconnect, so each send resumes the session under the policy now in force.
+#: A gate that raises stops that send.
+_UNATTENDED_GATE: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar(
+    "turn_unattended_gate", default=None
+)
+
+
+@contextlib.contextmanager
+def unattended_sends(gate: Callable[[], Awaitable[None]]) -> Iterator[None]:
+    """Run the enclosed turn as unattended: `gate` before every send, and
+    every send a single attempt (no SDK retry after its gate and decision)."""
+    token = _UNATTENDED_GATE.set(gate)
+    try:
+        with single_attempt_mutation():
+            yield
+    finally:
+        _UNATTENDED_GATE.reset(token)
+
+
 async def _send_decision_batch(
     batch: _DecisionBatch,
     *,
@@ -353,6 +393,24 @@ async def _send_decision_batch(
     try:
         if cancel.is_set():
             raise _InterruptInConsume()
+        if (gate := _UNATTENDED_GATE.get()) is not None:
+
+            async def run_gate() -> None:
+                await gate()
+
+            cancel_task = asyncio.create_task(cancel.wait(), name="turn.gate_cancel_waiter")
+            try:
+                await _await_or_cancel(
+                    run_gate(), cancel_task=cancel_task, phase="confirmation-gate"
+                )
+            except _InterruptedDuringRecovery:
+                raise _InterruptInConsume() from None
+            finally:
+                cancel_task.cancel()
+                with _suppress_task_exc():
+                    await cancel_task
+            if cancel.is_set():
+                raise _InterruptInConsume()
         await io.send(batch.events)
     except BaseException as err:
         await _bounded(
@@ -363,7 +421,11 @@ async def _send_decision_batch(
             what="retire_unsent_confirmations",
             session_id=session_id,
         )
-        if cancel.is_set() or isinstance(err, asyncio.CancelledError | _InterruptInConsume):
+        if (
+            _UNATTENDED_GATE.get() is not None
+            or cancel.is_set()
+            or isinstance(err, asyncio.CancelledError | _InterruptInConsume)
+        ):
             await _bounded(
                 asyncio.create_task(
                     _refuse_blocked(
@@ -371,6 +433,7 @@ async def _send_decision_batch(
                         session_id,
                         fresh,
                         message="This turn ended before the call was approved; it did not run.",
+                        interrupt_unattended=not isinstance(err, _InterruptInConsume),
                     ),
                     name="turn.refuse_blocked",
                 ),
@@ -535,7 +598,6 @@ async def run_turn(
     system_blocks: Sequence[BetaManagedAgentsSystemContentBlockParam] = (),
     deadline: datetime | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
-    before_confirmation: Callable[[], Awaitable[None]] | None = None,
     send_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     path: Literal["legacy", "mux"] | None = None,
     backend: ManagedAgents | None = None,
@@ -650,6 +712,8 @@ async def run_turn(
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
                 await before_send()
+            if (gate := _UNATTENDED_GATE.get()) is not None:
+                await gate()
             try:
                 await io.send(batch)
             except _anthropic.BadRequestError as err:
@@ -680,7 +744,6 @@ async def run_turn(
             billing=billing,
             tool_confirmation=tool_confirmation,
             preset_error=unwedge_failure[0],
-            before_confirmation=before_confirmation,
         )
 
     async def _pump_unwedging() -> TurnState:
@@ -884,7 +947,6 @@ async def _pump(
     billing: BillingPosture,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
     preset_error: BaseException | None = None,
-    before_confirmation: Callable[[], Awaitable[None]] | None = None,
 ) -> TurnState:
     log.info("turn.started", session_id=session_id, entry=entry)
 
@@ -1031,7 +1093,6 @@ async def _pump(
                                 delivered_provider_event_ids=delivered_provider_event_ids,
                                 billed_event_ids=billed_event_ids,
                                 stream_read_timeout_s=stream_read_timeout_s,
-                                before_confirmation=before_confirmation,
                             )
                     break  # a terminal event was found — exit the outer loop too
                 except _EventlessCycle as cycle:
@@ -1098,8 +1159,6 @@ async def _pump(
                                     pending_confirmation_reconnects = 0
                                     pending_confirmation_retry_ids = frozenset()
                                     confirmed_tool_use_ids.update(fresh)
-                                    if before_confirmation is not None:
-                                        await before_confirmation()
                                     decisions = await _decide_or_refuse_on_cancel(
                                         tool_confirmation,
                                         state_cell[0],
@@ -1124,8 +1183,6 @@ async def _pump(
                                     # confirm-reconnect-confirm spin. A later
                                     # duplicate has no fresh ids and enters
                                     # the bounded echo wait below.
-                                    if before_confirmation is not None:
-                                        await before_confirmation()
                                     await _send_decision_batch(
                                         decisions,
                                         fresh=fresh,
@@ -1531,7 +1588,6 @@ async def _consume_with_reconnect(
     delivered_provider_event_ids: set[str],
     billed_event_ids: set[str],
     stream_read_timeout_s: float,
-    before_confirmation: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """One attempt at the consume leg. On retry, replay + re-fold first."""
     if cancel.is_set():
@@ -1745,8 +1801,6 @@ async def _consume_with_reconnect(
                             # wait races the cancel signal; a cancel refuses
                             # every pending call before the interrupt, so the
                             # session is not left paused on them.
-                            if before_confirmation is not None:
-                                await before_confirmation()
                             decisions = await _decide_or_refuse_on_cancel(
                                 tool_confirmation,
                                 state_cell[0],
@@ -1761,8 +1815,6 @@ async def _consume_with_reconnect(
                             # RUNNING session returns HTTP 200 and is
                             # silently ignored (measured 2026-08-26) -- never
                             # move this send to a running-session position.
-                            if before_confirmation is not None:
-                                await before_confirmation()
                             await _send_decision_batch(
                                 decisions,
                                 fresh=fresh,

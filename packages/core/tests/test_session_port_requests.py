@@ -188,6 +188,7 @@ async def test_session_create_matches_legacy_wire_request(
                 tenant_id=tenant,
                 account_id=account,
                 extra_resources=resources,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
     legacy.assert_consumed()
     migrated.assert_consumed()
@@ -218,6 +219,7 @@ async def test_last_access_check_runs_before_create_request() -> None:
             agent=ma_agent(id="ag_parity"),
             environment=ma_environment(id="env_parity"),
             before_create=before_create,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     transport.assert_consumed()
     assert checked

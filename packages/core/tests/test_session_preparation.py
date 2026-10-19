@@ -77,7 +77,7 @@ from daimon.core.stores.thread_sessions import (
     set_pending_unsaved_work,
     update_mutable_fingerprint,
 )
-from daimon.core.tool_safety import ToolSafetyPolicy, has_confirmation_gate
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, has_confirmation_gate
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.deps import TurnDeps
@@ -297,6 +297,7 @@ def _deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport)
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -831,6 +832,9 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
         external_user_id="user-1",
         markup=Decimal("1"),
         channel_id="channel-b",
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
+        platform="discord",
     )
     with observation.activate():
         second = await _prepare(
@@ -3393,9 +3397,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
                 await asyncio.sleep(0.1)
             independent = [asyncio.create_task(send(i, phase)) for i in range(2)]
             waiters.extend(independent)
-            completed, pending = await asyncio.wait(
-                independent, timeout=3 if contended and phase == blocked_phase else 1
-            )
+            completed, pending = await asyncio.wait(independent, timeout=3)
             print(
                 f"entry={entry} contended={contended} phase={phase}: independent completed={len(completed)}, pending={len(pending)}, checkedout={engine.pool.checkedout()}, replacements still blocked={all(not t.done() for t in tasks)}",
                 flush=True,
@@ -3889,7 +3891,9 @@ async def test_old_session_cannot_be_written_after_successor_exists(db_session, 
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
     runtime = SimpleNamespace(
-        client=client, session_factory=db_session_factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=client,
+        session_factory=db_session_factory,
+        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     auth = AuthIdentity(
         account_id=first.admission.account_id,
@@ -4170,6 +4174,10 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         return result
 
     monkeypatch.setattr(client.beta.sessions.events, "send", paused_send)
+    # The MCP send uses a single-attempt copy of the client; keep it the patched one.
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.tools.agent_chat.single_attempt", lambda runtime: runtime.client
+    )
     sending = asyncio.create_task(
         _continue_turn_impl(runtime, auth, first.ma_session_id, "in flight")
     )

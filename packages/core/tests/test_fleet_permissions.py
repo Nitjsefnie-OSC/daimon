@@ -17,6 +17,7 @@ from daimon.core.neutral_resources import (
     freeze_root_permissions,
     resolve_worker_spec,
 )
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from mux.contracts.config import BackendConfig
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import (
@@ -1992,6 +1993,7 @@ async def test_root_freeze_uses_actual_sdk_owner_capture_and_owned_resource_proj
             account_id=account.id,
             resource_scope=scope,
             memory_read_only=True,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     transport.assert_consumed()
     assert captured.memory_required and captured.memory_store_id is None

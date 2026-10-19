@@ -32,7 +32,10 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import (
     FileMetadata,
 )
-from anthropic.types.beta.sessions import BetaManagedAgentsSessionEvent
+from anthropic.types.beta.sessions import (
+    BetaManagedAgentsAgentMCPToolUseEvent,
+    BetaManagedAgentsSessionEvent,
+)
 from anthropic.types.beta.sessions.beta_managed_agents_agent_message_event import (
     BetaManagedAgentsAgentMessageEvent,
 )
@@ -66,6 +69,7 @@ from daimon.core.errors import TurnError
 from daimon.core.headless_runner import run_turn
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.stores.agent_files import put_agent_file
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
     MARouter,
@@ -206,6 +210,8 @@ def _build_client(
             r"/v1/sessions/[^/]+/events",
             lambda request, match: list_response(event_dicts),
         )
+    # The unattended gate reads the session before each send.
+    router.add("GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=session_json))
     _register_agent_environment_routes(router, model_id=model_id)
     return build_fake_anthropic(router.dispatch)
 
@@ -241,6 +247,7 @@ async def test_run_turn_returns_last_message_text(origin, db_session, db_session
         origin=origin,
         tenant_id=tenant.id,
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert tail == "hello world", "run_turn should return the agent.message text"
@@ -284,6 +291,7 @@ async def test_full_final_response_is_returned_for_delivery() -> None:
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="hi",
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert tail == long_text, "the scheduler needs the complete reply, including its ending"
@@ -291,7 +299,7 @@ async def test_full_final_response_is_returned_for_delivery() -> None:
 
 async def test_auto_allow_confirms_once_and_rides_out_a_reemitted_requires_action() -> None:
     """Two requires_action idle events naming the same blocked id: the first
-    is auto-confirmed exactly once (no double-ack). MA repeats the pause while
+    is allowed (tool safety off) exactly once (no double-ack). MA repeats the pause while
     the batch's other tools run, so a repeat read before MA has taken the
     allow is a duplicate, not a re-ask: the turn carries on to its answer.
     Production 2026-10-08 ended such turns as `requires_action`. A real
@@ -300,6 +308,17 @@ async def test_auto_allow_confirms_once_and_rides_out_a_reemitted_requires_actio
     send_capture: list[dict[str, Any]] = []
 
     events: list[BetaManagedAgentsSessionEvent] = [
+        # The blocked call itself: an unattended decider refuses a pause it
+        # has no tool-use evidence for, whatever the policy.
+        BetaManagedAgentsAgentMCPToolUseEvent(
+            id="tu_x",
+            type="agent.mcp_tool_use",
+            processed_at=_NOW,
+            mcp_server_name="linear",
+            name="create_issue",
+            input={},
+            evaluated_permission="ask",
+        ),
         BetaManagedAgentsSessionStatusIdleEvent(
             id="evt_idle_block_1",
             type="session.status_idle",
@@ -338,6 +357,7 @@ async def test_auto_allow_confirms_once_and_rides_out_a_reemitted_requires_actio
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="hi",
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     # send_capture has all POST /v1/sessions/{id}/events bodies:
@@ -387,6 +407,7 @@ async def test_session_error_raises_turn_error() -> None:
             agent_id="agent_x",
             environment_id="env_x",
             trigger_message="hi",
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     assert exc_info.value.kind == "upstream"
@@ -432,6 +453,7 @@ async def test_run_turn_calls_usage_record_for_span_model_request_end() -> None:
         environment_id="env_x",
         trigger_message="hi",
         usage_record_factory=factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert tail == "ok"
@@ -489,7 +511,8 @@ async def test_run_turn_without_usage_record_factory_completes_unbilled(
         trigger_message="hi",
         tenant_id=tenant.id,
         session_factory=sm,
-        # usage_record_factory intentionally omitted
+        # usage_record_factory intentionally omitted,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert tail == "ok", "an unbilled turn still drains normally and returns its tail"
@@ -573,6 +596,7 @@ async def test_run_turn_reconnects_through_a_clean_close_and_returns_post_reconn
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="hi",
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert stream_calls == 2, "the stream must reopen exactly once after the clean close"
@@ -609,6 +633,7 @@ async def test_run_turn_propagates_usage_record_factory_exception() -> None:
             environment_id="env_x",
             trigger_message="hi",
             usage_record_factory=factory,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
 
@@ -631,6 +656,9 @@ async def test_run_turn_propagates_httpx_error() -> None:
         raise httpx.ConnectError("boom")
 
     router.add("POST", r"/v1/sessions", handle_create)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     _register_agent_environment_routes(router)
@@ -642,6 +670,7 @@ async def test_run_turn_propagates_httpx_error() -> None:
             agent_id="agent_x",
             environment_id="env_x",
             trigger_message="hi",
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     assert exc_info.value.kind == "connection_lost"
@@ -743,6 +772,9 @@ async def test_run_turn_attaches_vault_when_mcp_settings(
         lambda _r, _m: httpx.Response(200, json={"id": "vlt_new", "type": "vault"}),
     )
     router.add("POST", r"/v1/sessions", handle_session_create)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     _register_agent_environment_routes(router)
@@ -760,6 +792,7 @@ async def test_run_turn_attaches_vault_when_mcp_settings(
         account_id=account_id,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert tail == "ok"
@@ -806,6 +839,7 @@ async def test_run_turn_raises_value_error_when_account_id_missing() -> None:
                 public_url=HttpUrl("https://mcp.example.local/mcp"),
             ),
             account_id=None,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
 
@@ -837,6 +871,7 @@ async def test_run_turn_raises_when_mcp_active_and_agent_uuid_none() -> None:
             ),
             account_id=account_id,
             agent_uuid=None,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
 
@@ -877,7 +912,8 @@ async def test_run_turn_stamps_session_metadata_with_tenant_and_account() -> Non
         trigger_message="hi",
         tenant_id=tenant_id,
         account_id=account_id,
-        usage_record_factory=factory,  # the scheduler always passes one
+        usage_record_factory=factory,  # the scheduler always passes one,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert tail == "ok"
@@ -910,6 +946,7 @@ async def test_run_turn_without_usage_record_factory_stamps_session_billing_exem
         environment_id="env_x",
         trigger_message="hi",
         tenant_id=uuid.uuid4(),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(session_create_capture) == 1, "exactly one session-create call"
@@ -945,6 +982,7 @@ async def test_run_turn_stamps_a_routine_session_with_where_it_fires(
         origin_place=RoutineOrigin(
             channel_id="c1", thread_id="t1", seal_ids=frozenset({"c1"}), private_dm_id="routine:r1"
         ),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     metadata = session_create_capture[0]["metadata"]
@@ -1017,6 +1055,7 @@ def _build_client_with_files(
     router.add("POST", r"/v1/sessions", handle_create)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
+    router.add("GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=session_json))
     _register_session_vault_routes(router)
     _register_agent_environment_routes(router)
     return build_fake_anthropic(router.dispatch)
@@ -1051,6 +1090,7 @@ async def test_run_turn_mounts_env_resource_when_agent_has_secrets(
         tenant_id=tenant.id,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert tail == "ok", "turn still drains to idle and returns its tail"
@@ -1072,6 +1112,7 @@ async def test_run_turn_omits_resources_when_phase51_params_absent() -> None:
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="hi",
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert tail == "ok", "turn drains normally without resource-mount params"
@@ -1172,6 +1213,9 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
     )
     router.add("POST", r"/v1/files", handle_files)
     router.add("POST", r"/v1/sessions", handle_create)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
     router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     _register_agent_environment_routes(router)
@@ -1190,6 +1234,7 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
         tenant_id=tenant.id,
         agent_uuid=agent_uuid,
         session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert tail == "ok"
@@ -1228,6 +1273,9 @@ async def test_run_turn_past_deadline_raises_a_ceiling_turn_error_from_session_a
         return httpx.Response(200, json=session_json)
 
     router.add("POST", r"/v1/sessions", handle_create)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
     _register_agent_environment_routes(router)
 
     async def _slow_agent_retrieve(request: httpx.Request) -> httpx.Response:
@@ -1246,6 +1294,7 @@ async def test_run_turn_past_deadline_raises_a_ceiling_turn_error_from_session_a
             environment_id="env_x",
             trigger_message="hi",
             deadline=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=5),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     assert exc_info.value.kind == "ceiling", "a past deadline must breach as kind='ceiling'"
@@ -1268,6 +1317,9 @@ async def test_run_turn_ceiling_breach_during_the_drain_raises_a_ceiling_turn_er
         return httpx.Response(200, json={"data": None})
 
     router.add("POST", r"/v1/sessions", handle_create)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
     _register_agent_environment_routes(router)
 
@@ -1287,6 +1339,7 @@ async def test_run_turn_ceiling_breach_during_the_drain_raises_a_ceiling_turn_er
             environment_id="env_x",
             trigger_message="hi",
             deadline=dt.datetime.now(dt.UTC) + dt.timedelta(seconds=0.3),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     assert exc_info.value.kind == "ceiling", "a slow drain past the deadline must breach as ceiling"
@@ -1305,7 +1358,8 @@ async def test_run_turn_omitting_the_deadline_still_completes_a_normal_turn() ->
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="hi",
-        # deadline intentionally omitted
+        # deadline intentionally omitted,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert tail == "ok", "omitting deadline must not prevent a normal routine from completing"
@@ -1328,6 +1382,7 @@ async def test_run_turn_deadline_feeds_remaining_s_rather_than_being_ignored() -
             environment_id="env_x",
             trigger_message="hi",
             deadline=turn_deadline(now=dt.datetime.now(dt.UTC), ceiling_s=0.0),
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     assert exc_info.value.kind == "ceiling", (
@@ -1372,6 +1427,7 @@ async def test_run_turn_creates_a_fresh_session_per_fire_and_never_reuses_one() 
             agent_id="agent_x",
             environment_id="env_x",
             trigger_message=trigger,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     assert len(creates) == 2, (
@@ -1404,6 +1460,7 @@ async def test_memory_access_per_headless_origin(
         agent_uuid=agent_id,
         session_factory=db_session_factory,
         origin=origin,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     memory = next(r for r in bodies[0]["resources"] if r["type"] == "memory_store")
     assert memory["access"] == ("read_only" if origin == "routine" else "read_write")
@@ -1482,6 +1539,7 @@ async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
         session_factory=db_session_factory,
         origin="routine",
         personal_memory=routine_mounts_personal_memory(row),
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     mounts = {
         r["memory_store_id"]: r["access"]

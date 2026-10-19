@@ -257,6 +257,7 @@ def _make_continuation_row(
         target_name="uat-agent",
         requested_work="finish the migration",
         reason=reason,
+        attended=True,
         status="claimed",
         skip_reason=None,
         idempotency_key=uuid.uuid4(),
@@ -291,6 +292,7 @@ async def _run_continuation_and_capture_controls(
     *,
     workspace_id: str,
     reason: ContinuationReason,
+    attended: bool = True,
     admin_status: bool | None = False,
     prior_role: Role | None = None,
     excluded_identity: bool = False,
@@ -325,6 +327,8 @@ async def _run_continuation_and_capture_controls(
         tenant_id=tenant.id, account_id=requester.account_id, reason=reason
     )
 
+    row = row.model_copy(update={"attended": attended})
+
     with (
         patch(
             "daimon.adapters.slack.app.resolve_admin_status",
@@ -351,6 +355,27 @@ async def _run_continuation_and_capture_controls(
             mapping_id=None,
             recovered=False,
         )
+
+        async def check_origin(*args, **kwargs):
+            from daimon.core.stores.turn_origins import get_active_origin
+            from daimon.core.turn_origin import current_origin_id
+
+            origin_id = current_origin_id.get()
+            assert origin_id is not None
+            async with db_session_factory() as session:
+                origin = await get_active_origin(
+                    session,
+                    origin_id=origin_id,
+                    tenant_id=tenant.id,
+                    account_id=row.requester_account_id,
+                    platform=row.platform,
+                    now=datetime.now(UTC),
+                )
+            assert origin is not None
+            assert origin.attended is kwargs["attended"]
+            return run_turn.return_value
+
+        run_turn.side_effect = check_origin
         await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
             row,
             "finish the migration",
@@ -364,6 +389,9 @@ async def _run_continuation_and_capture_controls(
     assert resolve_identity.await_args.kwargs["enabled"] == (not excluded_identity)
 
     assert run_turn.await_args is not None, "the follow-up turn should have run"
+    assert run_turn.await_args.kwargs["attended"] is (
+        row.attended and row.reason not in ("timer", "worker_finished")
+    )
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message
@@ -1160,4 +1188,18 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
         "slack",
         _CHANNEL,
         _THREAD_ID,
+    )
+
+
+@pytest.mark.parametrize("attended", [False, True])
+async def test_handoff_retains_initiation_at_dispatch(
+    db_session, db_session_factory, fake_slack_web_client, attended
+):
+    await _run_continuation_and_capture_controls(
+        db_session,
+        db_session_factory,
+        fake_slack_web_client,
+        workspace_id="T_ATTENDANCE",
+        reason="task_handoff",
+        attended=attended,
     )

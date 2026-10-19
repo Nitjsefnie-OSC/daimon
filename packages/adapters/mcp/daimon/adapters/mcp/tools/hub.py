@@ -381,9 +381,10 @@ def register_hub_tools(
         On a session ``get_session`` reports ``paused`` with the hint to call
         ``continue_turn`` (a turn started here, waiting on tool confirmations
         after a restart), this resumes it first: the waiting calls are decided
-        by the current tool policy, and ``message`` is then optional. Only the
-        session's own account can continue or resume it, and never a turn
-        waiting on an approval card in chat.
+        by the current tool policy, and ``message`` is then optional; a
+        ``message`` is sent once the resumed turn ends, waiting up to about 90
+        seconds. Only the session's own account can continue or resume it,
+        and never a turn waiting on an approval card in chat.
         """
         auth, subject, recheck = await _admitted(ctx, daimon_id, "continue_turn")
         with hub_session_access(subject, "continue"):

@@ -29,6 +29,7 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import FundingMode
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import PreparedTurn, bind_session
@@ -145,6 +146,7 @@ def _deps(
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
