@@ -295,3 +295,5 @@ resources and visible servers. Polling resumes confirmation handling after a
 server restart. With tool safety disabled, MCP turns retain their existing
 permissions; confirmations on a previously gated session are answered using
 the disabled policy.
+
+Operator `daimon run` uses this unattended policy too, including `unattended_writes`; chat-only allow rules do not grant unattended permission.

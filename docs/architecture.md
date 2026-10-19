@@ -2092,3 +2092,5 @@ existing progress card while it waits behind the tenant cap. The same card
 returns to ordinary progress when the slot is granted. Stop, queue limits and
 FIFO admission are unchanged, and the card displays no tenant identities or
 queue counts. Drained follow-up turns keep their existing card wording.
+
+Operator `daimon run` uses the shared unattended decider with the existing session agent and server bindings.

@@ -233,3 +233,58 @@ async def test_run_conversation_passes_the_tool_posture_to_the_driver(
     )
 
     assert captured["tool_confirmation"] is posture
+
+
+@pytest.mark.parametrize(
+    ("writes", "chat_rule", "allowed"), [(True, False, True), (False, True, False)]
+)
+def test_cli_entrypoint_uses_unattended_policy(
+    monkeypatch: pytest.MonkeyPatch, writes: bool, chat_rule: bool, allowed: bool
+) -> None:
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+
+    from daimon.core.tool_safety import ResolvedAgentToolRule, ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+    from daimon.testing import ma_session
+
+    settings = Settings()
+    settings.tool_safety = ToolSafetyPolicy(
+        enabled=True,
+        agent_rules=chat_rule,
+        unattended_writes=("linear/create_issue",) if writes else (),
+    )
+    rt = _make_rt()
+
+    @asynccontextmanager
+    async def runtime(_settings: Settings):
+        yield rt
+
+    @asynccontextmanager
+    async def db():
+        yield object()
+
+    object.__setattr__(rt, "sessionmaker", db)
+    monkeypatch.setattr(cmd_mod, "load_settings", lambda: settings)
+    monkeypatch.setattr(cmd_mod, "build_runtime", runtime)
+    monkeypatch.setattr(cmd_mod, "retrieve_session_record", AsyncMock(return_value=ma_session()))
+    monkeypatch.setattr(cmd_mod, "discover_tenant", AsyncMock(return_value=uuid4()))
+
+    async def rule(_call: ToolCall):
+        return ResolvedAgentToolRule(rule="allow", scope="chat")
+
+    monkeypatch.setattr(cmd_mod, "agent_rule_lookup", lambda *a, **kw: rule)
+
+    async def conversation(**kwargs: Any) -> int:
+        posture = kwargs["tool_confirmation"]
+        assert isinstance(posture, PolicyApproval)
+        result = await posture.decide(
+            ToolCall(tool_use_id="tool1", server_name="linear", tool_name="create_issue")
+        )
+        assert result.allow is allowed
+        return 0
+
+    monkeypatch.setattr(cmd_mod, "run_conversation", conversation)
+    result = _invoke(["hello", "--session", "s1"])
+    assert result.exit_code == 0, result.exception
