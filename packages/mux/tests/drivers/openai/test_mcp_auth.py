@@ -1296,3 +1296,45 @@ async def test_owned_mcp_session_cleanup_suppresses_credential_echo() -> None:
         is refused.value.native_param
         is None
     )
+
+
+async def test_acknowledged_session_delete_keeps_vault_timeout_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mux.drivers.openai.sessions as session_module
+
+    wire = Wire()
+    session_deleted = False
+    slow = True
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal session_deleted
+        if session_deleted and slow and request.url.path == "/v1/vaults/vault-1":
+            await asyncio.sleep(1)
+        response = wire.handle(request)
+        if request.method == "DELETE" and request.url.path == "/v1/agents/sessions/s":
+            session_deleted = True
+        return response
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = wire.driver(sdk)
+        agent = await driver.agents.create(SCOPE, spec(), key="agent")
+        session = await driver.sessions.create(
+            SCOPE,
+            SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
+            key="session",
+        )
+        monkeypatch.setattr(session_module, "_DELETE_TIMEOUT", 0.05)
+        with pytest.raises(ProviderError) as refused:
+            await driver.sessions.delete(SCOPE, session.ref, key="delete")
+        assert refused.value.native_code == "session_delete_deadline"
+        assert refused.value.retryable and session_deleted and wire.vaults
+        slow = False
+        monkeypatch.setattr(session_module, "_DELETE_TIMEOUT", 30)
+        receipt = await driver.sessions.delete(SCOPE, session.ref, key="delete")
+        assert {ref.kind for ref in receipt.deleted} == {"session", "vault"}
+        assert not wire.vaults and not wire.sessions

@@ -430,6 +430,9 @@ class OpenAISessions:
                                 if error.category != "conflict" or error.native_code != "409":
                                     raise
                             else:
+                                # The session DELETE is acknowledged. A later vault
+                                # cleanup timeout must not report that DELETE unknown.
+                                deleting = False
                                 if managed is not None:
                                     await managed.delete(self._c, scope, key=key + ":mcp-vault")
                                 return DeletionReceipt(
