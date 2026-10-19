@@ -10,6 +10,7 @@ from anthropic.types.beta.sessions import BetaManagedAgentsEventParams
 from daimon.core.errors import TurnError
 from daimon.core.turn.driver import (
     _handle_interrupt_in_consume,  # pyright: ignore[reportPrivateUsage]
+    _UnattendedAbort,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.turn.io import MuxTurnIO, TurnConnectionLost, TurnIO
 from daimon.core.turn.state import TurnState
@@ -223,7 +224,7 @@ async def test_interrupt_terminal_hook_uses_observed_outcome_instead_of_cancel_i
     lifecycle = RecordingLifecycle()
     render = AsyncMock()
     state = await _handle_interrupt_in_consume(
-        io=io,
+        abort=_UnattendedAbort(io, session_id="session", stop_timeout_s=1),
         session_id="session",
         state_cell=[TurnState()],
         lifecycle=lifecycle,
