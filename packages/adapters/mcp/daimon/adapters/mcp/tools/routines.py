@@ -871,18 +871,25 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_id: str | None = None,
         origin_context_id: str | None = None,
     ) -> RoutineRow:
-        """Create a recurring routine with optional channel, thread or owner-DM delivery.
+        """Create a recurring routine; owner DMs run as unattended live-DM turns.
 
-        DM runs mount no personal memory and retain ordinary channel-routine tool
-        authority. Sources must be supported channels/threads in this tenant's guild;
-        the original thread and parent remain subject to reader restrictions.
+        Owner-DM routines are scheduled live-DM turns, using the owner's normal
+        personal/shared memory, credentials and DM tool authority in a fresh private
+        scope. They support Managed Agents only and run unattended: calls needing
+        a person are refused, and nobody watches intermediate actions. Permitted
+        tools retain ordinary DM side-effect risk. Crash and stop guarantees are
+        exactly those of live DMs. A slot skips if the owner has a DM turn running.
+        Channel routines never mount personal memory. Sources must be supported
+        channels/threads in this tenant's guild; the original thread and parent
+        remain subject to reader restrictions.
 
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
 
         ``destination_kind`` (``channel``, ``thread`` or ``dm``) and ``destination_id``
-        optionally name where each run's result goes. The run is told where,
-        and if the agent does not post there itself, daimon posts the end of
-        its final reply there. On Slack a thread is ``<channel id>:<thread
+        optionally name where each run's result goes. Channel/thread runs are
+        told where; if the agent does not post there itself, daimon posts the end
+        of its final reply there. Owner-DM runs queue their successful final reply
+        privately for the owner. On Slack a thread is ``<channel id>:<thread
         ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
         are in. Discord ``dm`` delivers only to the authenticated owner; omit
         ``destination_id`` to derive their user ID. Slack and Teams reject DM

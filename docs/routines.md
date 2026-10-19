@@ -232,7 +232,11 @@ it for later ticks and close it at shutdown.
 
 ## The turn itself
 
-A fire resolves the tenant, mints or finds the creator's principal on the
+Explicit owner-DM fires use the ordinary live-DM admission, binding and runner,
+with normal owner memory and credentials, as described below. The headless path
+in this section applies to channel/thread and legacy destination-free routines.
+
+A headless fire resolves the tenant, mints or finds the creator's principal on the
 tenant's own platform, checks the tenant's invoker allowlist against the
 creator (see [architecture.md](architecture.md#how-a-message-becomes-a-turn)),
 checks the balance, binds a usage recorder, resolves
@@ -244,7 +248,7 @@ That runner creates a session through the same
 `packages/core/daimon/core/sessions.py` assembly the chat path uses — same
 credential vault, same env mount, same repo resource, same tenant metadata
 stamps — and then hands the drain to the same driver,
-`packages/core/daimon/core/turn/driver.py`. So a routine inherits the driver's
+`packages/core/daimon/core/turn/driver.py`. So a headless routine inherits the driver's
 whole liveness story: status-checked reconnects, the per-call read timeout,
 the cancel race. What it does not inherit is the chat chokepoint for channel routines. A channel routine does not
 call `admit()` or `bind_session()`, so there is no thread-session binding, no
@@ -559,8 +563,11 @@ A locally ended turn does not prove that remote work ceased. There is no durable
 stop ledger, restart recovery or guaranteed unresolved-stop notice. A successful
 turn queues its final result; a delivery failure does not change its execution
 outcome. Agent reassignment or any private routine edit clears old private
-previews, diagnostics and pending/claimed results. Late writes compare the
-captured producer, destination and revision; every chunk and file rechecks them.
+previews, diagnostics and pending/claimed results atomically with the edit.
+Concurrent edits compare their captured revision and refuse a stale write; reload
+before retrying so validation and erasure use the current classification.
+Late writes compare the captured producer, destination and revision; every chunk
+and file rechecks them.
 An old result cannot acquire a new agent's authority or move to a public target.
 
 Channel routine sessions mount persistent agent memory read-only. They never

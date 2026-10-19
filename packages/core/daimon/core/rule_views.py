@@ -131,9 +131,9 @@ def routine_answers_only_owner(row: RoutineRow) -> bool:
 
     Explicit DM delivery reaches only the owner, even with a saved source
     channel. A legacy routine with neither destination nor channel also keeps
-    its result private. Only the legacy owner-only case may read personal
-    memory; explicit DM routines retain ordinary tool authority and never
-    mount personal memory.
+    its result private. Explicit DM routines use the normal live-DM pipeline,
+    including the owner's personal memory and DM tool authority. Legacy
+    owner-only headless runs may read personal memory read-only.
     A channel/thread routine may fall back to a DM, but cannot read personal
     memory because public delivery remains possible. Decided at every fire.
     """
