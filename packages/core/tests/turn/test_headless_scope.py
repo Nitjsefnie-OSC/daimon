@@ -77,6 +77,11 @@ async def test_headless_turn_uses_authorized_scope_and_original_requests(
         r"/v1/sessions/session-headless/events$",
         lambda request, match: httpx.Response(200, json={"data": None}),
     )
+    router.add(
+        "GET",
+        r"/v1/sessions/session-headless$",
+        lambda request, match: httpx.Response(200, json=session.model_dump(mode="json")),
+    )
     transport = ScriptedTransport(router=router)
     async with transport.client() as client:
         assert (
@@ -97,6 +102,7 @@ async def test_headless_turn_uses_authorized_scope_and_original_requests(
         ("GET", "/v1/environments/env-headless"),
         ("POST", "/v1/sessions"),
         ("GET", "/v1/sessions/session-headless/events/stream"),
+        ("GET", "/v1/sessions/session-headless"),
         ("POST", "/v1/sessions/session-headless/events"),
     ]
     turn_scopes = [scope for scope in scopes if scope.authorization_id == "headless-turn"]
