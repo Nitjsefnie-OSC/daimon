@@ -43,7 +43,7 @@ def words_sentence(platform: ChatPlatform) -> str:
     return (
         " When you tell a person how to reach a Daimon command or who can change a setting, "
         f"use `words` from these controls. {one_platform_rule(platform)} Even when you "
-        "quote or sum up what someone wrote, put \"another app\" in place of another app's "
+        'quote or sum up what someone wrote, put "another app" in place of another app\'s '
         "name so the meaning stays the same. Which Daimon "
         "command to use and who counts as an admin, as `words` gives them, are not setup "
         "details: tell anyone. Repo names, key names, environment details and your "
