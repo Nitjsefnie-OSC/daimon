@@ -3,7 +3,9 @@
     pytest -m platform_contract tests/platform_contract          (see README.md)
 
 Slack needs `SLACK_QA_BOT_TOKEN`. Discord needs `DISCORD_QA_BOT_TOKEN` and
-`DISCORD_PLATFORM_CONTRACT_CHANNEL_ID`. A platform without its variables is skipped.
+`DISCORD_PLATFORM_CONTRACT_CHANNEL_ID`, and that channel must be in the Daimon QA guild (the
+fixture checks; `DISCORD_PLATFORM_CONTRACT_GUILD_ID` overrides the expected guild). A platform
+without its variables is skipped.
 Each platform also gets one known-bad canary that must be rejected, so a validator
 (or a token that reaches the wrong endpoint) that accepts everything fails the run.
 Run without xdist: the calls are paced to the platforms' rate limits in one process.
@@ -21,7 +23,17 @@ import pytest
 from .catalogue import CATALOGUE, Built
 from .platform_clients import DiscordScratchChannel, SlackValidator
 
-pytestmark = pytest.mark.platform_contract
+# The platform calls are paced inside one process, so xdist workers would together exceed the limits.
+pytestmark = [
+    pytest.mark.platform_contract,
+    pytest.mark.skipif(
+        "PYTEST_XDIST_WORKER" in os.environ,
+        reason="platform_contract paces calls to the platforms' rate limits in one process; run without -n",
+    ),
+]
+
+# The Daimon QA guild. Scratch posts go only to a channel in this guild.
+DEFAULT_QA_GUILD_ID = "1435062989119295640"
 
 SLACK_NAMES = sorted(name for name in CATALOGUE if name.startswith("slack/"))
 DISCORD_NAMES = sorted(name for name in CATALOGUE if name.startswith("discord/"))
@@ -46,6 +58,14 @@ def discord_channel() -> Iterator[DiscordScratchChannel]:
             "DISCORD_QA_BOT_TOKEN and DISCORD_PLATFORM_CONTRACT_CHANNEL_ID are not both set"
         )
     channel = DiscordScratchChannel(token, channel_id)
+    expected_guild = os.environ.get("DISCORD_PLATFORM_CONTRACT_GUILD_ID", DEFAULT_QA_GUILD_ID)
+    actual_guild = channel.guild_id()
+    if actual_guild != expected_guild:
+        channel.close()
+        pytest.fail(
+            f"scratch channel {channel_id} is in guild {actual_guild or 'none (a DM?)'}, not the QA guild "
+            f"{expected_guild}; refusing to post (set DISCORD_PLATFORM_CONTRACT_GUILD_ID to override)"
+        )
     yield channel
     channel.close()
 
@@ -69,7 +89,7 @@ def test_slack_rejects_the_shipped_feedback_modal_bug(slack_validator: SlackVali
     text_input = next(
         block["element"]
         for block in view["blocks"]
-        if block["element"]["type"] == "plain_text_input"
+        if block.get("element", {}).get("type") == "plain_text_input"
     )
     text_input["max_length"] = 4000
     verdict = slack_validator.validate(Built("slack", "view", view))

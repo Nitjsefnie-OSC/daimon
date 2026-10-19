@@ -14,6 +14,8 @@ new-repo views, avatar views, `/memory` and `/github` replies.
 from __future__ import annotations
 
 import asyncio
+import copy
+import functools
 import inspect
 import uuid
 from datetime import UTC, datetime
@@ -559,15 +561,28 @@ def thread_hand_over_blocks() -> Any:
 
 @entry("github_card_with_buttons", "slack", "blocks")
 def github_card_with_buttons() -> Any:
+    """The card is built by the real `github_card_blocks`; the two buttons are hand-built.
+
+    RECONSTRUCTED buttons: the handlers in `github_requests.py` (link and cancel) and
+    `github_new_repo.py` assemble their button dicts inline, so there is no builder to call.
+    """
     from daimon.adapters.slack.agent_setup.github_card_ui import github_card_blocks
 
-    button = {
-        "type": "button",
-        "action_id": "x",
-        "text": {"type": "plain_text", "text": "Open"},
-        "value": "v",
-    }
-    return github_card_blocks("GitHub is connected.\nrepo acme/widgets", buttons=[button])
+    buttons = [
+        {
+            "type": "button",
+            "action_id": "github_personal__open",
+            "url": "https://github.com/login/oauth/authorize?state=x",
+            "text": {"type": "plain_text", "text": "Get a new link"},
+        },
+        {
+            "type": "button",
+            "action_id": "github_request__decision",
+            "value": "request-id:cancel",
+            "text": {"type": "plain_text", "text": "Cancel request"},
+        },
+    ]
+    return github_card_blocks("GitHub is connected.\nrepo acme/widgets", buttons=buttons)
 
 
 @entry("coding_tools_ephemeral", "slack", "blocks")
@@ -728,26 +743,37 @@ async def _drive_lifecycle(answer: str, *, render_tables: bool) -> list[tuple[st
     return calls
 
 
-def _lifecycle_blocks(
-    method: str, *, answer: str = _ANSWER, render_tables: bool = False
-) -> list[Any]:
-    calls = run_async(_drive_lifecycle(answer, render_tables=render_tables))
-    bodies = [body for name, body in calls if name == method]
-    if not bodies:
-        raise LookupError(f"lifecycle sent no {method}")
-    return bodies[-1]["blocks"]
+# Every call a lifecycle run sends, in order. `_lifecycle_calls` fails when a run sends a
+# different sequence, so a new or reordered call cannot go unvalidated unnoticed.
+_LIFECYCLE_RUNS: dict[str, tuple[str, bool, tuple[str, ...]]] = {
+    "answer": (_ANSWER, False, ("chat.postMessage", "chat.update")),
+    "table_answer": (
+        _ANSWER_WITH_TABLE,
+        True,
+        ("chat.postMessage", "chat.postMessage", "chat.update"),
+    ),
+}
 
 
-@entry("lifecycle_status_post", "slack", "blocks")
-def lifecycle_status_post() -> Any:
-    return _lifecycle_blocks("chat.postMessage")
+@functools.cache
+def _lifecycle_calls(run: str) -> tuple[tuple[str, dict[str, Any]], ...]:
+    answer, render_tables, expected = _LIFECYCLE_RUNS[run]
+    calls = tuple(run_async(_drive_lifecycle(answer, render_tables=render_tables)))
+    sent = tuple(method for method, _ in calls)
+    if sent != expected:
+        raise AssertionError(f"lifecycle run {run!r} sent {sent}, catalogue expects {expected}")
+    return calls
 
 
-@entry("lifecycle_answer_update", "slack", "blocks")
-def lifecycle_answer_update() -> Any:
-    return _lifecycle_blocks("chat.update")
+def _register_lifecycle_calls() -> None:
+    for run, (_, _, methods) in _LIFECYCLE_RUNS.items():
+        for index, method in enumerate(methods):
+            name = f"lifecycle_{run}_{index + 1}_{method.removeprefix('chat.')}"
+            entry(name, "slack", "blocks")(
+                lambda run=run, index=index: copy.deepcopy(
+                    _lifecycle_calls(run)[index][1]["blocks"]
+                )
+            )
 
 
-@entry("lifecycle_answer_with_table_update", "slack", "blocks")
-def lifecycle_answer_with_table_update() -> Any:
-    return _lifecycle_blocks("chat.update", answer=_ANSWER_WITH_TABLE, render_tables=True)
+_register_lifecycle_calls()

@@ -111,6 +111,13 @@ class DiscordScratchChannel:
         )
         self._pacer = _Pacer(DISCORD_MIN_SECONDS_BETWEEN_CALLS)
 
+    def guild_id(self) -> str:
+        """The guild that owns the scratch channel, so a mistyped id cannot post into a real server."""
+        response = self._request("GET", f"/channels/{self._channel}")
+        if response.status_code != 200:
+            raise RuntimeError(f"cannot read scratch channel: HTTP {response.status_code}")
+        return str(response.json().get("guild_id", ""))
+
     def validate(self, built: Built) -> Verdict:
         body: dict[str, Any] = {**built.payload, "allowed_mentions": {"parse": []}}
         response = self._request("POST", f"/channels/{self._channel}/messages", body)

@@ -23,13 +23,13 @@ uv run pytest tests/platform_contract -n 2
 
 ## Run against the real platforms
 
-Do not use xdist for these: the calls are paced to each platform's rate limit in one process.
+Do not use xdist for these: the calls are paced to each platform's rate limit in one process, and the module skips itself under xdist.
 
 | Variable | Used for |
 | --- | --- |
 | `SLACK_QA_BOT_TOKEN` | Slack `blocks.validate` (the QA workspace bot; needs no scopes) |
 | `DISCORD_QA_BOT_TOKEN` | Discord bot that posts to the scratch channel |
-| `DISCORD_PLATFORM_CONTRACT_CHANNEL_ID` | id of the scratch channel |
+| `DISCORD_PLATFORM_CONTRACT_CHANNEL_ID` | id of the scratch channel; the run fails if it is not in the Daimon QA guild (`DISCORD_PLATFORM_CONTRACT_GUILD_ID` overrides the expected guild id) |
 
 Both tokens are in staging Secret Manager. Read them into the test process only, and never
 print them:

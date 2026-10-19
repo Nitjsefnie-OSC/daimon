@@ -133,6 +133,17 @@ def test_rule_option_text_over_75_fires_and_75_passes() -> None:
     assert slack_option_text_within_limit(broken("slack/feedback_modal", over_limit))
 
 
+@pytest.mark.parametrize("field", ["initial_options", "initial_option"])
+def test_rule_initial_option_text_over_75_fires(field: str) -> None:
+    option = {"text": {"type": "plain_text", "text": "x" * 76}, "value": "v"}
+
+    def mutate(view: Any) -> None:
+        element = feedback_inputs(view)[0]["element"]
+        element[field] = [option] if field == "initial_options" else option
+
+    assert slack_option_text_within_limit(broken("slack/feedback_modal", mutate))
+
+
 @pytest.mark.parametrize(
     "url", ["not a url", "ftp://example.com/x", "javascript:alert(1)", "https://"]
 )

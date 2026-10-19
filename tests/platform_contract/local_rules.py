@@ -126,13 +126,12 @@ def slack_option_text_within_limit(built: Built) -> list[str]:
 
 
 def _is_option_text(path: str) -> bool:
-    """True for `...options[i].text` and `...options[i].description` text objects."""
+    """True for the text and description of an option, or of an initial option."""
     parts = path.split(".")
-    return (
-        len(parts) >= 2
-        and parts[-1] in ("text", "description")
-        and parts[-2].startswith("options[")
-    )
+    if len(parts) < 2 or parts[-1] not in ("text", "description"):
+        return False
+    owner = parts[-2]
+    return owner.startswith(("options[", "initial_options[")) or owner == "initial_option"
 
 
 def slack_button_urls_are_http(built: Built) -> list[str]:

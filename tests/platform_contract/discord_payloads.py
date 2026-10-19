@@ -173,17 +173,24 @@ def tool_confirmation_pending_v2() -> Any:
     return call_in_event_loop(lambda: _layout_body(build_confirmation_view(card, prompt)))
 
 
-@entry("feedback_button_view", "discord", "message")
-def feedback_button_view() -> Any:
+def _feedback_prompt(*, shared: bool) -> dict[str, Any]:
+    """The DM the bot sends after a feedback reaction: `feedback_prompt_embed` plus the button view."""
     import discord
     from daimon.adapters.discord.feedback_button import FeedbackButton
+    from daimon.adapters.discord.feedback_reactions import feedback_prompt_embed
+
+    link = "https://discord.com/channels/1/2/3"
 
     def build() -> dict[str, Any]:
         view = discord.ui.View(timeout=None)
         view.add_item(FeedbackButton(feedback_id=str(uuid.uuid4())))
-        return _classic_body(view=view, content="Thanks for the feedback.")
+        return _classic_body(view=view, embed=feedback_prompt_embed(link, shared=shared))
 
     return call_in_event_loop(build)
+
+
+entry("feedback_prompt", "discord", "message")(lambda: _feedback_prompt(shared=False))
+entry("feedback_prompt_shared", "discord", "message")(lambda: _feedback_prompt(shared=True))
 
 
 @entry("here_embed", "discord", "message")
