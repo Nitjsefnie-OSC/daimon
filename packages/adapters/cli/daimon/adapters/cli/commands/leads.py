@@ -58,7 +58,9 @@ def adopt_config(tenant_id: UUID, intake_id: UUID, revision: int) -> None:
     """Explicitly adopt an operator-reviewed configuration revision for unfinished work.
 
     This records the old/new revision in encrypted audit and performs no
-    provider writes. Review the connection and destination before invoking it.
+    provider writes. Review the connections before invoking it. A revision with
+    another sales channel or guild is refused: a lead keeps the readers of the
+    channel it was captured for.
     """
     settings = load_settings()
     console = Console(highlight=False)
@@ -69,17 +71,7 @@ def adopt_config(tenant_id: UUID, intake_id: UUID, revision: int) -> None:
                 tuple(key.get_secret_value() for key in settings.crypto.keys)
             )
             store = IntakeStore(runtime.sessionmaker, fernet, tenant_id)
-            async with store.claim(f"source:{intake_id}"):
-                config, _ = await store.configuration()
-                record = await store.get(intake_id)
-                if revision != config.revision or record.status not in {"pending", "review"}:
-                    raise ValueError("configuration_or_intake_not_eligible")
-                for step in ("starter", "company", "contact", "deal"):
-                    if await store.effect(intake_id, step) is not None:
-                        raise ValueError("cannot_rebind_started_effects")
-                before = str(record.config_revision)
-                record.config_revision, record.error_code = revision, None
-                await store.audit(record, "deployment-operator", before, config.model_dump_json())
+            await store.adopt(intake_id, revision)
         console.print(
             f"Intake {intake_id} adopted configuration revision {revision}; resume separately."
         )

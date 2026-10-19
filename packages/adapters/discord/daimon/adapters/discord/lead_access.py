@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
 
+from cryptography.fernet import MultiFernet
 from daimon.core.authz import AgentRef, Place
 from daimon.core.lead_intake import IntakeConfig
 from daimon.core.lead_intake_access import (
@@ -17,6 +18,7 @@ from daimon.core.lead_intake_access import (
     LeadReadTarget,
     NativeChannel,
     authorize_lead_read,
+    read_target,
 )
 from daimon.core.membership import MembershipResolver
 from daimon.core.stores.access_policy import load_access_policy
@@ -153,3 +155,27 @@ async def discord_lead_reads(
         await authorize_lead_read(target, reader, native)
 
     return DiscordLeadReads(store=store, config=config, check=check)
+
+
+async def require_lead_readable(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+    resolver: MembershipResolver,
+    tenant_id: UUID,
+    channel: discord.abc.GuildChannel | discord.Thread,
+    user_id: str,
+    intake_id: str,
+) -> None:
+    """Raise unless this person may read the lead: an approval card's Details uses it."""
+    store = IntakeStore(sessionmaker, fernet, tenant_id)
+    reads = await discord_lead_reads(
+        sessionmaker=sessionmaker,
+        store=store,
+        resolver=resolver,
+        tenant_id=tenant_id,
+        guild=channel.guild,
+        user_id=user_id,
+        origin=channel,
+    )
+    await reads.check(read_target(await store.get(UUID(intake_id))))

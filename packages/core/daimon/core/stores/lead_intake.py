@@ -378,6 +378,29 @@ class IntakeStore:
                 .values(status=record.status, encrypted_payload=self.seal(record.model_dump_json()))
             )
 
+    async def adopt(self, intake_id: UUID, revision: int) -> None:
+        """Rebind unfinished work to an operator-reviewed revision, audited.
+
+        Connections, CRM and mappings may change; the sales channel may not:
+        a lead keeps the readers of the channel it was captured for.
+        """
+        async with self.claim(f"source:{intake_id}"):
+            config, _ = await self.configuration()
+            record = await self.get(intake_id)
+            if revision != config.revision or record.status not in {"pending", "review"}:
+                raise ValueError("configuration_or_intake_not_eligible")
+            if record.destination is None or (
+                record.destination.guild_id,
+                record.destination.channel_id,
+            ) != (config.guild_id, config.channel_id):
+                raise ValueError("destination_change_not_adoptable")
+            for step in ("starter", "company", "contact", "deal"):
+                if await self.effect(intake_id, step) is not None:
+                    raise ValueError("cannot_rebind_started_effects")
+            before = str(record.config_revision)
+            record.config_revision, record.error_code = revision, None
+            await self.audit(record, "deployment-operator", before, config.model_dump_json())
+
     async def starter_recovery_facts(self, record: IntakeRecord) -> tuple[list[str], bool]:
         async with self.sessions() as session:
             claimed = list(
