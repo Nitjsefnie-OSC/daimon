@@ -308,7 +308,7 @@ next to their wake poller (Teams for its one organisation). Each poll claims `pe
 - **Creator first.** Before resolving or sending anything, the poster reads
   the tenant access policy and checks the creator: if the policy cannot be
   read (`skipped/access_policy_unreadable`) or the creator may no longer
-  invoke the agent (`skipped/invoker_not_allowed`; admins always pass),
+  invoke the agent (`skipped/invoker_not_allowed`; admins pass when `invoker_admin_bypass` is true),
   nothing is sent anywhere — not to the destination and not by direct
   message. Everything below applies only to a cleared result.
 - **Policy, at post time.** The adapter resolves where the destination

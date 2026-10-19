@@ -211,3 +211,36 @@ def test_role_list_alone_closes_open_user_list() -> None:
 def test_roles_require_snowflakes(role: str) -> None:
     with pytest.raises(ValidationError):
         TenantAccessPolicy(invoker_role_ids=(role,))
+
+
+@pytest.mark.parametrize("bypass", [False, True])
+@pytest.mark.parametrize(
+    "user,roles,restricted,expected",
+    [
+        ("other", (), True, False),
+        ("other", ("123",), True, True),
+        ("listed", (), True, True),
+        ("other", (), False, True),
+    ],
+)
+def test_admin_invoker_switch(bypass, user, roles, restricted, expected):  # type: ignore[no-untyped-def]
+    policy = TenantAccessPolicy(
+        invoker_user_ids=("listed",) if restricted else (),
+        invoker_role_ids=("123",) if restricted else (),
+        invoker_admin_bypass=bypass,
+    )
+    assert is_invoker_allowed(
+        policy,
+        external_user_id=user,
+        role_ids=roles,
+        verified_membership=True,
+        is_admin=True,
+    ) is (bypass or expected)
+
+
+def test_admin_switch_old_json_and_round_trip() -> None:
+    assert TenantAccessPolicy.model_validate_json(
+        '{"invoker_user_ids": ["u1"]}'
+    ).invoker_admin_bypass
+    policy = TenantAccessPolicy(invoker_admin_bypass=False)
+    assert TenantAccessPolicy.model_validate_json(policy.model_dump_json()) == policy

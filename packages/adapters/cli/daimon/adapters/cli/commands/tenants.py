@@ -560,11 +560,13 @@ def _print_policy(
         return
     if policy == OPEN_ACCESS_POLICY:
         console.print(f"{label} access policy: open (anyone may invoke; no rules)")
+        console.print("  invoker_admin_bypass: true")
         return
     console.print(f"{label} access policy:")
     console.print(f"  invoker_role_ids: {', '.join(policy.invoker_role_ids) or '-'}")
     console.print(f"  invoker_user_ids: {', '.join(policy.invoker_user_ids) or '-'}")
     console.print(f"  member_guest_ids: {', '.join(policy.member_guest_ids) or '-'}")
+    console.print(f"  invoker_admin_bypass: {str(policy.invoker_admin_bypass).lower()}")
     console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
     rules = len(policy.channel_rules) + len(policy.category_rules) + len(policy.agent_rules)
     console.print(f"  rules: {rules or '-'} (see access-policy rules)")
@@ -697,7 +699,10 @@ def tenants_access_policy_set_command(
     invoker: Annotated[
         list[str] | None,
         typer.Option(
-            help="Platform user id allowed to start turns (repeatable). Admins always may."
+            help=(
+                "Platform user id allowed to start turns (repeatable). "
+                "Admins bypass the lists only while invoker_admin_bypass is on."
+            )
         ),
     ] = None,
     invoker_role: Annotated[
@@ -709,6 +714,13 @@ def tenants_access_policy_set_command(
     clear_invoker_roles: Annotated[
         bool, typer.Option("--clear-invoker-roles", help="Clear the Discord invoker role list.")
     ] = False,
+    invoker_admin_bypass: Annotated[
+        bool | None,
+        typer.Option(
+            "--invoker-admin-bypass/--no-invoker-admin-bypass",
+            help="Allow server admins to bypass the invoker user/role lists.",
+        ),
+    ] = None,
     dm_memory_read_only: Annotated[
         bool | None,
         typer.Option(
@@ -762,6 +774,7 @@ def tenants_access_policy_set_command(
                 invoker=invoker,
                 invoker_role=invoker_role,
                 clear_invoker_roles=clear_invoker_roles,
+                invoker_admin_bypass=invoker_admin_bypass,
                 dm_memory_read_only=dm_memory_read_only,
                 add_member_guest=add_member_guest,
                 remove_member_guest=remove_member_guest,
@@ -814,6 +827,7 @@ async def tenants_access_policy_set(
     invoker: list[str] | None = None,
     invoker_role: list[str] | None = None,
     clear_invoker_roles: bool = False,
+    invoker_admin_bypass: bool | None = None,
     dm_memory_read_only: bool | None = None,
     add_member_guest: list[str] | None = None,
     remove_member_guest: list[str] | None = None,
@@ -851,6 +865,8 @@ async def tenants_access_policy_set(
         changes["invoker_role_ids"] = ()
     if invoker is not None:
         changes["invoker_user_ids"] = _parse_invokers(invoker, platform=validated_platform)
+    if invoker_admin_bypass is not None:
+        changes["invoker_admin_bypass"] = invoker_admin_bypass
     if dm_memory_read_only is not None:
         changes["dm_memory_read_only"] = dm_memory_read_only
     edits_guests = bool(guests_to_add or guests_to_remove)

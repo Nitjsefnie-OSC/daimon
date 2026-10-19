@@ -58,7 +58,7 @@ class Action(StrEnum):
     # notice around a turn, or a routine's delivery post.
     POST = "post"
     # Run or deliver a routine on its creator's behalf: only while the creator
-    # may still start a turn (the invoker allowlist; admins always may). A
+    # may still start a turn (the invoker allowlist and optional admin bypass). A
     # routine with no recorded creator speaks for no one.
     ACT_FOR_CREATOR = "act_for_creator"
     # Send a direct message to a workspace member as the executing agent.
