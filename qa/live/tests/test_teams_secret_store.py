@@ -19,6 +19,11 @@ from qa.live.teams.tokens import ReauthRequired, TokenStore
 SENTINEL = "PRIVATE_CACHE_PAYLOAD"
 
 
+def canonical(name: str) -> str:
+    """The real API names versions by project number, not project ID."""
+    return name.replace("projects/qa-project/", "projects/123456789/")
+
+
 class FakeSecrets:
     def __init__(self) -> None:
         self.payloads: dict[str, bytes] = {}
@@ -38,7 +43,7 @@ class FakeSecrets:
         name = request["parent"]
         self.payloads[name] = request["payload"]["data"]
         version = SimpleNamespace(
-            name=f"{name}/versions/{len(self.versions) + 1}",
+            name=f"{canonical(name)}/versions/{len(self.versions) + 1}",
             state=secretmanager.SecretVersion.State.ENABLED,
         )
         self.versions.append(version)
@@ -49,7 +54,8 @@ class FakeSecrets:
             raise PermissionDenied("list denied")
         if self.listing is not None:
             return self.listing
-        return [v for v in self.versions if v.name.startswith(request["parent"] + "/")]
+        parent = canonical(request["parent"])
+        return [v for v in self.versions if v.name.startswith(parent + "/")]
 
     def destroy_secret_version(self, *, request: dict[str, str]) -> None:
         if self.deny_prune or self.deny_destroy:
@@ -97,7 +103,8 @@ MEMBER = "projects/qa-project/secrets/teams-qa-token-member"
 
 
 def enabled(api: FakeSecrets, secret: str) -> list[str]:
-    return [v.name for v in api.versions if v.name.startswith(secret + "/") and v.state == ENABLED]
+    prefix = canonical(secret) + "/"
+    return [v.name for v in api.versions if v.name.startswith(prefix) and v.state == ENABLED]
 
 
 @pytest.mark.parametrize("writes", [1, 2, 3, 4, 5, 8])
@@ -120,14 +127,49 @@ def test_prune_never_touches_config_or_other_persona() -> None:
         backend.write("member", SENTINEL)
     for _ in range(6):
         backend.write("admin", SENTINEL)
-    # Even a listing that returns every secret's versions must not reach them.
-    api.listing = list(api.versions)
+    # Even a listing that returns every secret's versions, including the same
+    # secret id in another project, must not reach them.
+    foreign = [
+        SimpleNamespace(
+            name=f"projects/{project}/secrets/teams-qa-token-admin/versions/1", state=ENABLED
+        )
+        for project in ("987654321", "other-project")
+    ]
+    api.listing = foreign + list(api.versions)
     backend.write("admin", SENTINEL)
-    assert enabled(api, CONFIG) == [f"{CONFIG}/versions/1"]
+    assert enabled(api, CONFIG) == [f"{canonical(CONFIG)}/versions/1"]
     assert len(enabled(api, MEMBER)) == 2
     # The listing predates the last add, so that version survives as a fourth.
     assert len(enabled(api, ADMIN)) == 4
-    assert all(name.startswith(ADMIN + "/") for name in api.destroyed)
+    assert all(name.startswith(canonical(ADMIN) + "/") for name in api.destroyed)
+    assert all(version.state == ENABLED for version in foreign)
+
+
+def test_prune_matches_project_number_names() -> None:
+    api = FakeSecrets()
+    backend = SecretManagerCacheBackend("qa-project", "teams-qa", api)
+    for _ in range(4):
+        backend.write("admin", SENTINEL)
+    assert api.versions[0].name == "projects/123456789/secrets/teams-qa-token-admin/versions/1"
+    assert api.destroyed == [api.versions[0].name]
+    assert len(enabled(api, ADMIN)) == 3
+
+
+def test_prune_skips_when_added_version_is_another_secret() -> None:
+    api = FakeSecrets()
+    backend = SecretManagerCacheBackend("qa-project", "teams-qa", api)
+    for _ in range(4):
+        backend.write("admin", SENTINEL)
+    destroyed = list(api.destroyed)
+    real_add = api.add_secret_version
+
+    def add_elsewhere(*, request: dict[str, Any]) -> SimpleNamespace:
+        real_add(request=request)
+        return SimpleNamespace(name="projects/1/secrets/teams-qa-config/versions/9", state=ENABLED)
+
+    api.add_secret_version = add_elsewhere  # type: ignore[method-assign]
+    backend.write("admin", SENTINEL)
+    assert api.destroyed == destroyed
 
 
 def test_prune_ignores_disabled_versions() -> None:
