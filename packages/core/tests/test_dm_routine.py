@@ -45,6 +45,7 @@ from daimon.testing.factories import (
 from daimon.testing.ma import build_fake_anthropic, resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session, ma_session_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 OWNER = "999"
@@ -462,7 +463,7 @@ async def test_a_public_send_in_the_run_is_decided_by_the_unattended_gate(
     monkeypatch.setattr(direct_messages, "prepared_annotation_lookup", lambda *a, **k: None)
 
     posture = await direct_messages._unattended_gate(  # pyright: ignore[reportPrivateUsage]
-        deps, prepared, tenant_id=tenant.id
+        deps, prepared, tenant_id=tenant.id, scope=Scope.legacy_host_authorized(call_site="test")
     )
     await client.close()
 

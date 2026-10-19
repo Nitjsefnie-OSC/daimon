@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import anthropic
 import structlog
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
@@ -63,6 +64,7 @@ from daimon.core.turn.run import prepared_annotation_lookup, run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.unattended import gate_session_snapshot, unattended_posture
 from daimon.core.turn_origin import render_turn_origin, turn_origin
+from mux.contracts.ids import Scope
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -501,6 +503,7 @@ async def _run_admitted_dm_turn(
     origin: TurnContext = "chat",
     attended: bool | None = None,
     tool_confirmation: ToolConfirmation | None = None,
+    on_session: Callable[[str, uuid.UUID | None], Awaitable[None]] | None = None,
 ) -> tuple[str, str]:
     """Run one admitted, bound private turn and return its final text and session.
 
@@ -544,6 +547,7 @@ async def _run_admitted_dm_turn(
                 deadline=deadline,
                 attended=attended,
                 tool_confirmation=tool_confirmation,
+                on_session=on_session,
             )
         except DmSourceSealedError:
             # Decided again during a dead-session recovery.
@@ -769,6 +773,20 @@ class DmRoutineReply:
     grant: AdmissionGrant
 
 
+#: Recorded on the routine when its agent runs on another provider.
+MANAGED_AGENTS_ONLY = "DM routines need a Managed Agents agent"
+
+_MANAGED_AGENTS_PROFILE = "anthropic.managed_agents"
+
+
+@dataclass
+class _RunningSession:
+    """The session a DM routine's turn is actually running in, across recovery."""
+
+    session_id: str
+    mapping_id: uuid.UUID | None
+
+
 async def run_dm_routine(
     deps: TurnDeps,
     *,
@@ -784,13 +802,20 @@ async def run_dm_routine(
     Ordinary DM admission (`cold_dm`, the routine's saved agent through the
     cold-DM agent checks, fresh membership), the session a fresh live DM of
     the same owner and agent gets, personal memory included, and the shared
-    prepared-turn execution. The run is unattended: its session is gated and
-    its pauses decided by `unattended_posture`, so a call that needs someone's
-    Approve is refused. It owns a new private scope, never the owner's
-    selected DM conversation, and starts with no history. `source` is the
-    routine's creation source, rechecked for a seal whenever the session is
-    built; `budget_channel_id` only bills. Nothing is posted here: the caller
-    queues the text for the owner's DM.
+    prepared-turn execution. The run is unattended: every session it runs in,
+    a recovery's replacement included, is gated before anything is sent to it
+    and its pauses decided by `unattended_posture`, so a call that needs
+    someone's Approve is refused. Only Managed Agents agents run: another
+    provider is refused (`MANAGED_AGENTS_ONLY`) before a session exists.
+
+    It owns a new private scope, never the owner's selected DM conversation,
+    and starts with no history. `source` is the routine's creation source,
+    rechecked for a seal whenever the session is built; `budget_channel_id`
+    only bills. Any exit without a final answer (an error, the ceiling, a lost
+    stream, cancellation) stops the session that is running; a stop that is
+    not confirmed is logged, and raised as `stop_unresolved` unless the run
+    was cancelled. Nothing is posted here: the caller queues the text for the
+    owner's DM.
     """
     now = datetime.now(UTC)
     async with deps.sessionmaker() as session:
@@ -821,6 +846,11 @@ async def run_dm_routine(
             dm_agent_name=agent_name,
             cold_dm=True,
         )
+        if (
+            admission.backend_revision is not None
+            and admission.backend_revision.profile != _MANAGED_AGENTS_PROFILE
+        ):
+            raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
         if admission.grant is None:
             raise DirectMessageAccessRevoked(
                 "authorization_missing", message="Private authority unavailable."
@@ -843,77 +873,113 @@ async def run_dm_routine(
             reuse_existing=False,
             deadline=deadline,
         )
+    except DmSourceSealedError as error:
+        raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE) from error
+    except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
+        raise _revoked(error) from error
+    running = _RunningSession(prepared.ma_session_id, prepared.mapping_id)
+    scope = resource_scope(
+        tenant_id=str(tenant_id),
+        account_id=str(prepared.session_account_id),
+        authorization_id="dm-routine",
+    )
+    try:
         grant = prepared.admission.grant
-        if grant is None:
-            raise DirectMessageAccessRevoked(
-                "authorization_missing", message="Private authority unavailable."
-            )
+        if prepared.backend is not None or grant is None:
+            # Admission named Managed Agents; anything else is never sent to.
+            raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+        posture = await _unattended_gate(deps, prepared, tenant_id=tenant_id, scope=scope)
+
+        async def replaced(session_id: str, mapping_id: uuid.UUID | None) -> None:
+            running.session_id, running.mapping_id = session_id, mapping_id
+            await _gate_session(deps, session_id, tenant_id=tenant_id, scope=scope)
 
         async def sealed() -> None:
             raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
 
-        try:
-            text, session_id = await _run_admitted_dm_turn(
-                deps,
-                prepared,
-                tenant_id=tenant_id,
-                platform="discord",
-                parent_channel_id=scope_id,
-                scope_id=scope_id,
-                external_user_id=owner_user_id,
-                role=Role.ADMIN if grant.subject.is_admin else Role.USER,
-                prompt=prompt,
-                deadline=deadline,
-                on_sealed=sealed,
-                origin="routine",
-                attended=False,
-                tool_confirmation=await _unattended_gate(deps, prepared, tenant_id=tenant_id),
-            )
-        except asyncio.CancelledError:
-            # A scheduler shutdown: nothing reads this private session again.
-            with suppress(Exception):
-                await interrupt_orphaned_session(
-                    deps.anthropic,
-                    session_id=prepared.ma_session_id,
-                    scope=resource_scope(
-                        tenant_id=str(tenant_id),
-                        account_id=str(prepared.session_account_id),
-                        authorization_id="dm-routine-shutdown",
-                    ),
-                    timeout_s=_SHUTDOWN_INTERRUPT_TIMEOUT_S,
-                )
-            raise
-    except DmSourceSealedError as error:
-        raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE) from error
-    except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
-        reason = (
-            "policy_unreadable"
-            if isinstance(error, AccessPolicyUnreadable)
-            else "agent_unavailable"
+        text, session_id = await _run_admitted_dm_turn(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            platform="discord",
+            parent_channel_id=scope_id,
+            scope_id=scope_id,
+            external_user_id=owner_user_id,
+            role=Role.ADMIN if grant.subject.is_admin else Role.USER,
+            prompt=prompt,
+            deadline=deadline,
+            on_sealed=sealed,
+            origin="routine",
+            attended=False,
+            tool_confirmation=posture,
+            on_session=replaced,
         )
-        raise DirectMessageAccessRevoked(reason, message=str(error)) from error
+    except (Exception, asyncio.CancelledError) as error:
+        if prepared.backend is not None:
+            # Refused above before anything was sent to the other provider.
+            raise
+        stopped = await _stop_routine_session(deps, running, scope=scope)
+        if isinstance(error, asyncio.CancelledError):
+            raise
+        if not stopped:
+            raise DirectMessageAccessRevoked(
+                "stop_unresolved",
+                message=f"The routine failed and its session could not be stopped: {error}",
+            ) from error
+        if isinstance(error, DmSourceSealedError):
+            raise DirectMessageAccessRevoked(
+                "source_sealed", message=SEALED_SINCE_MESSAGE
+            ) from error
+        if isinstance(error, (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError)):
+            raise _revoked(error) from error
+        raise
     return DmRoutineReply(text=text, session_id=session_id, grant=grant)
 
 
-async def _unattended_gate(
-    deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID
-) -> ToolConfirmation | None:
-    """Gate a DM routine's managed-agents session and answer its pauses unattended.
-
-    `gate_session_snapshot` rewrites the session's own tool config from the
-    current policy before anything is sent, so Daimon's protected actions ask,
-    and `unattended_posture` refuses every call that needs a person. A
-    provider-native session keeps `run_prepared_turn`'s `attended=False`
-    posture, the same unattended decider.
-    """
-    if prepared.backend is not None:
-        return None
-    scope = resource_scope(
-        tenant_id=str(tenant_id),
-        account_id=str(prepared.session_account_id),
-        authorization_id="dm-routine-gate",
+def _revoked(
+    error: BoundAgentUnavailable | AccessPolicyUnreadable | MAResolverMissError,
+) -> DirectMessageAccessRevoked:
+    reason = (
+        "policy_unreadable" if isinstance(error, AccessPolicyUnreadable) else "agent_unavailable"
     )
-    session = await retrieve_session_record(deps.anthropic, prepared.ma_session_id, scope=scope)
+    return DirectMessageAccessRevoked(reason, message=str(error))
+
+
+async def _stop_routine_session(deps: TurnDeps, running: _RunningSession, *, scope: Scope) -> bool:
+    """Stop the session a failed or cancelled DM routine left, bounded; True once confirmed.
+
+    Interrupts the session the turn is actually running in (a recovery's
+    replacement, not the one it was bound to) and retires its mapping, so
+    nothing sends into it again. Never raises: an unconfirmed stop is logged
+    with the session id for an operator.
+    """
+    interrupted = False
+    try:
+        interrupted = await interrupt_orphaned_session(
+            deps.anthropic,
+            session_id=running.session_id,
+            scope=scope,
+            timeout_s=_SHUTDOWN_INTERRUPT_TIMEOUT_S,
+        )
+    except Exception as error:
+        # Named boundary: cleanup must never mask why the run ended.
+        _log.warning("dm_routine.stop_failed", error_type=type(error).__name__)
+    if running.mapping_id is not None:
+        with suppress(SQLAlchemyError):
+            async with deps.sessionmaker.begin() as session:
+                await mark_dead(session, id=running.mapping_id)
+    if interrupted:
+        _log.info("dm_routine.session_stopped", session_id=running.session_id)
+    else:
+        _log.error("dm_routine.stop_unresolved", session_id=running.session_id)
+    return interrupted
+
+
+async def _gate_session(
+    deps: TurnDeps, session_id: str, *, tenant_id: uuid.UUID, scope: Scope
+) -> BetaManagedAgentsSession:
+    """Rewrite `session_id`'s own tool config from the current policy (S1's gate)."""
+    session = await retrieve_session_record(deps.anthropic, session_id, scope=scope)
     await gate_session_snapshot(
         deps.anthropic,
         session,
@@ -923,6 +989,20 @@ async def _unattended_gate(
         session_factory=deps.sessionmaker,
         tenant_id=tenant_id,
     )
+    return session
+
+
+async def _unattended_gate(
+    deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID, scope: Scope
+) -> ToolConfirmation:
+    """Gate a DM routine's Managed Agents session and answer its pauses unattended.
+
+    `gate_session_snapshot` rewrites the session's own tool config from the
+    current policy before anything is sent, so Daimon's protected actions ask,
+    and `unattended_posture` refuses every call that needs a person, tool
+    safety on or off.
+    """
+    session = await _gate_session(deps, prepared.ma_session_id, tenant_id=tenant_id, scope=scope)
     return unattended_posture(
         deps.tool_safety,
         session=session,
