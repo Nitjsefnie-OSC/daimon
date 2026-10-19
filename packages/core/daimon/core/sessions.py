@@ -193,18 +193,11 @@ def _shared_mcp_vault_required(
     *,
     account_id: uuid.UUID | None,
     hide_personal_for: uuid.UUID | None,
-    is_external: bool,
     fernet: MultiFernet | None,
 ) -> bool:
     """A shared thread's session (no account, a synthetic owner) mounts a vault
-    of the thread's own for the agent's shared tokens. Never for an external
-    caller, who gets no agent-wide token anywhere."""
-    return (
-        account_id is None
-        and hide_personal_for is not None
-        and not is_external
-        and fernet is not None
-    )
+    of the thread's own for the agent's shared tokens."""
+    return account_id is None and hide_personal_for is not None and fernet is not None
 
 
 def _session_mcp_credential(url: str, *, app_mode: bool) -> bool:
