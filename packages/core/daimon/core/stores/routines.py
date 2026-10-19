@@ -339,12 +339,24 @@ async def update_routine(
     if not values:
         return current
 
+    return await _save_routine_edit(session, current, values)
+
+
+async def _save_routine_edit(
+    session: AsyncSession,
+    current: RoutineRow,
+    values: dict[str, str | bool | datetime | None],
+    *,
+    expected_updated_at: datetime | None = None,
+) -> RoutineRow:
+    """All configuration writers share CAS, monotone revisions and erasure."""
+    if expected_updated_at is not None and current.updated_at != expected_updated_at:
+        raise StoreError("Routine changed while being edited; reload it and try again.")
     if current.destination_kind == "dm" or (
-        agent_id is not None
-        or agent_name is not None
-        or clear_destination
-        or destination_kind is not None
-        or destination_id is not None
+        "agent_id" in values
+        or "agent_name" in values
+        or "destination_kind" in values
+        or "destination_id" in values
     ):
         # Any private edit or producer/destination change invalidates content.
         # This also erases retained previews from legacy owner-only routines.
@@ -358,7 +370,7 @@ async def update_routine(
                 "private_revision_changed"
                 if current.destination_kind == "dm"
                 else "destination_changed"
-                if clear_destination or destination_kind is not None
+                if "destination_kind" in values
                 else "agent_changed"
             ),
             delivery_lease_owner=None,
@@ -368,8 +380,8 @@ async def update_routine(
     stmt = (
         update(Routine)
         .where(
-            Routine.id == routine_id,
-            Routine.tenant_id == tenant_id,
+            Routine.id == current.id,
+            Routine.tenant_id == current.tenant_id,
             Routine.updated_at == current.updated_at,
         )
         .values(
@@ -485,25 +497,26 @@ async def get_first_routine_for_principal(
 
 
 async def pause_routine(
-    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    tenant_id: _uuid.UUID,
+    expected_updated_at: datetime | None = None,
 ) -> RoutineRow | None:
-    """Set ``enabled=False`` and ``next_fire_at=NULL`` atomically.
+    """Pause the captured revision, erase private output and clear its next slot.
 
-    Returns the updated row, or ``None`` if no row matched ``routine_id``
-    (including a routine_id that exists under a different tenant_id).
+    Missing/cross-tenant rows return None. A stale authorized revision or a
+    concurrent configuration edit raises StoreError rather than overwriting it.
     """
-    stmt = (
-        update(Routine)
-        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(enabled=False, next_fire_at=None, updated_at=func.now())
-        .returning(Routine)
-        .execution_options(synchronize_session=False)
-    )
-    orm = (await session.execute(stmt)).scalar_one_or_none()
-    if orm is None:
+    row = await get_routine(session, routine_id, tenant_id=tenant_id)
+    if row is None:
         return None
-    await session.flush()
-    return RoutineRow.model_validate(orm)
+    return await _save_routine_edit(
+        session,
+        row,
+        {"enabled": False, "next_fire_at": None},
+        expected_updated_at=expected_updated_at,
+    )
 
 
 async def resume_routine(
@@ -512,29 +525,23 @@ async def resume_routine(
     *,
     tenant_id: _uuid.UUID,
     now: datetime,
+    expected_updated_at: datetime | None = None,
 ) -> RoutineRow | None:
-    """Set ``enabled=True`` and ``next_fire_at`` to the next cron slot at-or-after ``now``.
+    """Resume only the revision whose cron/timezone supplied the next slot.
 
-    Caller injects ``now`` so this helper stays clock-free. Returns the
-    updated row, or ``None`` if no row matched ``routine_id``
-    (including a routine_id that exists under a different tenant_id).
+    Missing/cross-tenant rows return None. A concurrent edit raises StoreError;
+    callers must reload/revalidate instead of saving an obsolete computed slot.
     """
     row = await get_routine(session, routine_id, tenant_id=tenant_id)
     if row is None:
         return None
     nxt = next_slot_at_or_after(row.cron_expr, row.timezone, now)
-    stmt = (
-        update(Routine)
-        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(enabled=True, next_fire_at=nxt, updated_at=func.now())
-        .returning(Routine)
-        .execution_options(synchronize_session=False)
+    return await _save_routine_edit(
+        session,
+        row,
+        {"enabled": True, "next_fire_at": nxt},
+        expected_updated_at=expected_updated_at,
     )
-    orm = (await session.execute(stmt)).scalar_one_or_none()
-    if orm is None:
-        return None
-    await session.flush()
-    return RoutineRow.model_validate(orm)
 
 
 async def record_result(

@@ -1,6 +1,6 @@
 # Routines
 
-A routine is a recurring headless turn: a cron expression, a timezone, an
+A routine is a recurring scheduled turn: a cron expression, a timezone, an
 agent and one prompt. The scheduler fires it, the agent runs with no human in
 the thread, and the tail of its final message is written back onto the
 routine row.
@@ -564,8 +564,10 @@ stop ledger, restart recovery or guaranteed unresolved-stop notice. A successful
 turn queues its final result; a delivery failure does not change its execution
 outcome. Agent reassignment or any private routine edit clears old private
 previews, diagnostics and pending/claimed results atomically with the edit.
-Concurrent edits compare their captured revision and refuse a stale write; reload
-before retrying so validation and erasure use the current classification.
+Concurrent edits, pauses and resumes compare their authorized revision and refuse
+a stale write; reload before retrying so validation and erasure use the current
+classification. Revisions strictly advance even if the clock moves backwards;
+resume computes its next slot from the same cron/timezone revision it saves.
 Late writes compare the captured producer, destination and revision; every chunk
 and file rechecks them.
 An old result cannot acquire a new agent's authority or move to a public target.
