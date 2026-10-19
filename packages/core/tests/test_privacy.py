@@ -67,6 +67,10 @@ def test_plain_privacy_summary_plural_and_pause_spacing() -> None:
     )
     preview = PurgePreview(**values)
     assert summary_line(preview) == "1 linked account, 2 routines, saved settings"
+    assert (
+        summary_line(preview.model_copy(update={"watches": PurgePreviewRow(count=2, example=None)}))
+        == "1 linked account, 2 routines, 2 page watches, saved settings"
+    )
     assert summary_line(PurgePreview(**{name: empty for name in values})) == "nothing listed here"
     assert DELETE_PAUSED == (
         "Deleting your account is paused during the event.\n\n"
@@ -802,6 +806,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "principal_links": "principal_links",
         "lead_intakes": "lead_intakes",
         "routines": "routines",
+        "watches": "watches",
         "user_configs": "user_configs",
         "accounts": "account",
         "user_skills": "user_skills",
@@ -857,6 +862,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     """
     # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
+        "watches": "owner_account_id FK; explicit erasure also deletes evidence and pending wakes",
         "neutral_agent_revisions": "accounts.id FK cascade",
         "neutral_skill_versions": "accounts.id FK cascade",
         "cli_principals": "account_id FK -> accounts.id",

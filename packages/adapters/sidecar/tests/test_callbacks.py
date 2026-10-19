@@ -784,3 +784,43 @@ async def test_slow_body_deadline_releases_capacity_without_acceptance(
         assert response.status == 503
     async with db_session_factory() as db:
         assert await watches.list_evidence(db, registered.id) == []
+
+
+async def test_account_erasure_removes_watch_evidence_and_pending_wakes(
+    db_session_factory, registered
+):
+    from daimon.core.privacy import collect_purge_preview, summary_line
+    from daimon.core.purge import purge_account
+
+    wake_key = await deliver(db_session_factory, event(registered))
+    async with db_session_factory.begin() as session:
+        await watches.set_watch_control(
+            session, scope=f"owner:{registered.owner_account_id}", enabled=False
+        )
+    preview = await collect_purge_preview(
+        sm=db_session_factory, account_id=registered.owner_account_id
+    )
+    assert preview.watches.count == 1
+    assert "1 page watch" in summary_line(preview)
+    result = await purge_account(sm=db_session_factory, account_id=registered.owner_account_id)
+    assert result.db.watches == 1
+    async with db_session_factory() as session:
+        assert await watches.get_watch(session, registered.id) is None
+        assert await get_continuation(session, idempotency_key=wake_key) is None
+        assert await watches.list_evidence(session, registered.id) == []
+        for table in ("watch_capabilities", "watch_firings"):
+            assert (
+                await session.scalar(
+                    text(f"SELECT count(*) FROM {table} WHERE watch_id=:id"), {"id": registered.id}
+                )
+                == 0
+            )
+        assert (
+            await session.scalar(
+                text("SELECT count(*) FROM watch_controls WHERE scope=:scope"),
+                {"scope": f"owner:{registered.owner_account_id}"},
+            )
+            == 0
+        )
+    repeated = await purge_account(sm=db_session_factory, account_id=registered.owner_account_id)
+    assert repeated.db.watches == 0

@@ -33,7 +33,7 @@ from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.untrusted import render_untrusted
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -119,6 +119,36 @@ async def register_page_watch(
     await session.flush()
     await session.refresh(row)
     return WatchRow.model_validate(row)
+
+
+async def count_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
+    return (
+        await session.scalar(
+            select(func.count()).select_from(Watch).where(Watch.owner_account_id == account_id)
+        )
+        or 0
+    )
+
+
+async def delete_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
+    """Erase definitions, evidence and wakes in the caller's privacy transaction."""
+    # Match ingress/control lock order so an accepted event cannot outlive erasure.
+    await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
+    ids = list(
+        await session.scalars(
+            select(Watch.id).where(Watch.owner_account_id == account_id).with_for_update()
+        )
+    )
+    await session.execute(
+        delete(TaskContinuation).where(
+            TaskContinuation.idempotency_key.in_(
+                select(WatchFiring.wake_key).where(WatchFiring.watch_id.in_(ids))
+            )
+        )
+    )
+    await session.execute(delete(Watch).where(Watch.id.in_(ids)))
+    await session.execute(delete(WatchControl).where(WatchControl.scope == f"owner:{account_id}"))
+    return len(ids)
 
 
 async def get_watch(session: AsyncSession, watch_id: uuid.UUID) -> WatchRow | None:

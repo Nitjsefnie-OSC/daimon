@@ -31,8 +31,8 @@ ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = ROOT / "packages/core/alembic"
 FORK = "0109_github_tokens_live_index"
 MAIN = "0110_microsoft_accounts"
-PREVIOUS_HEAD = "0117_clear_legacy_routine_output"
-HEAD = "0118_lead_intake"
+REVERSIBLE_HEAD = "0116_thread_model_settings"
+HEAD = "0116_watches"
 CHAIN = [
     MAIN,
     "0111_cold_dm_agent",
@@ -40,8 +40,7 @@ CHAIN = [
     "0113_unattended_turn_provenance",
     "0114_turn_attendance",
     "0115_origin_session_grants",
-    "0116_thread_model_settings",
-    PREVIOUS_HEAD,
+    REVERSIBLE_HEAD,
     HEAD,
 ]
 TABLES = {
@@ -49,15 +48,6 @@ TABLES = {
     "microsoft_sign_ins",
     "direct_message_policies",
     "routines",
-    "lead_intake_configs",
-    "lead_intakes",
-    "lead_intake_effects",
-    "lead_resolution_audit",
-    "lead_mailbox_states",
-    "lead_intake_executions",
-    "lead_opportunities",
-    "lead_mailbox_scans",
-    "lead_mailbox_messages",
 }
 
 
@@ -88,12 +78,8 @@ def _historical_scripts(tmp_path: Path) -> Path:
 def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     assert connection.scalar(text("SELECT version_num FROM alembic_version")) == expected
 
-    compared_tables = (
-        TABLES if expected == HEAD else {name for name in TABLES if not name.startswith("lead_")}
-    )
-
     def include_name(name: str | None, kind: str, _parents: dict[str, str | None]) -> bool:
-        return kind != "table" or name in compared_tables
+        return kind != "table" or name in TABLES
 
     def include_object(
         _obj: object,
@@ -102,7 +88,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         _reflected: bool,
         _compare_to: object,
     ) -> bool:
-        return kind != "table" or name in compared_tables
+        return kind != "table" or name in TABLES
 
     migration_context = MigrationContext.configure(
         connection, opts={"include_name": include_name, "include_object": include_object}
@@ -221,8 +207,8 @@ async def test_deployed_upgrade_and_downgrade_paths(
                         )
                     )
                 sync.commit()
-            command.upgrade(config, PREVIOUS_HEAD)
-            _assert_head(sync, PREVIOUS_HEAD)
+            command.upgrade(config, REVERSIBLE_HEAD)
+            _assert_head(sync, REVERSIBLE_HEAD)
             if start not in ("fresh", MAIN):
                 assert (
                     sync.scalar(text("SELECT dm_agent_name FROM direct_message_policies"))
@@ -234,8 +220,8 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 ) == bytes.fromhex("cafe")
             sync.commit()
             # A repeat upgrade is a no-op after translation.
-            command.upgrade(config, PREVIOUS_HEAD)
-            _assert_head(sync, PREVIOUS_HEAD)
+            command.upgrade(config, REVERSIBLE_HEAD)
+            _assert_head(sync, REVERSIBLE_HEAD)
             if start in (
                 "0111_routine_dm_destination",
                 "0112_unattended_turn_provenance",
@@ -251,11 +237,11 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 with pytest.raises(RuntimeError, match="convert or remove DM routines"):
                     command.downgrade(config, MAIN)
                 # The failed downgrade rolls back the provenance downgrade too.
-                _assert_head(sync, PREVIOUS_HEAD)
+                _assert_head(sync, REVERSIBLE_HEAD)
                 sync.execute(text("DELETE FROM routines"))
                 sync.commit()
             # Each new revision reverses, including Microsoft's tables.
-            for target in reversed([FORK, *CHAIN[:-1]]):
+            for target in reversed([FORK, *CHAIN[:-2]]):
                 command.downgrade(config, target)
                 assert sync.scalar(text("SELECT version_num FROM alembic_version")) == target
                 inspector = inspect(sync)
@@ -276,10 +262,19 @@ async def test_deployed_upgrade_and_downgrade_paths(
                     assert not inspector.has_table("microsoft_user_tokens")
                     assert not inspector.has_table("microsoft_sign_ins")
                 sync.commit()
+            command.upgrade(config, REVERSIBLE_HEAD)
+            _assert_head(sync, REVERSIBLE_HEAD)
+
+            # Watches retain evidence and deliberately refuse downgrade.
             command.upgrade(config, "head")
             _assert_head(sync)
-            with pytest.raises(NotImplementedError, match="retention/export"):
-                command.downgrade(config, PREVIOUS_HEAD)
+            assert (
+                sync.scalar(text("SELECT enabled FROM watch_controls WHERE scope = 'global'"))
+                is False
+            )
+            sync.commit()
+            with pytest.raises(NotImplementedError, match="Watch evidence"):
+                command.downgrade(config, REVERSIBLE_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)

@@ -52,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add default-off OS-signed page-event watches with atomic evidence and durable wakes,
   restricted database identities, replay/retention limits and an optional preview
-  sidecar. Woken turns explicitly use constrained unattended read-and-report authority.
+  sidecar. Account erasure removes owned watches, evidence and queued wakes. Woken turns explicitly use constrained unattended read-and-report authority.
 
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
 
