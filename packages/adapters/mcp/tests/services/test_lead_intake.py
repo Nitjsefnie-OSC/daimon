@@ -359,3 +359,36 @@ async def test_nonce_less_starter_ambiguity_never_reposts(
                 config(), EffectRequest(step="starter", key="stable", payload=payload)
             )
     assert replay.events == []
+
+
+@pytest.mark.parametrize(
+    "step,kind,prop",
+    [
+        ("company", "companies", "daimon_company_identity"),
+        ("contact", "contacts", "email"),
+        ("deal", "deals", "daimon_intake_identity"),
+    ],
+)
+@pytest.mark.parametrize("conflict", [False, True])
+async def test_approved_crm_selection_cannot_be_replaced_by_recovery(
+    step: str, kind: str, prop: str, conflict: bool
+) -> None:
+    replay = ProviderReplay()
+    replay.objects[kind] = [{"id": "201", "properties": {}, "archived": False}]
+    if conflict:
+        replay.objects[kind].append(
+            {"id": "999", "properties": {prop: "stable"}, "archived": False}
+        )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(replay.handle)) as client:
+        ports = HttpIntakePorts(
+            client, gmail_token="synthetic", hubspot_token="synthetic", discord_token="synthetic"
+        )
+        effect = EffectRequest(
+            step=step, key="stable", payload={"selected": "201", "email": "stable"}
+        )
+        if conflict:
+            with pytest.raises(ReviewRequired, match="approved_selection_conflicts"):
+                await ports.recover(config(), effect)
+        else:
+            assert await ports.recover(config(), effect) == "201"
+    assert replay.events == [], "Conflicting recovery cannot create or associate any record"

@@ -169,9 +169,13 @@ class IntakeService:
             )
         request = EffectRequest(step=step, key=key, payload=payload)
         if saved and saved.state == "completed":
+            if payload.get("selected") and saved.remote_id != payload["selected"]:
+                raise ReviewRequired("approved_selection_conflicts_with_recovery")
             return saved.remote_id or ""
         recovered = await self.ports.recover(config, request)
         if recovered is not None:
+            if payload.get("selected") and recovered != payload["selected"]:
+                raise ReviewRequired("approved_selection_conflicts_with_recovery")
             await self.store.intent(record.id, step, key)
             await self.store.finish(record.id, step, recovered)
             return recovered
@@ -305,6 +309,10 @@ class IntakeService:
                             submission.opportunity_description,
                             p.deal_id,
                         )
+                        for entity in ("company", "contact", "deal"):
+                            selected = getattr(p, f"selected_{entity}_id")
+                            if selected and selected != getattr(p, f"{entity}_id"):
+                                raise ReviewRequired("approved_selection_conflicts_with_recovery")
                         for kind, remote in (
                             ("companies", p.company_id),
                             ("contacts", p.contact_id),

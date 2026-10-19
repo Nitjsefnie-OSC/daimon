@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native tenant-scoped lead intake with encrypted capture, Gmail qualification,
   restricted Discord dossiers and draft replies, conservative HubSpot reuse,
   durable write recovery, authorized human resolution and retention tombstones.
+  CRM recovery refuses conflicts with approved selections and requires another review.
 
 
 - Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.

@@ -329,6 +329,22 @@ class HttpIntakePorts:
         value = p["email"] if step == "contact" else effect.key
         from urllib.parse import quote
 
+        selected = p.get("selected")
+        if selected:
+            approved = await self.request(
+                "hubspot",
+                "GET",
+                f"crm/v3/objects/{kind}/{selected}",
+                params={"properties": "hs_is_closed"},
+                missing=True,
+            )
+            if (
+                not approved
+                or str(approved["id"]) != selected
+                or approved.get("archived")
+                or str(approved.get("properties", {}).get("hs_is_closed")).lower() == "true"
+            ):
+                raise ReviewRequired("selected_record_unavailable")
         record = await self.request(
             "hubspot",
             "GET",
@@ -338,25 +354,16 @@ class HttpIntakePorts:
             else {"idProperty": prop},
             missing=True,
         )
+        if record and selected and str(record["id"]) != selected:
+            raise ReviewRequired("approved_selection_conflicts_with_recovery")
+        if selected:
+            return selected
         if record:
             if record.get("archived") or (
                 step == "deal"
                 and str(record.get("properties", {}).get("hs_is_closed")).lower() == "true"
             ):
                 raise ReviewRequired("closed_or_archived_crm_record")
-            return str(record["id"])
-        if p.get("selected"):
-            record = await self.request(
-                "hubspot",
-                "GET",
-                f"crm/v3/objects/{kind}/{p['selected']}",
-                params={"properties": "hs_is_closed"},
-            )
-            if (
-                record.get("archived")
-                or str(record.get("properties", {}).get("hs_is_closed")).lower() == "true"
-            ):
-                raise ReviewRequired("selected_record_closed")
             return str(record["id"])
         if step == "company":
             objects = await self._objects(kind, "name,domain,hs_additional_domains")
