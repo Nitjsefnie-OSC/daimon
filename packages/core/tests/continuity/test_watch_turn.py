@@ -172,7 +172,10 @@ async def test_watch_reads_recheck_current_agent_denials_without_allowing_writes
     ).allow
 
 
-async def test_restore_finishes_before_cancellation_releases_watch_session(monkeypatch):
+@pytest.mark.parametrize("cancellations", [1, 2])
+async def test_restore_finishes_before_cancellation_releases_watch_session(
+    monkeypatch, cancellations
+):
     import asyncio
 
     from daimon.core.continuity import watch_turn
@@ -204,9 +207,10 @@ async def test_restore_finishes_before_cancellation_releases_watch_session(monke
         )
     )
     await started.wait()
-    task.cancel()
-    await asyncio.sleep(0)
-    assert not task.done()
+    for _ in range(cancellations):
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
     finish.set()
     with pytest.raises(asyncio.CancelledError):
         await task

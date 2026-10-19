@@ -180,8 +180,16 @@ async def restore_session_tools(
             agent=cast(BetaManagedAgentsSessionAgentUpdateParam, agent),
         )
     )
-    try:
-        await asyncio.shield(restore)
-    except asyncio.CancelledError:
-        await restore
-        raise
+    cancellation: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(restore)
+            break
+        except asyncio.CancelledError as exc:
+            if restore.cancelled():
+                raise
+            # Shutdown and an owner stop can both cancel the same turn. Keep
+            # shielding on every request, and propagate only after restoration.
+            cancellation = exc
+    if cancellation is not None:
+        raise cancellation
