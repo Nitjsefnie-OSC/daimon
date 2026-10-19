@@ -459,8 +459,15 @@ class Harness:
         recovery = RoutineSessionSupervisor(
             self.factory, self.upstream.client, owner_key=randbits(63)
         )
-        await recovery.recover()
-        await recovery.drain()
+        self.supervisor = recovery
+        self.dispatcher = RoutineDispatcher(2, supervisor=recovery)
+        self.owner_context = hold_worker_owner(
+            self.factory.kw["bind"], owner_key=recovery.owner_key, ownership_lost=asyncio.Event()
+        )
+        await self.owner_context.__aenter__()
+        # The next scheduled slot is still in the future. A real scheduler
+        # tick recovers pending obligations without recreating/resending work.
+        await self.fire(row)
         return recovery
 
     async def live_dm(self, text: str, message_id: str, *, start: bool = True) -> str:
@@ -522,6 +529,18 @@ class Harness:
         """What a session runs with: memory, tools, servers, credentials."""
         session = self.upstream.state.sessions[sid]
         volatile = {"id", "created_at", "updated_at"}
+        from daimon.core.turn.unattended import protected_tools
+
+        tools = [tool.model_dump(mode="json") for tool in session.agent.tools]
+        for tool in tools:
+            if tool.get("mcp_server_name") == "daimon-mcp":
+                # Routines additionally force unattended protected actions to
+                # ask. Compare all remaining capability/permission fields.
+                tool["configs"] = [
+                    config
+                    for config in tool.get("configs", [])
+                    if config["name"] not in protected_tools(self.deps.tool_safety)
+                ]
         return {
             "resources": sorted(
                 (
@@ -530,7 +549,7 @@ class Harness:
                 ),
                 key=json.dumps,
             ),
-            "tools": [t.model_dump(mode="json") for t in session.agent.tools],
+            "tools": tools,
             "mcp_servers": [s.model_dump(mode="json") for s in session.agent.mcp_servers],
             "vault_ids": sorted(session.vault_ids),
             "agent": session.agent.id,
@@ -1035,9 +1054,9 @@ async def test_exhaustion_survives_a_later_fire_and_notifies_only_the_owner(
     harness.upstream.interrupt_error = True
     await harness.dispatcher.close()
     await asyncio.gather(task, return_exceptions=True)
-    recovery = await harness.boot_recover(row)
+    await harness.boot_recover(row)
     await harness.retry_now(row)
-    await recovery.recover()
+    await harness.fire(row)
     (unresolved,) = await harness.intents(row)
     assert unresolved.state == "stop_unresolved" and unresolved.stop_attempts == 3
     immutable = unresolved.finished_at

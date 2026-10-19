@@ -173,7 +173,11 @@ class RoutineSessionSupervisor:
         active = {intent for fire in self._fires for intent in fire.intents}
         async with self.sm() as db:
             rows = await store.pending(db)
-        tasks = [self.submit_stop(row.id) for row in rows if row.id not in active]
+        tasks = [
+            self.submit_stop(row.id)
+            for row in rows
+            if row.id not in active or row.state == "stopping"
+        ]
         if tasks:
             await asyncio.shield(asyncio.gather(*tasks))
 
