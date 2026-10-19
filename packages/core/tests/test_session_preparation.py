@@ -832,6 +832,7 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
         channel_id="channel-b",
         tool_safety=OPEN_TOOL_SAFETY,
         public_url=None,
+        platform="discord",
     )
     with observation.activate():
         second = await _prepare(

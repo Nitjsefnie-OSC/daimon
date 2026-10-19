@@ -95,12 +95,16 @@ from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.domain import UnsavedWorkChoice
 from daimon.core.stores.pending_file_deletes import enqueue_pending_file_delete
 from daimon.core.tool_safety import ToolSafetyPolicy
-from daimon.core.turn.driver import run_turn
+from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import Billed, UsageRecorder
 from daimon.core.turn.state import TurnState, extract_final_response
-from daimon.core.turn.unattended import gate_session_snapshot, unattended_posture
+from daimon.core.turn.unattended import (
+    session_gate,
+    session_rules_channel,
+    unattended_posture,
+)
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.workspace_ports_compat import restore_transfer_records
 from mux.contracts.extensions import ExtensionConfig
@@ -424,6 +428,7 @@ async def transfer_workspace(
     from_agent_name: str,
     tool_safety: ToolSafetyPolicy,
     public_url: str | None,
+    platform: str,
     reason: str = CHECKPOINT_REASON_CONFIGURATION_CHANGE,
     unsaved_work: UnsavedWorkChoice | None = None,
     max_bundle_bytes: int = HANDOFF_MAX_BYTES,
@@ -446,7 +451,9 @@ async def transfer_workspace(
     Nobody is watching the checkpoint turn, so it is unattended: right before
     its message the old session is gated from `tool_safety`
     (`gate_session_snapshot`), and every pause is decided by
-    `unattended_posture`, never `AutoApprove`. `channel_id`'s tool rules apply.
+    `unattended_posture`, never `AutoApprove`, before every send. The tool
+    rules are those of the old session's own conversation channel on
+    `platform` (`session_rules_channel`); `channel_id` is only who pays.
 
     `unsaved_work` is the person's answer about uncommitted changes in the
     mounted repository: `"leave"` keeps them in the old checkout and out of the
@@ -525,52 +532,51 @@ async def transfer_workspace(
         log.warning("workspace_transfer.checkpoint_failed", session_id=old_session_id)
         return TranscriptOnly(transcript=transcript or "", gap_reason="session_dead")
 
-    async def gated_before_send() -> None:
-        if before_send is not None:
-            await before_send()
-        await gate_session_snapshot(
-            client.with_options(max_retries=0),
-            old_session,
+    # Unattended: the old session is gated before the message and before every
+    # confirmation batch, each a single attempt.
+    with unattended_sends(
+        session_gate(
+            client,
+            old_session_id,
             tool_safety,
             scope=scope,
             public_url=public_url,
             session_factory=sessionmaker,
             tenant_id=tenant_id,
         )
-
-    state = await run_turn(
-        anthropic=client,
-        session_id=old_session_id,
-        scope=turn_scope,
-        user_message=f"{controls}\n\n{prompt}",
-        system_blocks=checkpoint_system_blocks,
-        lifecycle=_NoOpLifecycle(),
-        cancel=asyncio.Event(),
-        now=now,
-        billing=Billed(
-            record=_bind_checkpoint_recorder(
-                sessionmaker,
+    ):
+        state = await run_turn(
+            anthropic=client,
+            session_id=old_session_id,
+            scope=turn_scope,
+            user_message=f"{controls}\n\n{prompt}",
+            system_blocks=checkpoint_system_blocks,
+            lifecycle=_NoOpLifecycle(),
+            cancel=asyncio.Event(),
+            now=now,
+            billing=Billed(
+                record=_bind_checkpoint_recorder(
+                    sessionmaker,
+                    tenant_id=tenant_id,
+                    external_user_id=external_user_id,
+                    ma_session_id=old_session_id,
+                    model_id=old_snapshot.pricing_id,
+                    markup=markup,
+                    channel_id=channel_id,
+                )
+            ),
+            tool_confirmation=unattended_posture(
+                tool_safety,
+                session=old_session,
+                public_url=public_url,
+                session_factory=sessionmaker,
                 tenant_id=tenant_id,
-                external_user_id=external_user_id,
-                ma_session_id=old_session_id,
-                model_id=old_snapshot.pricing_id,
-                markup=markup,
-                channel_id=channel_id,
-            )
-        ),
-        tool_confirmation=unattended_posture(
-            tool_safety,
-            session=old_session,
-            public_url=public_url,
-            session_factory=sessionmaker,
-            tenant_id=tenant_id,
-            channel_id=channel_id,
-        ),
-        deadline=checkpoint_deadline,
-        # The checkpoint executes the old session: decided and gated again
-        # right before its message.
-        before_send=gated_before_send,
-    )
+                channel_id=session_rules_channel(old_session, platform=platform),
+            ),
+            deadline=checkpoint_deadline,
+            # The checkpoint executes the old session: decided again right before.
+            before_send=before_send,
+        )
     failure = _checkpoint_gap_reason(state)
     if failure is not None:
         log.warning(
@@ -777,8 +783,10 @@ class WorkspaceTransferRunner:
     tool_safety: ToolSafetyPolicy
     """The deployment's policy; the checkpoint turn is unattended."""
     public_url: str | None
+    platform: str
+    """Where the old session's conversation is; its tool rules come from there."""
     channel_id: str | None = None
-    """The channel the checkpoint turn's spend is attributed to, and whose tool rules apply."""
+    """The channel the checkpoint turn's spend is attributed to (not its tool rules)."""
     from_agent_name: str | None = None
     """Override for the source agent's display name; defaults to the snapshot's."""
     account_id: uuid.UUID | None = None
@@ -812,6 +820,7 @@ class WorkspaceTransferRunner:
             from_agent_name=from_agent_name,
             tool_safety=self.tool_safety,
             public_url=self.public_url,
+            platform=self.platform,
             reason=_checkpoint_reason(
                 old_snapshot=old_snapshot,
                 from_agent_name=from_agent_name,

@@ -104,6 +104,7 @@ async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
             before_send=before_send,
             tool_safety=OPEN_TOOL_SAFETY,
             public_url=None,
+            platform="discord",
         )
     old.assert_consumed()
     new.assert_consumed()
@@ -153,6 +154,7 @@ async def test_runner_carries_the_authorized_account_to_transfer_and_restore(
             markup=Decimal("1.2"),
             tool_safety=OPEN_TOOL_SAFETY,
             public_url=None,
+            platform="discord",
         )
         await runner(
             old_session_id="sess_old",
