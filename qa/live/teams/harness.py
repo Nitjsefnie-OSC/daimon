@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -68,18 +69,54 @@ def _plain(value: object) -> str:
     return unescape(re.sub(r"<[^>]*>", "", value)).strip()
 
 
+def _in_progress(message: dict[str, Any], texts: set[str], text: str) -> bool:
+    """Recognize the adapter's live card by its cancel action or headline."""
+
+    def has_cancel(value: object) -> bool:
+        if isinstance(value, list):
+            return any(has_cancel(item) for item in cast(list[object], value))
+        if isinstance(value, dict):
+            action = cast(dict[str, object], value)
+            data = action.get("data")
+            if action.get("type") == "Action.Execute" and (
+                action.get("verb") == "cancel_turn"
+                or isinstance(data, dict)
+                and cast(dict[str, object], data).get("action") == "cancel_turn"
+            ):
+                return True
+            return any(has_cancel(item) for item in action.values())
+        return False
+
+    for attachment in message.get("attachments", []):
+        content = attachment.get("content")
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except ValueError:
+                continue
+        if has_cancel(content):
+            return True
+    return any(
+        "Working on it…" in candidate or "Working on it..." in candidate
+        for candidate in (*texts, text)
+    )
+
+
 def _format(message: dict[str, Any]) -> dict[str, Any]:
     texts, titles = card_details(message)
     body = message.get("body")
     content: object = (
         cast(dict[str, object], body).get("content") if isinstance(body, dict) else None
     )
+    text = _plain(content)
     return {
         "id": str(message.get("id", "")),
         "created": str(message.get("createdDateTime", "")),
-        "text": _plain(content),
+        "modified": message.get("lastModifiedDateTime"),
+        "text": text,
         "card_texts": sorted(texts),
         "action_titles": sorted(titles),
+        "in_progress": _in_progress(message, texts, text),
     }
 
 
@@ -184,7 +221,8 @@ async def wait(
         deadline = driver.now() + timeout
         after_time: datetime | None = None
         quiet_since: float | None = None
-        prior_ids: frozenset[str] = frozenset()
+        prior_snapshot: tuple[tuple[str, str], ...] = ()
+        in_progress = False
         while driver.now() < deadline:
             messages = await _messages(driver, persona, source, deadline)
             if after_time is None:
@@ -197,19 +235,41 @@ async def wait(
                 ):
                     raise ValueError("after_not_found")
             found = _bot_messages(messages, driver.config.bot_app_id, after_time)
-            ids = frozenset(str(item["id"]) for item in found)
+            formatted = [_format(item) for item in found]
+            in_progress = any(item["in_progress"] for item in formatted)
+            snapshot = tuple(
+                (
+                    str(item["id"]),
+                    json.dumps(
+                        (
+                            item.get("body"),
+                            item.get("attachments"),
+                            item.get("lastModifiedDateTime"),
+                        ),
+                        sort_keys=True,
+                    ),
+                )
+                for item in found
+            )
             if found:
-                if ids != prior_ids:
-                    prior_ids = ids
+                if snapshot != prior_snapshot:
+                    prior_snapshot = snapshot
                     quiet_since = driver.now()
-                elif quiet_since is not None and driver.now() - quiet_since >= QUIET_SECONDS:
+                elif (
+                    not in_progress
+                    and quiet_since is not None
+                    and driver.now() - quiet_since >= QUIET_SECONDS
+                ):
                     return {
                         "ok": True,
                         "persona": persona,
                         "source": source,
-                        "messages": [_format(item) for item in found],
+                        "messages": formatted,
                     }
+            else:
+                prior_snapshot = ()
+                quiet_since = None
             await driver.sleep(min(1.0, max(0.0, deadline - driver.now())))
-        return {"ok": False, "error": "timeout", "after": after}
+        return {"ok": False, "error": "timeout", "after": after, "in_progress": in_progress}
     except (ReauthRequired, GraphRequestError, ValueError) as exc:
         return _error(exc, persona)

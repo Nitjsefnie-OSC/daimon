@@ -81,7 +81,7 @@ uv run python -m qa.live.teams read --persona admin --from chat --since 5m
 `send` returns
 `{"ok":true,"persona":"admin","to":"chat","message_id":"<message_id>","posted_at":"<time>","chat_id":"<chat_id>"}`.
 `wait` and `read` return
-`{"ok":true,"persona":"admin","source":"chat","messages":[{"id":"<reply_id>","created":"<time>","text":"...","card_texts":["..."],"action_titles":["Refresh"]}]}`.
+`{"ok":true,"persona":"admin","source":"chat","messages":[{"id":"<reply_id>","created":"<time>","modified":"<time or null>","text":"...","card_texts":["..."],"action_titles":["Refresh"],"in_progress":false}]}`.
 Use `card_texts` for card copy and `action_titles` for visible controls. Titles
 are evidence only: do not click them. The loop is **send → wait after its ID →
 judge the text/card/actions → next check**. Record each reply ID. `read` helps

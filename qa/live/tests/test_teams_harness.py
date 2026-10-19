@@ -26,6 +26,31 @@ def message(mid: str, when: datetime, *, bot: bool = False, text: str = "hello")
     }
 
 
+def progress(mid: str, when: datetime) -> dict[str, Any]:
+    item = message(mid, when, bot=True, text="")
+    item["attachments"] = [
+        {
+            "content": {
+                "body": [
+                    {"type": "TextBlock", "text": "**Working on it…**"},
+                    {
+                        "type": "ActionSet",
+                        "actions": [
+                            {
+                                "type": "Action.Execute",
+                                "title": "Stop",
+                                "verb": "cancel_turn",
+                                "data": {"action": "cancel_turn", "turn": "turn-1"},
+                            }
+                        ],
+                    },
+                ],
+            }
+        }
+    ]
+    return item
+
+
 class FakeDriver:
     def __init__(self, config: TeamsQaConfig) -> None:
         self.config = config
@@ -133,9 +158,11 @@ async def test_read_filters_cards_since_and_thread(config: TeamsQaConfig) -> Non
         {
             "id": "bot",
             "created": recent["createdDateTime"],
+            "modified": None,
             "text": "answer",
             "card_texts": ["Routines"],
             "action_titles": ["Refresh"],
+            "in_progress": False,
         }
     ]
     json.dumps(result)
@@ -156,7 +183,77 @@ async def test_wait_quiet_window_and_timeout(config: TeamsQaConfig) -> None:
         "ok": False,
         "error": "timeout",
         "after": "start",
+        "in_progress": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_wait_progress_edit_then_footer(config: TeamsQaConfig) -> None:
+    driver, graph = fake(config)
+    now = datetime.now(UTC)
+    driver.items = [message("start", now - timedelta(seconds=10)), progress("reply", now)]
+
+    async def sleep(seconds: float) -> None:
+        driver.clock += seconds
+        if driver.clock >= 4 and len(driver.items) == 2:
+            final = message("reply", now, bot=True, text="Final answer")
+            final["lastModifiedDateTime"] = (now + timedelta(seconds=4)).isoformat()
+            driver.items[1] = final
+        if driver.clock >= 5 and len(driver.items) == 2:
+            driver.items.append(
+                message("footer", now + timedelta(seconds=5), bot=True, text="usage")
+            )
+
+    driver.sleep = sleep
+    result = await wait(graph, "admin", "start", 12)
+    assert result["ok"] is True
+    assert driver.clock >= 8
+    assert [(item["id"], item["text"]) for item in result["messages"]] == [
+        ("reply", "Final answer"),
+        ("footer", "usage"),
+    ]
+    assert result["messages"][0]["modified"] == (now + timedelta(seconds=4)).isoformat()
+    assert all(not item["in_progress"] for item in result["messages"])
+
+
+@pytest.mark.asyncio
+async def test_wait_progress_never_finishes(config: TeamsQaConfig) -> None:
+    driver, graph = fake(config)
+    now = datetime.now(UTC)
+    driver.items = [message("start", now - timedelta(seconds=10)), progress("reply", now)]
+    assert await wait(graph, "admin", "start", 5) == {
+        "ok": False,
+        "error": "timeout",
+        "after": "start",
+        "in_progress": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_read_progress_text_fallback(config: TeamsQaConfig) -> None:
+    driver, graph = fake(config)
+    now = datetime.now(UTC)
+    driver.items = [message("reply", now, bot=True, text="Working on it...")]
+    result = await read(graph, "admin", "chat", "5m")
+    assert result["messages"][0]["in_progress"] is True
+
+
+@pytest.mark.asyncio
+async def test_wait_content_edit_resets_quiet_window(config: TeamsQaConfig) -> None:
+    driver, graph = fake(config)
+    now = datetime.now(UTC)
+    driver.items = [message("start", now - timedelta(seconds=10)), message("reply", now, bot=True)]
+
+    async def sleep(seconds: float) -> None:
+        driver.clock += seconds
+        if driver.clock == 2:
+            driver.items[1]["body"]["content"] = "<p>revised</p>"
+
+    driver.sleep = sleep
+    result = await wait(graph, "admin", "start", 7)
+    assert result["ok"] is True
+    assert result["messages"][0]["text"] == "revised"
+    assert driver.clock == 5
 
 
 @pytest.mark.asyncio

@@ -532,7 +532,7 @@ Each verb prints one JSON line. `send` posts once and never retries:
 `{"ok": true, "persona": "admin", "to": "chat", "message_id": "<id>", "posted_at": "<time>", "chat_id": "<chat-id>"}`.
 `read` and `wait` return the bot's messages with their text, card texts and
 card action titles:
-`{"ok": true, "persona": "admin", "source": "chat", "messages": [{"id": "<id>", "created": "<time>", "text": "...", "card_texts": ["..."], "action_titles": ["Refresh"]}]}`.
+`{"ok": true, "persona": "admin", "source": "chat", "messages": [{"id": "<id>", "created": "<time>", "modified": "<time or null>", "text": "...", "card_texts": ["..."], "action_titles": ["Refresh"], "in_progress": false}]}`.
 Failures are `{"ok": false, "error": "<reason>", ...}` with a non-zero exit;
 `reauth_required` means a persona must sign in again with `login`, and
 `post_outcome_unknown` means the post may or may not exist, so check with
