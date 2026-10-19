@@ -153,6 +153,10 @@ delegated to session administration. Closed `anthropic.session_create@1` and
 `anthropic.session_resource_create@1` configs preserve omitted and explicit empty
 fields, agent overrides and mount ordering. Session specs carry extensions and
 records carry an opaque optional native snapshot for the temporary host codec.
+The driver exports `SESSION_READS_NAMESPACE` alongside the `SessionReads` port.
+Hosts use that address to request the actual Managed Agents snapshot for
+unattended send gates; unsupported backends refuse confirmations instead of
+substituting another runtime's session read.
 
 Anthropic model spans convert to `UsageObservation` in the usage driver,
 retaining event IDs, timestamps and the untouched native meter. Neutral input

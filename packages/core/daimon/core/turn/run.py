@@ -109,9 +109,9 @@ from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.profile import SUPPORTED
-from mux.drivers.anthropic.sessions_lifecycle import SessionReads
+from mux.drivers.anthropic.sessions_lifecycle import SESSION_READS_NAMESPACE, SessionReads
 from mux.errors import ScopeViolation, UnsupportedCapability
-from mux.profiles import get_profile
+from mux.profiles import MANAGED_AGENTS, get_profile
 from sqlalchemy.exc import SQLAlchemyError
 
 
@@ -1088,7 +1088,7 @@ async def run_prepared_turn_impl(
         with contextlib.ExitStack() as stack:
             if unattended:
                 revision = admission.backend_revision
-                gateable = revision is None or revision.profile == "anthropic.managed_agents"
+                gateable = revision is None or revision.profile == MANAGED_AGENTS.profile_id
                 read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None
                 injected = (backend or deps.backend) if selected_path == "mux" else None
                 gate_scope = admitted_session_scope(
@@ -1102,7 +1102,7 @@ async def run_prepared_turn_impl(
                         ref = deps.backend_session_ref(session_id, gate_scope)
                     try:
                         reads = injected.extension(
-                            SessionReads, namespace="anthropic.session_reads", version=1
+                            SessionReads, namespace=SESSION_READS_NAMESPACE, version=1
                         )
                     except UnsupportedCapability:
                         gateable = False
