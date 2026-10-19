@@ -182,6 +182,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--method, --body and --body-file require graph")
     if args.body is not None and args.body_file is not None:
         parser.error("--body and --body-file are exclusive")
+    if args.body_file is not None and (
+        args.method.upper() != "PUT" or not args.body_file.is_file()
+    ):
+        parser.error("--body-file needs --method PUT and an existing file")
     if args.command != "login" and (args.manual or args.access_flow):
         parser.error("login mode flags require login")
     if args.command not in {"smoke", "refresh"} and (args.journey or args.all):

@@ -106,6 +106,46 @@ async def test_upload_puts_raw_bytes_into_the_qa_team_files(config: TeamsQaConfi
     assert requests[0].headers["Content-Type"] == "text/csv"
 
 
+@pytest.mark.parametrize(
+    ("method", "suffix"),
+    [
+        ("POST", "items/abc/invite"),
+        ("POST", "root/createLink"),
+        ("POST", "items/abc/copy"),
+        ("PATCH", "items/abc/permissions/p1"),
+        ("PUT", "items/abc/permissions/p1"),
+        ("PUT", "root:/General/a.csv:/content/../../x"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_team_library_takes_uploads_only(
+    config: TeamsQaConfig, method: str, suffix: str
+) -> None:
+    graph_driver, requests = driver(config)
+    path = f"/groups/{config.team_id}/drive/{suffix}"
+    shared = await graph(graph_driver, "admin", method, path, "{}")
+    as_upload = await graph(graph_driver, "admin", "PUT", path, upload=(b"x", "text/csv"))
+    assert shared["ok"] is False and as_upload["ok"] is False
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/groups/{team}/drive/%2e%2e/%2e%2e/users/v/drive/root:/a:/content",
+        "/groups/{team}/drive/%252e%252e/x/content",
+        "/teams/{team}/channels/a%2F..%2Fb/messages",
+        "/teams/{team}/channels/a%2Fb/messages",
+    ],
+)
+@pytest.mark.asyncio
+async def test_encoded_climbs_and_separators_are_refused(config: TeamsQaConfig, path: str) -> None:
+    graph_driver, requests = driver(config)
+    result = await graph(graph_driver, "admin", "GET", path.format(team=config.team_id))
+    assert result["error"] == "invalid_path"
+    assert requests == []
+
+
 @pytest.mark.asyncio
 async def test_upload_refuses_other_drives_and_a_second_body(config: TeamsQaConfig) -> None:
     graph_driver, requests = driver(config)
@@ -116,12 +156,13 @@ async def test_upload_refuses_other_drives_and_a_second_body(config: TeamsQaConf
     other_group = await graph(
         graph_driver, "admin", "PUT", "/groups/other/drive/root:/a.csv:/content", upload=csv
     )
-    both = await graph(
-        graph_driver, "admin", "PUT", f"/groups/{config.team_id}/drive/x", "{}", upload=csv
-    )
-    assert [elsewhere["error"], other_group["error"], both["error"]] == [
+    library = f"/groups/{config.team_id}/drive/root:/General/a.csv:/content"
+    both = await graph(graph_driver, "admin", "PUT", library, "{}", upload=csv)
+    posted = await graph(graph_driver, "admin", "POST", library, upload=csv)
+    assert [elsewhere["error"], other_group["error"], both["error"], posted["error"]] == [
         "write_outside_qa_team",
         "write_outside_qa_team",
+        "invalid_body",
         "invalid_body",
     ]
     assert requests == []
@@ -222,3 +263,7 @@ def test_cli_sends_a_body_file_as_raw_bytes(monkeypatch: pytest.MonkeyPatch, tmp
     assert uploads == [(b"week,sales\n", "text/csv")]
     with pytest.raises(SystemExit):
         cli.main([*argv, "--body", "{}"])
+    with pytest.raises(SystemExit):
+        cli.main([*argv[:4], "POST", *argv[5:]])
+    with pytest.raises(SystemExit):
+        cli.main([*argv[:-1], str(tmp_path / "missing.csv")])
