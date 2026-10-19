@@ -60,7 +60,6 @@ from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
-    session_response,
     sse_response,
 )
 from daimon.testing.ma_models import (
@@ -225,9 +224,9 @@ def _register_turn_routes(
 ) -> None:
     """POST /v1/sessions (create) + GET stream (SSE) + POST events (send).
 
-    `terminal_less_script=True` additionally registers `GET /v1/sessions/{id}`
-    (status "idle", no reopen) and `GET /v1/sessions/{id}/events` (replay,
-    the same `event_dicts`) -- required whenever `event_dicts` does not end
+    `GET /v1/sessions/{id}` supplies the unattended send gate's snapshot.
+    `terminal_less_script=True` additionally registers
+    `GET /v1/sessions/{id}/events` (replay, the same `event_dicts`) -- required whenever `event_dicts` does not end
     in a real terminal event (`session.status_idle`/`session.status_terminated`).
     A `session.error` event alone is not stream-terminal to the driver's
     consume loop, so the stream ending right after one is a clean close that
@@ -274,12 +273,12 @@ def _register_turn_routes(
         handle_stream_hang if hang else handle_stream,  # pyright: ignore[reportArgumentType]
     )
     router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+$",
+        lambda req, _m: httpx.Response(200, json=session_json),
+    )
     if terminal_less_script:
-        router.add(
-            "GET",
-            r"/v1/sessions/[^/]+$",
-            lambda req, _m: session_response(session_id=session_id, status="idle"),
-        )
         router.add(
             "GET",
             r"/v1/sessions/[^/]+/events",
