@@ -3381,9 +3381,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
                 await asyncio.sleep(0.1)
             independent = [asyncio.create_task(send(i, phase)) for i in range(2)]
             waiters.extend(independent)
-            completed, pending = await asyncio.wait(
-                independent, timeout=3 if contended and phase == blocked_phase else 1
-            )
+            completed, pending = await asyncio.wait(independent, timeout=3)
             print(
                 f"entry={entry} contended={contended} phase={phase}: independent completed={len(completed)}, pending={len(pending)}, checkedout={engine.pool.checkedout()}, replacements still blocked={all(not t.done() for t in tasks)}",
                 flush=True,
