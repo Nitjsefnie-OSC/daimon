@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Fleet workers and unattended wakes re-gate Managed Agents sessions before every
+  confirmation batch. Runtimes without session reads refuse unattended
+  confirmations with a plain reason, including when tool safety is off.
 - Agent-chat turns (`start_turn`, `continue_turn` and `ask`, with an agent key or on the hub) now follow tool safety. Before every message the session's tool settings are set again from the current policy, and each tool call is decided by the unattended rules when it is made: reads run, and a third-party write is refused unless the operator allowed it in unattended runs. These turns used to run every tool without asking. With tool safety off, calls the session still asks about are allowed.
 - Agent-chat turns apply agent tool rules for their channel (a channel-bound key's channel, or the conversation's), and refuse Daimon's card-only actions: a backend switch and Microsoft mail and invites with tool safety on or off, and Microsoft file changes with it on, as in chat.
 - Reading a session never answers its tool calls. An agent-chat turn left waiting on a tool call by a restart reads as `paused` from `get_session` and `get_my_session`, with a hint; only the session's owner resumes it with `continue_turn`, whose `message` is now optional for that case, and the current policy decides the waiting calls. `continue_turn` never answers a confirmation card from a chat turn.

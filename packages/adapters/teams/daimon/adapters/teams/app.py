@@ -1400,6 +1400,7 @@ class TeamsApp:
                     role=role or Role.USER,  # admission's: one read per turn
                     handoff=handoff,
                     reraise=reraise,
+                    attended=continuation is None,
                 )
             except asyncio.CancelledError:
                 raise
@@ -1468,6 +1469,7 @@ class TeamsApp:
         role: Role,
         handoff: HandoffFactory | None,
         reraise: bool,
+        attended: bool,
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
@@ -1591,6 +1593,7 @@ class TeamsApp:
                 thread_id=inbound.thread_id,
                 external_user_id=inbound.user_id,
                 origin="handoff" if notice is not None else "chat",
+                attended=attended,
                 user_message=message,
                 lifecycle=lifecycle,
                 cancel=cancel,

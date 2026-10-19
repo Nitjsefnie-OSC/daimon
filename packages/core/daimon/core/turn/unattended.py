@@ -6,7 +6,10 @@ call pauses: a frozen `always_allow` would otherwise skip the decision
 entirely. Every pause is then decided by `unattended_posture`, which always
 answers through `unattended_decider` and never `AutoApprove`. Safety off is
 the explicit `enabled=False` policy from settings, under which the decider
-allows ordinary third-party calls.
+allows ordinary third-party calls. Prepared fleet/wake turns require a fresh
+Managed Agents snapshot before every confirmation batch. A runtime without
+that read capability refuses every unattended confirmation, even with safety
+off; it never falls back to an allow decision.
 
 Daimon's own protected actions (`protected_tools`) ask in these sessions and
 their final call is refused, since nobody is there to press the card: a
@@ -28,6 +31,7 @@ from anthropic.types.beta.beta_managed_agents_session_agent_update_param import 
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL, MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.session_ports_compat import retrieve_session_record, update_session_record
 from daimon.core.tool_safety import (
+    ToolCall,
     ToolSafetyPolicy,
     backend_switch_tools,
     daimon_endpoint,
@@ -43,9 +47,20 @@ from daimon.core.turn.approvals import (
     daimon_rule_tools_for,
     unattended_decider,
 )
-from daimon.core.turn.posture import PolicyApproval
+from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from mux.contracts.ids import Revision, Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+async def refuse_ungated_confirmation(call: ToolCall) -> ToolConfirmationResult:
+    """Refuse a prepared unattended call whose runtime cannot refresh its gate."""
+    return ToolConfirmationResult(
+        allow=False,
+        deny_message=(
+            f"Refused {call.key}: this runtime cannot refresh the session's tool safety "
+            "gate before unattended confirmations. The tool call did not run."
+        ),
+    )
 
 
 def protected_tools(policy: ToolSafetyPolicy) -> frozenset[str]:
@@ -163,18 +178,23 @@ def session_gate(
     public_url: str | None,
     session_factory: async_sessionmaker[AsyncSession] | None,
     tenant_id: uuid.UUID | None,
+    read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None,
 ) -> Callable[[], Awaitable[None]]:
     """The gate a driven unattended turn runs before each send (`unattended_sends`).
 
     It reads the session as it is now and gates that snapshot, so a policy or
     rule that changed while the turn was paused reaches its next call. A
     failed read or update raises, and the send it guards does not happen.
+    An injected mux backend supplies its own `read_session`; its snapshot is
+    never replaced by a read through a different runtime.
     """
 
     async def gate() -> None:
         await gate_session_snapshot(
             client.with_options(max_retries=0),
-            await retrieve_session_record(client, session_id, scope=scope),
+            await read_session()
+            if read_session is not None
+            else await retrieve_session_record(client, session_id, scope=scope),
             policy,
             scope=scope,
             public_url=public_url,

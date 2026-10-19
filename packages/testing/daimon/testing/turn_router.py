@@ -110,6 +110,7 @@ def build_turn_router(
     output_tokens: int = 50,
     session_id: str | None = None,
     replacement_session_ids: tuple[str, ...] = (),
+    session_reads: bool = False,
     fresh_event_ids: bool = False,
     send_events_data: list[dict[str, Any]] | None = None,
     sent_event_bodies: list[dict[str, Any]] | None = None,
@@ -136,6 +137,7 @@ def build_turn_router(
                              only, so a turn run anywhere else has no route
                              and fails loudly (proves which session ran).
       `replacement_session_ids` -- idle sessions with retrieve and archive routes for replacements.
+      `session_reads`      -- serve complete snapshots for unattended send gates.
       `fresh_event_ids`   -- each stream open mints new event ids, for
                              scenarios running several turns on one session.
       `send_events_data`  -- the `data` echoed by `POST .../events`.
@@ -224,6 +226,20 @@ def build_turn_router(
     for retrieve_id in replacement_session_ids:
         target.add_session(
             ma_session(id=retrieve_id, agent_id=agent_id, environment_id=env_id), with_archive=True
+        )
+    if session_reads:
+        target.add(
+            "GET",
+            rf"/v1/sessions/(?P<session_id>{session_re})",
+            lambda request, match: httpx.Response(
+                200,
+                json=ma_session(
+                    id=match["session_id"],
+                    agent_id=agent_id,
+                    environment_id=env_id,
+                    model=model_id,
+                ).model_dump(mode="json"),
+            ),
         )
     target.add("POST", rf"/v1/sessions/(?P<session_id>{session_re})/events", _send_events)
     target.add("GET", rf"/v1/sessions/(?P<session_id>{session_re})/events/stream", _stream)

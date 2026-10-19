@@ -1043,7 +1043,16 @@ The driver-run ones go through one send boundary
 (`turn/driver.unattended_sends`): the session is gated
 (`unattended.session_gate`) right before the message and before every
 confirmation batch, live or on reconnect, and every send is a single
-attempt; a failed gate stops the send. Tool rules come from the session's
+attempt; a failed gate stops the send. For `run_prepared_turn` (fleet workers,
+unattended wakes, and future watches or completion turns), this also covers
+dead-session recovery. Platform queue dispatchers explicitly mark these
+background continuation turns unattended. Managed Agents runtimes refresh
+the snapshot before **every** confirmation batch. A non-Anthropic runtime, or an injected mux
+backend without a session read, refuses every unattended confirmation with
+a plain explanation that it cannot refresh the tool safety gate. This rule
+applies with safety on or off; the model receives a denial and the turn can
+continue or end. Unattended turns never invoke a human provider-action hook.
+Tool rules come from the session's
 conversation channel (`session_rules_channel`), never its budget channel. The decider comes
 from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write
 model in `packages/core/daimon/core/tool_safety.py`. With
