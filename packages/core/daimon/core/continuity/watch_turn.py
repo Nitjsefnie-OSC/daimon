@@ -12,7 +12,7 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_session_agent_update_param import (
     BetaManagedAgentsSessionAgentUpdateParam,
 )
-from daimon.core.mcp_server_url import is_session_mcp_url, same_mcp_url
+from daimon.core.mcp_server_url import same_mcp_endpoint
 from daimon.core.session_ports_compat import update_session_record
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -138,7 +138,7 @@ async def constrain_session(
     own_servers = {
         s.name
         for s in snapshot.agent.mcp_servers
-        if public_url and (same_mcp_url(s.url, public_url) or is_session_mcp_url(s.url, public_url))
+        if public_url and same_mcp_endpoint(s.url, public_url)
     }
     tools = [
         tool.model_dump(mode="json")
