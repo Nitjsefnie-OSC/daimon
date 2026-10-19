@@ -636,9 +636,6 @@ def create_mcp_app(
         ),
         methods=["PUT"],
     )
-    from daimon.adapters.mcp.watch_polling import poll_endpoint
-
-    app.add_route("/internal/watches/{watch_id}/poll", poll_endpoint(runtime), methods=["POST"])
     app.add_route("/healthz", _healthz, methods=["GET"])
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
     app.add_route(

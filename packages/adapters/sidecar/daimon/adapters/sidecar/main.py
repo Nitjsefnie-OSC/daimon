@@ -163,7 +163,12 @@ def run() -> None:
                 while True:
                     with contextlib.suppress(Exception):
                         await poll_once(
-                            async_sessionmaker(engine), http, origin=settings.os_executor_origin
+                            async_sessionmaker(engine),
+                            http,
+                            origin=settings.os_executor_origin,
+                            executor_secret=settings.executor_secret.get_secret_value()
+                            if settings.executor_secret
+                            else None,
                         )
                     await asyncio.sleep(settings.poll_interval_s)
 
@@ -196,11 +201,14 @@ async def poll_once(
     http: ClientSession,
     *,
     origin: str,
+    executor_secret: str | None = None,
 ) -> int:
     """Schedule at most four reads; only a registered OS executor receives leases."""
     if not load_watches_settings().enabled:
         return 0
-    if origin not in {"http://mcp:8765", "http://127.0.0.1:8765"}:
+    if executor_secret is None:
+        return 0
+    if origin not in {"http://watch-executor:8767", "http://127.0.0.1:8767"}:
         raise ValueError("Poll executor must be the private OS service")
     async with sessions.begin() as db:
         leases = await claim_poll_watches(db)
@@ -210,7 +218,7 @@ async def poll_once(
             return
         async with http.post(
             f"{origin}/internal/watches/{item['watch_id']}/poll",
-            headers={"X-Watch-Lease": item["lease"]},
+            headers={"X-Watch-Lease": item["lease"], "X-Watch-Executor-Key": executor_secret},
             allow_redirects=False,
         ) as response:
             response.release()

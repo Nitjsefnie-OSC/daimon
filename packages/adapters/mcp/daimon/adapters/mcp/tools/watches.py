@@ -69,7 +69,7 @@ async def private_key_delivery(
         raise ToolError("Private owner delivery is disabled")
     await require_dm_recipient_allowed(runtime, auth, recipient_id=watch.owner_external_id)
     async with rest_client(_require_bot_token(runtime)) as client:
-        # Guild membership is fetched live, including for an admin rotating another owner's key.
+        # Guild membership is fetched live for the owner.
         if auth.external_id is None:
             raise ToolError("Missing workspace")
         guild = await client.fetch_guild(int(auth.external_id))
@@ -98,6 +98,16 @@ async def fresh_admin(runtime: McpRuntime, auth: AuthIdentity) -> bool:
         require_fresh=True,
     )
     return subject.verified_membership is True and subject.is_admin
+
+
+async def require_attended_owner(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
+) -> None:
+    if origin_context_id is None:
+        raise ToolError("An attended owner turn origin is required")
+    origin = await require_turn_origin(runtime, auth, origin_context_id)
+    if not origin.attended or auth.platform != "discord" or auth.platform_user_id is None:
+        raise ToolError("An attended owner Discord turn is required")
 
 
 async def create_watch_impl(
@@ -142,7 +152,7 @@ async def create_watch_impl(
                     binding,
                     instructions=instructions,
                     tool=tool,
-                    arguments=arguments or {"thread_id": origin.thread_id},
+                    arguments=arguments or {},
                     projection=projection,
                     rule=rule,
                     interval=interval,
@@ -164,26 +174,28 @@ async def create_watch_impl(
             # Current owner/agent/seal policy, independently of the origin grant.
             await authorize_poll(runtime, watch)
         if source == "page_event":
-            return await rotate_watch_impl(runtime, auth, watch_id=str(watch.id))
+            return await rotate_watch_impl(
+                runtime, auth, watch_id=str(watch.id), origin_context_id=origin_context_id
+            )
         return summary(watch)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
 
 
 async def rotate_watch_impl(
-    runtime: McpRuntime, auth: AuthIdentity, *, watch_id: str
+    runtime: McpRuntime, auth: AuthIdentity, *, watch_id: str, origin_context_id: str | None = None
 ) -> WatchSummary:
     try:
         key_id, key = secrets.token_hex(12), secrets.token_urlsafe(48)
-        admin = await fresh_admin(runtime, auth)
         async with runtime.session_factory.begin() as db:
             watch = await watches.require_owned_watch(
                 db,
                 uuid.UUID(watch_id),
                 tenant_id=auth.tenant_id,
                 account_id=auth.account_id,
-                is_admin=admin,
+                is_admin=False,
             )
+            await require_attended_owner(runtime, auth, origin_context_id)
             if watch.source != "page_event":
                 raise ValueError("Poll watches have no signing key")
             await watches.rotate_signing_key(
@@ -208,6 +220,7 @@ async def manage_watch_impl(
     *,
     watch_id: str,
     action: Literal["show", "pause", "resume", "delete"],
+    origin_context_id: str | None = None,
 ) -> WatchSummary:
     try:
         admin = await fresh_admin(runtime, auth)
@@ -217,12 +230,13 @@ async def manage_watch_impl(
                 uuid.UUID(watch_id),
                 tenant_id=auth.tenant_id,
                 account_id=auth.account_id,
-                is_admin=admin,
+                is_admin=admin and action != "resume",
             )
             now = datetime.now(UTC)
             if action == "pause":
                 await watches.pause_watch(db, row.id)
             elif action == "resume":
+                await require_attended_owner(runtime, auth, origin_context_id)
                 await watches.resume_watch(db, row.id, now=now)
                 await authorize_poll(runtime, row)
             elif action == "delete":
@@ -255,6 +269,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Binds the current human owner, tenant, agent and exact Discord thread.
         Requires an attended turn origin. Polls run without an AI turn; firings
         use unattended read-and-report turns and current access/spend checks.
+        Poll arguments must explicitly name a source different from the reporting thread.
         Only read_thread and read_channel are pollable; no URLs or outside tools.
         Projection supports `.`, `.field.nested` and `.rows[0].field`; other jq
         expressions are refused. Polls start with a saved baseline and compare
@@ -307,20 +322,28 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         return await manage_watch_impl(runtime, await _auth(ctx), watch_id=watch_id, action="pause")
 
     @mcp.tool
-    async def resume_watch(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
-        """Resume your paused watch after fresh access checks. Imported watches require operator
-        confirmation; source_unmapped never resumes.
+    async def resume_watch(ctx: Context, watch_id: str, origin_context_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
+        """Resume your paused watch from an attended owner turn after fresh access checks.
+        Only the owner may resume; an admin cannot override the owner pause.
+        Imported watches require operator confirmation; source_unmapped never resumes.
         """
         return await manage_watch_impl(
-            runtime, await _auth(ctx), watch_id=watch_id, action="resume"
+            runtime,
+            await _auth(ctx),
+            watch_id=watch_id,
+            action="resume",
+            origin_context_id=origin_context_id,
         )
 
     @mcp.tool
-    async def rotate_watch_key(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
+    async def rotate_watch_key(ctx: Context, watch_id: str, origin_context_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Rotate an OS page signing key, revoke the old key and cancel queued wakes. The fresh
-        key goes to its owner by private DM once.
+        key goes to its owner by private DM once. Requires an attended owner turn;
+        an admin cannot rotate another owner's key.
         """
-        return await rotate_watch_impl(runtime, await _auth(ctx), watch_id=watch_id)
+        return await rotate_watch_impl(
+            runtime, await _auth(ctx), watch_id=watch_id, origin_context_id=origin_context_id
+        )
 
     @mcp.tool
     async def delete_watch(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]

@@ -2435,7 +2435,8 @@ queued wakes. Re-enabling does not revive them. Evidence expires after seven day
 independent byte, row and rate quotas prevent a pending batch growing without bound.
 Migration `0117_watch_polling` follows `0116_watches`. Sidecar claims at most four
 poll leases through `claim_watch_polls()`, then submits only a watch UUID and opaque
-60-second lease to the OS MCP service's `/internal/watches/{watch_id}/poll` endpoint.
+60-second lease to the separate private `watch-executor:8767` service's
+`/internal/watches/{watch_id}/poll` endpoint. The public MCP app has no poll route.
 Only fixed private OS origins are supported and redirects are disabled. The lease
 is a scheduling capability; the caller supplies no tool, arguments, identity or
 result. Sidecar cannot read watch rows or submit poll results. The OS executor loads
@@ -2446,7 +2447,10 @@ implementations as the human owner. No AI turn is spent polling. Both producer
 gates apply before a source is read; stopped/expired leases cannot commit.
 
 `continuity.poll_tools.POLL_TOOLS` is an explicit reviewed READ catalogue; unlisted,
-non-READ and NO_WATCH operations cannot enroll. Arguments exclude URLs and limit
+non-READ and NO_WATCH operations cannot enroll. Poll arguments must explicitly
+name a source different from the reporting thread, preventing self-report wake loops.
+The agent must currently have that read enabled with `always_allow` in its own
+canonical OS MCP toolset; missing, disabled or approval-required reads stop the watch. Arguments exclude URLs and limit
 reads to 20 messages. The safe jq-style projection subset supports identity, object
 fields and numeric indexes, with 4 KiB, depth-16 and 1,024-node input/output limits.
 The first poll saves a baseline without firing. Later `change`, `added` and `updated`

@@ -1364,6 +1364,14 @@ sent. A worker whose turn was sent is reconciled, never resent.
 
 Read from `daimon.core.config.WatchesSettings`. Prefix `DAIMON_WATCHES__`.
 
+### `DAIMON_WATCHES__EXECUTOR_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Private poll executor shared secret, also supplied as DAIMON_SIDECAR__EXECUTOR_SECRET.
+Unset disables executor transport. Never expose the private listener through the public
+proxy.
+
 ### `DAIMON_WATCHES__ENABLED`
 
 `bool` · optional · default `False`
@@ -1636,9 +1644,16 @@ Maximum concurrent callback transactions; excess requests receive 429.
 
 Total callback body and database deadline in seconds.
 
+### `DAIMON_SIDECAR__EXECUTOR_SECRET`
+
+`SecretStr | None` · optional · default unset · secret
+
+Private poll executor shared secret, matching DAIMON_WATCHES__EXECUTOR_SECRET. Unset
+disables polling transport.
+
 ### `DAIMON_SIDECAR__OS_EXECUTOR_ORIGIN`
 
-`'http://mcp:8765' | 'http://127.0.0.1:8765'` · optional · default `http://mcp:8765`
+`'http://watch-executor:8767' | 'http://127.0.0.1:8767'` · optional · default `http://watch-executor:8767`
 
 Fixed private OS executor origin. No outside hosts, redirects or source URLs.
 

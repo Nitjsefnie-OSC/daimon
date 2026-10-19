@@ -29,7 +29,14 @@ configuration, signing headers, limits and database roles, and the
 optional preview profile. Outside senders are unsupported.
 
 Polling uses a fixed private OS executor, never external URLs. Sidecar can claim
-four 60-second poll leases at a time; the OS MCP executor loads the registered
+four 60-second poll leases at a time; the private executor loads the registered
 source and checks live owner permissions. Only OS can submit poll results. Both
 producer gates remain default off. See the lane README for owner tools, offline
 paused imports and the five-step preview procedure.
+
+The poll-only ASGI app runs separately on `watch-executor:8767`, without published
+ports or proxy routes. The public MCP app has no executor route. Configure the
+same random secret in `DAIMON_WATCHES__EXECUTOR_SECRET` on the executor and
+`DAIMON_SIDECAR__EXECUTOR_SECRET` on sidecar. Missing secrets disable transport;
+invalid secrets and leases cannot consume the shared real-poll budget. Local
+processes use only `http://127.0.0.1:8767` and bind that listener to loopback.

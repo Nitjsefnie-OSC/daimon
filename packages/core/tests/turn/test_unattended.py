@@ -216,6 +216,9 @@ async def test_a_failed_gate_raises() -> None:
             {"intake_id": "opaque", "resolution": {"contact_id": "201"}},
             False,
         ),
+        ("create_watch", {"source": "poll"}, False),
+        ("resume_watch", {"watch_id": "id"}, False),
+        ("rotate_watch_key", {"watch_id": "id"}, False),
         ("request_agent_backend_switch", {}, True),
     ],
 )

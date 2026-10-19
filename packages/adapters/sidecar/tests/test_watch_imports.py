@@ -127,7 +127,7 @@ async def test_mapped_import_requires_explicit_exact_binding_confirmation(
     db_session_factory, definition
 ):
     mapped = definition.model_copy(
-        update={"tool": "read_thread", "arguments": {"thread_id": "4242"}}
+        update={"tool": "read_thread", "arguments": {"thread_id": "4343"}}
     )
     async with db_session_factory.begin() as db:
         row = await watches.import_watch(db, mapped, now=datetime.now(UTC))
@@ -245,3 +245,27 @@ def test_import_validation_never_echoes_rejected_signing_secrets():
     with pytest.raises(ValidationError) as refused:
         WatchExport.model_validate({"version": 1, "watches": [], "signing_key": key})
     assert key not in str(refused.value)
+
+
+async def test_import_confirmation_cannot_activate_self_reporting_source(
+    db_session_factory, definition
+):
+    mapped = definition.model_copy(
+        update={"tool": "read_thread", "arguments": {"thread_id": "4242"}}
+    )
+    async with db_session_factory.begin() as db:
+        row = await watches.import_watch(db, mapped, now=datetime.now(UTC))
+        with pytest.raises(ValueError, match="differ from the reporting thread"):
+            await watches.confirm_import(
+                db,
+                row.id,
+                tenant_id=row.tenant_id,
+                owner_account_id=row.owner_account_id,
+                agent_id=row.agent_id,
+                parent_channel_id=row.parent_channel_id,
+                thread_id=row.thread_id,
+                now=datetime.now(UTC),
+            )
+    async with db_session_factory() as db:
+        current = await watches.get_watch(db, row.id)
+        assert current.status == "paused" and current.source_state["confirmed"] is False

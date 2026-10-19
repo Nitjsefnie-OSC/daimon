@@ -6,7 +6,7 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from daimon.core.continuity.watch_imports import ImportedWatch
@@ -600,11 +600,12 @@ async def register_poll_watch(
     expires_at: datetime,
     now: datetime,
 ) -> WatchRow:
-    from daimon.core.continuity.poll_tools import validate_poll
+    from daimon.core.continuity.poll_tools import require_distinct_source, validate_poll
     from pydantic import JsonValue, TypeAdapter
 
     args = TypeAdapter(dict[str, JsonValue]).validate_python(arguments)
     validate_poll(tool, args, projection=projection, rule=rule, interval=interval)
+    require_distinct_source(args, binding.thread_id)
     watch = await register_page_watch(
         session,
         binding,
@@ -636,9 +637,14 @@ async def claim_poll_watches(session: AsyncSession) -> list[dict[str, str]]:
     return list(result or [])
 
 
+class PollBindingRevoked(ValueError):
+    pass
+
+
 async def leased_poll(
     session: AsyncSession, watch_id: uuid.UUID, lease: str, *, now: datetime
 ) -> WatchRow | None:
+    """Scheduling races return None; revoked identity raises PollBindingRevoked."""
     watch = await get_watch(session, watch_id)
     if (
         watch is None
@@ -678,8 +684,16 @@ async def leased_poll(
         or (live.ma_session_id, live.ma_agent_id, live.channel_id)
         != (watch.session_id, watch.agent_id, watch.parent_channel_id)
     ):
-        return None
+        raise PollBindingRevoked("Watch binding revoked")
     return watch
+
+
+async def release_poll_lease(session: AsyncSession, watch_id: uuid.UUID, lease: str) -> None:
+    await session.execute(
+        update(Watch)
+        .where(Watch.id == watch_id, Watch.lease_owner == lease)
+        .values(lease_owner=None, lease_expires_at=None)
+    )
 
 
 async def finish_poll(
@@ -708,6 +722,10 @@ async def poll_failed(
     revoked: bool,
     now: datetime,
 ) -> None:
+    # Invalid capabilities never contend on the global firing lock.
+    current = await get_watch(session, watch_id)
+    if current is None or current.lease_owner != lease:
+        return
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None or row.lease_owner != lease:
@@ -825,6 +843,12 @@ async def confirm_import(
         raise ValueError("Import binding confirmation mismatch")
     if watch.source_state.get("reason") in {"source_unmapped", "projection_unmapped"}:
         raise ValueError("Unmapped imported sources or projections cannot be confirmed")
+    if watch.source == "poll":
+        from daimon.core.continuity.poll_tools import require_distinct_source
+
+        require_distinct_source(
+            cast(dict[str, object], watch.source_state.get("arguments", {})), watch.thread_id
+        )
     row = await session.get(Watch, watch_id)
     assert row is not None
     row.source_state = {**row.source_state, "confirmed": True}

@@ -60,7 +60,7 @@ async def poll_watch(db_session_factory, monkeypatch):
             binding,
             instructions="Report changed rows.",
             tool="read_thread",
-            arguments={"thread_id": "4242"},
+            arguments={"thread_id": "4343"},
             projection=".rows",
             rule="change",
             interval=60,
@@ -267,7 +267,7 @@ async def test_poll_firing_caps_keep_baseline_and_evidence_unchanged(
                 binding,
                 instructions="Another owner watch.",
                 tool="read_thread",
-                arguments={"thread_id": "4242"},
+                arguments={"thread_id": "4343"},
                 projection=".",
                 rule="change",
                 interval=60,
@@ -348,3 +348,57 @@ async def test_baseline_commit_rejects_revoked_owner_binding(db_session_factory,
         await result(db_session_factory, watch, token, 1)
     async with db_session_factory() as db:
         assert (await watches.get_watch(db, watch.id)).baseline == {}
+
+
+async def test_poll_transport_requires_private_secret_and_origin(db_session_factory, monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    monkeypatch.setenv("DAIMON_WATCHES__ENABLED", "true")
+    http = MagicMock()
+    http.post.return_value.__aenter__.return_value = MagicMock()
+    claim = AsyncMock(return_value=[{"watch_id": "watch", "lease": "opaque-lease"}])
+    monkeypatch.setattr("daimon.adapters.sidecar.main.claim_poll_watches", claim)
+    assert await poll_once(db_session_factory, http, origin="http://watch-executor:8767") == 0
+    claim.assert_not_called()
+    with pytest.raises(ValueError, match="private OS service"):
+        await poll_once(
+            db_session_factory, http, origin="http://mcp:8765", executor_secret="s" * 32
+        )
+    assert (
+        await poll_once(
+            db_session_factory, http, origin="http://watch-executor:8767", executor_secret="s" * 32
+        )
+        == 1
+    )
+    http.post.assert_called_once_with(
+        "http://watch-executor:8767/internal/watches/watch/poll",
+        headers={"X-Watch-Lease": "opaque-lease", "X-Watch-Executor-Key": "s" * 32},
+        allow_redirects=False,
+    )
+
+
+async def test_invalid_poll_failure_never_takes_global_firing_lock(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    session = AsyncMock()
+    watch_id = uuid.uuid4()
+    monkeypatch.setattr(
+        watches, "get_watch", AsyncMock(return_value=SimpleNamespace(lease_owner="real"))
+    )
+    await watches.poll_failed(session, watch_id, "junk", revoked=True, now=datetime.now(UTC))
+    session.execute.assert_not_called()
+
+
+async def test_old_lease_release_cannot_clear_new_poll_claim(db_session_factory, poll_watch):
+    watch, _ = poll_watch
+    token = await claim(db_session_factory, watch.id)
+    replacement = str(uuid.uuid4())
+    async with db_session_factory.begin() as db:
+        await db.execute(
+            text("UPDATE watches SET lease_owner=:replacement WHERE id=:id"),
+            {"replacement": replacement, "id": watch.id},
+        )
+        await watches.release_poll_lease(db, watch.id, token)
+    async with db_session_factory() as db:
+        assert (await watches.get_watch(db, watch.id)).lease_owner == replacement

@@ -139,11 +139,13 @@ single-migrator invariant, including when starting or retrying Cloud Run jobs.
 
 ### Signed page-event watch sidecar
 
-The optional `preview-sidecar` profile runs `daimon-sidecar` and a digest-pinned
-TLS proxy. The application uses `DAIMON_LANE_IMAGE` / `DAIMON_LANE_SHA` and waits
-for migrations. Only callback paths are public; `/healthz` and the database stay
-private. Set `DAIMON_SIDECAR_PUBLIC_HOST` (default `localhost` for local use) and,
-optionally, `DAIMON_SIDECAR_TLS_PORT`.
+The optional `preview-sidecar` Compose profile runs `daimon-sidecar`, the private
+OS poll executor and a TLS proxy, using the lane's immutable commit image and successful migration dependency.
+Only the proxy publishes TLS; database, `/healthz` and other paths stay private.
+Set `DAIMON_SIDECAR_PUBLIC_HOST` to a separate preview hostname. The default
+`localhost` is for local use. `DAIMON_SIDECAR_TLS_PORT` optionally changes the
+published TLS port. The proxy image is pinned by digest; the application uses
+`DAIMON_LANE_IMAGE` with `DAIMON_LANE_SHA`, as for other lane services.
 
 Migration `0119_watches` follows `0118_lead_intake`. Keep both
 `DAIMON_WATCHES__ENABLED` and the core-owned database `global` gate off until
@@ -170,22 +172,30 @@ port. Sidecar gains only `claim_watch_polls()`; it still cannot enumerate tables
 read credentials/policy, submit source results or enqueue arbitrary wakes. The OS
 MCP database login must own the migrations/result function (or receive an explicit
 EXECUTE grant on `accept_watch_poll_result(uuid,text,jsonb,text)` from its owner).
-Do not grant that port to `daimon_sidecar`. Keep the OS executor route private at
-your main proxy; sidecar sends only a short-lived lease, never owner credentials.
+Do not grant that port to `daimon_sidecar`. The separate `watch-executor` service
+listens on private port 8767, with no published port or proxy route. It has no MCP
+tools; the public MCP app has no poll route. Supply a random 32–256 byte secret as
+`DAIMON_WATCHES__EXECUTOR_SECRET` on the executor and the same value as
+`DAIMON_SIDECAR__EXECUTOR_SECRET` on sidecar (Compose wires both from the former).
+Unset secrets disable poll transport. Authentication and a cheap exact-lease lookup
+precede rate accounting, so invalid requests cannot consume the real-poll budget.
+Sidecar sends only the service secret and short-lived lease, never owner credentials.
 
 Sidecar checks due work every five seconds, at most four polls per tick. A poll
 lease lasts 60 seconds, independently of the durable wake's lease. Each OS executor
 call has a 25-second deadline; the sidecar transport has 30 seconds, follows no
 redirects and ignores proxy environment variables. `DAIMON_SIDECAR__OS_EXECUTOR_ORIGIN`
-accepts only `http://mcp:8765` (Compose) or `http://127.0.0.1:8765` (local processes).
+accepts only `http://watch-executor:8767` (Compose) or `http://127.0.0.1:8767` (local processes).
 `DAIMON_SIDECAR__POLL_INTERVAL_S` controls the 1–60 second tick interval. Both producer
 gates must be on before any poll runs. Source errors back off exponentially from
 the registered interval to a maximum of one day. Revoked owner/source/destination
 access pauses polling and cancels queued work. Expired watches stop automatically.
 
 `create_watch`, `list_watches`, `show_watch`, `pause_watch`, `resume_watch`,
-`rotate_watch_key` and `delete_watch` are owner MCP tools (tenant admins may manage
-another owner's watch). Creation takes an attended `origin_context_id`, never a
+`rotate_watch_key` and `delete_watch` are owner MCP tools (tenant admins may show, pause or delete
+another owner's watch). Creation, resume and signing-key rotation require an attended
+owner `origin_context_id` and a human confirmation card even with tool safety off;
+admins cannot resume or rotate for someone else. Creation never takes a
 caller-selected owner or destination. Only reviewed `read_thread` and `read_channel`
 are pollable; no arbitrary HTTP or external sender mode is supported. Poll intervals
 are 60–86400 seconds, with 1–30 day lifetime and at most 25 live watches per owner.
@@ -284,12 +294,15 @@ operator confirmation.
 Run only in an isolated preview lane after release review, with both the setting
 and durable global gate explicitly enabled. Use a disposable Discord thread whose
 agent satisfies the read-and-report allowlist, a reviewed OS notebook/report page,
-and the owning human's attended MCP connection. `ORIGIN` below is the live
+and a disposable non-admin human owner (Discord administrators bypass channel
+overwrites). In an attended conversation, ask the bound agent to make the MCP
+calls below and approve each enrollment card; humans cannot manufacture the signed
+chat-session grant. `ORIGIN` below is the live
 `origin_context_id` supplied by that conversation's turn controls; replace the
 upper-case IDs, UUIDs and hostname. These are operator instructions, not commands
 run by the importer or by this build.
 
-1. **Create watches.** Invoke these MCP calls as the thread's human owner:
+1. **Create watches.** Ask the agent during the owner's attended turn to call:
 
    ```text
    create_watch(origin_context_id=ORIGIN, source="page_event", page_id=PAGE_UUID,
@@ -302,6 +315,11 @@ run by the importer or by this build.
    list_watches()
    ```
 
+   `SOURCE_CHANNEL_ID` must differ from the reporting thread. Seed it first with
+   `send_message(channel_id=SOURCE_CHANNEL_ID, content="row-12 baseline")`. The
+   agent must have `read_channel` enabled without approval in its own canonical OS
+   toolset, as well as the existing read-and-report allowlist eligibility.
+
    Expected: both watches list the same owner-bound agent and exact thread. The
    page signing key appears once in the owner's private DM, never the MCP output.
    Install the delivered `key_id` and key privately on the OS page host and in
@@ -311,6 +329,9 @@ run by the importer or by this build.
 2. **Fire a signed page callback.** In a private OS-host operator shell, put the
    delivered key in `WATCH_KEY` without shell tracing/history and set
    `WATCH_ID`, `PAGE_ID`, `KEY_ID`, `CALLBACK_ORIGIN=https://preview-callback-host`.
+   Export all five variables (`WATCH_ID` is the callback watch UUID, `PAGE_ID`
+   is the same `PAGE_UUID` used above). Load `WATCH_KEY` using `read -rs WATCH_KEY;
+   export WATCH_KEY` in bash so it does not enter shell history.
    This sends exactly one server-signed event; a browser never receives the key:
 
    ```sh
@@ -329,6 +350,9 @@ run by the importer or by this build.
        print(response.status, response.read().decode())
    PY
    ```
+
+   The request signs the exact bytes and sets no explicit Content-Type header
+   (urllib may add its default); sidecar accepts the raw UTF-8 body. Each execution mints a fresh event UUID.
 
    Expected: HTTP 202 with `accepted=true` and a durable `wake_id`; the bound thread
    receives a read-and-report answer containing `signed-page-event`. It appears
@@ -368,26 +392,122 @@ run by the importer or by this build.
    prose. The deterministic regression is
    `test_watch_read_report_refuses_writes_shell_and_builtins_even_with_write_grants`.
 
-5. **Revoke and cancel queued wakes.** To make the queue observation deterministic,
-   temporarily stop only this isolated lane's Discord consumer through its normal
-   Compose command (`docker compose -f deploy/lanes/compose.lane.yml stop discord`).
-   Repeat step 2 with a new signed event and retain its returned `wake_id`. On the
-   owner's still-valid MCP management connection invoke:
+5. **Revoke actual source access and cancel queued wakes.** In the preview host's
+   private bash shell, set `PREVIEW_COMPOSE` to the absolute deployed
+   `compose.lane.yml` path (beside the lane's `.env`). Use the existing project name
+   shown by `docker compose ls` as `PREVIEW_PROJECT`, not a new Compose project.
+   Export `SOURCE_CHANNEL_ID`, `OWNER_DISCORD_ID` (the non-admin human), and
+   `POLL_WATCH_UUID` from step 1. These commands never target a different lane:
 
-   ```text
-   pause_watch(watch_id=CALLBACK_WATCH_UUID)
-   pause_watch(watch_id=POLL_WATCH_UUID)
-   show_watch(watch_id=CALLBACK_WATCH_UUID)
+   ```sh
+   dc() { docker compose --project-name "$PREVIEW_PROJECT" \
+     --env-file "$(dirname "$PREVIEW_COMPOSE")/.env" -f "$PREVIEW_COMPOSE" "$@"; }
+   dc ps discord sidecar watch-executor
+   dc stop discord
+   read -rs DISCORD_BOT_TOKEN; export DISCORD_BOT_TOKEN
    ```
 
-   ```sql
-   SELECT status,skip_reason FROM task_continuations
-   WHERE idempotency_key = '<QUEUED_WAKE_ID>';
+   Use the preview bot token from private lane configuration; it must have Manage
+   Roles permission to edit this disposable channel's member overwrite. This helper sends
+   one source change, then removes the owner's native history permission. It
+   preserves the original member overwrite for restoration; keep this shell open:
+
+   ```sh
+   discord_parity() {
+     ACTION="$1" uv run python - <<'PY'
+   import json, os, urllib.request
+   base = "https://discord.com/api/v10/channels/" + os.environ["SOURCE_CHANNEL_ID"]
+   owner = os.environ["OWNER_DISCORD_ID"]
+   headers = {"Authorization": "Bot " + os.environ["DISCORD_BOT_TOKEN"],
+              "Content-Type": "application/json", "User-Agent": "Daimon-preview-parity/1"}
+   def request(method, suffix="", value=None):
+       body = None if value is None else json.dumps(value).encode()
+       req = urllib.request.Request(base + suffix, data=body, headers=headers, method=method)
+       with urllib.request.urlopen(req, timeout=15) as response:
+           raw = response.read()
+           return json.loads(raw) if raw else None
+   action = os.environ["ACTION"]
+   if action == "queue":
+       request("POST", "/messages", {"content":"row-12 queued before revocation",
+                                    "allowed_mentions":{"parse":[]}})
+   elif action == "revoke":
+       current = next((x for x in request("GET")["permission_overwrites"]
+                       if x["id"] == owner and x["type"] == 1), None)
+       print(json.dumps(current))
+       old = current or {"allow":"0", "deny":"0"}
+       request("PUT", "/permissions/" + owner, {"type":1,
+           "allow":str(int(old["allow"]) & ~65536), "deny":str(int(old["deny"]) | 65536)})
+   elif action == "restore":
+       previous = json.loads(os.environ["PREVIOUS_OVERWRITE"])
+       request("DELETE" if previous is None else "PUT", "/permissions/" + owner,
+               None if previous is None else {k:previous[k] for k in ("type","allow","deny")})
+   PY
+   }
+   discord_parity queue
    ```
 
-   Expected: watches are paused, that queued wake is `cancelled` with
-   `watch_revoked`, a freshly signed page delivery is refused, and no poll runs.
-   Restart only the preview Discord consumer; the cancelled wake produces no
-   report. Key revocation can also be checked with `rotate_watch_key`: it cancels
-   queued wakes and refuses signatures using the old key. Restore both producer
-   gates to OFF after the preview exercise unless separately approved to keep on.
+   Wait at least 65 seconds for the poll, keeping Discord stopped. Confirm a
+   pending wake exists with this exact SQL command before revoking; if it returns
+   no row, wait for the baseline/change poll and repeat the query:
+
+   ```sh
+   dc exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<SQL
+   SELECT q.idempotency_key,q.status FROM watch_firings f
+   JOIN task_continuations q ON q.idempotency_key=f.wake_key
+   WHERE f.watch_id='$POLL_WATCH_UUID' AND q.status='pending';
+   SQL
+   export PREVIOUS_OVERWRITE="$(discord_parity revoke)"
+   ```
+
+   Wait another 65 seconds so the next poll sees the revoked history permission:
+
+   ```sh
+   dc exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<SQL
+   SELECT status,source_state->>'reason' AS reason FROM watches WHERE id='$POLL_WATCH_UUID';
+   SELECT q.status,q.skip_reason FROM watch_firings f
+   JOIN task_continuations q ON q.idempotency_key=f.wake_key
+   WHERE f.watch_id='$POLL_WATCH_UUID' ORDER BY f.created_at DESC LIMIT 1;
+   SQL
+   discord_parity restore
+   unset DISCORD_BOT_TOKEN PREVIOUS_OVERWRITE
+   dc start discord
+   ```
+
+   Expected: the watch is `paused` with `access_revoked`; the previously pending
+   wake is `cancelled` with `watch_revoked`. Restoring permission and restarting
+   Discord produces no report and does not resume the watch. In a fresh attended
+   owner turn ask the agent for `show_watch(watch_id=POLL_WATCH_UUID)` to verify.
+   Ask it to pause the page watch with `pause_watch(watch_id=CALLBACK_WATCH_UUID)`.
+   Restore both producer gates to OFF after the exercise unless separately approved
+   to keep them on. This cancels queued work through the core stop port, updates
+   only this lane's existing `.env`, and recreates its policy consumers:
+
+   ```sh
+   dc exec -T watch-executor python - <<'PY'
+   import asyncio
+   from sqlalchemy.ext.asyncio import async_sessionmaker
+   from daimon.core.config import load_settings
+   from daimon.core.db import build_engine
+   from daimon.core.stores.watches import set_watch_control
+   async def stop():
+       engine = build_engine(str(load_settings().database.url))
+       try:
+           async with async_sessionmaker(engine).begin() as db:
+               await set_watch_control(db, scope="global", enabled=False)
+       finally:
+           await engine.dispose()
+   asyncio.run(stop())
+   PY
+   python3 - "$(dirname "$PREVIEW_COMPOSE")/.env" <<'PY'
+   import re, sys
+   from pathlib import Path
+   path = Path(sys.argv[1])
+   value = path.read_text()
+   value = re.sub(r"(?m)^(?:export )?DAIMON_WATCHES__ENABLED=.*\n?", "", value)
+   path.write_text(value.rstrip() + "\nDAIMON_WATCHES__ENABLED=false\n")
+   PY
+   export DAIMON_WATCHES__ENABLED=false
+   dc up -d --no-deps --force-recreate mcp discord sidecar watch-executor
+   ```
+
+   A resumed poll requires a fresh attended owner origin and another confirmation card.

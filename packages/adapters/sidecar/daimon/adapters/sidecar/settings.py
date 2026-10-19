@@ -42,8 +42,22 @@ class SidecarSettings(BaseSettings):
         default=10, ge=1, le=30, description="Total callback body and database deadline in seconds."
     )
 
-    os_executor_origin: Literal["http://mcp:8765", "http://127.0.0.1:8765"] = Field(
-        default="http://mcp:8765",
+    @field_validator("executor_secret", mode="before")
+    @classmethod
+    def empty_executor_secret(cls, value: object) -> object:
+        return None if value == "" else value
+
+    executor_secret: SecretStr | None = Field(
+        default=None,
+        min_length=32,
+        max_length=256,
+        description=(
+            "Private poll executor shared secret, matching "
+            "DAIMON_WATCHES__EXECUTOR_SECRET. Unset disables polling transport."
+        ),
+    )
+    os_executor_origin: Literal["http://watch-executor:8767", "http://127.0.0.1:8767"] = Field(
+        default="http://watch-executor:8767",
         description="Fixed private OS executor origin. No outside hosts, redirects or source URLs.",
     )
     poll_interval_s: float = Field(

@@ -66,7 +66,7 @@ async def runtime_watch(db_session_factory, monkeypatch):
             binding,
             instructions="Report changes.",
             tool="read_thread",
-            arguments={"thread_id": "4242"},
+            arguments={"thread_id": "4343"},
             projection=".rows",
             rule="change",
             interval=60,
@@ -84,11 +84,34 @@ async def runtime_watch(db_session_factory, monkeypatch):
     )
     monkeypatch.setattr(
         "daimon.adapters.mcp.watch_polling.retrieve_agent",
-        AsyncMock(return_value=ma_agent(id="agent-bound", name="analyst")),
+        AsyncMock(
+            return_value=ma_agent(
+                id="agent-bound",
+                name="analyst",
+                mcp_servers=[
+                    {"type": "url", "name": "daimon-mcp", "url": "https://os.example/mcp"}
+                ],
+                tools=[
+                    {
+                        "type": "mcp_toolset",
+                        "mcp_server_name": "daimon-mcp",
+                        "configs": [],
+                        "default_config": {
+                            "enabled": True,
+                            "permission_policy": {"type": "always_allow"},
+                        },
+                    }
+                ],
+            )
+        ),
     )
     monkeypatch.setattr(
         "daimon.adapters.mcp.watch_polling.poll_read_place",
-        AsyncMock(return_value=Place(channel_id="4242", parent_channel_id="4241")),
+        AsyncMock(
+            side_effect=lambda runtime, auth, resource_id, **kwargs: Place(
+                channel_id=resource_id, parent_channel_id="4241"
+            )
+        ),
     )
     auth = AuthIdentity(
         account_id=watch.owner_account_id,
@@ -99,6 +122,30 @@ async def runtime_watch(db_session_factory, monkeypatch):
         role=Role.USER,
     )
     return runtime, watch, auth
+
+
+@pytest.fixture
+async def attended_owner(runtime_watch):
+    from dataclasses import replace
+
+    from daimon.core.turn_origin import turn_origin
+
+    runtime, watch, auth = runtime_watch
+    auth = replace(auth, chat_session_id="attended-session")
+    async with turn_origin(
+        runtime.session_factory,
+        tenant_id=watch.tenant_id,
+        account_id=watch.owner_account_id,
+        platform="discord",
+        parent_channel_id=watch.parent_channel_id,
+        thread_id=watch.thread_id,
+        responder_ma_agent_id=watch.agent_id,
+        responder_name=watch.agent_name,
+        role=Role.USER,
+        chat_session_id=auth.chat_session_id,
+        attended=True,
+    ) as origin:
+        yield runtime, watch, auth, str(origin.id)
 
 
 async def lease(runtime, watch):
@@ -167,8 +214,8 @@ async def test_management_refuses_nonowner_and_cross_tenant(runtime_watch, actio
             await manage_watch_impl(runtime, forged, watch_id=str(watch.id), action=action)
 
 
-async def test_owner_can_pause_show_resume_and_delete(runtime_watch):
-    runtime, watch, auth = runtime_watch
+async def test_owner_can_pause_show_resume_and_delete(attended_owner):
+    runtime, watch, auth, origin = attended_owner
     assert (
         await manage_watch_impl(runtime, auth, watch_id=str(watch.id), action="pause")
     ).status == "paused"
@@ -176,22 +223,26 @@ async def test_owner_can_pause_show_resume_and_delete(runtime_watch):
         await manage_watch_impl(runtime, auth, watch_id=str(watch.id), action="show")
     ).status == "paused"
     assert (
-        await manage_watch_impl(runtime, auth, watch_id=str(watch.id), action="resume")
+        await manage_watch_impl(
+            runtime, auth, watch_id=str(watch.id), action="resume", origin_context_id=origin
+        )
     ).status == "active"
     assert (
         await manage_watch_impl(runtime, auth, watch_id=str(watch.id), action="delete")
     ).status == "deleted"
 
 
-async def test_page_key_is_delivered_privately_once_never_in_mcp_result(runtime_watch):
-    runtime, watch, auth = runtime_watch
+async def test_page_key_is_delivered_privately_once_never_in_mcp_result(attended_owner):
+    runtime, watch, auth, origin = attended_owner
     async with runtime.session_factory.begin() as db:
         await db.execute(
             text("UPDATE watches SET source='page_event' WHERE id=:id"), {"id": watch.id}
         )
     deliver = AsyncMock()
     with patch("daimon.adapters.mcp.tools.watches.private_key_delivery", deliver):
-        response = await rotate_watch_impl(runtime, auth, watch_id=str(watch.id))
+        response = await rotate_watch_impl(
+            runtime, auth, watch_id=str(watch.id), origin_context_id=origin
+        )
     deliver.assert_awaited_once()
     key = deliver.await_args.kwargs["key"]
     assert len(key) >= 32 and key not in response.model_dump_json()
@@ -211,8 +262,8 @@ async def test_page_key_is_delivered_privately_once_never_in_mcp_result(runtime_
         assert key not in str(values) and len(values) == 1
 
 
-async def test_failed_private_key_delivery_pauses_watch(runtime_watch):
-    runtime, watch, auth = runtime_watch
+async def test_failed_private_key_delivery_pauses_watch(attended_owner):
+    runtime, watch, auth, origin = attended_owner
     async with runtime.session_factory.begin() as db:
         await db.execute(
             text("UPDATE watches SET source='page_event' WHERE id=:id"), {"id": watch.id}
@@ -224,7 +275,7 @@ async def test_failed_private_key_delivery_pauses_watch(runtime_watch):
         ),
         pytest.raises(ToolError, match="watch paused"),
     ):
-        await rotate_watch_impl(runtime, auth, watch_id=str(watch.id))
+        await rotate_watch_impl(runtime, auth, watch_id=str(watch.id), origin_context_id=origin)
     async with runtime.session_factory() as db:
         assert (await watches.get_watch(db, watch.id)).status == "paused"
 
@@ -274,7 +325,7 @@ async def test_owner_registration_binds_attended_origin_and_refuses_unattended(r
                     instructions="Report a change.",
                     source="poll",
                     tool="read_thread",
-                    arguments={"thread_id": "4242"},
+                    arguments={"thread_id": "4343"},
                 )
                 assert created.thread_id == watch.thread_id and created.agent_id == watch.agent_id
             else:
@@ -390,6 +441,163 @@ async def test_owner_account_tenant_change_stops_poll_before_read(runtime_watch)
         )
     with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", AsyncMock()) as source:
         assert not await run_poll(runtime, watch.id, token)
+        source.assert_not_called()
+    async with runtime.session_factory() as db:
+        assert (await watches.get_watch(db, watch.id)).status == "paused"
+
+
+@pytest.mark.parametrize("action", ["resume", "rotate"])
+async def test_unattended_origin_cannot_reactivate_or_rotate_watch(runtime_watch, action):
+    from dataclasses import replace
+
+    from daimon.core.turn_origin import turn_origin
+
+    runtime, watch, auth = runtime_watch
+    await manage_watch_impl(runtime, auth, watch_id=str(watch.id), action="pause")
+    auth = replace(auth, chat_session_id="unattended-session")
+    async with turn_origin(
+        runtime.session_factory,
+        tenant_id=watch.tenant_id,
+        account_id=watch.owner_account_id,
+        platform="discord",
+        parent_channel_id=watch.parent_channel_id,
+        thread_id=watch.thread_id,
+        responder_ma_agent_id=watch.agent_id,
+        responder_name=watch.agent_name,
+        role=Role.USER,
+        chat_session_id=auth.chat_session_id,
+        attended=False,
+    ) as origin:
+        with pytest.raises(ToolError, match="attended"):
+            if action == "resume":
+                await manage_watch_impl(
+                    runtime,
+                    auth,
+                    watch_id=str(watch.id),
+                    action=action,
+                    origin_context_id=str(origin.id),
+                )
+            else:
+                await rotate_watch_impl(
+                    runtime, auth, watch_id=str(watch.id), origin_context_id=str(origin.id)
+                )
+    async with runtime.session_factory() as db:
+        assert (await watches.get_watch(db, watch.id)).status == "paused"
+
+
+@pytest.mark.parametrize("action", ["resume", "rotate"])
+async def test_admin_cannot_override_another_owner_pause_or_key(runtime_watch, action):
+    from dataclasses import replace
+
+    runtime, watch, auth = runtime_watch
+    auth = replace(auth, account_id=uuid.uuid4(), role=Role.ADMIN)
+    with (
+        patch("daimon.adapters.mcp.tools.watches.fresh_admin", AsyncMock(return_value=True)),
+        pytest.raises(ToolError, match="not found"),
+    ):
+        if action == "resume":
+            await manage_watch_impl(runtime, auth, watch_id=str(watch.id), action=action)
+        else:
+            await rotate_watch_impl(runtime, auth, watch_id=str(watch.id))
+
+
+@pytest.mark.parametrize("arguments", [None, {"thread_id": "4242"}])
+async def test_default_and_self_source_poll_registration_refused(attended_owner, arguments):
+    from daimon.adapters.mcp.tools.watches import create_watch_impl
+
+    runtime, watch, auth, origin = attended_owner
+    with pytest.raises(ToolError, match="source"):
+        await create_watch_impl(
+            runtime,
+            auth,
+            origin_context_id=origin,
+            source="poll",
+            instructions="report",
+            arguments=arguments,
+        )
+
+
+async def test_legacy_self_source_cannot_read_or_wake_from_own_report(runtime_watch):
+    runtime, watch, _ = runtime_watch
+    async with runtime.session_factory.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE watches SET source_state=jsonb_set(source_state,'{arguments,thread_id}','\"4242\"') WHERE id=:id"
+            ),
+            {"id": watch.id},
+        )
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", AsyncMock()) as source:
+        assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
+        source.assert_not_called()
+    async with runtime.session_factory() as db:
+        assert await watches.list_evidence(db, watch.id) == []
+        assert (await watches.get_watch(db, watch.id)).status == "paused"
+
+
+@pytest.mark.parametrize("race", ["gate", "lease", "expiry"])
+async def test_scheduling_race_does_not_mark_owner_access_revoked(runtime_watch, race):
+    runtime, watch, _ = runtime_watch
+    token = await lease(runtime, watch)
+    async with runtime.session_factory.begin() as db:
+        if race == "gate":
+            await db.execute(
+                text("INSERT INTO watch_controls(scope,enabled) VALUES(:scope,false)"),
+                {"scope": f"tenant:{watch.tenant_id}"},
+            )
+        elif race == "lease":
+            await db.execute(
+                text("UPDATE watches SET lease_expires_at=now()-interval '1 second' WHERE id=:id"),
+                {"id": watch.id},
+            )
+        else:
+            await db.execute(
+                text("UPDATE watches SET expires_at=now()-interval '1 second' WHERE id=:id"),
+                {"id": watch.id},
+            )
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", AsyncMock()) as source:
+        assert not await run_poll(runtime, watch.id, token)
+        source.assert_not_called()
+    async with runtime.session_factory() as db:
+        current = await watches.get_watch(db, watch.id)
+        assert current.source_state.get("reason") != "access_revoked"
+        assert current.status == "active" and current.lease_owner is None
+        assert current.consecutive_errors == 0
+
+
+@pytest.mark.parametrize("mode", ["missing", "disabled", "ask", "foreign"])
+async def test_poll_honors_agents_own_live_os_toolset(runtime_watch, mode):
+    runtime, watch, _ = runtime_watch
+    tool = {
+        "type": "mcp_toolset",
+        "mcp_server_name": "daimon-mcp",
+        "configs": [
+            {
+                "name": "read_thread",
+                "enabled": mode != "disabled",
+                "permission_policy": {"type": "always_ask" if mode == "ask" else "always_allow"},
+            }
+        ],
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+    }
+    agent = ma_agent(
+        id="agent-bound",
+        name="analyst",
+        tools=[] if mode == "missing" else [tool],
+        mcp_servers=[
+            {
+                "type": "url",
+                "name": "daimon-mcp",
+                "url": "https://evil.example/mcp"
+                if mode == "foreign"
+                else "https://os.example/mcp",
+            }
+        ],
+    )
+    with (
+        patch("daimon.adapters.mcp.watch_polling.retrieve_agent", AsyncMock(return_value=agent)),
+        patch("daimon.adapters.mcp.watch_polling._read_thread_impl", AsyncMock()) as source,
+    ):
+        assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
         source.assert_not_called()
     async with runtime.session_factory() as db:
         assert (await watches.get_watch(db, watch.id)).status == "paused"

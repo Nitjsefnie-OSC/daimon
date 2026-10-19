@@ -469,7 +469,7 @@ Owner-bound watch management.
 | `delete_watch` | all callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
 | `list_watches` | all callers | List your watches in this workspace, including paused imports and expiry; no signing secrets. |
 | `pause_watch` | all callers | Pause your watch and cancel its queued wakes. |
-| `resume_watch` | all callers | Resume your paused watch after fresh access checks. |
+| `resume_watch` | all callers | Resume your paused watch from an attended owner turn after fresh access checks. |
 | `rotate_watch_key` | all callers | Rotate an OS page signing key, revoke the old key and cancel queued wakes. |
 | `show_watch` | all callers | Show your watch's immutable destination, source, status and expiry. |
 

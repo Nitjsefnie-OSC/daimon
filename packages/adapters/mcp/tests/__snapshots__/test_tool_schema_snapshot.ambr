@@ -2250,6 +2250,7 @@
         Binds the current human owner, tenant, agent and exact Discord thread.
         Requires an attended turn origin. Polls run without an AI turn; firings
         use unattended read-and-report turns and current access/spend checks.
+        Poll arguments must explicitly name a source different from the reporting thread.
         Only read_thread and read_channel are pollable; no URLs or outside tools.
         Projection supports `.`, `.field.nested` and `.rows[0].field`; other jq
         expressions are refused. Polls start with a saved baseline and compare
@@ -5553,18 +5554,23 @@
     }),
     'resume_watch': dict({
       'description': '''
-        Resume your paused watch after fresh access checks. Imported watches require operator
-        confirmation; source_unmapped never resumes.
+        Resume your paused watch from an attended owner turn after fresh access checks.
+        Only the owner may resume; an admin cannot override the owner pause.
+        Imported watches require operator confirmation; source_unmapped never resumes.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
           'watch_id': dict({
             'type': 'string',
           }),
         }),
         'required': list([
           'watch_id',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -5591,17 +5597,22 @@
     'rotate_watch_key': dict({
       'description': '''
         Rotate an OS page signing key, revoke the old key and cancel queued wakes. The fresh
-        key goes to its owner by private DM once.
+        key goes to its owner by private DM once. Requires an attended owner turn;
+        an admin cannot rotate another owner's key.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
           'watch_id': dict({
             'type': 'string',
           }),
         }),
         'required': list([
           'watch_id',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),

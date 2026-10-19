@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
 import uuid
 from collections import deque
@@ -38,7 +39,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
 from daimon.core.config import load_watches_settings
-from daimon.core.continuity.poll_tools import validate_poll
+from daimon.core.continuity.poll_tools import require_distinct_source, validate_poll
 from daimon.core.continuity.watch_projection import Rule, evaluate, project
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.membership_subject import resolve_subject
@@ -48,7 +49,13 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.stores.watches import finish_poll, leased_poll, poll_failed
+from daimon.core.stores.watches import (
+    PollBindingRevoked,
+    finish_poll,
+    leased_poll,
+    poll_failed,
+    release_poll_lease,
+)
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 from daimon.core.turn.approvals import agent_rule_lookup
 from pydantic import JsonValue, TypeAdapter
@@ -144,6 +151,27 @@ async def authorize_poll(
         if public_url is None:
             raise PollAccessRevoked("OS endpoint unavailable")
         tool = str(watch.source_state.get("tool"))
+        servers = [server for server in agent.mcp_servers if server.name == DAIMON_SERVER_NAME]
+        toolsets = [
+            entry
+            for entry in agent.tools
+            if entry.type == "mcp_toolset" and entry.mcp_server_name == DAIMON_SERVER_NAME
+        ]
+        if (
+            len(servers) != 1
+            or servers[0].url.rstrip("/") != str(public_url).rstrip("/")
+            or len(toolsets) != 1
+        ):
+            raise PollAccessRevoked("Agent OS toolset unavailable")
+        toolset = toolsets[0]
+        configs = [config for config in toolset.configs if config.name == tool]
+        config = configs[0] if len(configs) == 1 else toolset.default_config
+        if (
+            len(configs) > 1
+            or not config.enabled
+            or config.permission_policy.type != "always_allow"
+        ):
+            raise PollAccessRevoked("Agent poll tool is disabled or requires approval")
         rules = agent_rule_lookup(
             runtime.session_factory,
             tenant_id=watch.tenant_id,
@@ -159,6 +187,10 @@ async def authorize_poll(
             raise PollAccessRevoked("Poll tool requires approval or is denied")
         arguments = cast(dict[str, object], watch.source_state.get("arguments", {}))
         source_id = str(arguments.get("thread_id", arguments.get("channel_id", "")))
+        try:
+            require_distinct_source(arguments, watch.thread_id)
+        except ValueError as exc:
+            raise PollAccessRevoked(str(exc)) from exc
         source_place = await poll_read_place(runtime, auth, source_id)
     # Policy is read after all native/provider lookups, immediately before the
     # source call. The executor repeats this check after the read before commit.
@@ -199,10 +231,9 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
             async with runtime.session_factory() as db:
                 watch = await leased_poll(db, watch_id, lease, now=datetime.now(UTC))
             if watch is None:
-                # A revoked live binding cancels prior queued work too; stale leases
-                # cannot mutate a watch since poll_failed compares the exact token.
+                # Gate/expiry/lease races are scheduling outcomes, not owner revocation.
                 async with runtime.session_factory.begin() as db:
-                    await poll_failed(db, watch_id, lease, revoked=True, now=datetime.now(UTC))
+                    await release_poll_lease(db, watch_id, lease)
                 return False
             tool = str(watch.source_state["tool"])
             arguments = TypeAdapter(dict[str, JsonValue]).validate_python(
@@ -250,7 +281,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
             await authorize_poll(runtime, watch)
             async with runtime.session_factory.begin() as db:
                 if await leased_poll(db, watch_id, lease, now=datetime.now(UTC)) is None:
-                    await poll_failed(db, watch_id, lease, revoked=True, now=datetime.now(UTC))
+                    await release_poll_lease(db, watch_id, lease)
                     return False
                 await finish_poll(
                     db,
@@ -273,6 +304,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     exc,
                     (
                         PollAccessRevoked,
+                        PollBindingRevoked,
                         ToolError,
                         discord.Forbidden,
                         discord.NotFound,
@@ -294,13 +326,15 @@ def poll_endpoint(runtime: McpRuntime):
         nonlocal active
         if not load_watches_settings().enabled:
             return Response(status_code=503)
-        now = time.monotonic()
-        while recent and recent[0] <= now - 60:
-            recent.popleft()
-        if active >= 4 or len(recent) >= 120:
-            return Response(status_code=429)
-        recent.append(now)
-        # Only opaque lease identifiers; no identity/source/output/instructions.
+        secret = load_watches_settings().executor_secret
+        supplied = request.headers.getlist("X-Watch-Executor-Key")
+        if (
+            secret is None
+            or len(supplied) != 1
+            or not secrets.compare_digest(supplied[0].encode(), secret.get_secret_value().encode())
+        ):
+            return Response(status_code=403)
+        # Authenticate and check a live opaque capability before charging shared budgets.
         try:
             watch_id = uuid.UUID(request.path_params["watch_id"])
             values = request.headers.getlist("X-Watch-Lease")
@@ -310,6 +344,23 @@ def poll_endpoint(runtime: McpRuntime):
             uuid.UUID(lease)
         except ValueError:
             return Response(status_code=403)
+        async with runtime.session_factory() as db:
+            from daimon.core.stores.watches import get_watch
+
+            watch = await get_watch(db, watch_id)
+        if (
+            watch is None
+            or watch.lease_owner != lease
+            or watch.lease_expires_at is None
+            or watch.lease_expires_at <= datetime.now(UTC)
+        ):
+            return Response(status_code=403)
+        now = time.monotonic()
+        while recent and recent[0] <= now - 60:
+            recent.popleft()
+        if active >= 4 or len(recent) >= 120:
+            return Response(status_code=429)
+        recent.append(now)
         active += 1
         try:
             success = await run_poll(runtime, watch_id, lease)

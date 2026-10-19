@@ -6,6 +6,7 @@ No URL, shell, management, model execution, clock or external MCP tool belongs
 here. Expanding this registry requires code review and authorization tests.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -52,3 +53,9 @@ def validate_poll(
         raise ValueError("Poll read limit must be 1 to 20")
     if not 60 <= interval <= 86400:
         raise ValueError("Poll interval must be 60 to 86400 seconds")
+
+
+def require_distinct_source(arguments: Mapping[str, object], destination: str) -> None:
+    """Reporting into the source would turn each report into another firing."""
+    if arguments.get("thread_id", arguments.get("channel_id")) == destination:
+        raise ValueError("Poll source must differ from the reporting thread")

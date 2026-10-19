@@ -97,6 +97,26 @@ services:
     entrypoint: ["python", "-m", "daimon.adapters.slack"]
     restart: unless-stopped
 
+  watch-executor:
+    profiles: ["preview-sidecar"]
+    image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
+    labels:
+      org.opencontainers.image.revision: ${DAIMON_LANE_SHA:?DAIMON_LANE_SHA is required}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER:-daimon}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-daimon}
+      DAIMON_WATCHES__ENABLED: ${DAIMON_WATCHES__ENABLED:-false}
+      DAIMON_WATCHES__EXECUTOR_SECRET: ${DAIMON_WATCHES__EXECUTOR_SECRET:-}
+    # Private service only: no published ports, public proxy route or MCP tools.
+    entrypoint: ["uvicorn"]
+    command: ["daimon.adapters.mcp.watch_executor:create_watch_executor_app", "--factory", "--host", "0.0.0.0", "--port", "8767", "--no-access-log"]
+    mem_limit: 512m
+    cpus: 0.5
+    restart: unless-stopped
+
   sidecar:
     profiles: ["preview-sidecar"]
     image: ${DAIMON_LANE_IMAGE:?DAIMON_LANE_IMAGE is required}
@@ -110,7 +130,8 @@ services:
       DAIMON_SIDECAR__DATABASE_URL: ${DAIMON_SIDECAR__DATABASE_URL:-postgresql+asyncpg://sidecar:unconfigured@postgres:5432/daimon}
       DAIMON_WATCHES__ENABLED: ${DAIMON_WATCHES__ENABLED:-false}
       DAIMON_SIDECAR__SIGNING_KEYS: "${DAIMON_SIDECAR__SIGNING_KEYS:-{}}"
-      DAIMON_SIDECAR__OS_EXECUTOR_ORIGIN: "http://mcp:8765"
+      DAIMON_SIDECAR__EXECUTOR_SECRET: ${DAIMON_WATCHES__EXECUTOR_SECRET:-}
+      DAIMON_SIDECAR__OS_EXECUTOR_ORIGIN: "http://watch-executor:8767"
       DAIMON_SIDECAR__POLL_INTERVAL_S: "5"
       DAIMON_SIDECAR__PORT: "8780"
       DAIMON_SIDECAR__MAX_CONCURRENT: "8"

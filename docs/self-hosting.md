@@ -1409,26 +1409,44 @@ port. Sidecar gains only `claim_watch_polls()`; it still cannot enumerate tables
 read credentials/policy, submit source results or enqueue arbitrary wakes. The OS
 MCP database login must own the migrations/result function (or receive an explicit
 EXECUTE grant on `accept_watch_poll_result(uuid,text,jsonb,text)` from its owner).
-Do not grant that port to `daimon_sidecar`. Keep the OS executor route private at
-your main proxy; sidecar sends only a short-lived lease, never owner credentials.
+Do not grant that port to `daimon_sidecar`. The separate `watch-executor` service
+listens on private port 8767, with no published port or proxy route. It has no MCP
+tools; the public MCP app has no poll route. Supply a random 32–256 byte secret as
+`DAIMON_WATCHES__EXECUTOR_SECRET` on the executor and the same value as
+`DAIMON_SIDECAR__EXECUTOR_SECRET` on sidecar (Compose wires both from the former).
+Unset secrets disable poll transport. Authentication and a cheap exact-lease lookup
+precede rate accounting, so invalid requests cannot consume the real-poll budget.
+Sidecar sends only the service secret and short-lived lease, never owner credentials.
 
 Sidecar checks due work every five seconds, at most four polls per tick. A poll
 lease lasts 60 seconds, independently of the durable wake's lease. Each OS executor
 call has a 25-second deadline; the sidecar transport has 30 seconds, follows no
 redirects and ignores proxy environment variables. `DAIMON_SIDECAR__OS_EXECUTOR_ORIGIN`
-accepts only `http://mcp:8765` (Compose) or `http://127.0.0.1:8765` (local processes).
+accepts only `http://watch-executor:8767` (Compose) or `http://127.0.0.1:8767` (local processes).
+Run the separate private listener with
+`uvicorn daimon.adapters.mcp.watch_executor:create_watch_executor_app --factory --host 127.0.0.1 --port 8767 --no-access-log`.
+The public MCP app has no poll route. Set a random 32–256 byte
+`DAIMON_WATCHES__EXECUTOR_SECRET` on that service and the same value as
+`DAIMON_SIDECAR__EXECUTOR_SECRET` on sidecar. Missing secrets disable transport.
+Service authentication and exact lease lookup precede shared rate accounting.
 `DAIMON_SIDECAR__POLL_INTERVAL_S` controls the 1–60 second tick interval. Both producer
 gates must be on before any poll runs. Source errors back off exponentially from
 the registered interval to a maximum of one day. Revoked owner/source/destination
 access pauses polling and cancels queued work. Expired watches stop automatically.
 
 `create_watch`, `list_watches`, `show_watch`, `pause_watch`, `resume_watch`,
-`rotate_watch_key` and `delete_watch` are owner MCP tools (tenant admins may manage
-another owner's watch). Creation takes an attended `origin_context_id`, never a
+`rotate_watch_key` and `delete_watch` are owner MCP tools (tenant admins may show, pause or delete
+another owner's watch). Creation, resume and signing-key rotation require an attended
+owner `origin_context_id` and a human confirmation card even with tool safety off;
+admins cannot resume or rotate for someone else. Creation never takes a
 caller-selected owner or destination. Only reviewed `read_thread` and `read_channel`
 are pollable; no arbitrary HTTP or external sender mode is supported. Poll intervals
 are 60–86400 seconds, with 1–30 day lifetime and at most 25 live watches per owner.
 The first successful poll establishes the baseline without waking the agent.
+Poll arguments must name a source distinct from the reporting thread. The agent
+must have the read enabled without approval on its canonical OS MCP toolset.
+Gate, expiry and lease races release the matching poll lease without marking owner
+access revoked. Actual owner or binding revocation pauses and cancels queued wakes.
 
 Projections accept `.`, `.field.nested` and `.rows[0].content`; unsupported jq must
 be rewritten by an operator. Input and output are limited to 4 KiB, depth 16 and
