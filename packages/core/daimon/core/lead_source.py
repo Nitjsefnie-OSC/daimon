@@ -4,6 +4,7 @@ import base64
 import re
 from dataclasses import dataclass
 from email import policy
+from email.message import Message
 from email.parser import BytesParser
 from email.utils import getaddresses
 
@@ -22,14 +23,31 @@ def decode_email(raw: str) -> EmailEvidence:
     )
     headers = "\n".join(f"{key}: {value}" for key, value in message.items())
     parts: list[str] = []
-    for part in message.walk():
-        if part.get_content_disposition() == "attachment" or part.get_filename() is not None:
-            continue
-        if part.get_content_type() not in ("text/plain", "text/html"):
-            continue
-        payload = part.get_payload(decode=True)
-        if isinstance(payload, bytes):
-            parts.append(payload.decode(part.get_content_charset() or "utf-8", errors="replace"))
+
+    def collect(part: Message) -> None:
+        # Attachment containers must prune their whole subtree, including .eml
+        # bodies whose descendants have no disposition or filename themselves.
+        if (
+            part.get_content_disposition() == "attachment"
+            or part.get_filename() is not None
+            or part.get_content_maintype() == "message"
+        ):
+            return
+        if part.is_multipart():
+            children = part.get_payload()
+            if isinstance(children, list):
+                for child in children:
+                    if isinstance(child, Message):
+                        collect(child)
+            return
+        if part.get_content_type() in ("text/plain", "text/html"):
+            payload = part.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                parts.append(
+                    payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                )
+
+    collect(message)
     recipients = frozenset(
         address.casefold()
         for _, address in getaddresses(
