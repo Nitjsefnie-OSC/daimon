@@ -4119,7 +4119,9 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         combine_handlers(make_fake_sessions_handler(transport.state), router.dispatch)
     )
     runtime = SimpleNamespace(
-        client=client, session_factory=factory, settings=SimpleNamespace(mcp=deps.mcp)
+        client=client,
+        session_factory=factory,
+        settings=SimpleNamespace(mcp=deps.mcp, tool_safety=deps.tool_safety),
     )
     auth = AuthIdentity(
         account_id=account.id,
@@ -4146,8 +4148,14 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         _continue_turn_impl(runtime, auth, first.ma_session_id, "in flight")
     )
     replacing = None
+    entered_wait = asyncio.create_task(entered.wait())
     try:
-        await asyncio.wait_for(entered.wait(), 5)
+        done, _ = await asyncio.wait(
+            {entered_wait, sending}, timeout=5, return_when=asyncio.FIRST_COMPLETED
+        )
+        if sending in done:
+            await sending  # Surface an early send failure rather than timing out on entered.
+        assert entered_wait in done, "the send must enter while holding its mutation fence"
         replacing = asyncio.create_task(
             _prepare(
                 deps, await _admit_next(admission_deps, tenant), tenant=tenant, account=account
@@ -4164,8 +4172,12 @@ async def test_handoff_waits_for_an_inflight_handle_send(
         assert await _count_live_rows(factory, tenant=tenant, account=account) == 1
     finally:
         release.set()
+        entered_wait.cancel()
         await asyncio.gather(
-            sending, *([replacing] if replacing is not None else []), return_exceptions=True
+            entered_wait,
+            sending,
+            *([replacing] if replacing is not None else []),
+            return_exceptions=True,
         )
 
 
