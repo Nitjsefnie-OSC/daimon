@@ -21,17 +21,19 @@ from daimon.adapters.cli.run.lifecycle import NdjsonLifecycle
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import discover_tenant
 from daimon.core.config import Settings, load_settings, load_turn_settings
+from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.mux_backend import platform_scope, resource_scope
 from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.approvals import AnnotationLookup
 from daimon.core.turn.ceiling import turn_deadline
-from daimon.core.turn.driver import run_turn
+from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.outcomes import current_outcome, observe_turn
 from daimon.core.turn.posture import BillingExempt, RequireApproval, ToolConfirmation
 from daimon.core.turn.state import TurnState
-from daimon.core.turn.unattended import gate_session_snapshot, unattended_posture
+from daimon.core.turn.unattended import session_gate, session_rules_channel, unattended_posture
 from mux.errors import ScopeViolation
 
 
@@ -75,33 +77,55 @@ async def _run_with_defaults(settings: Settings, session: str, user_message: str
     async with build_runtime(settings) as rt:
         public_url = str(settings.mcp.public_url) if settings.mcp.public_url is not None else None
         scope = platform_scope("CLI operator run gate")
-        async with rt.sessionmaker() as db:
-            tenant_id = await discover_tenant(db)
         snapshot = await retrieve_session_record(rt.anthropic, session, scope=scope)
-        await gate_session_snapshot(
-            rt.anthropic.with_options(max_retries=0),
-            snapshot,
+        tenant_id, platform = await _session_tenant(rt, snapshot)
+        gate = session_gate(
+            rt.anthropic,
+            session,
             settings.tool_safety,
             scope=scope,
             public_url=public_url,
             session_factory=rt.sessionmaker,
             tenant_id=tenant_id,
         )
-        # Decide on what the gate left (a healed reserved URL, for one).
+        # Decide on what a first gate leaves (a healed reserved URL, for one);
+        # the driver gates again before the message and every confirmation.
+        await gate()
         snapshot = await retrieve_session_record(rt.anthropic, session, scope=scope)
-        return await run_conversation(
-            rt=rt,
-            session_id=session,
-            user_message=user_message,
-            tool_confirmation=unattended_posture(
-                settings.tool_safety,
-                session=snapshot,
-                public_url=public_url,
-                session_factory=rt.sessionmaker,
-                tenant_id=tenant_id,
-                annotations_for=_annotations_for(rt, snapshot),
-            ),
-        )
+        with unattended_sends(gate):
+            return await run_conversation(
+                rt=rt,
+                session_id=session,
+                user_message=user_message,
+                tool_confirmation=unattended_posture(
+                    settings.tool_safety,
+                    session=snapshot,
+                    public_url=public_url,
+                    session_factory=rt.sessionmaker,
+                    tenant_id=tenant_id,
+                    channel_id=session_rules_channel(snapshot, platform=platform),
+                    annotations_for=_annotations_for(rt, snapshot),
+                ),
+            )
+
+
+async def _session_tenant(
+    rt: CliRuntime, session: BetaManagedAgentsSession
+) -> tuple[uuid.UUID, str]:
+    """The tenant and platform whose rules the operator's session runs under.
+
+    A session stamped for a tenant (a chat or agent-chat conversation) keeps
+    that tenant's rules and its channel's; only an unstamped operator session
+    falls back to the local CLI tenant.
+    """
+    stamped = (session.metadata or {}).get(MA_METADATA_KEY_TENANT)
+    async with rt.sessionmaker() as db:
+        if stamped is None:
+            return await discover_tenant(db), "cli"
+        tenant = await get_tenant(db, uuid.UUID(stamped))
+    if tenant is None:
+        raise ScopeViolation(session.id, "the session's tenant is not on this deployment")
+    return tenant.id, tenant.platform
 
 
 def _annotations_for(rt: CliRuntime, session: BetaManagedAgentsSession) -> AnnotationLookup | None:

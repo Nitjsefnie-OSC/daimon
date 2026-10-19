@@ -74,13 +74,15 @@ class _Session:
     def __init__(self, tools: list[dict[str, Any]], servers: list[dict[str, Any]]) -> None:
         self.tools = tools
         self.servers = servers
+        self.metadata: dict[str, str] = {}
         self.wire: list[tuple[str, Any]] = []
 
     def model(self) -> dict[str, Any]:
         return ma_session(
             id=_SESSION,
-            agent=ma_agent(tools=self.tools, mcp_servers=self.servers),
+            agent=ma_agent(id="ag_cli", tools=self.tools, mcp_servers=self.servers),
             status="idle",
+            metadata=self.metadata,
         ).model_dump(mode="json")
 
     def router(self, events: list[dict[str, Any]]) -> MARouter:
@@ -222,3 +224,50 @@ async def test_an_operator_run_never_sends_microsoft_mail(
         public_url=_PUBLIC,
     )
     assert _confirmations(session) == ["deny"]
+
+
+@pytest.mark.parametrize(
+    ("stamp", "expected"),
+    [
+        ({"daimon_channel": "C1"}, "deny"),
+        ({"daimon_channel": "C1", "daimon_private_dm": "dm-1"}, "allow"),
+        ({"daimon_channel": "C2"}, "allow"),
+    ],
+    ids=["channel-deny", "dm-excluded", "other-channel"],
+)
+async def test_a_stamped_session_runs_under_its_own_tenant_and_channel_rules(
+    stamp: dict[str, str],
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Review B, finding 3: not the local CLI tenant, and not without its channel."""
+    from daimon.core.authz import Subject
+    from daimon.core.stores import agent_tool_rules
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory() as db:
+        tenant = await make_tenant(db, platform="discord", workspace_id="g-cli")
+        await agent_tool_rules.set_rule(
+            db,
+            tenant_id=tenant.id,
+            agent_id="ag_cli",
+            agent_name="cli",
+            tool_key="linear/get_issue",
+            channel_id="C1",
+            server_url=_LINEAR["url"],
+            rule="deny",
+            set_by="admin",
+            actor=Subject(is_admin=True, platform_user_id="UA"),
+        )
+        await db.commit()
+    session = _Session([_toolset("linear")], [_LINEAR])
+    session.metadata = {"daimon_tenant": str(tenant.id), **stamp}
+    await _run(
+        monkeypatch,
+        db_session_factory,
+        session,
+        _events("linear", "get_issue"),
+        ToolSafetyPolicy(enabled=True, agent_rules=True),
+    )
+    assert _confirmations(session) == [expected]
