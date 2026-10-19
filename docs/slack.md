@@ -153,7 +153,8 @@ expired and stopped cards lose
 their buttons.
 
 After install, the success page says to invite Daimon with `/invite @daimon`
-and mention it there, and the installer gets the same short welcome as a DM. A
+and mention it there, and on a first install the installer gets the same short
+welcome as a DM. A
 DM to Daimon when private chats are off, or before one has been started from a
 channel with `/dm-me`, gets a one-time reply saying how to reach it.
 

@@ -254,21 +254,19 @@ def test_success_html_says_how_to_add_the_bot_to_a_channel() -> None:
 
 
 def test_welcome_dm_text_says_what_it_does_one_thing_to_try_and_the_setup_phrase() -> None:
-    assert _welcome_dm_text(
-        display_name="daimon", signup_credit=Decimal("10"), promo_codes=False
-    ) == (
+    assert _welcome_dm_text(display_name="daimon", credit=Decimal("10"), promo_codes=False) == (
         "*👋 Daimon is ready*\n"
         "I answer questions about data and write code, charts and notebooks.\n"
         "Try it: invite me to a channel with `/invite @daimon`, then mention me there "
         "with a question, or attach a CSV and ask me to summarise it.\n"
-        'To change who answers or add keys and repos, mention me and say "help me set up".\n'
-        "You have $10 of credit to start. Each answer shows what's left."
+        'To set things up, mention me and say "help me set up".\n'
+        "You have $10 of credit. Each answer shows what's left."
     )
 
 
 def test_welcome_dm_text_leaves_out_credit_when_there_is_none_and_escapes_the_name() -> None:
-    text = _welcome_dm_text(display_name="a<b>", signup_credit=Decimal("0"), promo_codes=True)
-    assert "credit to start" not in text
+    text = _welcome_dm_text(display_name="a<b>", credit=None, promo_codes=True)
+    assert "of credit" not in text
     assert "`/invite @a&lt;b&gt;`" in text
     assert text.endswith("Have a promo code? An admin can redeem it in `/billing`.")
 
@@ -1193,6 +1191,20 @@ async def test_install_welcomes_the_installing_user_in_a_dm(
     text = str(posts[0]["text"])
     assert "invite me to a channel with `/invite @daimon`" in text
     assert 'say "help me set up"' in text
+
+
+async def test_a_reinstall_sends_no_second_welcome(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    with aioresponses() as m:
+        m.post(  # pyright: ignore[reportUnknownMemberType]
+            "https://slack.com/api/chat.postMessage", payload={"ok": True}, repeat=True
+        )
+        first = await _install_with_welcome(sessionmaker, m, authed_user={"id": _SLACK_USER_ID})
+        again = await _install_with_welcome(sessionmaker, m, authed_user={"id": _SLACK_USER_ID})
+
+    assert first.status_code == again.status_code == 200
+    assert len(_slack_posts(m, "/api/chat.postMessage")) == 1, "a reinstall is no first use"
 
 
 async def test_install_without_an_installing_user_sends_no_dm(

@@ -575,7 +575,7 @@ def _build_ready_embed(
         "I answer questions about data and write code, charts and notebooks.",
         f"Try it: mention `@{bot_display_name}` with a question, "
         "or attach a CSV and ask me to summarise it.",
-        'To change who answers or add keys and repos, mention me and say "help me set up".',
+        'To set things up, mention me and say "help me set up".',
     ]
     if credit is not None:
         lines.append(f"You have {fmt_usd(credit)} of credit. Each answer shows what's left.")

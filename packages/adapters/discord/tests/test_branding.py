@@ -158,7 +158,7 @@ class TestWelcomeAndReadyEmbeds:
             "I answer questions about data and write code, charts and notebooks.\n"
             "Try it: mention `@daimon` with a question, "
             "or attach a CSV and ask me to summarise it.\n"
-            'To change who answers or add keys and repos, mention me and say "help me set up".'
+            'To set things up, mention me and say "help me set up".'
         )
 
     def test_ready_text_uses_the_configured_bot_name(self) -> None:

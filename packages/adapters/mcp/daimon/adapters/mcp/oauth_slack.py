@@ -41,8 +41,9 @@ from daimon.core.slack_oauth import (
     verify_state,
 )
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
-from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.core.stores.slack_bot_tokens import get_slack_bot_token, upsert_slack_bot_token
 from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
+from daimon.core.stores.tenant_ledger import get_prepaid_balance
 from daimon.core.stores.tenants import set_provision_status
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -161,21 +162,20 @@ def _success_html(
 _WELCOME_DM_TIMEOUT_S = 5.0
 
 
-def _welcome_dm_text(*, display_name: str, signup_credit: Decimal, promo_codes: bool) -> str:
-    """The welcome DM to the person who installed Daimon, in Slack mrkdwn."""
+def _welcome_dm_text(*, display_name: str, credit: Decimal | None, promo_codes: bool) -> str:
+    """The welcome DM to the person who installed Daimon, in Slack mrkdwn.
+
+    `credit` is the tenant's prepaid balance when above zero, as the turn footer shows it."""
     name = html.escape(display_name, quote=False)  # Slack escapes exactly & < >
     lines = [
         "*👋 Daimon is ready*",
         "I answer questions about data and write code, charts and notebooks.",
         f"Try it: invite me to a channel with `/invite @{name}`, then mention me there "
         "with a question, or attach a CSV and ask me to summarise it.",
-        'To change who answers or add keys and repos, mention me and say "help me set up".',
+        'To set things up, mention me and say "help me set up".',
     ]
-    if signup_credit > 0:
-        lines.append(
-            f"You have {_format_credit(signup_credit)} of credit to start. "
-            "Each answer shows what's left."
-        )
+    if credit is not None:
+        lines.append(f"You have {_format_credit(credit)} of credit. Each answer shows what's left.")
     if promo_codes:
         lines.append("Have a promo code? An admin can redeem it in `/billing`.")
     return "\n".join(lines)
@@ -494,6 +494,8 @@ def build_oauth_slack_routes(
         )
 
         async with sessionmaker.begin() as s:
+            # Only a workspace's first install (or one after an uninstall) gets the welcome DM.
+            first_install = await get_slack_bot_token(s, team_id=team_id) is None
             await upsert_slack_bot_token(
                 s,
                 team_id=team_id,
@@ -513,24 +515,28 @@ def build_oauth_slack_routes(
             key=f"install:slack:{team_id}",
             message=f"New install: Slack {result.team_name or team_id} ({team_id})",
         )
+        credit: Decimal | None = None
         try:
             async with sessionmaker() as s:
                 promo_codes = await has_redeemable_promo_code(s, now=datetime.now(UTC))
+                # Prepaid only, as the turn footer: an operator-funded tenant has no balance.
+                balance = await get_prepaid_balance(s, tenant_id=tenant.tenant_id)
+            credit = balance if balance is not None and balance > 0 else None
         except SQLAlchemyError as exc:
-            # The install is done; a failed lookup only drops the promo line.
+            # The install is done; a failed lookup only drops the promo and credit lines.
             logger.warning(
                 "slack install promo code lookup failed", team_id=team_id, error=str(exc)
             )
             promo_codes = False
 
         display_name = settings.slack.bot_display_name if settings.slack is not None else "daimon"
-        if result.authed_user_id is not None:
+        if first_install and result.authed_user_id is not None:
             await _dm_installer_welcome(
                 bot_token=result.access_token,
                 user_id=result.authed_user_id,
                 text=_welcome_dm_text(
                     display_name=display_name,
-                    signup_credit=settings.billing.signup_credit,
+                    credit=credit,
                     promo_codes=promo_codes,
                 ),
                 team_id=team_id,

@@ -53,8 +53,7 @@ def welcome_lines(bot: str, *, team: bool) -> tuple[str, str, str]:
     return (
         f"👋 I'm {bot}. I help with questions and data.",
         "Ask a question or send me a data file.",
-        'To change who answers or add keys and repos, say "help me set up". '
-        "Send `help` for the rest.",
+        'To set things up, say "help me set up". Send `help` for the rest.',
     )
 
 
