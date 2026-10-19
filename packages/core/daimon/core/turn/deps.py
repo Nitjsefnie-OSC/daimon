@@ -38,7 +38,7 @@ from daimon.core.native_admins import ServerAdminIds
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.specs import SkillRef
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.running import RunningTurns
 from daimon.core.turn.runtimes import RuntimeFactory, build_channel_runtime
 from mux.contracts.ids import ResourceRef, Scope
@@ -79,7 +79,8 @@ class TurnDeps:
     github_app_private_key: str | None
     public_url: str | None
     agent_github_app: GithubAppSettings | None = None
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY
+    # Required: safety off is the explicit `enabled=False` policy from settings.
+    tool_safety: ToolSafetyPolicy = field(kw_only=True)
     preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
     # Sends the channel budget notice; set by an adapter with a platform client.
     budget_notifier: BudgetNotifier | None = None

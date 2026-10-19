@@ -13,10 +13,11 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 from daimon.core.config import McpSettings
 from daimon.core.headless_runner import run_turn
 from daimon.core.sessions import create_session
-from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 from pydantic import HttpUrl
@@ -139,6 +140,7 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
         agent_id="agent_x",
         environment_id="env_x",
         trigger_message="file tonight's bugs",
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert creates[0]["agent"] == "agent_x", "no override when enforcement is off"
@@ -259,3 +261,36 @@ async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before(
     assert without == inert, "rules that are not applied leave the session's tools alone"
     (daimon,) = [t for t in without["tools"] if t.get("mcp_server_name") == "daimon-mcp"]
     assert [c["name"] for c in daimon["configs"]] == ["add_skill"]
+
+
+def test_no_production_signature_defaults_the_policy() -> None:
+    """Design test 6: safety off is an explicit policy; omitting one is an error."""
+    import dataclasses
+    import inspect
+
+    from daimon.core import headless_runner, session_snapshot, sessions, smoke
+    from daimon.core.turn.deps import TurnDeps
+
+    for fn in (
+        headless_runner.run_turn,
+        headless_runner.run_turn_impl,
+        sessions.create_session,
+        sessions.create_isolated_session,
+        sessions.project_session_resources,
+        session_snapshot.desired_snapshot,
+        smoke.run_smoke_check,
+    ):
+        param = inspect.signature(fn).parameters["tool_safety"]
+        assert param.default is inspect.Parameter.empty, fn.__qualname__
+    field = next(f for f in dataclasses.fields(TurnDeps) if f.name == "tool_safety")
+    assert field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING
+
+
+async def test_run_turn_without_a_policy_is_a_type_error() -> None:
+    with pytest.raises(TypeError, match="tool_safety"):
+        await run_turn(  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+            anthropic=build_fake_anthropic(MARouter().dispatch),
+            agent_id="ag",
+            environment_id="env",
+            trigger_message="hi",
+        )

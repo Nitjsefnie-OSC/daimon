@@ -14,6 +14,7 @@ import pytest
 from daimon.core.headless_runner import run_turn
 from daimon.core.routine_delivery import agent_posted_to
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.state import TurnState
 from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
@@ -93,6 +94,7 @@ async def _final_state(events: list[Any]) -> TurnState:
         environment_id="env_x",
         trigger_message="go",
         on_state=states.append,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     (state,) = states
     return state

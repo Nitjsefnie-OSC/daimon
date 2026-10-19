@@ -7,6 +7,7 @@ import httpx
 import pytest
 from daimon.core import headless_runner
 from daimon.core.mux_backend import resource_scope
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.ma import MARouter, sse_response
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 from daimon.testing.ma_transport import ScriptedTransport
@@ -86,6 +87,7 @@ async def test_headless_turn_uses_authorized_scope_and_original_requests(
                 trigger_message="hello",
                 tenant_id=tenant_id,
                 account_id=account_id,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
             == "authorized"
         )
@@ -135,5 +137,6 @@ async def test_mux_headless_missing_identity_fails_before_provider_io(
                 trigger_message="hello",
                 tenant_id=tenant_id,
                 account_id=account_id,
+                tool_safety=OPEN_TOOL_SAFETY,
             )
     assert transport.requests == []

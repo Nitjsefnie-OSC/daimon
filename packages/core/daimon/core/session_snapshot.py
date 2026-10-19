@@ -55,7 +55,6 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.model_presets import model_choice_id
 from daimon.core.tool_safety import (
-    OPEN_TOOL_SAFETY,
     ToolSafetyPolicy,
     heal_reserved_server,
     session_tools_for_policy,
@@ -569,7 +568,7 @@ def desired_snapshot(
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
     token_issued_at_by_installation: dict[int, int] | None = None,
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     public_url: str | None = None,
     channel_skills: Sequence[MaSkill] = (),
 ) -> SessionSnapshot:

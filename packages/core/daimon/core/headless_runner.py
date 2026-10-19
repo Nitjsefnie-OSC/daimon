@@ -81,7 +81,6 @@ from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import fleet as fleet_store
 from daimon.core.stores.mux_state import PostgresStateStore, database_clock
 from daimon.core.tool_safety import (
-    OPEN_TOOL_SAFETY,
     ToolSafetyPolicy,
     daimon_endpoint,
     trusted_servers_for,
@@ -185,7 +184,7 @@ async def run_turn(
     github_app_private_key: str | None = None,
     agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     on_state: Callable[[TurnState], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
@@ -279,7 +278,7 @@ async def run_turn_impl(
     github_app_private_key: str | None = None,
     agent_github_app: GithubAppSettings | None = None,
     deadline: datetime | None = None,
-    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
+    tool_safety: ToolSafetyPolicy,
     on_state: Callable[[TurnState], None] | None = None,
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,

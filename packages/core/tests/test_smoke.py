@@ -55,6 +55,7 @@ from daimon.core.smoke import SMOKE_MODEL, SMOKE_TOPUP_USD, SmokeCheckError, run
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores import tenants as tenants_store
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
@@ -347,6 +348,7 @@ async def test_run_smoke_check_writes_usage_event_and_returns_result_when_turn_c
         topup_key="happy-path",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert result.tail == "done", "tail should reflect the agent.message text"
@@ -367,6 +369,41 @@ async def test_run_smoke_check_writes_usage_event_and_returns_result_when_turn_c
     )
 
 
+async def test_run_smoke_check_runs_its_turn_under_the_policy_it_is_given(
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design test 6: the smoke turn never falls back to a default (open) policy."""
+    from daimon.core import smoke
+    from daimon.core.tool_safety import ToolSafetyPolicy
+
+    _write_seed_tree(tmp_path)
+    client = _build_happy_client(_Workspace())
+    seen: list[object] = []
+    real_run_turn = smoke.run_turn
+
+    async def spy(**kwargs: Any) -> str:
+        seen.append(kwargs["tool_safety"])
+        return await real_run_turn(**kwargs)
+
+    monkeypatch.setattr(smoke, "run_turn", spy)
+    policy = ToolSafetyPolicy(enabled=True)
+    await run_smoke_check(
+        session_factory=db_session_factory,
+        anthropic=client,
+        defaults_root=tmp_path,
+        agent_tag="daimon",
+        environment_tag="default",
+        resolver_cache=new_resolver_cache(),
+        topup_key="policy",
+        markup=Decimal("1.0"),
+        on_stage=lambda msg: None,
+        tool_safety=policy,
+    )
+    assert seen == [policy]
+
+
 async def test_run_smoke_check_is_idempotent_when_called_twice(
     tmp_path: Path,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -384,6 +421,7 @@ async def test_run_smoke_check_is_idempotent_when_called_twice(
         topup_key="idempotent-1",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
     second = await run_smoke_check(
         session_factory=db_session_factory,
@@ -395,6 +433,7 @@ async def test_run_smoke_check_is_idempotent_when_called_twice(
         topup_key="idempotent-2",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert second.tenant_id == first.tenant_id, (
@@ -427,6 +466,7 @@ async def test_run_smoke_check_recreates_agent_when_ma_agent_missing(
         topup_key="self-heal",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     # Simulate the smoke tenant's MA agent being wiped from the workspace
@@ -444,6 +484,7 @@ async def test_run_smoke_check_recreates_agent_when_ma_agent_missing(
         topup_key="self-heal",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert second.tail == "done", "second run must still complete successfully"
@@ -488,6 +529,7 @@ async def test_run_smoke_check_raises_when_no_usage_event_written(
             topup_key="no-usage-event",
             markup=Decimal("1.0"),
             on_stage=lambda msg: None,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
 
@@ -533,6 +575,7 @@ async def test_run_smoke_check_propagates_session_error_when_stream_errors(
             topup_key="session-error",
             markup=Decimal("1.0"),
             on_stage=lambda msg: None,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
     assert exc_info.value.kind == "upstream"
@@ -556,6 +599,7 @@ async def test_run_smoke_check_inserts_topup_when_balance_zero(
         topup_key="topup-zero-balance",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert result.topped_up is True, "zero balance must trigger a top-up"
@@ -594,6 +638,7 @@ async def test_run_smoke_check_skips_topup_when_balance_positive(
         topup_key="skip-topup",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert result.topped_up is False, "a positive balance must not trigger a top-up"
@@ -621,6 +666,7 @@ async def test_run_smoke_check_does_not_double_credit_when_topup_key_repeats(
         topup_key="repeat-key",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     # Drain the balance back to <= 0 so the second call's top-up floor check
@@ -646,6 +692,7 @@ async def test_run_smoke_check_does_not_double_credit_when_topup_key_repeats(
         topup_key="repeat-key",
         markup=Decimal("1.0"),
         on_stage=lambda msg: None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert second.topped_up is False, (
@@ -680,6 +727,7 @@ async def test_run_smoke_check_raises_timeout_error_when_turn_exceeds_timeout(
             markup=Decimal("1.0"),
             timeout_s=0.05,
             on_stage=lambda msg: None,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
 
 
@@ -701,6 +749,7 @@ async def test_run_smoke_check_reports_each_stage_via_on_stage(
         topup_key="stage-reporting",
         markup=Decimal("1.0"),
         on_stage=stages.append,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
     assert len(stages) >= 6, f"expected at least 6 stage reports, got {stages!r}"

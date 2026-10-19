@@ -61,6 +61,7 @@ from daimon.core.stores.thread_sessions import (
     list_orphaned_turns,
 )
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.posture import Billed, BillingPosture
 from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
@@ -237,6 +238,7 @@ def _seeded_snapshot(*, agent_id: str, environment_id: str) -> SessionSnapshot:
         repo_branch=None,
         memory_store_id=None,
         vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 

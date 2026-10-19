@@ -23,6 +23,7 @@ from daimon.core.neutral_resources import (
 from daimon.core.sessions import project_session_resources
 from daimon.core.stores import agent_memory_stores
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import AdmissionGrant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
@@ -140,6 +141,7 @@ async def captured(owned, request):
             if getattr(request, "param", None)
             in ("caller_credentials", "haiku55_credentials", "haiku55_effort")
             else None,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     trace.assert_consumed()
     assert [(r.method, r.path, r.body) for r in trace.requests] == [
@@ -632,6 +634,7 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captu
             before_create=fence,
             memory_read_only=True,
             mcp_settings=settings,
+            tool_safety=OPEN_TOOL_SAFETY,
         )
     assert not result.agent.mcp_servers
     assert len(result.agent.skills) == 11
