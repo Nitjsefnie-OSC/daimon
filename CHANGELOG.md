@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Continuing a routine session through the CLI, MCP or a checkpoint retains its conversation channel rules; its private transcript stamp no longer makes it execute as a DM.
 
-- An unattended turn that ends early, by Stop, cancellation, its turn ceiling, or a failed decision or session update, interrupts the session once and sends no confirmations, so pending tool calls stay paused, including on runtimes without a confirmation gate. This holds wherever the turn is when it ends, from the update before its message to a paused call it has not decided yet, and a further cancellation during cleanup no longer skips the interrupt or lets a confirmation out. A failed decision on one call also stops the other calls' pending decisions. Normal decisions on those runtimes still refuse unattended confirmations.
+- An unattended turn that ends early, by Stop, cancellation, its turn ceiling, or a failed decision or session update, interrupts the session once and sends no confirmations, so pending tool calls stay paused, including on runtimes without a confirmation gate. This holds wherever the turn is when it ends after its message has gone out, including at a paused call it has not decided yet (before that, a refused update still sends the session nothing), and a further cancellation during cleanup no longer skips the interrupt or lets a confirmation out. A failed decision on one call also stops the other calls' pending decisions. Normal decisions on those runtimes still refuse unattended confirmations.
 
 - Handoffs created by unattended wakes retain unattended tool safety on Discord, Slack and Teams; queueing a handoff no longer grants human approval surfaces.
 

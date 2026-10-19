@@ -263,8 +263,8 @@ Microsoft file changes with it on, and the routine refuses them. See
 [architecture.md](architecture.md). Stopping or cancelling a routine, reaching
 its turn ceiling, or a failed decision or session update interrupts the session
 once and sends no confirmations, so pending calls stay paused, including on
-runtimes without session reads. The first of these, wherever the turn is,
-starts the interrupt before any cleanup; a later cancellation, during card
+runtimes without session reads. Once the routine's message has gone out, the
+first of these, wherever the turn is, starts the interrupt before any cleanup; a later cancellation, during card
 cleanup or while the stream closes, cannot skip it, send a second one or let a
 confirmation out. Cleanup waits for the interrupt for a bounded time only.
 
