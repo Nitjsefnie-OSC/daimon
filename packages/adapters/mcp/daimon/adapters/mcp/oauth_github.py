@@ -58,7 +58,7 @@ from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.teams_graph import GraphClient, GraphUnavailable
 from mux.drivers import isolated_ssl_context
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 from sqlalchemy import text as sql_text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -70,7 +70,7 @@ ClientFactory = Callable[[], httpx.AsyncClient]
 _COOKIE = "daimon_gh_connect"
 _log = logging.getLogger(__name__)
 _ADMIN_RETRY = "Couldn't confirm you're still a server or workspace admin. Try again in a minute."
-# A save posts about 40 bytes per ticked repo (`repo=<id>` plus `access_<id>=write`),
+# A save posts one `repo=<id>` per addition plus one shared `access=write`,
 # so 256 KiB covers several thousand repos while bounding what one request can
 # make the server read and parse. The cap is checked before any other work.
 _MAX_CONFIRM_BODY_BYTES = 256 * 1024
@@ -92,6 +92,8 @@ _RETRY_FIELD_NAMES = frozenset(
         "receipt",
         "snapshot",
         "snapshot_sig",
+        "visibility",
+        "visibility_sig",
         "repo",
         "remove",
         "access",
@@ -211,6 +213,8 @@ class _Repo:
     # The signed-in person's GitHub permission on the repo; None when GitHub
     # reports none the flow can use.
     permission: github_connect.GitHubPermission | None
+    private: bool = False
+    archived: bool = False
 
     @property
     def usable(self) -> bool:
@@ -250,18 +254,25 @@ class _Installation:
     repository_selection: str
     repos: tuple[_Repo, ...]
     owner_type: str = ""
+    avatar_url: str | None = None
+    state: Literal["active", "suspended"] = "active"
+    total: int = 0
+    truncated: bool = False
+    fetch_state: Literal["ok", "error"] = "ok"
 
 
 class _OwnerPayload(BaseModel):
     id: int
     login: str = ""
     type: str = ""
+    avatar_url: str | None = None
 
 
 class _InstallationPayload(BaseModel):
     id: int
     account: _OwnerPayload
     repository_selection: str = "all"
+    suspended_at: str | None = None
 
 
 class _RepoPayload(BaseModel):
@@ -269,6 +280,8 @@ class _RepoPayload(BaseModel):
     owner: _OwnerPayload
     full_name: str = ""
     permissions: dict[str, bool] = Field(default_factory=dict)
+    private: bool = False
+    archived: bool = False
 
 
 class _TokenPayload(BaseModel):
@@ -581,16 +594,92 @@ def _snapshot_signature(state: str, invitation_hash: str, snapshot: str, secret:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
-def _saved_agent_page(name: str, grants: list[github_access.AgentRepo]) -> Response:
+def _visibility_digest(installations: Sequence[_Installation]) -> str:
+    """Bind the form to the GitHub repo lists it presented."""
+    inventory = [
+        (
+            item.id,
+            item.state,
+            item.fetch_state,
+            sorted(repo.id for repo in item.repos if repo.usable),
+        )
+        for item in installations
+    ]
+    return hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest()
+
+
+def _owner_avatar(item: _Installation | None) -> str:
+    is_person = item is not None and item.owner_type.lower() == "user"
+    if (
+        item is not None
+        and item.avatar_url
+        and item.avatar_url.startswith("https://avatars.githubusercontent.com/")
+    ):
+        shape = " gh-owner-avatar--person" if is_person else ""
+        return (
+            f'<img class="gh-owner-avatar{shape}" '
+            f'src="{html.escape(item.avatar_url, quote=True)}" alt="">'
+        )
+    shape = " gh-owner-avatar--person" if is_person else ""
+    fallback_icon = icon("user" if is_person else "building-2")
+    return f'<span class="gh-owner-avatar-fallback{shape}">{fallback_icon}</span>'
+
+
+def _saved_agent_page(
+    name: str,
+    grants: list[github_access.AgentRepo],
+    visible_ids: set[int] | None = None,
+    back_url: str | None = "https://discord.com/app",
+    installations: Sequence[_Installation] = (),
+) -> Response:
+    owner_installations = {item.owner_login.casefold(): item for item in installations}
+    groups: dict[str, list[github_access.AgentRepo]] = {}
+    for repo in grants:
+        groups.setdefault(repo.full_name.partition("/")[0], []).append(repo)
+    ordered = sorted(
+        groups.items(),
+        key=lambda item: (not any(repo.is_working_repo for repo in item[1]), item[0].casefold()),
+    )
     body = (
         '<div class="gh-status-icon">'
         + icon("circle-check")
         + "</div>"
-        + f'<p class="gh-status-line">{html.escape(name)} can use '
-        + f"{_repo_count(len(grants))}.</p>"
+        + f'<p class="gh-status-line">{html.escape(name)} can read and change '
+        + ("this repo." if len(grants) == 1 else f"these {_repo_count(len(grants))}.")
+        + "</p>"
+        + '<div class="gh-saved-groups">'
+        + "".join(
+            f'<section class="gh-owner-group"><h2 class="gh-owner-heading">'
+            f"{_owner_avatar(owner_installations.get(owner.casefold()))}"
+            f"{html.escape(owner)}</h2>"
+            + "".join(
+                '<div class="gh-saved-row">'
+                + f'<span class="gh-row-icon">{icon("book-marked")}</span>'
+                + '<span class="gh-saved-name">'
+                + (
+                    html.escape(repo.full_name.partition("/")[2])
+                    if repo.repo_id in (visible_ids or set())
+                    else "Hidden repo"
+                )
+                + "</span>"
+                + (" <span>Working repo</span>" if repo.is_working_repo else "")
+                + "</div>"
+                for repo in repos
+            )
+            + "</section>"
+            for owner, repos in ordered
+        )
+        + "</div>"
+        + (
+            '<a class="gh-primary gh-back-discord" href="'
+            + html.escape(back_url, quote=True)
+            + '">Back to Discord</a>'
+            if back_url
+            else ""
+        )
         + '<p class="gh-action-line">You can close this tab.</p>'
     )
-    return github_page(title="Repos saved", body_html=body, heading_icon=True)
+    return github_page(title="Repos saved", body_html=body, kind="saved")
 
 
 _EDITOR_SCRIPT = """
@@ -600,6 +689,14 @@ _EDITOR_SCRIPT = """
   const list = document.getElementById("connected-repos");
   const dialog = document.getElementById("repo-picker");
   const options = [...dialog.querySelectorAll(".gh-picker-choice:not(.gh-picker-connected)")];
+  const connected = [...dialog.querySelectorAll(".gh-picker-connected")];
+  const ownerChoice = document.getElementById("repo-owner-choice");
+  const ownerButtons = [...ownerChoice.querySelectorAll(".gh-owner-button[data-owner]")];
+  const readyOwners = () => ownerButtons.filter(button => !button.disabled);
+  const ownerSheet = document.getElementById("repo-owner-sheet");
+  const backOwners = document.getElementById("back-repo-owners");
+  const ownerTitle = document.getElementById("repo-picker-title");
+  let activeOwner = null;
   const pickerDraft = new Set(options.filter(option =>
     option.querySelector(".gh-picker-toggle").checked
   ).map(option => option.dataset.repoId));
@@ -609,10 +706,15 @@ _EDITOR_SCRIPT = """
   const saveHelp = document.getElementById("save-help");
   const stage = document.getElementById("stage-repos");
   const selectShown = document.getElementById("select-shown");
+  const showSelected = document.getElementById("show-selected-repos");
   const clearSelection = document.getElementById("clear-selection");
+  let selectedOnly = false;
   const workingInput = document.getElementById("working-input");
   const workingDialog = document.getElementById("working-picker");
   const workingSelect = document.getElementById("working-choice");
+  const workingCard = document.getElementById("working-card");
+  const workingCardName = document.getElementById("working-card-name");
+  const changeWorking = document.getElementById("change-working");
   const initialWorking = form.dataset.working || null;
   const mayChangeWorking = form.dataset.mayChangeWorking === "true";
   const staged = new Map();
@@ -631,20 +733,21 @@ _EDITOR_SCRIPT = """
       trigger.setAttribute("aria-expanded", "false");
     }
   }
-  function makeAddedRow(id, name, access) {
+  function makeAddedRow(id, name) {
     const row = document.getElementById("added-row-template")
       .content.firstElementChild.cloneNode(true);
     row.dataset.repoId = id;
     row.dataset.name = name;
     row.dataset.added = "true";
-    row.querySelector(".gh-row-name").textContent = name;
+    row.dataset.workingEligible = "true";
+    row.querySelector(".gh-row-name").textContent = name.split("/").slice(1).join("/");
     row.querySelector(".gh-remove-action").setAttribute("aria-label", "Remove " + name);
     const repoInput = row.querySelector('input[name="repo"]');
     repoInput.value = id;
-    const accessInput = row.querySelector(".gh-scoped-access");
-    accessInput.name = "access_" + id;
-    accessInput.value = access;
-    list.appendChild(row);
+    const owner = name.split("/")[0];
+    const group = [...list.querySelectorAll(".gh-owner-group")]
+      .find(group => group.dataset.owner.toLowerCase() === owner.toLowerCase());
+    if (group) { group.querySelector(".gh-owner-rows").appendChild(row); group.hidden = false; }
     return row;
   }
   function render() {
@@ -664,19 +767,44 @@ _EDITOR_SCRIPT = """
         if (isAdding) accessInput.value = staged.get(id);
       }
       row.querySelector(".gh-working-badge").hidden = isRemoved || working !== id;
-      row.querySelector(".gh-pending-label").textContent =
-        isRemoved ? "Will be removed when you save" :
-        isAdding ? "Will be added when you save" :
-        working === id && working !== initialWorking ? "Working repo when you save" : "";
+      const pending = row.querySelector(".gh-pending-label");
+      pending.textContent = isRemoved ? "− To remove" : isAdding ? "+ To add" : "";
+      pending.hidden = !isRemoved && !isAdding;
       const removeButton = row.querySelector(".gh-remove-action");
       const undoButton = row.querySelector(".gh-undo-action");
       if (removeButton) removeButton.hidden = isRemoved;
       if (undoButton) undoButton.hidden = !isRemoved;
-      const action = row.querySelector(".gh-working-action");
-      if (action) action.querySelector(".gh-working-action-label").textContent =
-        working === id ? "Change working repo" :
-        working === null ? "Choose working repo" : "Use as working repo";
     }
+    for (const group of list.querySelectorAll(".gh-owner-group")) {
+      group.hidden = !group.querySelector(".gh-agent-row");
+    }
+    workingCard.hidden = rows().length === 0;
+    const chosenRow = rowFor(working);
+    workingCardName.replaceChildren();
+    if (chosenRow?.dataset.name) {
+      const [owner, ...repo] = chosenRow.dataset.name.split("/");
+      const ownerName = document.createElement("span");
+      ownerName.className = "gh-working-owner";
+      ownerName.textContent = owner + "/";
+      const repoName = document.createElement("span");
+      repoName.className = "gh-working-repo";
+      repoName.textContent = repo.join("/");
+      workingCardName.append(ownerName, repoName);
+    } else {
+      workingCardName.textContent = chosenRow ? "Hidden repo" : "None chosen";
+    }
+    changeWorking.textContent = chosenRow ? "Change" : "Choose";
+    changeWorking.disabled = !rows().some(row =>
+      !removed.has(row.dataset.repoId) && row.dataset.workingEligible === "true");
+    const workingOwner = chosenRow?.closest(".gh-owner-group")?.dataset.owner;
+    const groups = [...list.querySelectorAll(".gh-owner-group")];
+    groups.sort((a, b) => {
+      const rank = group => group.dataset.owner === workingOwner ? 0 :
+        group.dataset.person === "true" ? 1 : 2;
+      return rank(a) - rank(b) ||
+        a.dataset.owner.localeCompare(b.dataset.owner, undefined, {sensitivity: "base"});
+    });
+    for (const group of groups) list.appendChild(group);
     closeMenus();
     const added = staged.size;
     const removedCount = removed.size;
@@ -686,7 +814,16 @@ _EDITOR_SCRIPT = """
     if (removedCount) parts.push("remove " + removedCount + " " + plural(removedCount));
     if (workingChanged) parts.push("change working repo");
     document.getElementById("selection-status").textContent =
-      parts.length ? "Not saved yet: " + parts.join(", ") : "No changes to save";
+      parts.length ? "Not saved yet" : "No changes to save";
+    document.querySelector(".gh-editor-footer").hidden = !parts.length;
+    document.getElementById("dock-add").textContent = added ? "+ " + added + " to add" : "";
+    document.getElementById("dock-add").hidden = !added;
+    document.getElementById("dock-remove").textContent = removedCount ?
+      "− " + removedCount + " to remove" : "";
+    document.getElementById("dock-remove").hidden = !removedCount;
+    document.querySelector("#dock-working span").textContent = workingChanged ?
+      "New working repo: " + (chosenRow?.dataset.name?.split("/").pop() || "None") : "";
+    document.getElementById("dock-working").hidden = !workingChanged;
     const empty = list.querySelector(".gh-editor-empty");
     if (empty) empty.hidden = rows().length > 0;
     document.getElementById("discard-repos").hidden = !parts.length;
@@ -704,36 +841,173 @@ _EDITOR_SCRIPT = """
   function resetPicker() {
     for (const option of options) {
       const id = option.dataset.repoId;
-      checkbox(option).checked = pickerDraft.has(id);
+      checkbox(option).checked = pickerDraft.has(id) || staged.has(id);
     }
     search.value = "";
-    for (const option of options) option.hidden = false;
+    selectedOnly = false;
+    for (const option of options) option.hidden = activeOwner !== option.dataset.owner;
+    for (const option of connected) option.hidden = activeOwner !== option.dataset.owner;
+    for (const note of dialog.querySelectorAll(".gh-owner-truncated")) {
+      note.hidden = activeOwner !== note.dataset.owner;
+    }
     document.getElementById("no-search-results").hidden = true;
+    showSelected.setAttribute("aria-pressed", "false");
     updatePicker();
   }
   function updatePicker() {
+    if (selectedOnly && !options.some(option => checkbox(option).checked)) {
+      selectedOnly = false;
+      showSelected.setAttribute("aria-pressed", "false");
+    }
+    const query = search.value.trim().toLowerCase();
+    for (const option of options) {
+      option.hidden = selectedOnly ? !checkbox(option).checked :
+        option.dataset.owner !== activeOwner || !option.dataset.name.toLowerCase().includes(query);
+    }
+    for (const option of connected) option.hidden = selectedOnly ||
+      option.dataset.owner !== activeOwner || !option.dataset.name.toLowerCase().includes(query);
+    for (const heading of dialog.querySelectorAll(".gh-selected-owner")) heading.remove();
+    if (selectedOnly) {
+      let previousOwner = null;
+      for (const option of options.filter(option => !option.hidden)) {
+        if (option.dataset.owner !== previousOwner) {
+          const heading = document.createElement("h3");
+          heading.className = "gh-selected-owner";
+          const ownerButton = ownerButtons.find(button =>
+            button.dataset.owner === option.dataset.owner);
+          heading.innerHTML = (ownerButton?.querySelector(
+            ".gh-owner-avatar, .gh-owner-avatar-fallback")?.outerHTML || "") +
+            '<span></span>';
+          heading.querySelector("span:last-child").textContent = option.dataset.owner;
+          option.before(heading);
+          previousOwner = option.dataset.owner;
+        }
+      }
+    }
     const count = options.filter(o => checkbox(o).checked).length;
     const shown = options.filter(o => !o.hidden).length;
     stage.disabled = count === 0 && staged.size === 0;
-    stage.textContent = "Add to list";
-    selectShown.textContent = "Select all " + shown + " shown";
+    stage.textContent = "Add " + count + " " + plural(count);
+    document.getElementById("picker-count").textContent = count + " selected";
+    document.getElementById("owner-picker-count").textContent = count + " selected";
+    document.getElementById("owner-stage-repos").disabled = count === 0;
+    document.getElementById("owner-stage-repos").textContent = stage.textContent;
+    ownerChoice.querySelector(".gh-dialog-footer").hidden = count === 0;
+    for (const button of ownerButtons) {
+      const n = options.filter(o => o.dataset.owner === button.dataset.owner &&
+        checkbox(o).checked).length;
+      button.querySelector(".gh-owner-selected").textContent = n ? n + " selected" : "";
+    }
+    selectShown.textContent = "Select all " + shown;
+    document.getElementById("shown-count").textContent = selectedOnly ?
+      "Showing " + shown + " selected" : "Showing " + shown + " of " +
+      options.filter(o => o.dataset.owner === activeOwner).length;
+    selectShown.hidden = selectedOnly;
     selectShown.disabled = shown === 0;
     clearSelection.disabled = count === 0;
+    showSelected.disabled = count === 0;
+    showSelected.textContent = "Selected (" + count + ")";
+    showSelected.setAttribute("aria-pressed", String(selectedOnly));
   }
   document.getElementById("open-repo-picker").addEventListener("click", event => {
     opener = event.currentTarget;
+    activeOwner = readyOwners().length === 1 ? readyOwners()[0].dataset.owner : null;
     resetPicker();
+    ownerChoice.hidden = activeOwner !== null;
+    ownerSheet.hidden = activeOwner === null;
+    backOwners.hidden = activeOwner === null || readyOwners().length <= 1;
     dialog.showModal();
-    search.focus();
+    if (activeOwner && window.innerWidth >= 768) search.focus();
+  });
+  function openOwner(owner) {
+    activeOwner = owner;
+    ownerChoice.hidden = true;
+    ownerSheet.hidden = false;
+    backOwners.hidden = readyOwners().length <= 1;
+    ownerTitle.textContent = "Add " + owner + " repos";
+    resetPicker();
+    if (window.innerWidth >= 768) search.focus();
+  }
+  for (const button of ownerButtons) {
+    button.addEventListener("click", () => openOwner(button.dataset.owner));
+  }
+  for (const link of ownerChoice.querySelectorAll(".gh-owner-retry")) {
+    link.addEventListener("click", async event => {
+      event.preventDefault();
+      link.textContent = "Loading repos";
+      try {
+        const response = await fetch(link.href, {credentials: "same-origin"});
+        if (!response.ok) throw new Error("GitHub did not answer");
+        const fresh = new DOMParser().parseFromString(await response.text(), "text/html");
+        const nextButton = [...fresh.querySelectorAll(".gh-owner-button")]
+          .find(button => button.dataset.owner === link.dataset.owner);
+        if (!nextButton || nextButton.disabled) throw new Error("Owner still unavailable");
+        const oldSnapshot = form.querySelector('input[name="snapshot"]').value;
+        const nextSnapshot = fresh.querySelector('input[name="snapshot"]')?.value;
+        const nextOptions = [...fresh.querySelectorAll(
+          ".gh-picker-choice:not(.gh-picker-connected)"
+        )];
+        const otherIds = entries => entries.filter(option =>
+          option.dataset.owner !== link.dataset.owner
+        ).map(option => option.dataset.repoId).sort().join(",");
+        if (nextSnapshot !== oldSnapshot || otherIds(nextOptions) !== otherIds(options)) {
+          throw new Error("Repos changed. Reload and try again.");
+        }
+        for (const name of ["visibility", "visibility_sig"]) {
+          form.querySelector(`input[name="${name}"]`).value =
+            fresh.querySelector(`input[name="${name}"]`).value;
+        }
+        for (const option of nextOptions.filter(option =>
+          option.dataset.owner === link.dataset.owner)) {
+          const copied = document.importNode(option, true);
+          dialog.querySelector("#no-search-results").before(copied);
+          options.push(copied);
+        }
+        for (const option of fresh.querySelectorAll(".gh-picker-connected")) {
+          if (option.dataset.owner !== link.dataset.owner) continue;
+          const copied = document.importNode(option, true);
+          dialog.querySelector("#no-search-results").before(copied);
+          connected.push(copied);
+        }
+        const button = ownerButtons.find(item => item.dataset.owner === link.dataset.owner);
+        button.innerHTML = nextButton.innerHTML;
+        button.disabled = false;
+        link.remove();
+        updatePicker();
+      } catch (error) {
+        link.textContent = error.message || "Try again";
+      }
+    });
+  }
+  backOwners.addEventListener("click", () => {
+    activeOwner = null; ownerChoice.hidden = false; ownerSheet.hidden = true;
+    backOwners.hidden = true;
+    ownerTitle.textContent = "Add repos"; updatePicker();
   });
   document.getElementById("close-repo-picker").addEventListener("click", () => dialog.close());
   dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
-  dialog.addEventListener("close", () => { if (opener) opener.focus(); });
+  dialog.addEventListener("close", () => {
+    pickerDraft.clear();
+    for (const option of options) checkbox(option).checked = false;
+    if (opener) opener.focus();
+  });
   function rememberPicker() {
     pickerDraft.clear();
     for (const option of options) {
       if (checkbox(option).checked) pickerDraft.add(option.dataset.repoId);
     }
+    let changed = false;
+    for (const id of staged.keys()) {
+      if (pickerDraft.has(id)) continue;
+      staged.delete(id);
+      const row = rowFor(id);
+      if (row?.dataset.added === "true") {
+        row.remove();
+        if (working === id) { working = null; workingExplicit = true; }
+      }
+      changed = true;
+    }
+    if (changed) render();
     updatePicker();
   }
   dialog.addEventListener("change", rememberPicker);
@@ -745,34 +1019,25 @@ _EDITOR_SCRIPT = """
     for (const option of options) checkbox(option).checked = false;
     rememberPicker();
   });
-  for (const button of dialog.querySelectorAll(".gh-owner-all")) {
-    button.addEventListener("click", () => {
-      search.value = "";
-      for (const option of options) {
-        option.hidden = false;
-        if (option.dataset.installation === button.dataset.installation) {
-          checkbox(option).checked = true;
-        }
-      }
-      document.getElementById("no-search-results").hidden = true;
-      rememberPicker();
-    });
-  }
+  document.getElementById("owner-clear-selection").addEventListener("click", () => {
+    for (const option of options) checkbox(option).checked = false;
+    rememberPicker();
+  });
   search.addEventListener("input", () => {
-    const query = search.value.trim().toLowerCase();
-    for (const option of options) {
-      option.hidden = !option.dataset.name.toLowerCase().includes(query);
-    }
+    updatePicker();
     document.getElementById("no-search-results").hidden = options.some(o => !o.hidden);
+  });
+  showSelected.addEventListener("click", () => {
+    selectedOnly = !selectedOnly;
+    showSelected.setAttribute("aria-pressed", String(selectedOnly));
     updatePicker();
   });
   stage.addEventListener("click", () => {
     const selected = options.filter(o => checkbox(o).checked);
-    staged.clear();
     for (const option of selected) {
       const id = option.dataset.repoId;
       staged.set(id, "write");
-      if (!rowFor(id)) makeAddedRow(id, option.dataset.name, staged.get(id));
+      if (!rowFor(id)) makeAddedRow(id, option.dataset.name);
       removed.delete(id);
     }
     for (const row of rows()) {
@@ -784,6 +1049,19 @@ _EDITOR_SCRIPT = """
     dialog.close();
     render();
   });
+  document.getElementById("owner-stage-repos").addEventListener("click", () => stage.click());
+  function showWorkingPicker(selectedId) {
+    workingSelect.replaceChildren();
+    for (const choice of rows().filter(item =>
+      !removed.has(item.dataset.repoId) && item.dataset.workingEligible === "true")) {
+      workingSelect.add(new Option(choice.dataset.name, choice.dataset.repoId));
+    }
+    workingSelect.add(new Option("No working repo", "clear"));
+    workingSelect.value = selectedId || "clear";
+    workingDialog.showModal();
+    workingSelect.focus();
+  }
+  changeWorking.addEventListener("click", () => showWorkingPicker(working));
   list.addEventListener("click", event => {
     const button = event.target.closest("button[data-action]");
     if (!button) return;
@@ -800,16 +1078,7 @@ _EDITOR_SCRIPT = """
     }
     if (button.dataset.action === "working" && mayChangeWorking) {
       if (working === id) {
-        workingSelect.replaceChildren();
-        for (const choice of rows().filter(item =>
-          !removed.has(item.dataset.repoId) && item.querySelector(".gh-working-action"))) {
-          const entry = new Option(choice.dataset.name, choice.dataset.repoId);
-          workingSelect.add(entry);
-        }
-        workingSelect.add(new Option("No working repo", "clear"));
-        workingSelect.value = id;
-        workingDialog.showModal();
-        workingSelect.focus();
+        showWorkingPicker(id);
       } else {
         working = id;
         workingExplicit = true;
@@ -818,6 +1087,7 @@ _EDITOR_SCRIPT = """
     } else if (button.dataset.action === "remove") {
       staged.delete(id);
       if (row.dataset.added === "true") {
+        pickerDraft.delete(id);
         row.remove();
       } else {
         removed.add(id);
@@ -849,6 +1119,7 @@ _EDITOR_SCRIPT = """
   });
   document.getElementById("discard-repos").addEventListener("click", () => {
     staged.clear(); removed.clear(); working = initialWorking; workingExplicit = false;
+    pickerDraft.clear();
     for (const row of rows()) if (row.dataset.added === "true") row.remove();
     render();
   });
@@ -894,10 +1165,13 @@ def _agent_editor_page(
     missing_names: tuple[str, ...] = (),
     selection_error: str | None = None,
     pending_installation: _PendingInstallationRequest | None = None,
+    github_user_id: int | None = None,
 ) -> Response:
     """Render one agent's grants and an optional staged add dialog."""
     esc = html.escape
+
     snapshot_digest = hashlib.sha256(snapshot.encode()).hexdigest()
+    visibility = _visibility_digest(installations)
     needed = needed or {}
     usable = {
         repo.id: repo
@@ -920,8 +1194,34 @@ def _agent_editor_page(
     )
     repairable = [repo for repo in grants if repo.repo_id in usable and repo.repo_id in needed]
     working = next((repo for repo in grants if repo.is_working_repo), None)
-    may_change_working = working is None or working.repo_id in usable
-    place = _place_label(platform)
+    may_change_working = True
+    owner_by_login = {item.owner_login.casefold(): item for item in installations}
+    past_cap_ids = {
+        repo.repo_id
+        for repo in grants
+        if (
+            (item := owner_by_login.get(repo.full_name.partition("/")[0].casefold()))
+            and item.state == "active"
+            and item.fetch_state == "ok"
+            and item.truncated
+            and repo.repo_id not in usable
+        )
+    }
+    owner_logins = {repo.full_name.partition("/")[0] for repo in grants}
+    owner_logins.update(item.owner_login for item in installations)
+    ordered_owners = sorted(
+        owner_logins,
+        key=lambda login: (
+            not any(
+                repo.is_working_repo
+                and repo.full_name.partition("/")[0].casefold() == login.casefold()
+                for repo in grants
+            ),
+            owner_by_login.get(login.casefold()) is None
+            or owner_by_login[login.casefold()].owner_id != github_user_id,
+            login.casefold(),
+        ),
+    )
     options = [
         _PickerOption(
             repo_id=repo.repo_id,
@@ -944,13 +1244,8 @@ def _agent_editor_page(
         for repo in available
     ]
     parts = [
-        f'<p class="gh-status-line">{len(grants)} '
-        f"{'repo' if len(grants) == 1 else 'repos'} connected.</p>"
-        + (
-            '<p class="gh-action-line">Add a repo, then choose its working repo.</p>'
-            if not grants
-            else '<p class="gh-action-line">Add repos or change the working repo.</p>'
-        ),
+        f'<div class="gh-editor-chips"><span>Can read and change</span><span>{len(grants)} '
+        f"{'repo' if len(grants) == 1 else 'repos'}</span></div>",
         '<form id="github-connect-form" class="gh-editor" method="post" '
         f'data-working="{working.repo_id if working else ""}" '
         f'data-may-change-working="{str(may_change_working).lower()}" '
@@ -962,13 +1257,11 @@ def _agent_editor_page(
         f'<input type="hidden" name="snapshot" value="{snapshot_digest}">',
         f'<input type="hidden" name="snapshot_sig" '
         f'value="{_snapshot_signature(state, invitation_hash, snapshot_digest, secret)}">',
+        f'<input type="hidden" name="visibility" value="{visibility}">',
+        f'<input type="hidden" name="visibility_sig" '
+        f'value="{_snapshot_signature(state, invitation_hash, visibility, secret)}">',
         '<input type="hidden" name="access" value="write">',
         '<input id="working-input" type="hidden" name="working" value="keep" disabled>',
-        f'<div class="gh-context">{platform_mark(platform)}'
-        f"<span>{place}: {esc(workspace)}</span></div>",
-        '<div class="gh-editor-toolbar"><h2>Repos for this agent</h2>',
-        '<button id="open-repo-picker" class="gh-add-button gh-js" type="button">'
-        f"{icon('plus')}Add repos</button></div>",
     ]
     if pending_installation is not None and pending_installation.found:
         organization = pending_installation.account_login
@@ -985,106 +1278,185 @@ def _agent_editor_page(
         )
     if selection_error:
         parts.append(f'<p class="gh-inline-error" role="alert">{esc(selection_error)}</p>')
+    working_name = (
+        '<span class="gh-working-owner">'
+        + esc(working.full_name.partition("/")[0])
+        + '/</span><span class="gh-working-repo">'
+        + esc(working.full_name.partition("/")[2])
+        + "</span>"
+        if working and working.repo_id in usable
+        else "Hidden repo"
+        if working
+        else "None chosen"
+    )
+    parts.append(
+        '<section id="working-card" class="gh-working-card" aria-label="Working repo"'
+        + ("" if grants else " hidden")
+        + f">{icon('pin')}<span>Working repo</span>"
+        + f'<strong id="working-card-name">{working_name}</strong>'
+        + '<button id="change-working" class="gh-add-button gh-js" type="button">'
+        + ("Change" if working else "Choose")
+        + "</button></section>"
+    )
     parts.append('<div id="connected-repos" class="gh-connected-list">')
     if not grants:
         parts.append('<p class="gh-editor-empty">No repos connected yet.</p>')
-    for repo in grants:
-        editable = repo.repo_id in usable
-        repo_name = esc(repo.full_name) if editable else "A connected repo you cannot access"
-        data_name = esc(repo.full_name, quote=True) if editable else ""
+    for owner in ordered_owners:
+        installation = owner_by_login.get(owner.casefold())
+        owner_grants = [
+            repo
+            for repo in grants
+            if repo.full_name.partition("/")[0].casefold() == owner.casefold()
+        ]
+        owner_options = [
+            option
+            for option in options
+            if option.name.partition("/")[0].casefold() == owner.casefold()
+        ]
         parts.append(
-            f'<article class="gh-agent-row" data-repo-id="{repo.repo_id}" '
-            f'data-name="{data_name}" '
-            f'data-access="{repo.ceiling_access}">'
-            '<div class="gh-row-top"><strong class="gh-row-name">'
-            f'{repo_name}</strong><div class="gh-row-actions gh-js">'
+            f'<section class="gh-owner-group" data-owner="{esc(owner, quote=True)}"'
+            + (
+                ' data-person="true"'
+                if installation and installation.owner_id == github_user_id
+                else ""
+            )
+            + ("" if owner_grants else " hidden")
+            + f'><h3 class="gh-owner-heading">{_owner_avatar(installation)}{esc(owner)}'
+            + (
+                " <span>Paused on GitHub</span>"
+                if installation and installation.state == "suspended"
+                else ""
+            )
+            + (
+                " <span>GitHub list unavailable</span>"
+                if installation and installation.fetch_state == "error"
+                else ""
+            )
+            + f'</h3><div class="gh-owner-rows" data-available="{len(owner_options)}">'
         )
-        if editable:
+        for repo in owner_grants:
+            editable = repo.repo_id in usable
+            repo_name = esc(repo.full_name.partition("/")[2]) if editable else "Hidden repo"
+            data_name = esc(repo.full_name, quote=True) if editable else ""
+            action_name = esc(repo.full_name, quote=True) if editable else "Hidden repo"
+            parts.append(
+                f'<article class="gh-agent-row" data-repo-id="{repo.repo_id}" '
+                f'data-name="{data_name}" '
+                f'data-working-eligible="{str(editable and repo.status == "active").lower()}" '
+                f'data-access="{repo.ceiling_access}">'
+                '<div class="gh-row-top"><span class="gh-row-icon">'
+                + icon("book-marked" if editable else "lock")
+                + '</span><span class="gh-row-content"><strong class="gh-row-name">'
+                f'{repo_name}</strong><span class="gh-working-badge"'
+                + ("" if repo.is_working_repo else " hidden")
+                + f">{icon('pin')}Working repo</span>"
+                + '<span class="gh-pending-label" aria-live="polite" hidden></span>'
+                + '</span><div class="gh-row-actions gh-js">'
+            )
             parts.append(
                 '<button class="gh-row-action gh-remove-action" type="button" '
-                f'data-action="remove" aria-label="Remove {esc(repo.full_name, quote=True)}">'
+                f'data-action="remove" aria-label="Remove {action_name}">'
                 f"{icon('trash-2')}Remove</button>"
                 '<button class="gh-row-action gh-undo-action" type="button" '
                 'data-action="undo" '
-                f'aria-label="Undo removal of {esc(repo.full_name, quote=True)}" '
+                f'aria-label="Undo removal of {action_name}" '
                 f"hidden>{icon('undo-2')}Undo</button>"
             )
-            if may_change_working and repo.status == "active":
+            parts.append('</div></div><div class="gh-row-meta">')
+            if repo.status != "active":
+                parts.append('<span class="gh-repo-state">Unavailable</span>')
+            parts.append("</div>")
+            if repo.repo_id in past_cap_ids:
                 parts.append(
-                    '<button class="gh-row-action gh-working-action" type="button" '
-                    'data-action="working">'
-                    f'{icon("folder")}<span class="gh-working-action-label">'
-                    + (
-                        "Change working repo"
-                        if repo.is_working_repo
-                        else "Choose working repo"
-                        if working is None
-                        else "Use as working repo"
-                    )
-                    + "</span></button>"
+                    '<p class="gh-repo-locked">Past the 2,000-repo limit, '
+                    "so you can only remove it here.</p>"
                 )
-        parts.append('</div></div><div class="gh-row-meta">')
-        parts.append(
-            f'<span class="gh-working-badge"{"" if repo.is_working_repo else " hidden"}>'
-            f"{icon('folder')}Working repo</span>"
-            '<span class="gh-pending-label" aria-live="polite"></span>'
-        )
-        if repo.status != "active":
-            parts.append('<span class="gh-repo-state">Unavailable</span>')
-        parts.append("</div>")
-        if not editable:
-            parts.append(
-                '<p class="gh-repo-locked">Your GitHub account has no permission on this repo, '
-                "so you can't edit it here.</p>"
-            )
-        if repo.repo_id in needed and needed[repo.repo_id]:
-            parts.append('<p class="gh-repo-state">Needs read and write to finish setup.</p>')
-        if editable:
+            elif not editable:
+                parts.append('<p class="gh-repo-locked">You can\'t see this repo on GitHub.</p>')
+            if repo.repo_id in needed and needed[repo.repo_id]:
+                parts.append('<p class="gh-repo-state">Needs read and write to finish setup.</p>')
             parts.append(f'<input type="hidden" name="remove" value="{repo.repo_id}" disabled>')
-            if repo in repairable:
+            if editable and repo in repairable:
                 parts.append(
                     f'<input type="hidden" name="repo" value="{repo.repo_id}" disabled>'
                     f'<input class="gh-scoped-access" type="hidden" '
                     f'name="access_{repo.repo_id}" value="write" disabled>'
                 )
-        parts.append("</article>")
+            parts.append("</article>")
+        parts.append("</div></section>")
     parts.append("</div>")
-    if not grants or not options:
-        parts.append(
-            '<p class="gh-editor-install">Missing a repo? Add it to the Daimon GitHub '
-            'App on GitHub. <a href="'
-            + esc(install_url, quote=True)
-            + '">Open GitHub setup</a></p>'
-        )
     parts.append(
-        '<details class="gh-access-help"><summary>'
-        f"{icon('info')}How this works</summary>"
-        "<p>The working repo opens in the agent's workspace. The agent can read and change "
-        "connected repos. Access also depends on the person asking and their GitHub permissions."
-        + (" Setup is incomplete until the required repos are connected." if missing_names else "")
-        + "</p></details>"
+        '<button id="open-repo-picker" class="gh-add-button gh-js" type="button">Add repos</button>'
     )
+    owner_choice_rows: list[str] = []
+    for item in installations:
+        count = sum(
+            repo.full_name.partition("/")[0].casefold() == item.owner_login.casefold()
+            for repo in grants
+        )
+        disabled = item.state == "suspended" or item.fetch_state == "error"
+        owner_choice_rows.append(
+            '<button class="gh-owner-button" type="button" '
+            f'data-owner="{esc(item.owner_login, quote=True)}"'
+            + (" disabled" if disabled else "")
+            + f'>{_owner_avatar(item)}<span class="gh-owner-login">{esc(item.owner_login)}</span>'
+            + (
+                f'<small class="gh-owner-added">{count} '
+                f"{'repo' if count == 1 else 'repos'} added</small>"
+                if count
+                else ""
+            )
+            + '<small class="gh-owner-selected"></small>'
+            + ("<small>Paused on GitHub</small>" if item.state == "suspended" else "")
+            + ("<small>Could not load repos.</small>" if item.fetch_state == "error" else "")
+            + icon("chevron-right")
+            + "</button>"
+        )
+        if item.fetch_state == "error":
+            owner_choice_rows.append(
+                f'<a class="gh-link gh-owner-retry" '
+                f'data-owner="{esc(item.owner_login, quote=True)}" '
+                f'href="{esc(root, quote=True)}/oauth/github/confirm?'
+                f'{urlencode({"state": state})}">Try again</a>'
+            )
     parts.append(
         '<dialog id="repo-picker" class="gh-repo-dialog" aria-labelledby="repo-picker-title">'
-        '<div class="gh-dialog-head"><h2 id="repo-picker-title">Add repos</h2>'
+        '<div class="gh-dialog-head">'
+        '<button id="back-repo-owners" class="gh-link-button" type="button" hidden>'
+        f"{icon('chevron-left')}Back</button>"
+        '<h2 id="repo-picker-title">Add repos</h2>'
         '<button id="close-repo-picker" class="gh-dialog-close" type="button" '
         f'aria-label="Close add repos">{icon("x")}</button></div>'
-        '<p class="gh-status-line gh-dialog-copy">The agent can read and change these repos.</p>'
-        '<p class="gh-action-line gh-dialog-copy">Choose repos, then review your changes.</p>'
-        f'<div class="gh-dialog-search">{icon("search")}'
+        '<div id="repo-owner-choice" class="gh-owner-choice">'
+        f"<p>{esc(agent_name)} can read and change the repos you add.</p>"
+        + "".join(owner_choice_rows)
+        + '<p class="gh-dialog-link gh-not-listed">Not listed? <a class="gh-add-button" href="'
+        + esc(install_url, quote=True)
+        + '">Open GitHub setup</a></p>'
+        '<div class="gh-dialog-footer" hidden><span id="owner-picker-count">0 selected</span>'
+        '<button id="owner-clear-selection" class="gh-link-button" '
+        'type="button">Clear selection</button>'
+        '<button id="owner-stage-repos" class="gh-primary" '
+        'type="button" disabled>Add 0 repos</button>'
+        "</div></div>"
+        '<div id="repo-owner-sheet">'
+        '<span class="gh-sheet-chip">Can read and change</span>'
+        + "".join(
+            f'<p class="gh-owner-truncated gh-dialog-copy" '
+            f'data-owner="{esc(item.owner_login, quote=True)}" hidden>'
+            "This list is limited to 2,000 repos.</p>"
+            for item in installations
+            if item.truncated
+        )
+        + f'<div class="gh-dialog-search">{icon("search")}'
         '<input id="search-repos" class="gh-search" type="search" '
         'aria-label="Search repos" placeholder="Search repos" autocomplete="off"></div>'
-        '<div class="gh-dialog-link gh-dialog-bulk">'
+        '<div class="gh-dialog-link gh-dialog-bulk"><span id="shown-count"></span>'
         '<button id="select-shown" class="gh-link-button" type="button">'
-        f"Select all {len(options)} shown</button>"
+        f"Select all {len(options)}</button>"
+        '<button id="show-selected-repos" class="gh-link-button" type="button" '
+        'aria-pressed="false" disabled>Selected (0)</button>'
         '<button id="clear-selection" class="gh-link-button" type="button">Clear selection</button>'
-        + "".join(
-            f'<button class="gh-link-button gh-owner-all" type="button" '
-            f'data-installation="{installation.id}">'
-            f"Everything in {esc(installation.owner_login)}</button>"
-            for installation in installations
-            if any(option.installation_id == installation.id for option in options)
-        )
         + "</div>"
         '<div class="gh-dialog-choices">'
     )
@@ -1095,13 +1467,16 @@ def _agent_editor_page(
         parts.append(
             f'<div class="gh-picker-choice" data-repo-id="{option.repo_id}" '
             f'data-name="{esc(option.name, quote=True)}" '
+            f'data-owner="{esc(option.name.partition("/")[0], quote=True)}" '
             f'data-installation="{option.installation_id}" '
             f'data-max-access="{"write" if option.can_write else "read"}" '
             f'data-required-write="{str(required_write).lower()}">'
-            '<label class="gh-picker-label"><input class="gh-picker-toggle" type="checkbox"'
+            '<label class="gh-picker-label"><span class="gh-row-icon">'
+            + icon("book-marked")
+            + '</span><input class="gh-picker-toggle" type="checkbox"'
             + (" checked" if option.repo_id == requested_id else "")
             + ">"
-            f"<span>{esc(option.name)}"
+            f'<span class="gh-picker-name">{esc(option.name.partition("/")[2])}'
             + ("<small>Finish setup</small>" if option.repair else "")
             + ("<small>Required to finish setup</small>" if required_write else "")
             + "</span></label></div>"
@@ -1110,20 +1485,19 @@ def _agent_editor_page(
         if repo.repo_id not in usable or repo in repairable:
             continue
         parts.append(
-            '<div class="gh-picker-choice gh-picker-connected">'
-            f"{icon('circle-check')}<span>{esc(repo.full_name)}"
-            "<small>Already connected</small></span></div>"
+            f'<div class="gh-picker-choice gh-picker-connected" '
+            f'data-owner="{esc(repo.full_name.partition("/")[0], quote=True)}" '
+            f'data-name="{esc(repo.full_name, quote=True)}">'
+            f'<span class="gh-row-icon">{icon("book-marked")}</span>'
+            f'<span class="gh-picker-name">{esc(repo.full_name.partition("/")[2])}'
+            "</span><small>✓ Added</small></div>"
         )
     parts.append(
         '<p id="no-search-results" hidden>No matching repos.</p></div>'
-        + '<p class="gh-dialog-link">Missing a repo? Add it to the Daimon GitHub App '
-        + 'on GitHub. <a href="'
-        + esc(install_url, quote=True)
-        + '">Open GitHub setup</a></p>'
         '<div class="gh-dialog-footer"><span id="picker-count">Not saved yet. Save changes '
         "after adding to the list.</span>"
         '<button id="stage-repos" class="gh-primary" type="button" disabled>Add to list</button>'
-        "</div></dialog>"
+        "</div></div></dialog>"
     )
     parts.append(
         '<dialog id="working-picker" class="gh-repo-dialog" '
@@ -1139,33 +1513,31 @@ def _agent_editor_page(
     )
     parts.append(
         '<template id="added-row-template"><article class="gh-agent-row">'
-        '<div class="gh-row-top"><strong class="gh-row-name"></strong>'
+        '<div class="gh-row-top"><span class="gh-row-icon">'
+        f'{icon("book-marked")}</span><span class="gh-row-content">'
+        '<strong class="gh-row-name"></strong>'
+        '<span class="gh-working-badge" hidden>Working repo</span>'
+        '<span class="gh-pending-label" aria-live="polite" hidden></span></span>'
         '<div class="gh-row-actions">'
         f'<button class="gh-row-action gh-remove-action" type="button" data-action="remove">'
         f"{icon('trash-2')}Remove</button>"
         '<button class="gh-row-action gh-undo-action" type="button" data-action="undo" hidden>'
-        f"{icon('undo-2')}Undo</button>"
-        + (
-            '<button class="gh-row-action gh-working-action" type="button" '
-            f'data-action="working">{icon("folder")}'
-            '<span class="gh-working-action-label">Choose working repo</span></button>'
-            if may_change_working
-            else ""
-        )
-        + '</div></div><div class="gh-row-meta">'
-        f'<span class="gh-working-badge" hidden>{icon("folder")}Working repo</span>'
-        '<span class="gh-pending-label" aria-live="polite"></span></div>'
+        f"{icon('undo-2')}Undo</button>" + '</div></div><div class="gh-row-meta">'
+        "</div>"
         '<input type="hidden" name="repo" disabled>'
-        '<input class="gh-scoped-access" type="hidden" disabled>' + "</article></template>"
+        "</article></template>"
     )
     # Browsers without scripting still get a complete native form.
     parts.append('<noscript><section class="gh-fallback"><h2>Edit repos</h2>')
+    previous_owner = ""
     for repo in grants:
-        if repo.repo_id not in usable:
-            continue
+        owner = repo.full_name.partition("/")[0]
+        if owner != previous_owner:
+            parts.append(f"<h3>{esc(owner)}</h3>")
+            previous_owner = owner
         parts.append(
             f'<label><input type="checkbox" name="remove" value="{repo.repo_id}">'
-            f"Remove {esc(repo.full_name)}</label>"
+            f"Remove {esc(repo.full_name) if repo.repo_id in usable else 'Hidden repo'}</label>"
         )
         if repo in repairable:
             parts.append(
@@ -1173,13 +1545,17 @@ def _agent_editor_page(
                 f"Finish setup for {esc(repo.full_name)}</label>"
                 f'<input type="hidden" name="access_{repo.repo_id}" value="write">'
             )
-    for repo in available:
+    previous_owner = ""
+    for repo in sorted(available, key=lambda item: item.full_name.casefold()):
+        owner = repo.full_name.partition("/")[0]
+        if owner != previous_owner:
+            parts.append(f"<h3>{esc(owner)}</h3>")
+            previous_owner = owner
         parts.append(
             f'<label><input type="checkbox" name="repo" value="{repo.id}"'
             + (" checked" if repo.id == requested_id else "")
             + ">"
             f"Add {esc(repo.full_name)}</label>"
-            f'<input type="hidden" name="access_{repo.id}" value="write">'
         )
     parts.append(
         '<label>Working repo <select name="working"><option value="keep">Keep current</option>'
@@ -1195,7 +1571,10 @@ def _agent_editor_page(
     parts.append(
         '<div class="gh-editor-footer"><div class="gh-editor-footer-inner">'
         '<div><strong id="selection-status" aria-live="polite">No changes to save</strong>'
-        '<small id="save-help">Changes apply when you save.</small></div>'
+        '<div class="gh-dock-chips"><span id="dock-add" hidden></span>'
+        '<span id="dock-remove" hidden></span>'
+        f'<span id="dock-working" hidden>{icon("pin")}<span></span></span></div>'
+        '<small id="save-help" hidden></small></div>'
         '<div class="gh-editor-footer-actions">'
         '<button id="discard-repos" class="gh-editor-discard gh-js" type="button" hidden>'
         "Discard changes</button>"
@@ -1464,23 +1843,51 @@ async def _installations(client: httpx.AsyncClient, token: str) -> list[_Install
         parsed = _InstallationPayload.model_validate(item)
         installation_id = parsed.id
         owner_id = parsed.account.id
-        repos_raw = await list_github_pages(
-            client, f"/user/installations/{installation_id}/repositories", token, "repositories"
-        )
         repos: list[_Repo] = []
-        for raw_repo in repos_raw:
-            repo = _RepoPayload.model_validate(raw_repo)
-            if repo.owner.id != owner_id:
-                continue
-            repos.append(
-                _Repo(
-                    id=repo.id,
-                    owner_id=owner_id,
-                    installation_id=installation_id,
-                    full_name=repo.full_name,
-                    permission=github_connect.github_permission(repo.permissions),
-                )
-            )
+        total = 0
+        truncated = False
+        last_page_full = False
+        fetch_state: Literal["ok", "error"] = "ok"
+        if parsed.suspended_at is None:
+            try:
+                for page in range(1, 21):
+                    response = await client.get(
+                        f"https://api.github.com/user/installations/{installation_id}/repositories",
+                        params={"per_page": 100, "page": page},
+                        headers=_github_headers(token),
+                    )
+                    response.raise_for_status()
+                    payload = TypeAdapter(dict[str, object]).validate_python(response.json())
+                    batch = TypeAdapter(list[dict[str, object]]).validate_python(
+                        payload["repositories"]
+                    )
+                    if page == 1:
+                        count = payload.get("total_count", 0)
+                        total = count if type(count) is int else 0
+                    for raw_repo in batch:
+                        repo = _RepoPayload.model_validate(raw_repo)
+                        if repo.owner.id != owner_id:
+                            continue
+                        repos.append(
+                            _Repo(
+                                id=repo.id,
+                                owner_id=owner_id,
+                                installation_id=installation_id,
+                                full_name=repo.full_name,
+                                permission=github_connect.github_permission(repo.permissions),
+                                private=repo.private,
+                                archived=repo.archived,
+                            )
+                        )
+                    last_page_full = len(batch) == 100
+                    if not last_page_full:
+                        break
+                truncated = total > 2000 or (last_page_full and total == 0)
+                total = max(total, len(repos))
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                # An owner's partial list is unsafe for selection; keep the owner visible.
+                repos.clear()
+                fetch_state = "error"
         result.append(
             _Installation(
                 id=installation_id,
@@ -1489,6 +1896,11 @@ async def _installations(client: httpx.AsyncClient, token: str) -> list[_Install
                 repository_selection=parsed.repository_selection,
                 repos=tuple(repos),
                 owner_type=parsed.account.type,
+                avatar_url=parsed.account.avatar_url,
+                state="suspended" if parsed.suspended_at is not None else "active",
+                total=total,
+                truncated=truncated,
+                fetch_state=fetch_state,
             )
         )
     return result
@@ -1596,7 +2008,11 @@ def build_oauth_github_routes(
         )
 
     async def successful_page(
-        state: str, cookie: str, invitation_hash: str = ""
+        state: str,
+        cookie: str,
+        invitation_hash: str = "",
+        visible_ids: set[int] | None = None,
+        installations: Sequence[_Installation] = (),
     ) -> Response | None:
         async with sessionmaker() as session:
             invitation = await github_connect.successful_confirmation(
@@ -1628,7 +2044,18 @@ def build_oauth_github_routes(
                 else []
             )
         if invitation.agent_id is not None:
-            return _saved_agent_page(invitation.agent_name or "Agent", agent_grants)
+            back_url = (
+                f"https://discord.com/channels/{requester.external_id}"
+                if requester is not None and requester.platform == "discord"
+                else None
+            )
+            return _saved_agent_page(
+                invitation.agent_name or "Agent",
+                agent_grants,
+                visible_ids,
+                back_url,
+                installations=installations,
+            )
         back = _back_to_chat(requester.platform, requester.external_id) if requester else ""
         return _already_connected_page(
             invitation.connected_repo_count,
@@ -1924,7 +2351,9 @@ def build_oauth_github_routes(
             cancel_url = f"{root}/oauth/github/confirm?{urlencode({'state': state, 'cancel': '1'})}"
             if request.method == "GET":
                 pending_installation = _PendingInstallationRequest(False)
-                if not any(repo.usable for item in installations for repo in item.repos):
+                if not any(repo.usable for item in installations for repo in item.repos) and all(
+                    item.fetch_state == "ok" for item in installations
+                ):
                     try:
                         async with factory() as client:
                             pending_installation = await has_pending_installation_request(
@@ -1952,6 +2381,7 @@ def build_oauth_github_routes(
                     requested_repo=invitation.requested_repo,
                     missing_names=tuple(missing_names),
                     pending_installation=pending_installation,
+                    github_user_id=flow.github_user_id,
                 )
             posted_snapshot = fields.get("snapshot", [""])[0]
             posted_signature = fields.get("snapshot_sig", [""])[0]
@@ -1960,6 +2390,16 @@ def build_oauth_github_routes(
                 _snapshot_signature(state, flow.invitation_hash, posted_snapshot, secret),
             ):
                 return _error("Selection could not be verified.", 400, retry_confirm_url)
+            posted_visibility = fields.get("visibility", [""])[0]
+            if not hmac.compare_digest(
+                fields.get("visibility_sig", [""])[0],
+                _snapshot_signature(state, flow.invitation_hash, posted_visibility, secret),
+            ):
+                return _error("Selection could not be verified.", 400, retry_confirm_url)
+            if posted_visibility != _visibility_digest(installations):
+                return _error(
+                    "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
+                )
             try:
                 selected_ids = [int(value) for value in fields.get("repo", [])]
                 removed_ids = [int(value) for value in fields.get("remove", [])]
@@ -1996,6 +2436,9 @@ def build_oauth_github_routes(
             }
             old = {repo.repo_id: repo for repo in grants}
             repairable = {repo.repo_id for repo in grants if repo.repo_id in needed}
+            allowed_fields = _RETRY_FIELD_NAMES | {f"access_{repo_id}" for repo_id in repairable}
+            if fields.keys() - allowed_fields:
+                return _error("Selection could not be verified.", 400, retry_confirm_url)
             working_before = next((repo.repo_id for repo in grants if repo.is_working_repo), None)
             working_choice = working_values[0]
             if working_choice not in ("keep", "clear"):
@@ -2005,18 +2448,12 @@ def build_oauth_github_routes(
                     return _error("Selection could not be verified.", 400, retry_confirm_url)
             else:
                 working_id = None
+            if any(repo_id in old and repo_id not in repairable for repo_id in selected_ids):
+                return _error("GitHub access could not be verified.", 403, retry_confirm_url)
             if (
-                any(
-                    repo_id not in visible or (repo_id in old and repo_id not in repairable)
-                    for repo_id in selected_ids
-                )
-                or any(repo_id not in old or repo_id not in visible for repo_id in removed_ids)
+                any(repo_id not in visible for repo_id in selected_ids)
+                or any(repo_id not in old for repo_id in removed_ids)
                 or bool(set(selected_ids) & set(removed_ids))
-                or (
-                    working_choice != "keep"
-                    and working_before is not None
-                    and working_before not in visible
-                )
                 or (
                     working_id is not None
                     and (
@@ -2157,17 +2594,43 @@ def build_oauth_github_routes(
                                 now=datetime.now(UTC),
                             )
                         for repo_id in removed_ids:
-                            await github_access.remove_agent_repo(
+                            await github_access.remove_grant(
                                 session,
                                 tenant_id=invitation.tenant_id,
                                 agent_id=invitation.agent_id,
                                 repo_id=repo_id,
-                                account_id=invitation.requester_account_id,
+                                changed_by_account_id=invitation.requester_account_id,
                             )
                         if repos:
-                            await github_connect.activate_confirmed_agent(
-                                session, invitation=invitation, repos=repos, repo_locks_held=True
+                            await github_connect.require_app_eligible_agent(
+                                session,
+                                tenant_id=invitation.tenant_id,
+                                agent_id=invitation.agent_id,
+                                agent_name=invitation.agent_name or "",
                             )
+                            existing_grants = {
+                                grant.repo_id: grant
+                                for grant in await github_access.list_agent_grants(
+                                    session,
+                                    tenant_id=invitation.tenant_id,
+                                    agent_id=invitation.agent_id,
+                                )
+                            }
+                            for repo in repos:
+                                existing = existing_grants.get(repo.repo_id)
+                                await github_access.stage_grant(
+                                    session,
+                                    tenant_id=invitation.tenant_id,
+                                    agent_id=invitation.agent_id,
+                                    repo_id=repo.repo_id,
+                                    baseline_access="write",
+                                    ceiling_access="write",
+                                    granted_by_account_id=invitation.requester_account_id,
+                                    mount_path=existing.mount_path if existing else None,
+                                    is_working_repo=existing.is_working_repo if existing else False,
+                                    agent_name=invitation.agent_name,
+                                    repo_lock_held=True,
+                                )
                         if working_choice != "keep":
                             selected_name = (
                                 None if working_id is None else visible[working_id].full_name
@@ -2177,6 +2640,15 @@ def build_oauth_github_routes(
                                 tenant_id=invitation.tenant_id,
                                 agent_id=invitation.agent_id,
                                 repo_name=selected_name,
+                                account_id=invitation.requester_account_id,
+                                agent_name=invitation.agent_name,
+                            )
+                        elif repos and (working_before is None or working_before in removed_ids):
+                            await github_access.set_working_repo(
+                                session,
+                                tenant_id=invitation.tenant_id,
+                                agent_id=invitation.agent_id,
+                                repo_name=repos[0].full_name,
                                 account_id=invitation.requester_account_id,
                                 agent_name=invitation.agent_name,
                             )
@@ -2231,7 +2703,9 @@ def build_oauth_github_routes(
                 used = await successful_page(state, cookie, invitation_hash)
                 return used if used is not None else _error()
             await revoke_user_token(token)
-            response = await successful_page(state, cookie)
+            response = await successful_page(
+                state, cookie, visible_ids=set(visible), installations=installations
+            )
             if response is None:
                 return _error()
             response.set_cookie(

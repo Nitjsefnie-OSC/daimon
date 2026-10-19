@@ -897,6 +897,19 @@ latest complete GitHub installation snapshot. Until the first refresh, the
 confirmed set applies. A GitHub-confirmed uninstall or suspension disables
 coverage; later refreshes can restore it when the repo is still confirmed.
 The refresh never adds repos to the tenant-confirmed set.
+The browser repo editor lists installations per owner, with at most 20 pages
+(2,000 repos) per owner. A failed owner's list is isolated from the others.
+The form signs both the grant snapshot and the GitHub inventory shown to the
+person. Its one POST resolves each selected repo's installation from the
+verified user lists and applies additions, removals, and the working repo in
+one serializable transaction under the tenant grant lock. A changed inventory
+or grant snapshot returns 409 before any grant changes. Previously granted
+repos missing from the person's verified GitHub listing show as hidden rows and
+can only be removed. A capped owner list explains its 2,000-repo limit without
+revealing names of unlisted grants. A picker save changes only the submitted
+grants; it leaves other grants in place even when their authorization is stale.
+The synthetic browser layout and interaction check is manual:
+`uv run --with playwright==1.58.0 python scripts/check_github_picker.py`.
 If token minting returns 403, 404, or 422 for a repository group, that group's
 pending token is closed, its installation is queued for reconciliation, and
 only successfully minted groups enter the session. The refused group's repos
