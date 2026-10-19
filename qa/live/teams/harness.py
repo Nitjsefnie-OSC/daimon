@@ -57,8 +57,14 @@ async def graph(
     method: str,
     path: str,
     body: str | None = None,
+    *,
+    upload: tuple[bytes, str] | None = None,
 ) -> dict[str, Any]:
-    """Make one Graph call as a persona; writes stay in the QA team or its bot chat."""
+    """Make one Graph call as a persona; writes stay in the QA team, its files or its bot chat.
+
+    ``upload`` sends raw bytes with their content type instead of a JSON body, for
+    putting a file into the QA team's document library (``/groups/<team>/drive/...``).
+    """
     try:
         _persona(driver, persona)
         method = method.upper()
@@ -66,6 +72,8 @@ async def graph(
             raise ValueError("invalid_method")
         version, bare = _graph_path(path)
         payload: object = None
+        if body is not None and upload is not None:
+            raise ValueError("invalid_body")
         if body is not None:
             try:
                 payload = json.loads(body)
@@ -77,17 +85,22 @@ async def graph(
             f"{team}/archive".casefold()
         ):
             raise ValueError("qa_team_protected")
-        if method != "GET" and not _within(bare, team):
+        team_files = f"/groups/{driver.config.team_id}/drive"
+        if method != "GET" and not (_within(bare, team) or _within(bare, team_files)):
             chat_id, _ = await driver.bot_chat(persona)
             if not _within(bare, f"/chats/{chat_id}"):
                 raise ValueError("write_outside_qa_team")
         token = driver.tokens.acquire(persona, GRAPH_DEFAULT)
+        headers = {"Authorization": f"Bearer {token.value}"}
+        if upload is not None:
+            headers["Content-Type"] = upload[1]
         try:
             response = await driver.http.request(
                 method,
                 f"{GRAPH_ROOT}/{version}{bare}",
-                headers={"Authorization": f"Bearer {token.value}"},
+                headers=headers,
                 json=payload,
+                content=None if upload is None else upload[0],
                 timeout=30,
             )
         except httpx.RequestError:

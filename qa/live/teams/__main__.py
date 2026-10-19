@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import mimetypes
 import os
 import re
 import sys
@@ -100,7 +101,16 @@ async def execute(args: argparse.Namespace, config: TeamsQaConfig) -> bool:
         async with httpx.AsyncClient(timeout=15) as http:
             driver = GraphTeamsDriver(config, tokens, http)
             if args.command in HARNESS_VERBS:
-                result = await graph(driver, args.persona, args.method, args.path, args.body)
+                upload = None
+                if args.body_file is not None:
+                    content_type = mimetypes.guess_type(args.body_file.name)[0]
+                    upload = (
+                        args.body_file.read_bytes(),
+                        content_type or "application/octet-stream",
+                    )
+                result = await graph(
+                    driver, args.persona, args.method, args.path, args.body, upload=upload
+                )
                 print(json.dumps(result))
                 return bool(result["ok"])
             if args.command == "verify-target":
@@ -158,11 +168,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--results", type=Path)
     parser.add_argument("--method", default="GET", help="Graph method for graph")
     parser.add_argument("--body", help="JSON request body for graph")
+    parser.add_argument(
+        "--body-file",
+        type=Path,
+        help="raw file to send as the graph body, e.g. a PUT into the QA team's files",
+    )
     args = parser.parse_intermixed_args(argv)
     if args.command != "graph" and args.path is not None:
         parser.error("a path requires graph")
-    if args.command != "graph" and (args.body is not None or args.method != "GET"):
-        parser.error("--method and --body require graph")
+    if args.command != "graph" and (
+        args.body is not None or args.body_file is not None or args.method != "GET"
+    ):
+        parser.error("--method, --body and --body-file require graph")
+    if args.body is not None and args.body_file is not None:
+        parser.error("--body and --body-file are exclusive")
     if args.command != "login" and (args.manual or args.access_flow):
         parser.error("login mode flags require login")
     if args.command not in {"smoke", "refresh"} and (args.journey or args.all):

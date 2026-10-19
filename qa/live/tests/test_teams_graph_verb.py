@@ -96,6 +96,37 @@ async def test_writes_inside_qa_team_and_bot_chat(config: TeamsQaConfig) -> None
     assert json.loads(requests[0].content) == json.loads(body)
 
 
+@pytest.mark.asyncio
+async def test_upload_puts_raw_bytes_into_the_qa_team_files(config: TeamsQaConfig) -> None:
+    graph_driver, requests = driver(config, status=201, body={"id": "item"})
+    path = f"/groups/{config.team_id}/drive/root:/General/weekly_sales.csv:/content"
+    result = await graph(graph_driver, "admin", "PUT", path, upload=(b"week,sales\n", "text/csv"))
+    assert result["status"] == 201
+    assert requests[0].content == b"week,sales\n"
+    assert requests[0].headers["Content-Type"] == "text/csv"
+
+
+@pytest.mark.asyncio
+async def test_upload_refuses_other_drives_and_a_second_body(config: TeamsQaConfig) -> None:
+    graph_driver, requests = driver(config)
+    csv = (b"x", "text/csv")
+    elsewhere = await graph(
+        graph_driver, "admin", "PUT", "/me/drive/root:/a.csv:/content", upload=csv
+    )
+    other_group = await graph(
+        graph_driver, "admin", "PUT", "/groups/other/drive/root:/a.csv:/content", upload=csv
+    )
+    both = await graph(
+        graph_driver, "admin", "PUT", f"/groups/{config.team_id}/drive/x", "{}", upload=csv
+    )
+    assert [elsewhere["error"], other_group["error"], both["error"]] == [
+        "write_outside_qa_team",
+        "write_outside_qa_team",
+        "invalid_body",
+    ]
+    assert requests == []
+
+
 @pytest.mark.parametrize(
     ("method", "path", "error"),
     [
@@ -142,9 +173,15 @@ def test_cli_wires_graph(
     calls: list[tuple[Any, ...]] = []
 
     async def fake_graph(
-        driver: Any, persona: str, method: str, path: str, body: str | None
+        driver: Any,
+        persona: str,
+        method: str,
+        path: str,
+        body: str | None,
+        *,
+        upload: tuple[bytes, str] | None = None,
     ) -> dict[str, Any]:
-        calls.append((persona, method, path, body))
+        calls.append((persona, method, path, body, upload))
         return {"ok": True}
 
     monkeypatch.setattr(cli, "graph", fake_graph)
@@ -157,8 +194,31 @@ def test_cli_wires_graph(
         ["graph", "--persona", "admin", "--method", "POST", "/teams/t/channels", "--body", "{}"]
     )
     assert code == 0
-    assert calls == [("admin", "POST", "/teams/t/channels", "{}")]
+    assert calls == [("admin", "POST", "/teams/t/channels", "{}", None)]
     with pytest.raises(SystemExit):
         cli.main(["read", "--persona", "admin", "--method", "POST"])
     with pytest.raises(SystemExit):
         cli.main(["graph", "--persona", "admin"])
+
+
+def test_cli_sends_a_body_file_as_raw_bytes(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    uploads: list[tuple[bytes, str] | None] = []
+
+    async def fake_graph(*args: Any, upload: tuple[bytes, str] | None = None) -> dict[str, Any]:
+        uploads.append(upload)
+        return {"ok": True}
+
+    monkeypatch.setattr(cli, "graph", fake_graph)
+    monkeypatch.setattr(
+        cli.TeamsQaConfig, "load", lambda *a, **k: SimpleNamespace(personas={"admin": None})
+    )
+    monkeypatch.setattr(cli, "TokenStore", lambda config: None)
+    monkeypatch.setattr(cli, "GraphTeamsDriver", lambda *a, **k: None)
+    data = tmp_path / "weekly_sales.csv"
+    data.write_bytes(b"week,sales\n")
+    path = "/groups/t/drive/root:/General/weekly_sales.csv:/content"
+    argv = ["graph", "--persona", "admin", "--method", "PUT", path, "--body-file", str(data)]
+    assert cli.main(argv) == 0
+    assert uploads == [(b"week,sales\n", "text/csv")]
+    with pytest.raises(SystemExit):
+        cli.main([*argv, "--body", "{}"])
