@@ -830,6 +830,8 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
         external_user_id="user-1",
         markup=Decimal("1"),
         channel_id="channel-b",
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url=None,
     )
     with observation.activate():
         second = await _prepare(

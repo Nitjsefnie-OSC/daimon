@@ -1595,6 +1595,8 @@ async def bind_session_impl(
             account_id=current.account_id,
             external_user_id=external_user_id,
             markup=deps.markup,
+            tool_safety=deps.tool_safety,
+            public_url=deps.public_url,
             channel_id=admission.budget_channel_id,
         )
 

@@ -1037,8 +1037,9 @@ pauses the session on a `requires_action` idle. `RequireApproval` ends the
 turn, `AutoApprove` allows every blocked call, and `PolicyApproval` asks a
 decider per call and sends each answer on the same stream. Routines and
 other headless runs use `PolicyApproval` with the unattended decider
-(`unattended_posture`), with tool safety on or off; only a workspace
-checkpoint turn still answers with `AutoApprove`. The decider comes
+(`unattended_posture`), with tool safety on or off, and so does a
+workspace transfer's checkpoint turn, whose old session is gated right
+before its message. The decider comes
 from `packages/core/daimon/core/turn/approvals.py`, over the pure read/write
 model in `packages/core/daimon/core/tool_safety.py`. With
 `DAIMON_TOOL_SAFETY__AGENT_RULES` on as well, each third-party paused call
