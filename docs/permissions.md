@@ -279,3 +279,19 @@ in the new shape on its next change, so no migration runs.
 The invoker allowlist, the Teams guests counted as members, read-only DM
 memory, environments, budgets and operator tokens are not
 channel or agent rules. They say who may act and who may change the rules.
+
+## MCP and unattended tool safety
+
+With `DAIMON_TOOL_SAFETY__ENABLED=true`, MCP `start_turn`, `continue_turn`
+and `ask` use the same unattended policy as scheduled routines and headless
+turns. Classified reads and writes listed in
+`DAIMON_TOOL_SAFETY__UNATTENDED_WRITES` run; other writes are refused because
+this API has no approval button. Operator denies and applicable agent tool
+rules still apply. An unrecognized tool name defaults to a write.
+
+New sessions receive gated toolsets. Continuing an existing session applies
+the current safety policy before sending the message, preserving its caller
+resources and visible servers. Polling resumes confirmation handling after a
+server restart. With tool safety disabled, MCP turns retain their existing
+permissions; confirmations on a previously gated session are answered using
+the disabled policy.

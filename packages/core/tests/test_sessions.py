@@ -3297,3 +3297,40 @@ async def test_source_environment_projection_retains_unrepresented_native_policy
     assert projected.native == environment.model_dump(mode="json", exclude_unset=True)
     transport.assert_consumed()
     assert [request.method for request in transport.requests] == ["GET"]
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_isolated_session_applies_tool_safety(enabled: bool) -> None:
+    from daimon.core.tool_safety import ToolSafetyPolicy
+
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=ma_session().model_dump(mode="json"))
+
+    agent = ma_agent(
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "third-party",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        ]
+    )
+    client = build_fake_anthropic_http(handler)
+    await create_isolated_session(
+        client,
+        agent=agent,
+        environment=_make_env(),
+        account_id=None,
+        tenant_id=None,
+        resources=[],
+        tool_safety=ToolSafetyPolicy(enabled=enabled),
+    )
+    sent = requests[0]["agent"]
+    if enabled:
+        assert sent["tools"][0]["default_config"]["permission_policy"]["type"] == "always_ask"
+    else:
+        assert sent == agent.id

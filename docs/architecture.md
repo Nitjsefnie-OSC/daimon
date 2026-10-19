@@ -1077,7 +1077,12 @@ that agent's credential, `search_tools` and `call_tool` included. The same two s
 gate it, and a failed read refuses.
 With `DAIMON_TOOL_SAFETY__ENABLED` on, `create_session` sends every attached
 third-party toolset as `always_ask` (a per-session override, so it holds
-however the agent was written); reads then run, a write in a routine is
+however the agent was written). MCP `start_turn`, `continue_turn` and `ask`
+also gate their sessions and use the routine `unattended_decider`: their
+handle-and-poll API has no approval surface. A bounded background worker
+folds the current turn and sends confirmations; polling reattaches it after
+a restart. Continued sessions update their frozen toolsets before the next
+message without restoring hidden servers or changing resources. Reads then run, a write in a routine is
 refused unless the operator allowed it there, and a write in chat waits for
 the requester to press Approve on a confirmation card. Read or write comes
 from an operator `DAIMON_TOOL_SAFETY__EFFECTS` pin, then the tool's MCP

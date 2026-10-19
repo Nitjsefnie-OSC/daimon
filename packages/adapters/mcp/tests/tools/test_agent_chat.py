@@ -86,6 +86,7 @@ from daimon.core.stores.github_links import save_verified_link
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.tenant_balance import debit_amount
+from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing import ma_agent, ma_model_usage, ma_session
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -178,6 +179,7 @@ def _runtime(
     environment_name: str | None = None,
 ) -> McpRuntime:
     settings = MagicMock()
+    settings.tool_safety = ToolSafetyPolicy()
     settings.mcp.public_url = None
     settings.mcp.jwt_secret = None
     settings.github.fallback_pat = None
@@ -2437,6 +2439,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "session_factory",
         "fernet",
         "app_session_unmapped",
+        "tool_safety",
         "github_fallback_pat",
         "github_app_id",
         "github_app_private_key",
@@ -4039,3 +4042,174 @@ async def test_start_then_continue_rotates_the_mounted_chat_token_inside_the_rea
         assert len(sends) == 3 and len(issued) == 2
     finally:
         await client.close()
+
+
+@pytest.mark.parametrize("entry", ["start_turn", "continue_turn", "ask"])
+@pytest.mark.parametrize(
+    ("enabled", "tool", "writes", "expected"),
+    [
+        (True, "opaque_query", (), "deny"),
+        (True, "create_issue", (), "deny"),
+        (True, "get_issue", (), "allow"),
+        (True, "annotated_query", (), "allow"),
+        (True, "create_issue", ("linear/create_issue",), "allow"),
+        (False, "create_issue", (), None),
+    ],
+)
+async def test_mcp_turn_unattended_policy(
+    entry: str,
+    enabled: bool,
+    tool: str,
+    writes: tuple[str, ...],
+    expected: str | None,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from daimon.adapters.mcp.tools import _agent_chat_safety as safety
+    from daimon.testing import ma_environment
+
+    if tool == "annotated_query":
+        # An annotation-aware classifier must feed every unattended entry point.
+        monkeypatch.setattr("daimon.core.tool_safety.classify_tool", lambda *a, **kw: "read")
+
+    policy = ToolSafetyPolicy(enabled=enabled, unattended_writes=writes)
+    agent = ma_agent(
+        id=_MA_AGENT_ID,
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        ],
+        mcp_servers=[{"name": "linear", "type": "url", "url": "https://linear.example/mcp"}],
+    )
+    session = ma_session(
+        id="ses_safety", agent=agent, metadata={MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID)}
+    )
+    confirmations: list[dict[str, Any]] = []
+    boundary = {
+        "id": "evt_user",
+        "type": "user.message",
+        "content": [{"type": "text", "text": "hi"}],
+    }
+
+    def send(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        events = json_body(req)["events"]
+        confirmations.extend(e for e in events if e["type"] == "user.tool_confirmation")
+        return send_events_response(data=[boundary])
+
+    def events(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        if confirmations or not enabled:
+            data = [_make_idle_event(), _make_agent_message_event("done"), boundary]
+        else:
+            data = [
+                {
+                    "id": "evt_pause",
+                    "type": "session.status_idle",
+                    "stop_reason": {"type": "requires_action", "event_ids": ["evt_tool"]},
+                },
+                {
+                    "id": "evt_tool",
+                    "type": "agent.mcp_tool_use",
+                    "mcp_server_name": "linear",
+                    "name": tool,
+                    "input": {},
+                    "evaluated_permission": "ask",
+                },
+                boundary,
+            ]
+        return list_response(data)
+
+    updates: list[dict[str, Any]] = []
+
+    def update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        nonlocal session
+        updates.append(json_body(req))
+        snapshot = agent.model_copy(
+            update={"tools": ma_agent(tools=updates[-1]["agent"]["tools"]).tools}
+        )
+        session = ma_session(id=session.id, agent=snapshot, metadata=session.metadata)
+        return httpx.Response(200, json=session.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add(
+        "GET",
+        r"/v1/sessions/ses_safety",
+        lambda r, m: httpx.Response(200, json=session.model_dump(mode="json")),
+    )
+    router.add("POST", r"/v1/sessions/ses_safety", update)
+    router.add("POST", r"/v1/sessions/ses_safety/events", send)
+    router.add("GET", r"/v1/sessions/ses_safety/events", events)
+    client = build_fake_anthropic(router.dispatch)
+    runtime = _runtime(client, db_session_factory, environment_name=_ENV_NAME)
+    runtime.settings.tool_safety = policy
+    env = ma_environment(id=_ENV_ID, name=_ENV_NAME)
+    creator = AsyncMock(return_value=session)
+    with (
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._resolve_ma_agent", AsyncMock(return_value=agent)
+        ),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat.find_environment_by_daimon_tag",
+            AsyncMock(return_value=env),
+        ),
+        patch("daimon.adapters.mcp.tools.agent_chat.create_session", creator),
+        patch(
+            "daimon.adapters.mcp.tools.agent_chat._send_billed", AsyncMock(return_value="evt_user")
+        ),
+    ):
+        try:
+            if entry == "start_turn":
+                await _start_turn_impl(runtime, _auth(), "hi")
+            elif entry == "continue_turn":
+                await _continue_turn_impl(runtime, _auth(), session.id, "hi")
+            else:
+                result = await _ask_impl(runtime, _auth(), "hi", poll_interval_seconds=0.01)
+                assert result.message == "done"
+            if enabled:
+                worker = safety._workers.get((id(runtime), session.id))  # pyright: ignore[reportPrivateUsage]
+                if worker is not None:
+                    await asyncio.wait_for(worker, timeout=5)
+                assert [e["result"] for e in confirmations] == [expected]
+            else:
+                assert not confirmations
+            if entry == "continue_turn":
+                assert bool(updates) == enabled
+                if enabled:
+                    assert (
+                        updates[0]["agent"]["tools"][0]["default_config"]["permission_policy"][
+                            "type"
+                        ]
+                        == "always_ask"
+                    )
+                if enabled:
+                    confirmations.clear()
+                    runtime.settings.tool_safety = ToolSafetyPolicy()
+                    await _continue_turn_impl(runtime, _auth(), session.id, "again")
+                    worker = safety._workers.get((id(runtime), session.id))  # pyright: ignore[reportPrivateUsage]
+                    assert worker is not None
+                    await asyncio.wait_for(worker, timeout=5)
+                    assert [e["result"] for e in confirmations] == ["allow"]
+                    assert len(updates) == 1, (
+                        "disabled policy keeps the frozen session and its resources"
+                    )
+                else:
+                    enabled = True
+                    runtime.settings.tool_safety = ToolSafetyPolicy(enabled=True)
+                    await _continue_turn_impl(runtime, _auth(), session.id, "again")
+                    worker = safety._workers.get((id(runtime), session.id))  # pyright: ignore[reportPrivateUsage]
+                    assert worker is not None
+                    await asyncio.wait_for(worker, timeout=5)
+                    assert [e["result"] for e in confirmations] == ["deny"]
+                    assert len(updates) == 1
+            else:
+                assert creator.call_args.kwargs["tool_safety"] == policy
+        finally:
+            task = safety._workers.pop((id(runtime), session.id), None)  # pyright: ignore[reportPrivateUsage]
+            if task is not None and not task.done():
+                task.cancel()
+            await client.close()

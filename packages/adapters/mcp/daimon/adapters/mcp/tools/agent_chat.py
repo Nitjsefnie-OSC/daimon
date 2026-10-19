@@ -22,8 +22,10 @@ Headless loop (primitives plus the bounded ``ask`` convenience tool):
 - ``get_session`` returns status/metadata (poll until idle). Read-only, not
   gated.
 - ``list_events`` returns the transcript; the caller reads the reply from the
-  ``agent.message`` events. Agents run ``permission_policy=always_allow``
-  (``specs.py``), so sessions reach idle without tool confirmations.
+  ``agent.message`` events. With tool safety enabled, sessions gate tools
+  and answer confirmations with the routine unattended policy: allowed reads
+  and configured unattended writes run; other calls are refused. With tool
+  safety off, agents retain their existing permissions.
   Read-only, not gated.
 - ``list_sessions`` enumerates this agent's sessions for resume. Read-only,
   not gated.
@@ -77,6 +79,7 @@ from daimon.adapters.mcp.resource_ports import (
     walk_sessions,
 )
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._agent_chat_safety import gate_session, pending_turn, watch_turn
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import (
     _admission_recheck,  # pyright: ignore[reportPrivateUsage]
@@ -621,6 +624,7 @@ async def _start_turn_impl(
             account_id=auth.account_id,
             tenant_id=auth.tenant_id,
             resources=resources,
+            tool_safety=runtime.settings.tool_safety,
             billing_exempt=billing_exempt,
             memory_read_only=memory_read_only,
             budget_channel_id=budget_channel_id,
@@ -661,6 +665,7 @@ async def _start_turn_impl(
             session_factory=runtime.session_factory,
             fernet=runtime.fernet,
             app_session_unmapped=True,
+            tool_safety=runtime.settings.tool_safety,
             github_fallback_pat=github_fallback_pat,
             github_app_id=github_app_id,
             github_app_private_key=github_app_private_key,
@@ -682,8 +687,11 @@ async def _start_turn_impl(
         observation.agent_id = str(ma_agent.id)
     if recheck is not None:
         await recheck()
+    await gate_session(runtime, auth, session)
     turn_started_at = now()
     turn_event_id = await _send_billed(runtime, session.id, message, scope=mcp_scope(auth))
+    if runtime.settings.tool_safety.enabled:
+        watch_turn(runtime, auth, session.id, turn_event_id=turn_event_id)
 
     return {
         "handle": session.id,
@@ -775,8 +783,13 @@ async def _continue_turn_impl(
                 session_factory=runtime.session_factory,
                 scope=mcp_scope(auth),
             )
+        await gate_session(runtime, auth, session)
         # Inside the fence, so settle requests follow the order of the sends.
         turn_event_id = await _send_billed(runtime, handle, message, scope=mcp_scope(auth))
+        if runtime.settings.tool_safety.enabled or any(
+            "always_ask" in t.model_dump_json() for t in session.agent.tools
+        ):
+            watch_turn(runtime, auth, handle, turn_event_id=turn_event_id)
     return {
         "handle": handle,
         "turn_event_id": turn_event_id,
@@ -819,7 +832,10 @@ async def _get_session_impl(
     s = await _verify_agent_owns_session(runtime, auth, handle)
     if on_read is not None:
         await on_read(s)
-    return SessionInfo.from_ma(s)
+    info = SessionInfo.from_ma(s)
+    if await pending_turn(runtime, auth, s):
+        return info.model_copy(update={"status": "running"})
+    return info
 
 
 async def _archive_my_session_impl(

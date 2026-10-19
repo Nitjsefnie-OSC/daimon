@@ -40,6 +40,7 @@ from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     WILDCARD_TOOL,
     ResolvedAgentToolRule,
+    ToolAnnotations,
     ToolCall,
     ToolSafetyPolicy,
     ToolVerdict,
@@ -62,6 +63,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 RuleLookup = Callable[[ToolCall], Awaitable[ResolvedAgentToolRule | None]]
+AnnotationLookup = Callable[[ToolCall], Awaitable[ToolAnnotations | None]]
 RuleCardFor = Callable[[ToolCall], ToolRuleCardReference | None]
 
 
@@ -385,6 +387,38 @@ def _answer_message(call: ToolCall, answer: str) -> str:
     )
 
 
+async def tool_call_verdict(
+    policy: ToolSafetyPolicy,
+    call: ToolCall,
+    *,
+    attended: bool,
+    trusted_servers: frozenset[str],
+    confirmed_tools: frozenset[str],
+    agent_rule: ResolvedAgentToolRule | None,
+    annotations_for: AnnotationLookup | None = None,
+) -> ToolVerdict:
+    """Classify and decide every attended or unattended call through one path.
+
+    An annotation lookup must supply only operator-trusted hints. Missing or
+    failed lookups fall back to the policy's conservative name classifier.
+    """
+    hints: ToolAnnotations | None = None
+    if policy.enabled and annotations_for is not None and call.server_name not in trusted_servers:
+        try:
+            hints = await annotations_for(call)
+        except Exception as err:
+            log.warning("tool_safety.annotation_read_failed", tool=call.key, error=str(err))
+    return decide_tool_call(
+        policy,
+        call,
+        attended=attended,
+        trusted_servers=trusted_servers,
+        confirmed_tools=confirmed_tools,
+        agent_rule=agent_rule,
+        annotations=hints,
+    )
+
+
 def unattended_decider(
     policy: ToolSafetyPolicy,
     *,
@@ -392,6 +426,7 @@ def unattended_decider(
     confirmed_tools: frozenset[str] = frozenset(),
     rules_for: RuleLookup | None = None,
     daimon_rules: bool = False,
+    annotations_for: AnnotationLookup | None = None,
 ) -> ToolCallDecider:
     """Decider for runs nobody is watching: reads run, writes are refused
     unless the operator allowed them there."""
@@ -406,13 +441,14 @@ def unattended_decider(
         rule, read_error = await _rule_for(
             policy, call, rules_for, skip=_skips_daimon_rules(call, trusted_servers, daimon_rules)
         )
-        verdict = decide_tool_call(
+        verdict = await tool_call_verdict(
             policy,
             call,
             attended=False,
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
             agent_rule=rule,
+            annotations_for=annotations_for,
         )
         if read_error:
             verdict = _read_error_verdict(verdict, attended=False)
@@ -443,6 +479,7 @@ def interactive_decider(
     rules_for: RuleLookup | None = None,
     rule_card_for: RuleCardFor | None = None,
     daimon_rules: bool = False,
+    annotations_for: AnnotationLookup | None = None,
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`.
 
@@ -461,13 +498,14 @@ def interactive_decider(
         rule, read_error = await _rule_for(
             policy, call, rules_for, skip=_skips_daimon_rules(call, trusted_servers, daimon_rules)
         )
-        verdict = decide_tool_call(
+        verdict = await tool_call_verdict(
             policy,
             call,
             attended=True,
             trusted_servers=trusted_servers,
             confirmed_tools=confirmed_tools,
             agent_rule=rule,
+            annotations_for=annotations_for,
         )
         if read_error:
             verdict = _read_error_verdict(verdict, attended=True)

@@ -35,7 +35,7 @@ from anthropic.types.beta.beta_managed_agents_memory_store_resource_param import
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
-from anthropic.types.beta.session_create_params import Agent, Resource
+from anthropic.types.beta.session_create_params import Resource
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import (
     mirror_credentials_into_vault,
@@ -940,7 +940,7 @@ async def create_session(
         # The same override carries the deployment's tool-safety policy: gated
         # third-party toolsets are sent as `always_ask` whatever the agent itself
         # stores, so every new session is gated however the agent was written.
-        agent_argument: Agent = agent.id
+        agent_argument: str | BetaManagedAgentsAgentWithOverridesParams = agent.id
         hidden: frozenset[str] = frozenset()
         # A shared thread's session has no account; its synthetic owner, who
         # connected nothing, hides every server someone connected personally.
@@ -1372,6 +1372,7 @@ async def create_isolated_session(
     account_id: uuid.UUID | None,
     tenant_id: uuid.UUID | None,
     resources: list[Resource],
+    tool_safety: ToolSafetyPolicy = OPEN_TOOL_SAFETY,
     billing_exempt: ExemptReason | None = None,
     memory_read_only: bool = False,
     budget_channel_id: str | None = None,
@@ -1418,6 +1419,15 @@ async def create_isolated_session(
             origin_stamp(channel_id=origin_channel_id, thread_id=None, seal=origin_seal_ids)
         )
 
+    tools = session_tools(agent, frozenset(), tool_safety=tool_safety, public_url=None)
+    agent_argument: str | BetaManagedAgentsAgentWithOverridesParams = agent.id
+    if list(tools) != list(agent.tools):
+        agent_argument = {
+            "type": "agent_with_overrides",
+            "id": agent.id,
+            "tools": [cast(Tool, t.model_dump(mode="json", exclude_none=True)) for t in tools],
+        }
+
     try:
         return await create_session_record(
             anthropic,
@@ -1426,7 +1436,7 @@ async def create_isolated_session(
                 account_id=account_id,
                 call_site="sessions:create_isolated_session",
             ),
-            agent=agent.id,
+            agent=agent_argument,
             environment_id=environment.id,
             metadata=metadata if metadata else None,
             resources=resources,

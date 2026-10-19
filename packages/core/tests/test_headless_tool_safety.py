@@ -259,3 +259,29 @@ async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before(
     assert without == inert, "rules that are not applied leave the session's tools alone"
     (daimon,) = [t for t in without["tools"] if t.get("mcp_server_name") == "daimon-mcp"]
     assert [c["name"] for c in daimon["configs"]] == ["add_skill"]
+
+
+async def test_headless_uses_the_attended_read_classifier(monkeypatch) -> None:
+    from daimon.core import tool_safety
+    from daimon.core.tool_safety import ToolCall
+    from daimon.core.turn.approvals import interactive_decider
+
+    # Stand in for an operator-trusted annotation classifier supplied by the host.
+    monkeypatch.setattr(tool_safety, "classify_tool", lambda *args, **kwargs: "read")
+    policy = ToolSafetyPolicy(enabled=True)
+    attended = interactive_decider(policy, requester_platform_user_id="operator")
+    assert (
+        await attended(
+            ToolCall(tool_use_id="evt_tu", server_name="linear", tool_name="create_issue", input={})
+        )
+    ).allow
+    sends: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_router(creates=[], sends=sends).dispatch)
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="read tonight's bugs",
+        tool_safety=policy,
+    )
+    assert [event["result"] for event in _confirmations(sends)] == ["allow"]

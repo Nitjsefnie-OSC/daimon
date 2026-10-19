@@ -69,3 +69,28 @@ def test_build_confirmation_events_produces_one_allow_payload_per_id_in_order() 
 
 def test_build_confirmation_events_returns_empty_list_for_no_ids() -> None:
     assert build_confirmation_events([]) == []
+
+
+async def test_attended_and_unattended_share_annotation_classification() -> None:
+    from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.approvals import interactive_decider, unattended_decider
+
+    call = ToolCall(
+        tool_use_id="tu_hint", server_name="third-party", tool_name="opaque_query", input={}
+    )
+    seen: list[ToolCall] = []
+
+    async def trusted_hints(call: ToolCall) -> ToolAnnotations:
+        seen.append(call)
+        return ToolAnnotations(read_only_hint=True)
+
+    policy = ToolSafetyPolicy(enabled=True)
+    assert (await unattended_decider(policy)(call)).allow is False
+    for decide in (
+        interactive_decider(
+            policy, requester_platform_user_id="user", annotations_for=trusted_hints
+        ),
+        unattended_decider(policy, annotations_for=trusted_hints),
+    ):
+        assert (await decide(call)).allow, "trusted reads must run without an approval surface"
+    assert seen == [call, call]
