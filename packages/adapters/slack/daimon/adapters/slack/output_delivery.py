@@ -254,7 +254,9 @@ async def deliver_session_outputs(
     a file over the limit gets one notice rather than one per sweep.
     """
     mention = _SweepMention(requester_user_id)
-    post = build_output_poster(web_client, channel_id=channel_id, thread_ts=thread_ts, mention=mention)
+    post = build_output_poster(
+        web_client, channel_id=channel_id, thread_ts=thread_ts, mention=mention
+    )
     on_skip = _build_skip_notice(
         web_client,
         channel_id=channel_id,
