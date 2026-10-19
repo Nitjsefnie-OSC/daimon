@@ -30,6 +30,7 @@ _TEAMS_FOREIGN = (
     "server admin",
     "workspace admin",
     "Manage Server",
+    "run `setup`",
 )
 _FOREIGN: dict[ChatPlatform, tuple[str, ...]] = {
     "teams": _TEAMS_FOREIGN,
@@ -68,6 +69,7 @@ def test_every_termination_notice_uses_the_platforms_words(
                 in_dm=in_dm,
                 setup_command=nouns.setup,
                 billing_command=nouns.billing,
+                setup_verb=nouns.verb,
             )
             if notice is not None:
                 _assert_native(platform, notice.plain_text())
