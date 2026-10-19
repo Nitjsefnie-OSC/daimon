@@ -67,7 +67,11 @@ class _Hub:
             id=session_id,
             agent_id=_AGENT,
             status="idle",
-            metadata={"daimon_account": str(account or self.account_id), **stamps},
+            metadata={
+                "daimon_agent_chat": "true",
+                "daimon_account": str(account or self.account_id),
+                **stamps,
+            },
         ).model_dump(mode="json")
 
     async def call(self, name: str, **arguments: Any) -> dict[str, Any]:

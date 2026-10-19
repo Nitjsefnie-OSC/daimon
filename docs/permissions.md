@@ -106,6 +106,11 @@ rules on two channels, a thread, a category and two agents with rules.
 
 ## Agent-chat turns
 
+Agent chat and the hub can drive only sessions created through agent chat.
+They cannot continue, cancel or archive a platform conversation, even for the
+same account and agent. Older sessions without this creation provenance must
+be replaced with a new agent-chat conversation. Transcript read access is unchanged.
+
 A turn started through agent chat (`start_turn`, `continue_turn` and `ask`,
 with an agent key or on the hub) has nobody to press Approve, so it runs
 under the same tool-safety rules as a routine: reads run, a third-party write

@@ -665,6 +665,7 @@ async def _start_turn_impl(
             resources=resources,
             tool_safety=runtime.settings.tool_safety,
             billing_exempt=billing_exempt,
+            agent_chat=True,
             memory_read_only=memory_read_only,
             budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
@@ -710,6 +711,7 @@ async def _start_turn_impl(
             github_app_private_key=github_app_private_key,
             agent_github_app=runtime.settings.github_app,
             billing_exempt=billing_exempt,
+            agent_chat=True,
             memory_read_only=memory_read_only,
             budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
@@ -770,6 +772,8 @@ async def _continue_turn_impl(
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
     same-tenant cross-agent handles (Tampering threat mitigation). A
     chat turn's own credential is refused (``require_outside_chat_turn``).
+    Only a session opened through agent chat can be mutated here; a platform
+    conversation never lends its attended execution grant to this caller.
     ``recheck`` runs the access decision again immediately before the send.
 
     A channel-bound key's channel sealed since the session opened refuses the
@@ -940,8 +944,9 @@ async def _archive_my_session_impl(
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
     cross-agent handles.
     """
-    await _verify_agent_owns_session(runtime, auth, handle)
+    require_outside_chat_turn(auth)
     async with session_mutation_fence(runtime.session_factory, handle):
+        require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
         await archive_session_record(runtime.client, handle, scope=mcp_scope(auth))
     try:
         await close_headless_app_session(
@@ -981,8 +986,9 @@ async def _cancel_turn_impl(
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
     cross-agent handles before any send.
     """
-    await _verify_agent_owns_session(runtime, auth, handle)
+    require_outside_chat_turn(auth)
     async with session_mutation_fence(runtime.session_factory, handle):
+        require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
         await send_session_events(
             runtime.client, handle, events=[{"type": "user.interrupt"}], scope=mcp_scope(auth)
         )

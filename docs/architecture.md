@@ -1186,6 +1186,11 @@ and worker-completion turns and their model-created handoffs stay unattended;
 a real human message or private-input action supplies attended provenance.
 Queue reasons alone cannot upgrade a turn to human approval surfaces.
 
+Agent-chat session creation records headless provenance. Continue, ask with a
+handle, cancel and archive require it, including inside the mutation fence.
+A platform session cannot lend its credential or attended origin grant to a
+headless caller. Legacy sessions without this provenance refuse mutation.
+
 Agent-chat turns (`start_turn`, `continue_turn` and `ask`, per agent and on
 the hub) have nobody to press Approve, so they take the unattended rules
 through one core gate, `packages/core/daimon/core/turn/unattended.py`. Before
