@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 121 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 122 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -388,6 +388,15 @@ Tenant summary: the balance, funding mode and every configured channel in one re
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `get_tenant_summary` | admin only, operator tokens with tenant:read | Summarize this server or workspace: balance, funding mode and each channel. |
+
+## `thread_model`
+
+Switch this conversation's model when someone asks in words ("use opus", "think
+harder").
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "think harder". |
 
 ## `thread_participation`
 

@@ -238,6 +238,15 @@ config). The order is load-bearing and documented as such in the module:
    for the turn is attributed to it. The window's first refusal also
    DMs the channel's admins through the adapter's `TurnDeps.budget_notifier`
    (`daimon.core.channel_budget_notice`).
+10. Conversation model — `daimon.core.thread_models.apply_thread_model` reads
+   the model the conversation's people chose (`thread_model_settings`, keyed
+   by the thread, or a DM's own channel) and puts it in `Admission.agent`,
+   with `Admission.model_override` naming it. It is read again for every
+   turn, so the choice survives restarts and no other conversation sees it.
+   A choice no longer in `ALLOWED_MODEL_IDS`, or a channel that runs another
+   backend, leaves the agent's own model and sets `Admission.model_fell_back`;
+   the turn's user message then carries a `<model_notice>` asking the agent
+   to say so in one sentence.
 
 The policy, writers, balance, cap and channel
 budget gates each raise `AdmissionDenied` with a reason literal, which
@@ -1497,6 +1506,18 @@ session is actually running (`packages/core/daimon/core/session_snapshot.py`),
 and that snapshot, not the current spec, is what later turns compare and bill
 against.
 
+A conversation's model choice (`/model` on Discord, or the agent's
+`set_thread_model` tool when someone asks in words) is a session override,
+never an agent edit. Admission puts it in the desired snapshot, so the next
+turn's compatibility check finds a `model` change and replaces the session,
+carrying the work over as for any model edit. The successor is created with
+`agent_with_overrides.model`. A Managed Agents override names a model and
+speed but no effort, so no effort is offered. The tool runs only for a
+verified, attended turn origin: routines, wakes and agent-chat callers can't
+change a conversation's model. `/model` runs the same `START_TURN` check that
+admission makes. Fleet roots and workers ignore the choice (see Worker fleets
+below), and `/model` says so when the thread's agent holds a fleet grant.
+
 ### Worker fleets
 
 A fleet run is an orchestrator turn's durable fan-out
@@ -1510,6 +1531,13 @@ row's version. Worker turns have a concurrency pool of their own, counted from
 these rows per tenant (`DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`) and
 per process, so a fan-out never takes the chat turns' slots. Fleets are off by
 default (`DAIMON_FLEET__ENABLED`).
+
+A conversation's model choice (`/model`) never reaches a fleet. When the
+answering agent holds a fleet grant, `bind_session_impl` puts the authored agent
+back (`Admission.authored`) before the root session is prepared. A worker's
+bind does the same, and its session is never created with an override. A
+frozen root therefore records the model the agent's owner approved, and the
+override is not among its retained admission facts.
 
 ### Same-thread handoff
 

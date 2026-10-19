@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from collections import Counter
 from io import BytesIO
 from pathlib import Path
@@ -193,7 +194,11 @@ async def test_manifest_change_keeps_existing_layer_ids_and_rendered_bytes(
     token = avatar.token
     original_layer_dir = agent_faces._LAYER_DIR
     for asset in original_layer_dir.glob("*.png"):
-        os.link(asset, tmp_path / asset.name)
+        try:
+            os.link(asset, tmp_path / asset.name)
+        except OSError:
+            # A temp dir on another filesystem (some CI runners) can't hard-link.
+            shutil.copy2(asset, tmp_path / asset.name)
     manifest = json.loads((original_layer_dir / "manifest.json").read_text())
     manifest["colours"].reverse()
     for colour in manifest["colours"]:

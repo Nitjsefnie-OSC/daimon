@@ -151,6 +151,42 @@ async def test_root_request_derivation_reaches_real_fresh_or_clone_worker(worker
     assert all(call.method == "GET" for call in transport.requests)
 
 
+async def test_a_worker_never_runs_the_root_conversations_model_choice(worker_root):
+    """Even a root request still carrying a thread's choice dispatches its worker without it."""
+    from daimon.core.thread_models import with_model_override
+
+    request, root, row, resolved, prices, calls, _, transport, _ = worker_root
+    chosen = "claude-opus-5-5"
+    request = replace(
+        request,
+        admission=replace(
+            request.admission,
+            agent=with_model_override(request.admission.agent, chosen),
+            model_override=chosen,
+            authored_agent=request.admission.agent,
+        ),
+    )
+    derived = await request.for_worker(root, resolved)
+    result = await run_worker(
+        derived,
+        parent=root,
+        worker=row,
+        trigger_message="Complete the task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded" and result.result is not None
+    assert [call.url.path for call in calls if call.method == "POST"] == [
+        "/v1/agents",
+        "/v1/agents/sessions",
+        "/v1/agents/sessions/native-openai-session/events",
+    ]
+    assert all(chosen not in call.content.decode() for call in calls if call.content), (
+        "the conversation's model never reaches a worker"
+    )
+    assert all(call.method == "GET" for call in transport.requests)
+
+
 @pytest.mark.parametrize(
     "fault", ("subject", "place", "scope", "pin", "expired", "stale", "disabled", "slow")
 )

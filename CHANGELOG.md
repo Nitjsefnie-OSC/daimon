@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A conversation can run on a model of its own: `/model` in a Discord thread shows it or switches it to Haiku, Sonnet or Opus (or back to the agent's default), and asking in words ("use opus", "think harder") switches it on any platform. The thread keeps the choice for every later reply, across restarts; other conversations and the stored agent are unchanged. Anyone who may start a turn there may change it; routines and other unattended runs can't. A choice that can no longer run falls back to the agent's own model, and the reply says so. Worker fleets ignore the choice: a fleet root and its workers always run the model the agent's owner approved, and `/model` says so on such a thread.
+
 - Native OpenAI sessions install isolated MCP session grants before creation, bind them to each executing origin on reuse, and revoke origin authority when the turn ends. Child preparation cannot inherit a parent origin grant.
 
 - Agent chat and hub mutations require a session opened on that headless surface. Same-account platform sessions and legacy sessions without proven headless provenance cannot be continued, cancelled or archived through it. Unauthorized callers are refused before waiting on a session mutation fence.
