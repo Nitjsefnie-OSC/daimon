@@ -51,7 +51,7 @@ class FakePorts:
         )
 
     async def recover(self, config: IntakeConfig, effect: EffectRequest) -> str | None:
-        return self.remote.get(effect.key)
+        return effect.payload.get("selected") or self.remote.get(effect.key)
 
     def replay_safe(self, effect: EffectRequest) -> bool:
         return False
@@ -537,3 +537,41 @@ async def test_resolution_cannot_recreate_data_after_actor_erasure(
                 == 0
             )
     assert (await store.get(record.id)).submission is None
+
+
+async def test_unclassified_discovery_expires_from_health_and_resume(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    store, service, _ = await setup(lead_sessions)
+    scanned = await service.scan()
+    assert len(scanned["discovered"]) == 2
+    assert (await store.health())["unclassified_count"] == 2
+    async with lead_sessions() as session, session.begin():
+        state = await session.scalar(
+            text("SELECT encrypted_state FROM lead_mailbox_states WHERE tenant_id=:tenant"),
+            {"tenant": store.tenant_id},
+        )
+        assert state is not None and "archived-a" not in store.open(state)
+        await session.execute(
+            text(
+                "UPDATE lead_mailbox_messages SET expires_at=now()-interval '1 second' WHERE tenant_id=:tenant"
+            ),
+            {"tenant": store.tenant_id},
+        )
+    assert (await store.health())["unclassified_count"] == 0
+    assert (await store.mailbox("gmail-1")).discovered == []
+    assert (await service.scan())["discovered"] == []
+    await store.purge(datetime.now(UTC))
+    config, _ = await store.configuration()
+    assert await store.seen_source(config, "archived-a")
+    async with lead_sessions() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT encrypted_message_id, disposition, connection_id FROM lead_mailbox_messages WHERE tenant_id=:tenant"
+                ),
+                {"tenant": store.tenant_id},
+            )
+        ).all()
+        assert len(rows) == 2
+        assert all(row == (None, "expired", "") for row in rows)

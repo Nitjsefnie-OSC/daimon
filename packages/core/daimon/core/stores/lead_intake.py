@@ -207,17 +207,22 @@ class IntakeStore:
         return hashlib.sha256(f"{self.tenant_id}:gmail:{key}".encode()).hexdigest()
 
     async def seen_source(self, config: IntakeConfig, message_id: str) -> bool:
-        key = f"gmail:{config.gmail_mailbox.strip().lower()}:{message_id}"
-        digest = hashlib.sha256(f"{self.tenant_id}:gmail:{key}".encode()).hexdigest()
+        digest = self.source_digest(config, message_id)
         async with self.sessions() as session:
-            return (
-                await session.scalar(
-                    select(LeadIntakeRecord.id).where(
-                        LeadIntakeRecord.tenant_id == self.tenant_id,
-                        LeadIntakeRecord.source_digest == digest,
-                    )
+            accepted = await session.scalar(
+                select(LeadIntakeRecord.id).where(
+                    LeadIntakeRecord.tenant_id == self.tenant_id,
+                    LeadIntakeRecord.source_digest == digest,
                 )
-            ) is not None
+            )
+            expired_discovery = await session.scalar(
+                select(LeadMailboxMessageRecord.source_digest).where(
+                    LeadMailboxMessageRecord.tenant_id == self.tenant_id,
+                    LeadMailboxMessageRecord.source_digest == digest,
+                    LeadMailboxMessageRecord.expires_at <= datetime.now(UTC),
+                )
+            )
+            return accepted is not None or expired_discovery is not None
 
     async def get(self, intake_id: UUID) -> IntakeRecord:
         async with self.sessions() as session:
@@ -307,6 +312,7 @@ class IntakeStore:
                 .where(
                     LeadMailboxMessageRecord.tenant_id == self.tenant_id,
                     LeadMailboxMessageRecord.disposition == "discovered",
+                    LeadMailboxMessageRecord.expires_at > datetime.now(UTC),
                 )
             )
             return {
@@ -483,15 +489,32 @@ class IntakeStore:
     async def mailbox(self, connection: str) -> MailboxState:
         async with self.sessions() as session:
             row = await session.get(LeadMailboxState, (self.tenant_id, connection))
-            return (
+            state = (
                 MailboxState.model_validate_json(self.open(row.encrypted_state))
                 if row
                 else MailboxState()
             )
+            # The per-message ledger owns pending IDs and their expiry. Coverage
+            # state contains only the checkpoint/error, never a second ID copy.
+            encrypted_ids = await session.scalars(
+                select(LeadMailboxMessageRecord.encrypted_message_id)
+                .where(
+                    LeadMailboxMessageRecord.tenant_id == self.tenant_id,
+                    LeadMailboxMessageRecord.connection_id == connection,
+                    LeadMailboxMessageRecord.disposition == "discovered",
+                    LeadMailboxMessageRecord.expires_at > datetime.now(UTC),
+                    LeadMailboxMessageRecord.encrypted_message_id.is_not(None),
+                )
+                .order_by(
+                    LeadMailboxMessageRecord.expires_at, LeadMailboxMessageRecord.source_digest
+                )
+            )
+            state.discovered = [self.open(value) for value in encrypted_ids if value is not None]
+            return state
 
     async def save_mailbox(self, connection: str, state: MailboxState) -> None:
         async with self.sessions() as session, session.begin():
-            encrypted = self.seal(state.model_dump_json())
+            encrypted = self.seal(state.model_copy(update={"discovered": []}).model_dump_json())
             await session.execute(
                 insert(LeadMailboxState)
                 .values(
@@ -803,11 +826,24 @@ async def configured_routines(
 async def purge_auxiliary(
     session: AsyncSession, now: datetime, tenant_id: UUID | None = None
 ) -> None:
-    for model in (LeadMailboxMessageRecord, LeadOpportunityRecord):
-        query = delete(model).where(model.expires_at <= now)
-        if tenant_id is not None:
-            query = query.where(model.tenant_id == tenant_id)
-        await session.execute(query)
+    # Unclassified sources retain only a digest disposition after their TTL,
+    # preventing overlapping scans from rediscovering the same stale source.
+    expire_messages = (
+        update(LeadMailboxMessageRecord)
+        .where(LeadMailboxMessageRecord.expires_at <= now)
+        .values(
+            encrypted_message_id=None,
+            disposition="expired",
+            connection_id="",
+        )
+    )
+    if tenant_id is not None:
+        expire_messages = expire_messages.where(LeadMailboxMessageRecord.tenant_id == tenant_id)
+    await session.execute(expire_messages)
+    query = delete(LeadOpportunityRecord).where(LeadOpportunityRecord.expires_at <= now)
+    if tenant_id is not None:
+        query = query.where(LeadOpportunityRecord.tenant_id == tenant_id)
+    await session.execute(query)
     query = delete(LeadMailboxScanRecord).where(
         LeadMailboxScanRecord.started_at <= now - timedelta(days=90)
     )
