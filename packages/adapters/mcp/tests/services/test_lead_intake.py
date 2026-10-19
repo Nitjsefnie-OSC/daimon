@@ -176,6 +176,10 @@ class ProviderReplay:
         return httpx.Response(404, json={})
 
 
+async def readable(target: object) -> None:
+    pass
+
+
 async def noop(access: IntakeAccess) -> None:
     pass
 
@@ -211,7 +215,7 @@ async def test_full_active_http_replay_without_duplicate_effects(
         ports = HttpIntakePorts(
             client, gmail_token="synthetic", hubspot_token="synthetic", discord_token="synthetic"
         )
-        intake = IntakeService(store, ports, noop)
+        intake = IntakeService(store, ports, noop, authorize_read=readable)
         draft = LeadDraft(
             source=LeadSource(kind="gmail", mailbox="owner@example.test", message_id="immutable-1"),
             classification="project",

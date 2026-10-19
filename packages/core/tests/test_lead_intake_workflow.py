@@ -18,6 +18,7 @@ from daimon.core.lead_intake_service import (
     IntakeService,
     VerifiedSource,
 )
+from daimon.core.lead_intake_access import LeadReadTarget
 from daimon.core.stores.lead_intake import IntakeStore
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
@@ -83,6 +84,10 @@ async def noop(access: IntakeAccess) -> None:
     pass
 
 
+async def readable(target: LeadReadTarget) -> None:
+    pass
+
+
 def draft(classification: str = "project", message: str = "immutable-1") -> LeadDraft:
     return LeadDraft(
         source=LeadSource(kind="gmail", mailbox="owner@example.test", message_id=message),
@@ -118,7 +123,7 @@ async def setup(
     )
     await store.configure(config, {"hubspot_access_token": "synthetic"})
     ports = FakePorts(FIXTURES[-2]["text"])
-    return store, IntakeService(store, ports, noop), ports
+    return store, IntakeService(store, ports, noop, authorize_read=readable), ports
 
 
 @pytest.mark.parametrize("row", FIXTURES, ids=[r["kind"] for r in FIXTURES])
@@ -294,7 +299,7 @@ async def test_scan_failure_preserves_discoveries_without_checkpoint_skip(
     ports.scan_fail = False
     result = await service.scan()
     assert result["caught_up"] is True
-    state = await store.mailbox("gmail-1")
+    state = await store.mailbox((await store.configuration())[0])
     assert state.discovered == ["archived-a", "archived-b"]
 
 
@@ -388,7 +393,7 @@ async def test_live_revocation_stops_next_effect(
         if access.create_thread:
             raise PermissionError("revoked")
 
-    service = IntakeService(store, ports, reauthorize)
+    service = IntakeService(store, ports, reauthorize, authorize_read=readable)
     result = await service.submit(draft(), "7")
     assert result.status == "pending"
     assert ports.writes == ["starter"]
@@ -572,7 +577,7 @@ async def test_unclassified_discovery_expires_from_health_and_resume(
             {"tenant": store.tenant_id},
         )
     assert (await store.health())["unclassified_count"] == 0
-    assert (await store.mailbox("gmail-1")).discovered == []
+    assert (await store.mailbox((await store.configuration())[0])).discovered == []
     assert (await service.scan())["discovered"] == []
     await store.purge(datetime.now(UTC))
     config, _ = await store.configuration()
@@ -581,7 +586,7 @@ async def test_unclassified_discovery_expires_from_health_and_resume(
         rows = (
             await session.execute(
                 text(
-                    "SELECT encrypted_message_id, disposition, connection_id FROM lead_mailbox_messages WHERE tenant_id=:tenant"
+                    "SELECT encrypted_message_id, disposition, mailbox_key FROM lead_mailbox_messages WHERE tenant_id=:tenant"
                 ),
                 {"tenant": store.tenant_id},
             )
@@ -616,7 +621,7 @@ async def test_thread_write_revocation_between_dossier_chunks_stops_resume(
         if access.write and access.thread_id and "dossier:0" in ports.writes:
             raise PermissionError("thread_writers_none")
 
-    service = IntakeService(store, ports, authorize)
+    service = IntakeService(store, ports, authorize, authorize_read=readable)
     result = await service.submit(
         draft().model_copy(update={"thread_content": "DRAFT: " + "x" * 4000}), "7"
     )

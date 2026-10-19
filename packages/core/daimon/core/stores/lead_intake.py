@@ -25,6 +25,7 @@ from daimon.core.lead_intake import (
     IntakeBusy,
     IntakeConfig,
     IntakeRecord,
+    LeadDestination,
     LeadEffectState,
     LeadSubmission,
 )
@@ -58,6 +59,9 @@ class IntakeStore:
 
     async def configure(self, config: IntakeConfig, credentials: dict[str, str]) -> None:
         """Operator service entrypoint; credentials never enter tool arguments."""
+        if not config.gmail_mailbox.strip():
+            # Discoveries are keyed by the mailbox, not the connection's name.
+            raise ValueError("gmail_mailbox_required")
         values = dict(
             tenant_id=self.tenant_id,
             config=config.model_dump(mode="json"),
@@ -149,6 +153,7 @@ class IntakeStore:
             execution_id=provenance[1] if provenance else None,
             config_revision=config.revision,
             created_at=now,
+            destination=LeadDestination(guild_id=config.guild_id, channel_id=config.channel_id),
             expires_at=now + timedelta(days=config.retention_days),
             raw_expires_at=now + timedelta(days=config.raw_retention_days),
         )
@@ -166,6 +171,8 @@ class IntakeStore:
                     created_at=now,
                     expires_at=record.expires_at,
                     raw_expires_at=record.raw_expires_at,
+                    destination_guild_id=config.guild_id,
+                    destination_channel_id=config.channel_id,
                 )
                 .on_conflict_do_nothing(index_elements=["tenant_id", "source_digest"])
             )
@@ -188,19 +195,30 @@ class IntakeStore:
             return self._record(row)
 
     def _record(self, row: LeadIntakeRecord) -> IntakeRecord:
+        # Readers come from the capture-time columns, which survive erasure.
+        destination = LeadDestination(
+            guild_id=row.destination_guild_id, channel_id=row.destination_channel_id
+        )
         if row.encrypted_payload is not None and row.expires_at > datetime.now(UTC):
-            return IntakeRecord.model_validate_json(self.open(row.encrypted_payload))
+            record = IntakeRecord.model_validate_json(self.open(row.encrypted_payload))
+            return record.model_copy(update={"destination": destination})
         return IntakeRecord(
             id=row.id,
             tenant_id=self.tenant_id,
             source_digest=row.source_digest,
             status="expired",
             submission=None,
+            destination=destination,
             config_revision=0,
             created_at=row.created_at,
             expires_at=row.expires_at,
             raw_expires_at=row.raw_expires_at,
         )
+
+    def mailbox_key(self, config: IntakeConfig) -> str:
+        """Discovery state follows the mailbox, so renaming its connection strands nothing."""
+        mailbox = config.gmail_mailbox.strip().lower()
+        return hashlib.sha256(f"{self.tenant_id}:gmail:{mailbox}".encode()).hexdigest()
 
     def source_digest(self, config: IntakeConfig, message_id: str) -> str:
         key = f"gmail:{config.gmail_mailbox.strip().lower()}:{message_id}"
@@ -271,10 +289,20 @@ class IntakeStore:
             return record
 
     async def list(
-        self, limit: int = 100, *, pending_only: bool = False, after_id: UUID | None = None
+        self,
+        limit: int = 100,
+        *,
+        pending_only: bool = False,
+        after_id: UUID | None = None,
+        destination_channel_id: str | None = None,
     ) -> list[IntakeRecord]:
         async with self.sessions() as session:
             query = select(LeadIntakeRecord).where(LeadIntakeRecord.tenant_id == self.tenant_id)
+            if destination_channel_id is not None:
+                # A prefilter only: every returned record is still authorized.
+                query = query.where(
+                    LeadIntakeRecord.destination_channel_id == destination_channel_id
+                )
             if pending_only:
                 query = query.where(
                     LeadIntakeRecord.status.in_(("pending", "review")),
@@ -500,9 +528,10 @@ class IntakeStore:
                 )
             )
 
-    async def mailbox(self, connection: str) -> MailboxState:
+    async def mailbox(self, config: IntakeConfig) -> MailboxState:
+        key = self.mailbox_key(config)
         async with self.sessions() as session:
-            row = await session.get(LeadMailboxState, (self.tenant_id, connection))
+            row = await session.get(LeadMailboxState, (self.tenant_id, key))
             state = (
                 MailboxState.model_validate_json(self.open(row.encrypted_state))
                 if row
@@ -514,7 +543,7 @@ class IntakeStore:
                 select(LeadMailboxMessageRecord.encrypted_message_id)
                 .where(
                     LeadMailboxMessageRecord.tenant_id == self.tenant_id,
-                    LeadMailboxMessageRecord.connection_id == connection,
+                    LeadMailboxMessageRecord.mailbox_key == key,
                     LeadMailboxMessageRecord.disposition == "discovered",
                     LeadMailboxMessageRecord.expires_at > datetime.now(UTC),
                     LeadMailboxMessageRecord.encrypted_message_id.is_not(None),
@@ -526,16 +555,15 @@ class IntakeStore:
             state.discovered = [self.open(value) for value in encrypted_ids if value is not None]
             return state
 
-    async def save_mailbox(self, connection: str, state: MailboxState) -> None:
+    async def save_mailbox(self, config: IntakeConfig, state: MailboxState) -> None:
+        key = self.mailbox_key(config)
         async with self.sessions() as session, session.begin():
             encrypted = self.seal(state.model_copy(update={"discovered": []}).model_dump_json())
             await session.execute(
                 insert(LeadMailboxState)
-                .values(
-                    tenant_id=self.tenant_id, connection_id=connection, encrypted_state=encrypted
-                )
+                .values(tenant_id=self.tenant_id, mailbox_key=key, encrypted_state=encrypted)
                 .on_conflict_do_update(
-                    index_elements=["tenant_id", "connection_id"],
+                    index_elements=["tenant_id", "mailbox_key"],
                     set_={"encrypted_state": encrypted},
                 )
             )
@@ -601,7 +629,7 @@ class IntakeStore:
                 LeadMailboxScanRecord(
                     tenant_id=self.tenant_id,
                     id=identity,
-                    connection_id=config.source_connection_id,
+                    mailbox_key=self.mailbox_key(config),
                     window_start=start,
                     window_end=end,
                     state="running",
@@ -621,7 +649,7 @@ class IntakeStore:
                     .values(
                         tenant_id=self.tenant_id,
                         source_digest=self.source_digest(config, message),
-                        connection_id=config.source_connection_id,
+                        mailbox_key=self.mailbox_key(config),
                         encrypted_message_id=self.seal(message),
                         disposition="discovered",
                         expires_at=datetime.now(UTC) + timedelta(days=config.retention_days),
@@ -848,7 +876,7 @@ async def purge_auxiliary(
         .values(
             encrypted_message_id=None,
             disposition="expired",
-            connection_id="",
+            mailbox_key="",
         )
     )
     if tenant_id is not None:

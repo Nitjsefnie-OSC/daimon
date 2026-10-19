@@ -693,13 +693,13 @@ async def test_create_thread_forum_channel_denied_without_send_messages(
         _check_create_thread_permission(channel, member)
 
 
-@pytest.mark.parametrize("case", ["thread_writers", "thread_send", "thread_create", "read_only"])
+@pytest.mark.parametrize("case", ["thread_writers", "thread_send", "thread_create", "allowed"])
 async def test_lead_destination_uses_thread_and_native_permissions(
     monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
     from datetime import UTC, datetime
 
-    from daimon.adapters.mcp.tools.lead_intake import authorize_destination
+    from daimon.adapters.mcp.tools.lead_intake import authorize_effect_destination
     from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
     from daimon.core.lead_intake import IntakeConfig
     from daimon.core.lead_intake_service import IntakeAccess
@@ -715,8 +715,6 @@ async def test_lead_destination_uses_thread_and_native_permissions(
         permissions &= ~_SEND_MESSAGES_IN_THREADS
     if case == "thread_create":
         permissions &= ~_CREATE_PUBLIC_THREADS
-    if case == "read_only":
-        permissions = _VIEW_CHANNEL | (1 << 16)
 
     async def handler(route: discord.http.Route, _kwargs: dict[str, Any]) -> Any:
         if route.path == "/guilds/{guild_id}":
@@ -749,12 +747,11 @@ async def test_lead_destination_uses_thread_and_native_permissions(
     access = IntakeAccess(
         thread_id=None if case == "thread_create" else "999",
         create_thread=case == "thread_create",
-        write=case != "read_only",
     )
     async with rest_client("synthetic") as client:
         _, member = await _resolve_member(client, "111", "42")
-        if case == "read_only":
-            await authorize_destination(
+        if case == "allowed":
+            await authorize_effect_destination(
                 _runtime_with_discord_token(),
                 _auth(),
                 client,
@@ -766,7 +763,7 @@ async def test_lead_destination_uses_thread_and_native_permissions(
             )
         else:
             with pytest.raises(ToolError):
-                await authorize_destination(
+                await authorize_effect_destination(
                     _runtime_with_discord_token(),
                     _auth(),
                     client,

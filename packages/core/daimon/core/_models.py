@@ -3946,6 +3946,9 @@ class LeadIntakeRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     raw_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Who may read a lead is fixed at capture; kept in plaintext so it outlives erasure.
+    destination_guild_id: Mapped[str] = mapped_column(Text, nullable=False)
+    destination_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class LeadIntakeEffect(Base):
@@ -3994,7 +3997,7 @@ class LeadMailboxState(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )
-    connection_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    mailbox_key: Mapped[str] = mapped_column(Text, primary_key=True)
     encrypted_state: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
 
@@ -4032,7 +4035,7 @@ class LeadMailboxScanRecord(Base):
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    connection_id: Mapped[str] = mapped_column(Text, nullable=False)
+    mailbox_key: Mapped[str] = mapped_column(Text, nullable=False)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
@@ -4055,7 +4058,7 @@ class LeadMailboxMessageRecord(Base):
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )
     source_digest: Mapped[str] = mapped_column(Text, primary_key=True)
-    connection_id: Mapped[str] = mapped_column(Text, nullable=False)
+    mailbox_key: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_message_id: Mapped[bytes | None] = mapped_column(LargeBinary)
     disposition: Mapped[str] = mapped_column(Text, nullable=False)
     intake_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))

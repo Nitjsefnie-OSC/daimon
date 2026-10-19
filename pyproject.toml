@@ -127,6 +127,7 @@ type = "forbidden"
 # drifts from the directory.
 source_modules = [
     "daimon.core.lead_intake",
+    "daimon.core.lead_intake_access",
     "daimon.core.lead_intake_execution",
     "daimon.core.lead_intake_service",
     "daimon.core.lead_source",

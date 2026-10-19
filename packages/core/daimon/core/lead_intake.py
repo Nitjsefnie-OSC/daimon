@@ -425,11 +425,21 @@ class LeadEffectState(BaseModel):
     created_at: datetime
 
 
+class LeadDestination(BaseModel):
+    """The sales channel a record was captured for; its readers stay that channel's."""
+
+    model_config = ConfigDict(frozen=True)
+    guild_id: str
+    channel_id: str
+
+
 class IntakeRecord(BaseModel):
     id: UUID
     tenant_id: UUID
     source_digest: str
     status: str
+    # Filled by the store from plaintext columns, never from the payload.
+    destination: LeadDestination | None = None
     submission: LeadSubmission | None
     progress: LeadProgress = Field(default_factory=LeadProgress)
     effects: list[LeadEffectState] = Field(default_factory=lambda: list[LeadEffectState]())
@@ -446,11 +456,11 @@ class IntakeRecord(BaseModel):
 
 class IntakeResolution(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    company_id: str | None = Field(default=None, pattern=r"^\d+$")
-    contact_id: str | None = Field(default=None, pattern=r"^\d+$")
-    deal_id: str | None = Field(default=None, pattern=r"^\d+$")
+    company_id: str | None = Field(default=None, pattern=r"^\d+$", max_length=20)
+    contact_id: str | None = Field(default=None, pattern=r"^\d+$", max_length=20)
+    deal_id: str | None = Field(default=None, pattern=r"^\d+$", max_length=20)
     separate_opportunity_confirmed: bool = False
-    discord_message_id: str | None = Field(default=None, pattern=r"^\d+$")
+    discord_message_id: str | None = Field(default=None, pattern=r"^\d+$", max_length=20)
     discord_post_absence_confirmed: bool = False
     evidence: str = Field(min_length=20, max_length=2000)
 

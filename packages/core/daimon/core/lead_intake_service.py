@@ -22,6 +22,7 @@ from daimon.core.lead_intake import (
     split_dossier,
     verify_lead_evidence,
 )
+from daimon.core.lead_intake_access import LeadReadTarget, discovery_target, read_target
 from daimon.core.stores.lead_intake import IntakeStore
 from pydantic import BaseModel
 
@@ -65,6 +66,8 @@ class IntakeAccess(BaseModel):
 
 
 type Reauthorize = Callable[[IntakeAccess], Awaitable[None]]
+# `authorize_lead_read` for the calling reader; raises when the read is refused.
+type AuthorizeRead = Callable[[LeadReadTarget], Awaitable[None]]
 
 
 class IntakeService:
@@ -74,9 +77,11 @@ class IntakeService:
         ports: IntakePorts,
         reauthorize: Reauthorize,
         *,
+        authorize_read: AuthorizeRead,
         provenance: tuple[UUID, UUID] | None = None,
     ) -> None:
         self.store, self.ports, self.reauthorize = store, ports, reauthorize
+        self.authorize_read = authorize_read
         self.provenance = provenance
 
     async def read_source(self, message_id: str) -> VerifiedSource:
@@ -85,7 +90,7 @@ class IntakeService:
         source = LeadSource(
             kind=LeadSourceKind.GMAIL, mailbox=config.gmail_mailbox, message_id=message_id
         )
-        await self.reauthorize(IntakeAccess(source=source, write=False))
+        await self.authorize_read(discovery_target(config, self.store.tenant_id))
         if not await self.store.is_discovered(config, message_id):
             raise ValueError("unexpired_discovery_required")
         verified = await self.ports.source(config, source, None)
@@ -135,10 +140,10 @@ class IntakeService:
         )
         record = await self.store.accept(config, submission, actor_id, self.provenance)
         if draft.source.kind == "gmail":
-            async with self.store.claim(f"mailbox:{config.source_connection_id}"):
-                state = await self.store.mailbox(config.source_connection_id)
+            async with self.store.claim(f"mailbox:{self.store.mailbox_key(config)}"):
+                state = await self.store.mailbox(config)
                 state.discovered = [x for x in state.discovered if x != draft.source.message_id]
-                await self.store.save_mailbox(config.source_connection_id, state)
+                await self.store.save_mailbox(config, state)
         return await self.resume(record.id)
 
     async def _effect(
@@ -175,6 +180,8 @@ class IntakeService:
         current, _ = await self.store.configuration()
         if current != config:
             raise ValueError("configuration_changed")
+        if not _same_destination(record, config):
+            raise ValueError("destination_changed")
         key = hashlib.sha256(
             (
                 f"{record.tenant_id}:{config.crm_connection_id}:{config.portal_id}:"
@@ -222,37 +229,33 @@ class IntakeService:
         await self.store.finish(record.id, step, remote_id)
         return remote_id
 
-    async def authorize_record(self, record: IntakeRecord, *, write: bool = False) -> None:
+    async def _authorize_effects(self, record: IntakeRecord) -> None:
+        """Write authority over the record's actual destination and dossier thread."""
         thread_id = record.progress.discord_thread_id or next(
             (e.remote_id for e in record.effects if e.step == "thread" and e.remote_id), None
         )
-        if not write and thread_id is None and any(e.step == "thread" for e in record.effects):
-            # Discord creates a message thread at its starter's ID. Until an
-            # uncertain creation is reconciled, reads check that possible thread.
-            thread_id = record.progress.discord_message_id or next(
-                (e.remote_id for e in record.effects if e.step == "starter" and e.remote_id), None
-            )
-            if thread_id is None:
-                raise PermissionError("dossier_thread_reconciliation_required")
         await self.reauthorize(
             IntakeAccess(
                 source=record.submission.source if record.submission else None,
                 thread_id=thread_id,
-                write=write,
             )
         )
 
     async def get(self, intake_id: UUID) -> IntakeRecord:
         record = await self.store.get(intake_id)
-        await self.authorize_record(record)
+        await self.authorize_read(read_target(record))
         return record
 
-    async def resume(self, intake_id: UUID) -> IntakeRecord:
+    async def advance(self, intake_id: UUID) -> IntakeRecord:
+        """Run what effects remain; the result is not yet authorized for reading."""
         try:
-            record = await self._resume(intake_id)
+            return await self._resume(intake_id)
         except IntakeBusy:
-            record = await self.store.get(intake_id)
-        await self.authorize_record(record)
+            return await self.store.get(intake_id)
+
+    async def resume(self, intake_id: UUID) -> IntakeRecord:
+        record = await self.advance(intake_id)
+        await self.authorize_read(read_target(record))
         return record
 
     async def _resume(self, intake_id: UUID) -> IntakeRecord:
@@ -260,15 +263,15 @@ class IntakeService:
         await self.store.purge(datetime.now(UTC))
         async with self.store.claim(f"source:{intake_id}"):
             record = await self.store.get(intake_id)
-            await self.authorize_record(record, write=True)
             config, _ = await self.store.configuration()
             if record.status in {"completed", "rejected", "expired"} or config.mode == "capture":
                 return record
-            if record.config_revision != config.revision:
+            if record.config_revision != config.revision or not _same_destination(record, config):
                 # Target/connection changes cannot silently redirect accepted evidence.
                 record.error_code = "config_revision_review"
                 await self.store.save(record)
                 return record
+            await self._authorize_effects(record)
             submission = record.submission
             if submission is None:
                 return record
@@ -402,13 +405,17 @@ class IntakeService:
         await self.reauthorize(IntakeAccess())
         async with self.store.claim(f"source:{intake_id}"):
             record = await self.store.get(intake_id)
+            # A resolver reads the record they decide on; may_resolve is live.
+            await self.authorize_read(read_target(record))
             if record.status not in {"pending", "review"}:
                 raise ValueError("intake_not_resolvable")
             current_config, _ = await self.store.configuration()
-            if record.config_revision != current_config.revision:
+            if record.config_revision != current_config.revision or not _same_destination(
+                record, current_config
+            ):
                 raise ValueError("config_revision_review")
             p = record.progress
-            await self.authorize_record(record, write=True)
+            await self._authorize_effects(record)
             before = p.model_dump_json()
             starter_resolution: tuple[str, str | None] | None = None
             if resolution.deal_id and resolution.separate_opportunity_confirmed:
@@ -420,7 +427,7 @@ class IntakeService:
                 if intent is None or intent.state == "completed" or record.submission is None:
                     raise ValueError("uncertain_starter_required")
                 config, _ = await self.store.configuration()
-                await self.authorize_record(record, write=True)
+                await self._authorize_effects(record)
                 check = EffectRequest(
                     step="starter_resolution",
                     key=intent.stable_key,
@@ -459,6 +466,7 @@ class IntakeService:
             p.separate_opportunity_confirmed = resolution.separate_opportunity_confirmed
             p.resolved_by, p.resolution_evidence = actor_id, resolution.evidence
             p.review_reason, record.error_code = None, None
+            await self.authorize_read(read_target(record))
             await self.store.audit(
                 record, actor_id, before, p.model_dump_json(), effect_resolution=starter_resolution
             )
@@ -467,8 +475,8 @@ class IntakeService:
     async def scan(self) -> dict[str, object]:
         await self.reauthorize(IntakeAccess())
         config, _ = await self.store.configuration()
-        async with self.store.claim(f"mailbox:{config.source_connection_id}"):
-            state = await self.store.mailbox(config.source_connection_id)
+        async with self.store.claim(f"mailbox:{self.store.mailbox_key(config)}"):
+            state = await self.store.mailbox(config)
             anchor = state.checkpoint or config.reconciliation_start
             now = datetime.now(UTC)
             end = min(now, anchor + timedelta(days=7))
@@ -488,7 +496,7 @@ class IntakeService:
                     await self.store.record_discovered(config, new_ids, scan_id)
                     discovered_count += len(new_ids)
                     state.discovered = list(dict.fromkeys([*state.discovered, *new_ids]))
-                    await self.store.save_mailbox(config.source_connection_id, state)
+                    await self.store.save_mailbox(config, state)
                     if not cursor:
                         break
                     if cursor in seen:
@@ -498,7 +506,7 @@ class IntakeService:
             except Exception:
                 state.error_code = "mailbox_scan_failed"
             await self.store.finish_scan(scan_id, discovered_count, state.error_code)
-            await self.store.save_mailbox(config.source_connection_id, state)
+            await self.store.save_mailbox(config, state)
             return dict(
                 checkpoint=state.checkpoint,
                 discovered=state.discovered[:100],
@@ -506,3 +514,11 @@ class IntakeService:
                 caught_up=state.error_code is None and end == now,
                 error_code=state.error_code,
             )
+
+
+def _same_destination(record: IntakeRecord, config: IntakeConfig) -> bool:
+    """Effects land only where the record's readers were fixed at capture."""
+    return record.destination is not None and (
+        record.destination.guild_id,
+        record.destination.channel_id,
+    ) == (config.guild_id, config.channel_id)

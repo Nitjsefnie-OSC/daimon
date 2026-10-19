@@ -23,6 +23,7 @@ def upgrade() -> None:
             encrypted_payload BYTEA, encrypted_raw BYTEA,
             created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
             raw_expires_at TIMESTAMPTZ NOT NULL,
+            destination_guild_id TEXT NOT NULL, destination_channel_id TEXT NOT NULL,
             PRIMARY KEY (tenant_id, id),
             CONSTRAINT uq_lead_source UNIQUE (tenant_id, source_digest));
         CREATE TABLE lead_intake_effects (
@@ -47,13 +48,13 @@ def upgrade() -> None:
             ON DELETE CASCADE);
         CREATE TABLE lead_mailbox_scans (
             tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, id UUID NOT NULL,
-            connection_id TEXT NOT NULL, window_start TIMESTAMPTZ NOT NULL,
+            mailbox_key TEXT NOT NULL, window_start TIMESTAMPTZ NOT NULL,
             window_end TIMESTAMPTZ NOT NULL, state TEXT NOT NULL, discovered_count INTEGER NOT NULL,
             started_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ, error_code TEXT,
             PRIMARY KEY (tenant_id, id));
         CREATE TABLE lead_mailbox_messages (
             tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE, source_digest TEXT NOT NULL,
-            connection_id TEXT NOT NULL, encrypted_message_id BYTEA, disposition TEXT NOT NULL,
+            mailbox_key TEXT NOT NULL, encrypted_message_id BYTEA, disposition TEXT NOT NULL,
             intake_id UUID, expires_at TIMESTAMPTZ NOT NULL,
             PRIMARY KEY (tenant_id, source_digest),
             FOREIGN KEY (tenant_id, intake_id) REFERENCES lead_intakes(tenant_id, id)
@@ -64,8 +65,8 @@ def upgrade() -> None:
             expires_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (tenant_id, id));
         CREATE TABLE lead_mailbox_states (
             tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
-            connection_id TEXT NOT NULL, encrypted_state BYTEA NOT NULL,
-            PRIMARY KEY (tenant_id, connection_id));
+            mailbox_key TEXT NOT NULL, encrypted_state BYTEA NOT NULL,
+            PRIMARY KEY (tenant_id, mailbox_key));
     """
     for statement in statements.split(";"):
         if statement.strip():
