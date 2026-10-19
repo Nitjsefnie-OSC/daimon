@@ -108,12 +108,12 @@ class PlatformWords:
             return "start a new post" if place == "channel" else "send `new`"
         return "start a new thread" if place == "channel" else "ask me to start fresh"
 
-    def top_up(self, *, place: Place = "channel") -> str:
+    def top_up(self, *, place: Place = "channel", me: str = "me") -> str:
         """Where an admin adds credit, as a noun. On Teams it points to the 1:1 chat,
         where the billing card does not expire as a private channel reply does."""
         command = self.commands["billing"]
-        if self.platform == "teams":
-            return f"`{command.word}` in a {self.private_chat} with me"
+        if self.platform == "teams" and place != "dm":
+            return f"`{command.word}` in a {self.private_chat} with {me}"
         return self.phrase("billing", place=place) or f"`{command.word}`"
 
 
@@ -171,7 +171,7 @@ WORDS: Mapping[ChatPlatform, PlatformWords] = MappingProxyType(
             platform="teams",
             space="organisation",
             admin="an admin",
-            admin_rule="an owner of the team Daimon names as its admin team",
+            admin_rule="an owner of Daimon's admin team",
             private_chat="1:1 chat",
             verb="send",
             commands=MappingProxyType(
@@ -208,8 +208,10 @@ def turn_words(platform: ChatPlatform, *, place: Place) -> dict[str, str]:
         "private_chat": words.private_chat,
         "fresh_start": words.fresh_start(place=place),
     }
-    for action in ("setup", "here", "billing", "help"):
+    for action in ("setup", "here", "help"):
         said = words.say(action, place=place, me="Daimon")
         if said is not None:
             out[action] = said
+    # Credit is added from the billing card, which on Teams lives in the 1:1 chat.
+    out["billing"] = f"{words.verb} {words.top_up(place=place, me='Daimon')}"
     return out
