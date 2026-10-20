@@ -504,7 +504,9 @@ async def test_watch_uses_shared_watch_policy_and_named_read_projection(monkeypa
     assert all(call.args == ("watch",) for call in entry_point.call_args_list)
     projection.assert_awaited_once()
     assert projection.await_args.kwargs["allow_skills"] is False
-    assert projection.await_args.kwargs["tool_allowlist"] == frozenset({"linear/get_issue"})
+    assert projection.await_args.kwargs["tool_allowlist"] == frozenset(
+        {capabilities.ServerTool("linear", "get_issue")}
+    )
     assert constrained.send.tools[0]["default_config"] == {
         "enabled": False,
         "permission_policy": {"type": "always_ask"},
@@ -517,7 +519,8 @@ def test_watch_keeps_telemetry_closed_when_shared_helper_accepts_it(level):
 
     snapshot = _explicit_read_snapshot()
     getattr(snapshot, level).__pydantic_extra__["future_execution_capability"] = False
-    capabilities.require_allowed_capabilities(snapshot, allow_skills=False)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        capabilities.require_allowed_capabilities(snapshot, allow_skills=False)
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         watch_turn.validate_watch_snapshot(snapshot)
 
@@ -535,12 +538,15 @@ def test_watch_refuses_unreviewed_private_instance_attributes(level):
         "config": snapshot.agent.tools[0].configs[0],
     }[level]
     object.__setattr__(target, "_future_execution_capability", False)
-    capabilities.require_allowed_capabilities(snapshot, allow_skills=False)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        capabilities.require_allowed_capabilities(snapshot, allow_skills=False)
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         watch_turn.validate_watch_snapshot(snapshot)
 
 
 async def test_watch_server_names_cannot_alias_shared_allowlist_keys():
+    from daimon.core.turn.errors import AdmissionDenied
+
     snapshot = _explicit_read_snapshot()
     regular = snapshot.agent.tools[0]
     read = regular.configs[0]
@@ -561,16 +567,15 @@ async def test_watch_server_names_cannot_alias_shared_allowlist_keys():
             }
         )
     )
-    constrained = await watch_turn.watch_capabilities(
-        snapshot,
-        ToolSafetyPolicy(),
-        public_url=None,
-        sessions=None,
-        tenant_id=uuid.uuid4(),
-    )
-    # A server name is not a prefix for enabling an absent tool on another server.
-    assert constrained.send.tools == []
-    assert constrained.send.mcp_servers == []
+    # The shared helper refuses ambiguous server identities before projection.
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await watch_turn.watch_capabilities(
+            snapshot,
+            ToolSafetyPolicy(),
+            public_url=None,
+            sessions=None,
+            tenant_id=uuid.uuid4(),
+        )
 
 
 @pytest.mark.parametrize("effort", ["max", {"type": "high"}])
