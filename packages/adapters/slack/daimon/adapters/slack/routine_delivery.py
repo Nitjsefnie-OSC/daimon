@@ -42,10 +42,10 @@ from daimon.core.routine_delivery import (
     render_fallback_post,
     resolve_routine_identity,
     slack_creator_may_post,
+    tenant_dm_still_open,
 )
 from daimon.core.routine_files import deliver_routine_files, payload_for
 from daimon.core.rule_views import keeps_routine_inside
-from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenants import get_tenant
@@ -224,15 +224,8 @@ def make_slack_routine_poster(
         async def fallback_guard() -> bool:
             if not await creator_current():
                 return False
-            async with runtime.sessionmaker() as session:
-                tenant_now = await get_tenant(session, row.tenant_id)
-                if (
-                    tenant_now is None
-                    or tenant_now.archived_at is not None
-                    or tenant_now.external_id != tenant.external_id
-                    or not await dm_enabled(session, tenant_id=row.tenant_id)
-                ):
-                    return False
+            if not await tenant_dm_still_open(runtime.sessionmaker, row, tenant.external_id):
+                return False
             creator = row.created_by_user_id
             current_dm_policy = runtime.settings.direct_message_policies.get(
                 row.tenant_id, DirectMessagePolicy()

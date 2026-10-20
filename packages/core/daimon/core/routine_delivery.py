@@ -89,6 +89,7 @@ __all__ = [
     "discord_creator_may_post",
     "slack_creator_may_post",
     "teams_thread_id",
+    "tenant_dm_still_open",
     "creator_refusal_for",
     "placement_unknown_is_unsafe",
     "delivery_refusal",
@@ -706,6 +707,20 @@ def claim_still_current(current: RoutineRow, row: RoutineRow, now: datetime) -> 
         and current.delivery_lease_expires_at is not None
         and current.delivery_lease_expires_at > now
     )
+
+
+async def tenant_dm_still_open(
+    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, external_id: str
+) -> bool:
+    """Whether `row`'s tenant is still the live workspace `external_id` with routine DMs on."""
+    async with sessionmaker() as session:
+        tenant = await get_tenant(session, row.tenant_id)
+        return (
+            tenant is not None
+            and tenant.archived_at is None
+            and tenant.external_id == external_id
+            and await dm_enabled(session, tenant_id=row.tenant_id)
+        )
 
 
 @dataclass(frozen=True)

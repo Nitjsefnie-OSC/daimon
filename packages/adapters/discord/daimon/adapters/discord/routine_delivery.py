@@ -54,6 +54,7 @@ from daimon.core.routine_delivery import (
     discord_creator_may_post,
     render_fallback_dm,
     render_fallback_post,
+    tenant_dm_still_open,
 )
 from daimon.core.routine_files import decode_payload, deliver_routine_files, payload_for
 from daimon.core.rule_views import keeps_routine_inside
@@ -374,15 +375,8 @@ def make_discord_routine_poster(
         async def fallback_guard() -> bool:
             if await creator_still_cleared(row) is not None:
                 return False
-            async with sessionmaker() as session:
-                tenant_now = await get_tenant(session, row.tenant_id)
-                if (
-                    tenant_now is None
-                    or tenant_now.archived_at is not None
-                    or tenant_now.external_id != tenant.external_id
-                    or not await dm_enabled(session, tenant_id=row.tenant_id)
-                ):
-                    return False
+            if not await tenant_dm_still_open(sessionmaker, row, tenant.external_id):
+                return False
             creator = row.created_by_user_id
             if creator is None or not dm_policy(row).allows(creator):
                 return False
