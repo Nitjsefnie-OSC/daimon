@@ -742,12 +742,13 @@ _EDITOR_SCRIPT = """
       trigger.setAttribute("aria-expanded", "false");
     }
   }
-  function makeAddedRow(id, name) {
+  function makeAddedRow(id, name, installation) {
     const row = document.getElementById("added-row-template")
       .content.firstElementChild.cloneNode(true);
     row.dataset.repoId = id;
     row.dataset.name = name;
     row.dataset.added = "true";
+    row.dataset.installation = installation || "";
     row.dataset.workingEligible = "true";
     row.querySelector(".gh-row-name").textContent = name.split("/").slice(1).join("/");
     row.querySelector(".gh-remove-action").setAttribute("aria-label", "Remove " + name);
@@ -839,7 +840,22 @@ _EDITOR_SCRIPT = """
     cancel.hidden = !!parts.length;
     save.hidden = !parts.length;
     saveHelp.hidden = !parts.length;
-    save.disabled = !parts.length;
+    // The server enforces the same limit by App installation; counting the same ids
+    // keeps the ticks instead of a dead end. The owner name is only a fallback.
+    const accounts = new Set(rows().filter(row => !removed.has(row.dataset.repoId))
+      .map(row => row.dataset.installation ? "i:" + row.dataset.installation :
+        "o:" + (row.closest(".gh-owner-group")?.dataset.owner || "").toLowerCase()));
+    const limit = Number(form.dataset.ownerLimit);
+    const over = accounts.size - limit;
+    const ownerLimit = document.getElementById("owner-limit");
+    ownerLimit.hidden = !(over > 0 && parts.length);
+    const limitText = over > 0 ? form.dataset.agent +
+      " can use repos from up to " + limit + " GitHub accounts or orgs. These changes use " +
+      accounts.size + ". Remove the repos from " + over + " " +
+      (over === 1 ? "account" : "accounts") + " to save." : "";
+    const limitSpan = ownerLimit.querySelector("span");
+    if (limitSpan.textContent !== limitText) limitSpan.textContent = limitText;
+    save.disabled = !parts.length || over > 0;
     save.textContent = "Save changes";
     workingInput.value = workingExplicit ||
       (working !== initialWorking && !removed.has(initialWorking))
@@ -1054,7 +1070,7 @@ _EDITOR_SCRIPT = """
     for (const option of selected) {
       const id = option.dataset.repoId;
       staged.set(id, "write");
-      if (!rowFor(id)) makeAddedRow(id, option.dataset.name);
+      if (!rowFor(id)) makeAddedRow(id, option.dataset.name, option.dataset.installation);
       removed.delete(id);
     }
     for (const row of rows()) {
@@ -1266,6 +1282,8 @@ def _agent_editor_page(
         '<form id="github-connect-form" class="gh-editor" method="post" '
         f'data-working="{working.repo_id if working else ""}" '
         f'data-may-change-working="{str(may_change_working).lower()}" '
+        f'data-agent="{esc(agent_name, quote=True)}" '
+        f'data-owner-limit="{github_access.MAX_AGENT_INSTALLATIONS}" '
         f'action="{esc(root, quote=True)}/oauth/github/confirm">',
         f'<input type="hidden" name="state" value="{esc(state, quote=True)}">',
         f'<input type="hidden" name="invitation" value="{esc(invitation_hash, quote=True)}">',
@@ -1362,6 +1380,7 @@ def _agent_editor_page(
             parts.append(
                 f'<article class="gh-agent-row" data-repo-id="{repo.repo_id}" '
                 f'data-name="{data_name}" '
+                f'data-installation="{repo.installation_id or ""}" '
                 f'data-working-eligible="{str(editable and repo.status == "active").lower()}" '
                 f'data-access="{repo.ceiling_access}">'
                 '<div class="gh-row-top"><span class="gh-row-icon">'
@@ -1614,7 +1633,9 @@ def _agent_editor_page(
         '<div class="gh-dock-chips"><span id="dock-add" hidden></span>'
         '<span id="dock-remove" hidden></span>'
         f'<span id="dock-working" hidden>{icon("pin")}<span></span></span></div>'
-        '<small id="save-help" hidden></small></div>'
+        '<small id="save-help" hidden></small>'
+        f'<p id="owner-limit" class="gh-dock-warning" role="alert" hidden>{icon("triangle-alert")}'
+        "<span></span></p></div>"
         '<div class="gh-editor-footer-actions">'
         '<button id="discard-repos" class="gh-editor-discard gh-js" type="button" hidden>'
         "Discard changes</button>"
@@ -2721,9 +2742,15 @@ def build_oauth_github_routes(
                 return _error(
                     "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
                 )
+            except github_access.InstallationLimitError as exc:
+                return _error(
+                    str(exc),
+                    400,
+                    retry_confirm_url,
+                    action="Go back, remove the repos from at least one account, then save again.",
+                )
             except (
                 github_connect.GrantReassignmentError,
-                github_access.InstallationLimitError,
                 github_access.SessionVaultBudgetError,
                 github_access.ReadOnlyMultiInstallationError,
             ) as exc:

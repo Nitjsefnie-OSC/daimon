@@ -107,8 +107,9 @@ def require_projected_grant_budget(
     """Check the complete stored grant set before changing it or its alias."""
     if len(repo_ids_by_installation) > MAX_AGENT_INSTALLATIONS:
         raise InstallationLimitError(
-            f"{agent_name} already uses repos from 12 GitHub accounts or orgs, "
-            "the most one agent can hold. Remove one first."
+            f"{agent_name} can use repos from up to {MAX_AGENT_INSTALLATIONS} GitHub "
+            f"accounts or orgs, and this change would make it "
+            f"{len(repo_ids_by_installation)}. Nothing was saved."
         )
     multi_installation = len(repo_ids_by_installation) > 1
     if multi_installation and any_read_only:
@@ -329,6 +330,9 @@ class AgentRepo(BaseModel):
     is_working_repo: bool = False
     grant_version: int = 0
     authorization_version: int = 0
+    # The App installation the repo's authorization rests on; the per-agent
+    # account limit counts these, not owner names (an owner can be renamed).
+    installation_id: int | None = None
 
 
 async def list_agent_repos(
@@ -358,6 +362,7 @@ async def list_agent_repos(
                 is_working_repo=grant.is_working_repo,
                 grant_version=grant.version,
                 authorization_version=row.version,
+                installation_id=row.installation_id,
             )
         )
     return sorted(result, key=lambda repo: repo.full_name.casefold())

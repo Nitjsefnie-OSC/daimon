@@ -404,7 +404,7 @@
 .gh-editor-footer strong { display: block; font-size: 14px; }
 .gh-editor-footer small { display: block; margin-top: 3px; color: var(--muted-foreground); font-size: 12px; }
 .gh-editor-footer-actions { display: flex; align-items: center; gap: 11px; }
-.gh-editor-discard, .gh-editor-cancel { min-height: 44px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-foreground); font-size: 14px; font-weight: 500; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
+.gh-editor-discard, .gh-editor-cancel { min-height: 44px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-foreground); font-size: 14px; font-weight: 500; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; white-space: nowrap; }
 .gh-editor-discard:hover, .gh-editor-cancel:hover { background: var(--muted); color: var(--foreground); }
 .gh-dock-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
 .gh-dock-chips > span { padding: 2px 7px; border-radius: 6px; background: var(--muted); color: var(--foreground); font-size: 13px; font-weight: 500; }
@@ -457,3 +457,6 @@
   .gh-editor-footer-actions .gh-primary { padding: 0 14px; font-size: 14px; }
   .gh-editor .gh-editor-cancel:not([hidden]) { display: inline-flex; }
 }
+.gh-dock-warning { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; padding: 4px 8px; border-radius: 6px; background: var(--warning-bg); color: var(--warning); font-size: 13px; font-weight: 500; line-height: 20px; }
+.gh-dock-warning[hidden] { display: none; }
+.gh-dock-warning .web-icon { width: 16px; height: 16px; flex: none; }
