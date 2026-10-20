@@ -1341,6 +1341,12 @@ membership lookup cannot authorize private delivery. Inspect routine
 `delivery_status` and `delivery_note` when a DM fails; do not manually reset an
 uncertain or partially sent claim to pending, because delivery is at most once.
 
+Native [lead intake](lead-intake.md) uses the existing `DAIMON_CRYPTO__KEYS`
+MultiFernet ring for tenant evidence and service-owned integration credentials.
+Provision private operator files with `daimon leads configure`; do not put
+Gmail/HubSpot secrets in prompts or agent vaults. Keep the scheduler running so
+raw-source and 90-day evidence expiry happen even when no triage routine fires.
+
 ### Clearing retained legacy routine output
 
 Migration `0117_clear_legacy_routine_output` clears `last_result_tail`,

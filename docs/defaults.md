@@ -256,3 +256,11 @@ them as PNG attachments unless the tenant opts out, and Slack uses native table 
 when the tenant enables them; Teams shows Markdown tables
 as they are, with no setting. Existing custom agent
 prompts are unchanged; see [platform table rendering](architecture.md#platform-table-rendering).
+
+The optional `lead-intake` skill classifies consulting/project enquiries and
+prepares source quotes, research and draft replies. Qualification is a model
+step; deterministic source and identity verification remain in the intake
+service. Applying defaults does not activate provider writes.
+
+Lead classification reads each discovered source through `lead_intake_read_source`
+before submission; the model receives source text without service credentials.

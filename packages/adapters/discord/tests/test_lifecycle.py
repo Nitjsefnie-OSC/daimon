@@ -378,7 +378,7 @@ async def test_terminal_edit_has_an_application_timeout(monkeypatch: pytest.Monk
     assert lc._card_writes.key(_SENTINEL_REF) in lc._card_writes.terminal_ready
 
 
-@pytest.mark.parametrize("held_stage", ["edit", "replacement_send"])
+@pytest.mark.parametrize("held_stage", ["edit", "replacement_send", "confirmation_lookup"])
 async def test_ceiling_render_supersedes_retained_terminal_replacement(
     monkeypatch: pytest.MonkeyPatch, held_stage: str
 ) -> None:
@@ -458,6 +458,13 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
         turn_path="legacy",
         backend=None,
     )
+
+    async def no_confirmed_tools(_deps: object, _tenant: uuid.UUID) -> frozenset[str]:
+        if held_stage == "confirmation_lookup":
+            await release.wait()
+        return frozenset()
+
+    monkeypatch.setattr(turn_runner, "confirmed_tools_for_tenant", no_confirmed_tools)
     monkeypatch.setattr(turn_runner, "run_turn", fake_driver)
     monkeypatch.setattr(turn_runner, "chat_tool_confirmation", lambda *args, **kwargs: None)
     monkeypatch.setattr(turn_runner, "trusted_servers_for", lambda *args: ())

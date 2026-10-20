@@ -42,7 +42,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
 from daimon.core.channel_backend import BackendUnsupported
 from daimon.core.channel_skills import PLATFORM_SKILL_RETRY_AFTER
 from daimon.core.config import load_turn_settings
-from daimon.core.confirmation import confirmed_tools_for_turn
+from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
 from daimon.core.ma_identity import derive_agent_uuid
@@ -648,7 +648,7 @@ async def create_ma_session(
             personal_memory=True,
             tool_safety=deps.tool_safety,
             asks_before_publishing=admission.asks_before_publishing,
-            confirmed_tools=confirmed_tools_for_turn(deps),
+            confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
             daimon_rule_tools=admission.daimon_rule_tools,
             slack_turn_context_id=admission.slack_turn_context_id,
             private_dm_id=admission.private_dm_id,

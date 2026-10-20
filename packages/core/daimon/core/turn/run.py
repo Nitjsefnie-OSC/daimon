@@ -31,7 +31,7 @@ from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
     ToolRuleCardReference,
-    confirmed_tools_for_turn,
+    confirmed_tools_for_tenant,
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.errors import TurnError
@@ -970,134 +970,7 @@ async def run_prepared_turn_impl(
     breach can never loop into a second wall-clock-priced attempt.
     """
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
-    confirmed_tools: frozenset[str] = confirmed_tools_for_turn(deps)
-    if confirmed_tools:
-        revision = prepared.admission.backend_revision
-        if (
-            revision is not None
-            and get_profile(revision.profile).support_for("tool_confirmation") not in SUPPORTED
-        ):
-            confirmed_tools = frozenset()
-    prepared_source = prepared._source  # pyright: ignore[reportPrivateUsage]
     unattended = not (attended if attended is not None else origin != "routine")
-    annotations_for = (
-        mcp_annotation_lookup(
-            server_urls={
-                s.name: s.url
-                for s in prepared.admission.agent.mcp_servers
-                if s.name in deps.tool_safety.trusted_annotations
-            },
-            token_for=agent_mcp_token_for(
-                deps.sessionmaker,
-                fernet=deps.fernet,
-                tenant_id=tenant_id,
-                agent_id=(
-                    prepared_source.agent_id
-                    if prepared_source is not None
-                    else derive_agent_uuid(
-                        tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
-                    )
-                ),
-            ),
-        )
-        # Only servers the operator trusts for annotations are read; with
-        # none trusted no catalogue is ever listed.
-        if getattr(deps.tool_safety, "enabled", False)
-        and getattr(deps.tool_safety, "trusted_annotations", ())
-        else None
-    )
-    tool_confirmation = chat_tool_confirmation(
-        deps.tool_safety,
-        requester_platform_user_id=external_user_id,
-        confirm=confirm_write,
-        attended=not unattended,
-        trusted_servers=trusted_servers_for(deps.public_url),
-        asks_before_publishing=prepared.admission.asks_before_publishing,
-        confirmed_tools=confirmed_tools,
-        daimon_rules=bool(prepared.admission.daimon_rule_tools),
-        rules_for=(
-            agent_rule_lookup(
-                deps.sessionmaker,
-                tenant_id=tenant_id,
-                agent_id=str(prepared.admission.agent.id),
-                server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
-                also_urls=daimon_endpoint(deps.public_url),
-                channel_id=channel_for_tool_rules(
-                    platform=platform,
-                    channel_id=prepared.admission.origin_channel_id,
-                    private_dm_id=prepared.admission.private_dm_id,
-                ),
-            )
-            if getattr(deps.tool_safety, "enabled", False)
-            and getattr(deps.tool_safety, "agent_rules", False)
-            else None
-        ),
-        rule_card_for=(
-            lambda call: (
-                (
-                    ToolRuleCardReference(
-                        tenant_id=tenant_id,
-                        agent_id=str(prepared.admission.agent.id),
-                        agent_name=prepared.admission.agent.name,
-                        tool_key=call.key,
-                        server_url=url,
-                        channel_id=channel_for_tool_rules(
-                            platform=platform,
-                            channel_id=prepared.admission.origin_channel_id,
-                            private_dm_id=prepared.admission.private_dm_id,
-                        ),
-                    )
-                    if (
-                        url := next(
-                            (
-                                server.url
-                                for server in prepared.admission.agent.mcp_servers
-                                if server.name == call.server_name
-                            ),
-                            None,
-                        )
-                    )
-                    is not None
-                    else None
-                )
-                if getattr(deps.tool_safety, "enabled", False)
-                and getattr(deps.tool_safety, "agent_rules", False)
-                else None
-            )
-        ),
-        annotations_for=annotations_for,
-    )
-    if unattended:
-        # A fleet worker or a wake nobody asked for just now: the one
-        # unattended decider, policy on or off, with Daimon's card-only actions
-        # refused, never the chat posture's safety-off shortcuts.
-        tool_confirmation = PolicyApproval(
-            decide=unattended_decider(
-                deps.tool_safety,
-                trusted_servers=trusted_servers_for(deps.public_url),
-                confirmed_tools=confirmed_tools | protected_tools(deps.tool_safety),
-                daimon_rules=True,
-                annotations_for=annotations_for,
-                rules_for=agent_rule_lookup(
-                    deps.sessionmaker,
-                    tenant_id=tenant_id,
-                    agent_id=str(prepared.admission.agent.id),
-                    server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
-                    also_urls=daimon_endpoint(deps.public_url),
-                    channel_id=channel_for_tool_rules(
-                        platform=platform,
-                        channel_id=prepared.admission.origin_channel_id,
-                        private_dm_id=prepared.admission.private_dm_id,
-                    ),
-                ),
-            )
-        )
-        tool_confirmation = capability_posture(tool_confirmation)
-
-    unattended_dm = (
-        unattended and prepared.admission.grant is not None and prepared.admission.grant.is_dm
-    )
-
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
@@ -1128,6 +1001,7 @@ async def run_prepared_turn_impl(
         mapping_id: uuid.UUID | None,
         session_ref: ResourceRef | None = None,
         *,
+        confirmation: ToolConfirmation,
         backend: ManagedAgents | None = None,
         scope: Scope | None = None,
     ) -> AsyncIterator[ToolConfirmation]:
@@ -1162,7 +1036,7 @@ async def run_prepared_turn_impl(
                 )
         try:
             selected_path = deps.turn_path or load_turn_settings().path
-            posture = tool_confirmation
+            posture = confirmation
             with contextlib.ExitStack() as stack:
                 stack.enter_context(execution_origin(origin_id))
                 if unattended:
@@ -1204,7 +1078,7 @@ async def run_prepared_turn_impl(
                         # a coordinator, or a tool that never pauses, would run
                         # on its first message. Refuse before anything is sent.
                         raise AdmissionDenied(reason="backend_unsupported")
-                    if unattended_dm:
+                    if admission.grant is not None and admission.grant.is_dm:
                         if not gateable:
                             raise AdmissionDenied(reason="backend_unsupported")
                         from daimon.core.turn.unattended import dm_session_authority
@@ -1281,6 +1155,130 @@ async def run_prepared_turn_impl(
             await before_send()
 
     async def _run() -> RunOutcome:
+        confirmed_tools: frozenset[str] = await confirmed_tools_for_tenant(deps, tenant_id)
+        if confirmed_tools:
+            revision = prepared.admission.backend_revision
+            if (
+                revision is not None
+                and get_profile(revision.profile).support_for("tool_confirmation") not in SUPPORTED
+            ):
+                confirmed_tools = frozenset()
+        prepared_source = prepared._source  # pyright: ignore[reportPrivateUsage]
+        annotations_for = (
+            mcp_annotation_lookup(
+                server_urls={
+                    s.name: s.url
+                    for s in prepared.admission.agent.mcp_servers
+                    if s.name in deps.tool_safety.trusted_annotations
+                },
+                token_for=agent_mcp_token_for(
+                    deps.sessionmaker,
+                    fernet=deps.fernet,
+                    tenant_id=tenant_id,
+                    agent_id=(
+                        prepared_source.agent_id
+                        if prepared_source is not None
+                        else derive_agent_uuid(
+                            tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
+                        )
+                    ),
+                ),
+            )
+            # Only servers the operator trusts for annotations are read; with
+            # none trusted no catalogue is ever listed.
+            if getattr(deps.tool_safety, "enabled", False)
+            and getattr(deps.tool_safety, "trusted_annotations", ())
+            else None
+        )
+        tool_confirmation = chat_tool_confirmation(
+            deps.tool_safety,
+            requester_platform_user_id=external_user_id,
+            confirm=confirm_write,
+            attended=not unattended,
+            trusted_servers=trusted_servers_for(deps.public_url),
+            asks_before_publishing=prepared.admission.asks_before_publishing,
+            confirmed_tools=confirmed_tools,
+            daimon_rules=bool(prepared.admission.daimon_rule_tools),
+            rules_for=(
+                agent_rule_lookup(
+                    deps.sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_id=str(prepared.admission.agent.id),
+                    server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+                    also_urls=daimon_endpoint(deps.public_url),
+                    channel_id=channel_for_tool_rules(
+                        platform=platform,
+                        channel_id=prepared.admission.origin_channel_id,
+                        private_dm_id=prepared.admission.private_dm_id,
+                    ),
+                )
+                if getattr(deps.tool_safety, "enabled", False)
+                and getattr(deps.tool_safety, "agent_rules", False)
+                else None
+            ),
+            rule_card_for=(
+                lambda call: (
+                    (
+                        ToolRuleCardReference(
+                            tenant_id=tenant_id,
+                            agent_id=str(prepared.admission.agent.id),
+                            agent_name=prepared.admission.agent.name,
+                            tool_key=call.key,
+                            server_url=url,
+                            channel_id=channel_for_tool_rules(
+                                platform=platform,
+                                channel_id=prepared.admission.origin_channel_id,
+                                private_dm_id=prepared.admission.private_dm_id,
+                            ),
+                        )
+                        if (
+                            url := next(
+                                (
+                                    server.url
+                                    for server in prepared.admission.agent.mcp_servers
+                                    if server.name == call.server_name
+                                ),
+                                None,
+                            )
+                        )
+                        is not None
+                        else None
+                    )
+                    if getattr(deps.tool_safety, "enabled", False)
+                    and getattr(deps.tool_safety, "agent_rules", False)
+                    else None
+                )
+            ),
+            annotations_for=annotations_for,
+        )
+        if unattended:
+            # A fleet worker or a wake nobody asked for just now: the one
+            # unattended decider, policy on or off, with Daimon's card-only actions
+            # refused, never the chat posture's safety-off shortcuts.
+            tool_confirmation = PolicyApproval(
+                decide=unattended_decider(
+                    deps.tool_safety,
+                    trusted_servers=trusted_servers_for(deps.public_url),
+                    confirmed_tools=confirmed_tools | protected_tools(deps.tool_safety),
+                    daimon_rules=True,
+                    annotations_for=annotations_for,
+                    rules_for=agent_rule_lookup(
+                        deps.sessionmaker,
+                        tenant_id=tenant_id,
+                        agent_id=str(prepared.admission.agent.id),
+                        server_urls={s.name: s.url for s in prepared.admission.agent.mcp_servers},
+                        also_urls=daimon_endpoint(deps.public_url),
+                        channel_id=channel_for_tool_rules(
+                            platform=platform,
+                            channel_id=prepared.admission.origin_channel_id,
+                            private_dm_id=prepared.admission.private_dm_id,
+                        ),
+                    ),
+                )
+            )
+
+            tool_confirmation = capability_posture(tool_confirmation)
+
         ma_session_id = prepared.ma_session_id
         mapping_id = prepared.mapping_id
 
@@ -1306,6 +1304,7 @@ async def run_prepared_turn_impl(
             ma_session_id,
             mapping_id,
             prepared.session_ref,
+            confirmation=tool_confirmation,
             backend=prepared.backend,
             scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
         ) as attempt_confirmation:
@@ -1468,7 +1467,10 @@ async def run_prepared_turn_impl(
             )
             try:
                 async with persisted(
-                    recovery.admission or prepared.admission, new_session_id, new_mapping_id
+                    recovery.admission or prepared.admission,
+                    new_session_id,
+                    new_mapping_id,
+                    confirmation=tool_confirmation,
                 ) as recovery_confirmation:
                     recovered_state = await run_turn(
                         **_turn_port_kwargs(

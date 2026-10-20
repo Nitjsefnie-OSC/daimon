@@ -2390,3 +2390,42 @@ Fallback-DM files recheck current DM controls, isolation (including a resolved
 Discord parent) and recipient eligibility before each file and after download.
 Delivery error logs record the error type without arbitrary exception text,
 which may contain signed upload URLs.
+
+## Lead intake
+
+The [lead intake](lead-intake.md) coordinator and evidence contracts live in
+core; tenant stores own encrypted submissions, effect intents, resolution audit,
+mailbox coverage and short-lived routine execution grants. The MCP service
+implements Gmail, HubSpot and Discord HTTP ports without adapter-to-adapter
+imports. Seven first-party tools expose submit/resume/resolve, attachment-free
+preclassification source reads, and private get/list/health; `daimon leads configure` provisions encrypted operator-owned
+integration configuration. Scheduler dispatch signs execution provenance into
+routine credentials and revokes it when the fire ends; retention maintenance
+erases expired evidence independently of intake activity.
+
+The Discord `/leads` entry point reads that same core tenant store and admission
+contract for an ephemeral queue/review status; decisions continue through the
+first-party resolver tool. It imports no MCP adapter implementation.
+
+Opportunity reservations retain tenant/CRM/portal-scoped normalized project
+identities. Separate mailbox scan history and message dispositions preserve
+page discoveries and failed coverage independently of the accepted intake queue.
+Sensitive opportunity mappings and discovered message IDs are encrypted and
+expire with the retention policy.
+
+Intake authorization carries the actual destination thread through recovery and
+write intents. Both MCP record readback and the private Discord queue evaluate
+that thread’s current policy and native visibility before returning its data.
+Approval cards cache no lead evidence: each Details click authorizes and renders
+from the live record, and removed records are unavailable. Store list traversal
+applies the same live read predicate before counting the visible page limit.
+Automatic resume batches use the current destination and revision and apply live
+read authorization before filling their processing window; deferred captures
+remain available for authorized manual review. Mailbox scan readback independently authorizes the current discovery destination,
+including when a resume batch contains no records.
+
+Routine intake provenance is signed only into the isolated provider-session
+credential. Refresh preserves its routine/execution discriminator and session
+grant; the shared personal-credential vault never receives routine provenance.
+Every unattended confirmation path protects lead resolution, even with general
+tool safety disabled.

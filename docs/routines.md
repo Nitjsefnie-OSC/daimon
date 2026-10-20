@@ -706,6 +706,19 @@ recipient eligibility and isolation, including a resolved Discord thread parent,
 before each file and after download. Owner DM delivery retains the same privacy and
 no-personal-memory rules as text. Run-failure notices never carry files.
 
+For configured [lead intake](lead-intake.md), begin each triage run with
+`lead_intake_resume`, classify every discovered message (including `other`),
+and inspect coverage separately from delivery/CRM status. The named routine's
+signed execution grant expires when its scheduler fire ends; stale grants and
+routine resolution are refused. Capture has no external effects. `crm_paused`
+still posts dossiers and archives Gmail. Alert only configured authorized owners
+with minimal IDs/error codes and private links, never public fallback content.
+
+Lead-intake routines use isolated session credentials with signed routine and
+execution identity, retained during refresh. They cannot borrow an attended
+conversation’s read or approval authority, and lead resolution is always refused
+unattended.
+
 Retained output and diagnostics on destination-free routines (no destination kind,
 destination ID, or channel ID) are owner-only, like DM results. Administrators can
 manage their metadata but cannot read those private previews, errors, delivery

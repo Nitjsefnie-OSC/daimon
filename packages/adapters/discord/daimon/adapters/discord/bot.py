@@ -1244,6 +1244,7 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.github import GitHubCog
         from daimon.adapters.discord.commands.help import HelpCog
         from daimon.adapters.discord.commands.here import HereCog
+        from daimon.adapters.discord.commands.leads import LeadsCog
         from daimon.adapters.discord.commands.memory import MemoryCog
         from daimon.adapters.discord.commands.model import ModelCog
         from daimon.adapters.discord.commands.privacy import PrivacyCog
@@ -1256,6 +1257,7 @@ class DaimonBot(commands.Bot):
         await self.add_cog(AgentSetupCog(self))
         await self.add_cog(GitHubCog(self))
         await self.add_cog(RoutinesCog(self))
+        await self.add_cog(LeadsCog(self))
         await self.add_cog(BillingCog(self))
         await self.add_cog(PrivacyCog(self))
         await self.add_cog(MemoryCog(self))

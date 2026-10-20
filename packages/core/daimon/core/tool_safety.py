@@ -162,6 +162,7 @@ ANY_KEY: Final[str] = "*"
 #: call only previews, and runs. With it, an unattended run is always refused.
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_skill": "content_hash",
+    "lead_intake_resolve": "resolution",
     "request_agent_backend_switch": "preview_digest",
     # Every call names its action, so every call asks.
     "microsoft_send": "action",
@@ -192,6 +193,7 @@ def _always_confirmed_tools() -> frozenset[str]:
     """Every other confirmation-table entry requires review when policy is on."""
     return (
         frozenset(CONFIRMED_DAIMON_TOOLS)
+        - frozenset({"lead_intake_resolve"})
         - backend_switch_tools(enabled=True)
         - microsoft_send_tools(enabled=True, tool_safety_on=True)
     )
@@ -365,7 +367,7 @@ class ToolSafetyPolicy(BaseModel):
             "gets it at its next bind, and an unattended turn (agent chat, daimon run, a "
             "routine, a checkpoint) sets it on the session before each send. Off lets "
             "ordinary third-party calls run, but Daimon's card-only actions still ask "
-            "(a backend switch and Microsoft mail and invites; Microsoft file changes only "
+            "(lead resolution, a backend switch and Microsoft mail and invites; file changes only "
             "with it on)."
         ),
     )

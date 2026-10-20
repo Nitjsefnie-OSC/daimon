@@ -7,9 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
 - Protect legacy destination-free routine previews and diagnostics from non-owner
   readers, including administrators, across MCP and chat panels. Clear retained
   legacy private output once during upgrade; operator backfill output stays redacted.
+
+- Lead approval Details loads authorized live evidence on each click and shows
+  removed records as no longer available. Cards retain no cached evidence.
+  Batch mailbox readback requires the common lead read check, and hidden leads
+  no longer consume list pages. Automatic resume batches skip old configuration
+  revisions, old destinations and unreadable records before filling their window.
+
+### Added
+
+- Native tenant-scoped lead intake with encrypted capture, Gmail qualification,
+  restricted Discord dossiers and draft replies, conservative HubSpot reuse,
+  durable write recovery, authorized human resolution and retention tombstones.
+  CRM recovery refuses conflicts with approved selections and requires another review.
+  Dossier effects/readback honor thread permissions; classification can read new
+  discoveries without service credentials. Nested attachments are excluded,
+  discoveries expire, source tombstones survive connection renames, and actor
+  erasure prevents racing resolution audits from recreating personal data.
+  Intake authority is bound to one attended session grant; routine provenance
+  remains isolated through refresh and resolution is protected unattended.
+  A lead's readers are fixed to the sales channel it was captured for: every
+  reader, including `/leads` and approval-card Details, needs that channel's and
+  its dossier thread's history, and an agent kept to its own channel reads no
+  lead elsewhere. Resolve cards keep the approved IDs visible; adoption refuses
+  a channel change; discoveries survive a mailbox connection rename.
 
 - Turns nobody watches (routines, timers and worker wakes, fleet workers, agent chat, `daimon run` and workspace checkpoints) refuse a session whose agent coordinates other agents, before anything is sent: its roster's agents could run tools and MCP writes the unattended gate cannot reach, and Managed Agents cannot remove the roster from a live session. Such a routine fails with `AdmissionDenied: backend_unsupported`, agent chat answers with a tool error, and a checkpoint carries only the conversation. A session carrying a field this release has not reviewed, at any level from the session and its resources down to a tool's permission policy, is refused the same way (including a field hidden inside a setting that should be a plain value), as is an unattended turn on a Managed Agents runtime that cannot read its session. Every MCP call in these sessions now pauses for the unattended decider, Daimon's own tools and calls with tool safety off included; the decider allows what it allowed before. Built-in sandbox tools (bash, file edits and the rest) and custom tools are disabled for every unattended entry point, including watches, with no opt-in. Routines and other unattended runs cannot generate files with sandbox tools, and workspace checkpoints cannot create sandbox archives.
 
