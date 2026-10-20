@@ -1134,6 +1134,34 @@ secrets. Keep both separate.
 Multiplier applied to raw Anthropic usage cost before billing the tenant. 1.0 = pass-
 through.
 
+### `DAIMON_BILLING__SELFHOSTED__ADMISSION_CLOCK_SKEW_S`
+
+`float` · optional · default `5`
+
+Maximum harness clock lag in seconds when associating usage with an existing tariff
+admission. Frozen at admission; default 5, maximum 60. This tolerance never creates an
+admission or selects current prices.
+
+### `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS`
+
+`dict[str, str]` · optional · default `{}`
+
+JSON object mapping selfhosted Azure deployment names to underlying model ids. Targets
+must have configured tariffs and aliases cannot shadow another model. The runtime must
+call the tariff admission gate before paid model work; these settings alone do not
+enable refusal or execution.
+
+### `DAIMON_BILLING__SELFHOSTED__MODELS`
+
+`dict[str, list[SelfhostedModelPrice]]` · optional · default `{}`
+
+JSON object keyed by underlying Azure OpenAI model id, each containing a list of
+historical tariffs. Each requires effective_from (ISO date), input, output and
+cache_read (USD per million tokens); optional valid_before expires a row. A newer
+effective_from ends the previous open window. Retain historical rows. Supply verified
+regional/contract rates; input/output must be positive. Runtime admission must persist
+the selected tariff before paid work.
+
 ### `DAIMON_BILLING__SIGNUP_CREDIT`
 
 `Decimal` · optional · default `10.00`

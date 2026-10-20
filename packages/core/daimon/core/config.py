@@ -11,7 +11,7 @@ import binascii
 import json
 import os
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, cast
@@ -1320,6 +1320,82 @@ class SentrySettings(BaseModel):
     )
 
 
+class SelfhostedModelPrice(BaseModel):
+    """One effective Azure tariff, in USD/M tokens."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    effective_from: date
+    input: Decimal = Field(gt=0, allow_inf_nan=False)
+    output: Decimal = Field(gt=0, allow_inf_nan=False)
+    cache_read: Decimal = Field(ge=0, allow_inf_nan=False)
+    valid_before: date | None = None
+
+    @model_validator(mode="after")
+    def validate_window(self) -> SelfhostedModelPrice:
+        if self.valid_before is not None and self.valid_before <= self.effective_from:
+            raise ValueError("pricing validity must extend beyond its effective date")
+        return self
+
+
+class SelfhostedBillingSettings(BaseModel):
+    """Explicit deployment identities and effective tariff history per model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    admission_clock_skew_s: float = Field(
+        default=5,
+        ge=0,
+        le=60,
+        allow_inf_nan=False,
+        description=(
+            "Maximum harness clock lag in seconds when associating usage with an existing "
+            "tariff admission. Frozen at admission; default 5, maximum 60. "
+            "This tolerance never creates an admission or selects current prices."
+        ),
+    )
+
+    deployments: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "JSON object mapping selfhosted Azure deployment names to underlying model ids. "
+            "Targets must have configured tariffs and aliases cannot shadow another model. "
+            "The runtime must call the tariff admission gate before paid model work; "
+            "these settings alone do not enable refusal or execution."
+        ),
+    )
+    models: dict[str, list[SelfhostedModelPrice]] = Field(
+        default_factory=dict,
+        description=(
+            "JSON object keyed by underlying Azure OpenAI model id, each containing a list "
+            "of historical tariffs. Each requires effective_from (ISO date), input, output "
+            "and cache_read (USD per million tokens); optional valid_before expires a row. "
+            "A newer effective_from ends the previous open window. Retain historical rows. "
+            "Supply verified regional/contract rates; input/output must be positive. "
+            "Runtime admission must persist the selected tariff before paid work."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_tariffs(self) -> SelfhostedBillingSettings:
+        for model, history in self.models.items():
+            if not model.strip() or not history:
+                raise ValueError("models require a nonempty identity and tariff history")
+            ordered = sorted(history, key=lambda rate: rate.effective_from)
+            for previous, following in zip(ordered, ordered[1:], strict=False):
+                if previous.effective_from == following.effective_from or (
+                    previous.valid_before is not None
+                    and previous.valid_before > following.effective_from
+                ):
+                    raise ValueError("model tariff windows must not overlap")
+        for deployment, model in self.deployments.items():
+            if not deployment.strip() or model not in self.models:
+                raise ValueError("deployments must map to a priced underlying model")
+            if deployment in self.models and deployment != model:
+                raise ValueError("deployment alias cannot shadow another model")
+        return self
+
+
 class BillingSettings(BaseModel):
     """Money policy: markup multiplier and trial credit seed.
 
@@ -1335,6 +1411,7 @@ class BillingSettings(BaseModel):
             "the tenant. 1.0 = pass-through."
         ),
     )
+    selfhosted: SelfhostedBillingSettings = Field(default_factory=SelfhostedBillingSettings)
     signup_credit: Decimal = Field(
         default=Decimal("10.00"),
         description=(

@@ -273,7 +273,8 @@ class ProviderPrice:
     A None cache-write rate declares that billing stage inapplicable, rather
     than asserting that the provider reported a zero count. Reasoning is
     already included in output. Actual infrastructure cost is supplied
-    separately for the observation's grain and revision.
+    separately for the observation's grain and revision. A host-admitted tariff
+    pins its validity check to admitted_on; ordinary prices use the receipt date.
     """
 
     provider: str
@@ -286,9 +287,11 @@ class ProviderPrice:
     verified: bool = True
     max_priced_input_tokens: int | None = None
     valid_before: date | None = None
+    admitted_on: date | None = None
 
     def current_on(self, on: date) -> bool:
-        """A verified source row applies only within its known date window."""
+        """Check the frozen admission date when the host admitted this tariff."""
+        on = self.admitted_on or on
         return (
             self.verified
             and self.checked_on <= on
@@ -351,13 +354,18 @@ def provider_cost_of(
 ) -> Decimal | None:
     """Verified total cost, including actual session/container charges.
 
-    Missing counts or infrastructure remain unverified, never a free turn.
+    Non-measured completeness, missing counts or infrastructure remain
+    unverified, never a free turn.
     A caller may explicitly supply zero for inapplicable infrastructure.
     Equal cached/uncached rates permit exact inclusive-input pricing even
     when the split is unreported. No missing native count is filled in.
     """
     tokens = provider_usage_tokens(usage, price)
-    if not price.current_on(usage.observed_at.date()) or infrastructure_usd is None:
+    if (
+        usage.completeness != "measured"
+        or not price.current_on(usage.observed_at.date())
+        or infrastructure_usd is None
+    ):
         return None
     if price.max_priced_input_tokens is not None and (
         usage.input_tokens is None or usage.input_tokens > price.max_priced_input_tokens
