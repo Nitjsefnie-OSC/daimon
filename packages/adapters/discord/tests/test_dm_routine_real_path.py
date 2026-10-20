@@ -478,26 +478,29 @@ class Harness:
         assert mapping is not None
         return mapping.ma_session_id
 
-    def manifest(self, sid: str) -> dict[str, Any]:
+    async def manifest(self, sid: str) -> dict[str, Any]:
         """What a session runs with: memory, tools, servers, credentials."""
         session = self.upstream.state.sessions[sid]
         volatile = {"id", "created_at", "updated_at"}
-        from daimon.core.turn.unattended import protected_tools
+        from daimon.core.turn.unattended_capabilities import constrain_capabilities
 
-        tools = [tool.model_dump(mode="json") for tool in session.agent.tools]
-        for tool in tools:
-            if tool.get("mcp_server_name") == "daimon-mcp":
-                # Routines additionally force unattended protected actions to
-                # ask. Compare all remaining capability/permission fields.
-                tool["configs"] = [
-                    config
-                    for config in tool.get("configs", [])
-                    if config["name"] not in protected_tools(self.deps.tool_safety)
-                ]
+        constrained = await constrain_capabilities(
+            session,
+            self.deps.tool_safety,
+            public_url=self.deps.public_url,
+            session_factory=self.factory,
+            tenant_id=self.tenant.id,
+            allow_skills=True,
+        )
+        if session.metadata.get("daimon_private_dm", "").startswith("routine:"):
+            assert [
+                tool.model_dump(mode="json") for tool in session.agent.tools
+            ] == constrained.send.tools
+        tools = constrained.send.tools
         # Preview now isolates each native session's identity grant, while
         # personal OAuth credentials remain in the owner's shared agent vault.
         chat_session = session.metadata["daimon_chat_session_id"]
-        servers = [server.model_dump(mode="json") for server in session.agent.mcp_servers]
+        servers = [dict(server) for server in constrained.send.mcp_servers]
         for server in servers:
             if server["name"] == "daimon-mcp":
                 assert server["url"] == f"https://mcp.example/mcp?daimon_session={chat_session}"
@@ -666,8 +669,8 @@ async def test_routine_session_is_the_owners_live_dm_session(harness: Harness, r
     routine_b = await harness.routine(OWNER_B)
 
     assert routine_a.text == "private answer"
-    assert harness.manifest(routine_a.session_id) == harness.manifest(live), (
-        "same memory stores and modes, tools, servers and credentials as the live DM"
+    assert await harness.manifest(routine_a.session_id) == await harness.manifest(live), (
+        "same memory, permitted MCP tools, servers and owner credentials as the live DM"
     )
     stores_a = harness.memory_stores(routine_a.session_id)
     stores_b = harness.memory_stores(routine_b.session_id)
@@ -701,7 +704,7 @@ async def test_a_paused_public_send_is_decided_unattended(
         if tool.mcp_server_name == "slack"
     )
     assert toolset.model_dump(mode="json")["default_config"]["permission_policy"] == {
-        "type": "always_ask" if policy.enabled else "always_allow"
+        "type": "always_ask"
     }, "the session runs under the current policy's gate"
     assert harness.gated == [reply.session_id] * 2, (
         "gated before message and both sides of confirmation decision"
@@ -1039,7 +1042,7 @@ async def test_mount_outage_matches_live_dm_without_another_owners_memory(harnes
     reply = await harness.routine()
     assert reply.text == "private answer"
     assert harness.memory_stores(live) == harness.memory_stores(reply.session_id) == {}
-    assert harness.manifest(live) == harness.manifest(reply.session_id)
+    assert await harness.manifest(live) == await harness.manifest(reply.session_id)
 
 
 @pytest.mark.parametrize("change", ["retarget", "clear"])
@@ -1813,3 +1816,60 @@ async def test_destination_free_fire_has_no_personal_memory_or_reclassified_resu
             output_client=harness.upstream.client,
         ),
     )
+
+
+@pytest.mark.parametrize("safety_on", [False, True])
+async def test_dm_routine_disables_sandbox_and_gates_all_mcp_calls(harness: Harness, safety_on):
+    harness.with_safety(ToolSafetyPolicy(enabled=safety_on))
+    agent = harness.upstream.state.ma.agents["ag_daimon"]
+    agent["skills"] = [{"type": "custom", "skill_id": "skill_routine", "version": "1"}]
+    agent["tools"].append(
+        {
+            "type": "agent_toolset_20260401",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [{"name": "bash", "enabled": True}],
+        }
+    )
+    reply = await harness.routine()
+    snapshot = harness.upstream.state.sessions[reply.session_id]
+    assert snapshot.agent.skills[0].model_dump(mode="json")["skill_id"] == "skill_routine"
+    for tool in snapshot.agent.tools:
+        body = tool.model_dump(mode="json")
+        if tool.type == "agent_toolset_20260401":
+            assert body["default_config"]["enabled"] is False
+            assert all(config["enabled"] is False for config in body["configs"])
+        elif tool.type == "mcp_toolset":
+            assert body["default_config"]["permission_policy"] == {"type": "always_ask"}
+            assert all(
+                config["permission_policy"] == {"type": "always_ask"} for config in body["configs"]
+            )
+    assert reply.text == "private answer"
+
+
+@pytest.mark.parametrize("safety_on", [False, True])
+@pytest.mark.parametrize("shape", ["coordinator", "unknown"])
+async def test_dm_routine_refuses_unreviewed_session_before_first_send(
+    harness: Harness, safety_on, shape
+):
+    from anthropic.types.beta import BetaManagedAgentsSession
+
+    harness.with_safety(ToolSafetyPolicy(enabled=safety_on))
+    upstream = harness.upstream
+    upstream.create_pause_at = 1
+    row = await _routine_row(harness)
+    task = asyncio.create_task(harness.fire(row))
+    await asyncio.wait_for(upstream.create_entered.wait(), timeout=20)
+    sid = next(reversed(upstream.state.sessions))
+    snapshot = upstream.state.sessions[sid].model_dump(mode="json")
+    if shape == "coordinator":
+        child = {key: value for key, value in snapshot["agent"].items() if key != "multiagent"}
+        snapshot["agent"]["multiagent"] = {"type": "coordinator", "agents": [child]}
+    else:
+        snapshot["agent"]["unreviewed_capability"] = {}
+    upstream.state.sessions[sid] = BetaManagedAgentsSession.model_validate(snapshot)
+    upstream.create_gate.set()
+    await task
+    async with harness.factory() as session:
+        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    assert after is not None and after.last_error == "AdmissionDenied: backend_unsupported"
+    assert upstream.sent == [], "the actual DM session must be checked before its first send"
