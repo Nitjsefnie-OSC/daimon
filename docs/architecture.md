@@ -2389,11 +2389,8 @@ turn and stores a versioned text-and-file-reference envelope in the
 existing outbox payload. Adapters download and upload those references inside
 the claim/settle lease, rechecking destination and owner access before each
 file. Discord and Slack reuse their interactive upload paths; Teams routine
-posts explain that attachments are unsupported. Failure notices remain text
-only, and an uncertain send is settled without replay by later polls. Platform
-SDKs may retry a single send after a server error or connection reset.
-Fallback-DM files recheck current DM controls, isolation (including a resolved
-Discord parent) and recipient eligibility before each file and after download.
+posts explain that attachments are unsupported. [Routines](routines.md#generated-files)
+lists the file limits, the fallback-DM rechecks and the replay guarantee.
 Delivery error logs record the error type without arbitrary exception text,
 which may contain signed upload URLs.
 
