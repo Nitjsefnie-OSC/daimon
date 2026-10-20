@@ -245,6 +245,7 @@ async def _drive(
     *,
     policy: ToolSafetyPolicy | None = None,
     public_url: str | None = None,
+    routine_sandbox_tools: bool = False,
 ) -> tuple[_Provider, Any]:
     provider = _Provider(snapshot)
     policy = policy or ToolSafetyPolicy(enabled=True)
@@ -259,6 +260,7 @@ async def _drive(
                 session_factory=None,
                 tenant_id=None,
                 entry_point=entry_point,
+                routine_sandbox_tools=routine_sandbox_tools,
             )
         ):
             result = await run_turn(
@@ -276,6 +278,7 @@ async def _drive(
                     session_factory=None,
                     tenant_id=None,
                     entry_point=entry_point,
+                    routine_sandbox_tools=routine_sandbox_tools,
                 ),
             )
     except AdmissionDenied as err:
@@ -330,6 +333,63 @@ def test_entry_point_policy_table() -> None:
     assert caps.capability_policy(None) == caps.CapabilityPolicy(
         allow_builtins=False, allow_skills=False
     )
+
+
+@pytest.mark.parametrize("entry_point", [None, *ENTRY_POINTS])
+def test_only_a_routine_takes_the_sandbox_opt_in(entry_point: UnattendedEntryPoint | None) -> None:
+    """Watches, wakes, chat, workers, `daimon run` and checkpoints ignore the flag."""
+    opted = caps.capability_policy(entry_point, routine_sandbox_tools=True)
+    assert opted.allow_builtins is (entry_point == "routine")
+    assert not caps.capability_policy(entry_point).allow_builtins
+    if entry_point is not None:
+        assert opted.allow_skills == ENTRY_POINT_POLICY[entry_point].allow_skills
+
+
+def _with_custom_tool() -> BetaManagedAgentsSession:
+    return _root_session(
+        tools=[
+            *_tools(),
+            {
+                "type": "custom",
+                "name": "local_fn",
+                "description": "d",
+                "input_schema": {"type": "object"},
+            },
+        ]
+    )
+
+
+@pytest.mark.parametrize("entry_point", ENTRY_POINTS)
+async def test_routine_opt_in_keeps_builtins_on_the_wire(entry_point: UnattendedEntryPoint) -> None:
+    """An opted-in routine sends its built-ins as authored; every other entry point
+    still disables them, and custom tools are removed either way."""
+    provider, result = await _drive(_with_custom_tool(), entry_point, routine_sandbox_tools=True)
+
+    assert result.error is None
+    [agent] = provider.at_send
+    assert _builtins_runnable(agent["tools"]) is (entry_point == "routine")
+    assert all(t["type"] != "custom" for t in agent["tools"])
+    root_mcp = next(t for t in agent["tools"] if t["type"] == "mcp_toolset")
+    assert not _can_run_without_decider(root_mcp, "create_issue")
+
+
+@pytest.mark.parametrize("entry_point", [None, *ENTRY_POINTS])
+async def test_decider_lets_builtins_through_only_for_an_opted_in_routine(
+    entry_point: UnattendedEntryPoint | None,
+) -> None:
+    inner = AsyncMock(return_value=caps.ToolConfirmationResult(allow=True))
+    opted_in = entry_point == "routine"
+    posture = caps.capability_posture(
+        PolicyApproval(decide=inner),
+        allow_builtins=caps.capability_policy(
+            entry_point, routine_sandbox_tools=True
+        ).allow_builtins,
+    )
+    decision = await posture.decide(
+        ToolCall(tool_use_id="tu_builtin", server_name=None, tool_name="bash")
+    )
+    assert decision.allow is opted_in
+    assert inner.await_count == (1 if opted_in else 0)
 
 
 @pytest.mark.parametrize(

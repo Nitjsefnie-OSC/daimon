@@ -3237,11 +3237,17 @@ async def test_legacy_public_routines_still_fire_with_unknown_creation_source(
     await client.close()
 
 
+@pytest.mark.parametrize("opted_in", [False, True], ids=["default", "admin_opt_in"])
 @pytest.mark.parametrize("agent_posted", [False, True])
 async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
-    db_session, db_session_factory, monkeypatch, agent_posted
+    db_session, db_session_factory, monkeypatch, agent_posted, opted_in
 ):
-    """Sandbox tools are disabled before a routine runs, so it produces no files."""
+    """Sandbox tools are disabled before a routine runs, so it produces no files.
+
+    Only a routine an admin opted in keeps them on the wire at send time.
+    """
+    import sqlalchemy as sa
+    from daimon.core._models import Routine as RoutineModel
     from daimon.core.routine_files import decode_payload
     from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, sse_response
     from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
@@ -3260,6 +3266,13 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
         destination_kind="channel",
         destination_id="C123",
     )
+    if opted_in:
+        await db_session.execute(
+            sa.update(RoutineModel)
+            .where(RoutineModel.id == row.id)
+            .values(sandbox_tools_enabled=True)
+        )
+        row = row.model_copy(update={"sandbox_tools_enabled": True})
     await db_session.commit()
     router = MARouter()
     snapshot = ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
@@ -3281,8 +3294,8 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
 
     def send_event(request, match):
         [builtins] = snapshot["agent"]["tools"]
-        assert builtins["default_config"]["enabled"] is False
-        assert all(config["enabled"] is False for config in builtins["configs"])
+        assert builtins["default_config"]["enabled"] is opted_in
+        assert all(config["enabled"] is opted_in for config in builtins["configs"])
         return httpx.Response(200, json={"data": None})
 
     router.add("POST", r"/v1/sessions/[^/]+$", update_session)

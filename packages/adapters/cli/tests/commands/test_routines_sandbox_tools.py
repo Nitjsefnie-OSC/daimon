@@ -1,0 +1,119 @@
+"""`daimon routines sandbox-tools`: the operator's cutover for a confirmed list of routines."""
+
+import uuid
+from io import StringIO
+
+import pytest
+from daimon.adapters.cli.commands.routines import run_sandbox_tools
+from daimon.core.errors import UserFacingError
+from daimon.core.stores.routines import create_routine, get_routine, sandbox_tools_history
+from daimon.testing.factories import make_tenant
+from rich.console import Console
+
+from ..harness import build_cli_runtime
+
+
+async def _routines(db_session_factory, count: int):
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, workspace_id="cutover-guild")
+        rows = [
+            await create_routine(
+                session,
+                tenant_id=tenant.id,
+                created_by_user_id="owner",
+                agent_id="ag",
+                agent_name="daimon",
+                cron_expr="0 9 * * *",
+                timezone_="UTC",
+                trigger_message=f"routine {n}",
+            )
+            for n in range(count)
+        ]
+    return tenant.id, rows
+
+
+async def _enabled(db_session_factory, tenant_id, rows) -> list[bool]:
+    async with db_session_factory() as session:
+        return [
+            (await get_routine(session, row.id, tenant_id=tenant_id)).sandbox_tools_enabled
+            for row in rows
+        ]
+
+
+async def test_dry_run_reports_and_writes_nothing(db_session_factory) -> None:
+    tenant_id, rows = await _routines(db_session_factory, 2)
+    output = StringIO()
+
+    await run_sandbox_tools(
+        rt=build_cli_runtime(db_session_factory),
+        console=Console(file=output, width=200),
+        tenant_id=tenant_id,
+        routine_ids=[rows[0].id],
+        enabled=True,
+        dry_run=True,
+    )
+
+    assert f"{rows[0].id}: turn on" in output.getvalue()
+    assert "Dry run: 1 routine(s) would change" in output.getvalue()
+    assert await _enabled(db_session_factory, tenant_id, rows) == [False, False]
+
+
+async def test_bulk_opt_in_changes_only_listed_routines_and_is_idempotent(
+    db_session_factory,
+) -> None:
+    tenant_id, rows = await _routines(db_session_factory, 3)
+    rt = build_cli_runtime(db_session_factory)
+    listed = [rows[0].id, rows[1].id]
+
+    for _ in range(2):
+        output = StringIO()
+        await run_sandbox_tools(
+            rt=rt,
+            console=Console(file=output, width=200),
+            tenant_id=tenant_id,
+            routine_ids=listed,
+            enabled=True,
+            dry_run=False,
+        )
+
+    assert "already on" in output.getvalue()
+    assert "0 routine(s); 2 unchanged" in output.getvalue()
+    assert await _enabled(db_session_factory, tenant_id, rows) == [True, True, False]
+    async with db_session_factory() as session:
+        [entry] = await sandbox_tools_history(session, rows[0].id, tenant_id=tenant_id)
+    assert entry.via == "cli" and entry.after_enabled is True and entry.set_by
+
+
+async def test_an_unknown_id_changes_nothing(db_session_factory) -> None:
+    tenant_id, rows = await _routines(db_session_factory, 1)
+
+    with pytest.raises(UserFacingError, match="Nothing was changed"):
+        await run_sandbox_tools(
+            rt=build_cli_runtime(db_session_factory),
+            console=Console(file=StringIO()),
+            tenant_id=tenant_id,
+            routine_ids=[rows[0].id, uuid.uuid4()],
+            enabled=True,
+            dry_run=False,
+        )
+
+    assert await _enabled(db_session_factory, tenant_id, rows) == [False]
+
+
+async def test_off_reverts_an_opt_in(db_session_factory) -> None:
+    tenant_id, rows = await _routines(db_session_factory, 1)
+    rt = build_cli_runtime(db_session_factory)
+    for enabled in (True, False):
+        await run_sandbox_tools(
+            rt=rt,
+            console=Console(file=StringIO()),
+            tenant_id=tenant_id,
+            routine_ids=[rows[0].id],
+            enabled=enabled,
+            dry_run=False,
+        )
+
+    assert await _enabled(db_session_factory, tenant_id, rows) == [False]
+    async with db_session_factory() as session:
+        history = await sandbox_tools_history(session, rows[0].id, tenant_id=tenant_id)
+    assert [entry.after_enabled for entry in history] == [True, False]

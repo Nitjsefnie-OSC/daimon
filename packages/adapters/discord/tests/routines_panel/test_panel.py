@@ -244,6 +244,19 @@ def test_empty_roster_disables_all_but_done_and_refresh() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("enabled", "line"),
+    [(False, "Sandbox tools: off"), (True, "Sandbox tools: on (admin opt-in)")],
+)
+def test_panel_shows_the_routine_sandbox_opt_in(enabled: bool, line: str) -> None:
+    state = _make_state([_make_entry(sandbox_tools_enabled=enabled)])
+    container = build_panel_container(state, now=datetime(2026, 5, 14, 12, 0, tzinfo=UTC))
+    text = " ".join(
+        child.content for child in container.children if isinstance(child, discord.ui.TextDisplay)
+    )
+    assert line in text
+
+
 @pytest.mark.asyncio
 async def test_interaction_check_rejects_wrong_user() -> None:
     entry = _make_entry()
