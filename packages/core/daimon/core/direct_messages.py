@@ -775,11 +775,10 @@ async def reply_to_dm_result(
 
 @dataclass(frozen=True)
 class DmRoutineReply:
-    """A DM routine's final text, the session that produced it and its authority."""
+    """A DM routine's final text, the session and the agent that produced it."""
 
     text: str
     session_id: str
-    grant: AdmissionGrant
     producing_agent_id: str
 
 
@@ -929,7 +928,6 @@ async def run_dm_routine(
         return DmRoutineReply(
             text=text,
             session_id=session_id,
-            grant=grant,
             producing_agent_id=prepared.admission.agent.id,
         )
 
