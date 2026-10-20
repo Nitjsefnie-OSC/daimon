@@ -73,6 +73,18 @@ processing. Use `capture` to stop every external effect. Changing the mode does
 not delete accepted work. Do not run two independent intake systems against the
 same mailbox and CRM.
 
+After reviewing changed connection configuration, a deployment operator can
+explicitly rebind unfinished work with
+`daimon leads adopt-config TENANT_UUID INTAKE_UUID REVISION`. This records the
+old/new configuration in encrypted audit, performs no provider writes, and
+requires a separate authorized resume. Completed work cannot be rebound. A
+revision with a different guild or sales channel is refused: such records keep
+their original readers and expire there.
+
+Connection/destination changes are refused while unfinished records have effect
+intents. Finish or reconcile that work with its original configuration first.
+Configuration adoption applies only to work whose effects have not started.
+
 ## Qualification and delivery
 
 Run `lead_intake_resume` to discover messages, then `lead_intake_read_source`
@@ -102,6 +114,15 @@ selection. Creates carry scoped stable remote identities; association writes
 are read back. A timed-out write remains uncertain until recovery finds the
 remote result. An empty search alone never authorizes another create.
 
+Recovery may replay only operations with native duplicate prevention after
+remote reconciliation: CRM unique-key creates, one thread per starter, label-set
+archive and association PUTs. Uncertain Discord message POSTs require history
+recovery or authorized starter resolution; they are never blindly reposted.
+
+Dossier thread rules apply independently of the sales channel. Revoking thread
+write permission stops further chunks and resume effects. Effects run only while
+the configured sales channel is still the one the record was captured for.
+
 ## Tools and review
 
 - `lead_intake_submit` verifies and records the immutable source. Replaying the
@@ -116,6 +137,11 @@ remote result. An empty search alone never authorizes another create.
 - `lead_intake_get`, `lead_intake_list` and `lead_intake_health` provide private
   readback. List supports `after_id` pagination and omits leads the caller may
   not read; health counts all records.
+
+Automatic resume batches select up to 25 readable records from the current
+destination and configuration revision, in one ordered pass. Old revisions
+and unreadable records do not fill the processing window; deferred records remain available
+for authorized review and explicit single-ID resume.
 
 ## Who can read a lead
 
@@ -159,6 +185,36 @@ scheduled submit/resume; routines never resolve. A successful routine turn is
 not proof that a scan or lead completed. Inspect review/error state and alert
 only authorized owners with opaque IDs and private links.
 
+Discord's `/leads` command shows an ephemeral queue of the configured sales
+channel's pending records that the member may read, as above.
+`/leads intake_id:UUID` shows private status and the dossier thread link, or a
+generic refusal. Review decisions continue in an authorized conversation through
+the same core resolution contract.
+
+For an uncertain Discord starter, an authorized resolver can select a verified
+Daimon message ID, or confirm absence after at least ten minutes and a successful
+candidate scan. Absence with remaining candidates cannot authorize a repost.
+
+Human resolution requires the requester's approval card, even when third-party
+tool safety is disabled. The card shows the intake ID, each selected company,
+contact, deal and starter ID and both confirmations in every state, so the
+approved selections stay visible after the answer; a selection too long to show
+denies the call. Details loads the live record after authorizing the clicker on every click and
+sends it privately in pages. The card caches no evidence. Erased, expired or
+missing records show “no longer available”. Resolution evidence is supplied with
+the tool call; review the live record before approving the visible selections. The resolver must also be able to read the
+lead. The handler verifies the live gated session before committing the resolution.
+Routine submit/resume does not acquire a resolution grant through that card.
+
+Interactive intake calls require an attended origin bound to the calling
+provider session’s signed execution grant. Other concurrent conversations grant
+no read or resolution authority; missing or ambiguous bindings refuse the call.
+
+Lead lists apply live read authorization while traversing the store query, before
+counting the visible page limit. Hidden records do not consume a page or become
+pagination cursors. Batch resume also authorizes mailbox discovery readback under
+the current sales channel, including when no pending leads exist.
+
 ## Retention and deletion
 
 Lead text, names, research, draft and resolution evidence are encrypted for at
@@ -180,61 +236,3 @@ expiry policy and separately authorize, perform and verify provider export or
 deletion using the recorded remote identities before erasing local content.
 Never claim provider copies were deleted based on a local purge. Lead content
 is not automatically ingested into memory, cards or public artifacts.
-
-Discord's `/leads` command shows an ephemeral queue of the configured sales
-channel's pending records that the member may read, as above.
-`/leads intake_id:UUID` shows private status and the dossier thread link, or a
-generic refusal. Review decisions continue in an authorized conversation through
-the same core resolution contract.
-
-For an uncertain Discord starter, an authorized resolver can select a verified
-Daimon message ID, or confirm absence after at least ten minutes and a successful
-candidate scan. Absence with remaining candidates cannot authorize a repost.
-
-After reviewing changed connection configuration, a deployment operator can
-explicitly rebind unfinished work with
-`daimon leads adopt-config TENANT_UUID INTAKE_UUID REVISION`. This records the
-old/new configuration in encrypted audit, performs no provider writes, and
-requires a separate authorized resume. Completed work cannot be rebound. A
-revision with a different guild or sales channel is refused: such records keep
-their original readers and expire there.
-
-Connection/destination changes are refused while unfinished records have effect
-intents. Finish or reconcile that work with its original configuration first.
-Configuration adoption applies only to work whose effects have not started.
-
-Recovery may replay only operations with native duplicate prevention after
-remote reconciliation: CRM unique-key creates, one thread per starter, label-set
-archive and association PUTs. Uncertain Discord message POSTs require history
-recovery or authorized starter resolution; they are never blindly reposted.
-
-Human resolution requires the requester's approval card, even when third-party
-tool safety is disabled. The card shows the intake ID, each selected company,
-contact, deal and starter ID and both confirmations in every state, so the
-approved selections stay visible after the answer; a selection too long to show
-denies the call. Details loads the live record after authorizing the clicker on every click and
-sends it privately in pages. The card caches no evidence. Erased, expired or
-missing records show “no longer available”. Resolution evidence is supplied with
-the tool call; review the live record before approving the visible selections. The resolver must also be able to read the
-lead. The handler verifies the live gated session before committing the resolution.
-Routine submit/resume does not acquire a resolution grant through that card.
-
-Dossier thread rules apply independently of the sales channel. Revoking thread
-write permission stops further chunks and resume effects. Effects run only while
-the configured sales channel is still the one the record was captured for.
-
-Interactive intake calls require an attended origin bound to the calling
-provider session’s signed execution grant. Other concurrent conversations grant
-no read or resolution authority; missing or ambiguous bindings refuse the call.
-
-Lead lists apply live read authorization while traversing the store query, before
-counting the visible page limit. Hidden records do not consume a page or become
-pagination cursors. Batch resume also authorizes mailbox discovery readback under
-the current sales channel, including when no pending leads exist.
-
-Automatic resume batches select up to 25 readable records from the current
-destination and configuration revision. The store traverses that destination in
-one ordered pass, fetching at most 100 rows at a time and stopping after 26
-eligible records (including the lookahead). Old revisions and unreadable
-records do not fill the processing window; deferred records remain available
-for authorized review and explicit single-ID resume.
