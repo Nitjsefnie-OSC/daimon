@@ -256,10 +256,7 @@ async def _quarantine(deps: TurnDeps, conversation: DirectMessageRow) -> None:
 async def _require_source_still_unsealed(deps: TurnDeps, conversation: DirectMessageRow) -> None:
     """Quarantine the conversation when its source has been sealed since.
 
-    The row (copied context and private history) is deleted and the scope's
-    provider sessions retired, so nothing supplied earlier survives into a
-    later turn; a fresh /dm-me is required. `reauthorize` asks the same question
-    again right before the DM's session is built (`DmSourceSealedError`).
+    Deletes the row and retires the scope's sessions; a fresh /dm-me is required.
     """
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=conversation.tenant_id)
@@ -297,11 +294,9 @@ async def start_dm(
 ) -> DirectMessageRow:
     """Select a workspace explicitly and give the DM a new thread-like scope.
 
-    Caller admits the source with is_dm=True and `dm_source_channel_id`, and
-    calls `require_unsealed_source`, before reading history or opening the DM.
-    `source_channel_id` is the parent channel `/dm-me` ran in; the DM's turns
-    count toward its budget. Each move resets the private scope; a prior
-    workspace's physical DM history is never replayed into this one.
+    Caller admits the source (is_dm=True, `dm_source_channel_id`) and calls
+    `require_unsealed_source` before reading history. The DM bills
+    `source_channel_id`; each move resets the scope and replays no prior history.
     """
     require_unsealed_source(admission)
     await require_dm_enabled(deps, tenant_id=tenant_id)
@@ -792,22 +787,13 @@ async def run_dm_routine(
     source: DmSource | None,
     budget_channel_id: str | None,
 ) -> DmRoutineReply:
-    """Run a DM routine's fire as a fresh private DM turn of its owner.
+    """Run a DM routine's fire as a fresh, unattended private DM turn of its owner.
 
-    Ordinary DM admission (`cold_dm`, the routine's saved agent through the
-    cold-DM agent checks, fresh membership), the session a fresh live DM of
-    the same owner and agent gets, personal memory included, and the shared
-    prepared-turn execution. The run is unattended: every session it runs in,
-    a recovery's replacement included, is gated before anything is sent to it
-    and its pauses decided by `unattended_posture`, so a call that needs
-    someone's Approve is refused. Only Managed Agents agents run: another
-    provider is refused (`MANAGED_AGENTS_ONLY`) before a session exists.
-
-    It owns a new private scope, never the owner's selected DM conversation,
-    and starts with no history. `source` is the routine's creation source,
-    rechecked for a seal whenever the session is built; `budget_channel_id`
-    only bills. Crash, cancellation and stop behaviour are the ordinary live-DM
-    behaviour. Nothing is posted here: the caller queues the final output.
+    Ordinary cold-DM admission and session (personal memory included), in a new
+    scope with no history. Every session is gated, so a call needing Approve is
+    refused; only Managed Agents agents run (`MANAGED_AGENTS_ONLY`). `source` is
+    rechecked for a seal whenever the session is built; `budget_channel_id` only
+    bills. Nothing is posted here: the caller queues the final output.
     """
     async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False):
         now = datetime.now(UTC)
@@ -936,15 +922,10 @@ _SHUTDOWN_INTERRUPT_TIMEOUT_S = 3.0
 
 
 async def _settle_shutdown_cancelled_dm(deps: TurnDeps, conversation: DirectMessageRow) -> None:
-    """Stop the MA turn a shutdown cancelled; a DM has no marker for recovery.
+    """Interrupt the MA turn a shutdown cancelled, marking it dead if unconfirmed.
 
-    Nothing will read the session again, so it is interrupted, and marked dead
-    when the interrupt is unconfirmed, so the next DM starts a fresh session
-    instead of sending into a busy one. Only while this delivery still holds
-    the conversation's claim (`active_until`, as `finish_message` compares):
-    the claim serializes the scope, so the live mapping is this turn's own,
-    including a replacement made by dead-session recovery. Best effort: a
-    database failure is logged and the claim expires on its own.
+    Only while this delivery still holds the conversation's claim, so the live
+    mapping is this turn's own. Best effort: a database failure is only logged.
     """
     await _settle_shutdown_dm_scope(
         deps,
@@ -1031,10 +1012,8 @@ async def owner_dm_turn(
             db = await stack.enter_async_context(AsyncSession(bind=connection))
             await stack.enter_async_context(db.begin())
             await try_fence(db, f"owner_dm:{platform}:{owner}", schema_scoped=True)
-            # Keep the owner's transaction on a dedicated connection. Returning
-            # its pool slot leaves ordinary preparation/mutation headroom even
-            # with the minimum four-connection work pool. Closing this detached
-            # connection physically releases the lock on every local exit.
+            # Detach so the lock does not hold a work-pool slot; closing the
+            # detached connection releases the lock on every local exit.
             await connection.run_sync(lambda sync: sync.detach())
         except BaseException:
             await stack.aclose()
