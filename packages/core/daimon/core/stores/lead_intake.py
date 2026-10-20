@@ -13,6 +13,7 @@ from cryptography.fernet import MultiFernet
 from daimon.core._models import (
     LeadIntakeConfig,
     LeadIntakeEffect,
+    LeadIntakeExecution,
     LeadIntakeRecord,
     LeadMailboxMessageRecord,
     LeadMailboxScanRecord,
@@ -30,6 +31,7 @@ from daimon.core.lead_intake import (
     LeadSubmission,
 )
 from daimon.core.lead_intake_access import LeadReadDenied, LeadReadTarget, read_target
+from daimon.core.lead_intake_execution import current_intake_execution
 from pydantic import BaseModel, Field
 from sqlalchemy import case, delete, func, literal, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
@@ -723,9 +725,6 @@ async def routine_execution(
     register: bool = True,
 ) -> AsyncIterator[None]:
     """A live, expiring grant ends with the scheduler fire, including cancellation."""
-    from daimon.core._models import LeadIntakeExecution
-    from daimon.core.lead_intake_execution import current_intake_execution
-
     identity = uuid4()
     if register:
         async with sessions() as session, session.begin():
@@ -755,8 +754,6 @@ async def routine_execution(
 async def execution_is_active(
     session: AsyncSession, tenant_id: UUID, routine_id: UUID, execution_id: UUID
 ) -> bool:
-    from daimon.core._models import LeadIntakeExecution
-
     row = await session.get(LeadIntakeExecution, (tenant_id, execution_id))
     return row is not None and row.routine_id == routine_id and row.expires_at > datetime.now(UTC)
 
