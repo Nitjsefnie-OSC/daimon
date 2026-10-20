@@ -1827,7 +1827,9 @@ async def test_dm_routine_disables_sandbox_and_gates_all_mcp_calls(harness: Harn
         {
             "type": "agent_toolset_20260401",
             "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
-            "configs": [{"name": "bash", "enabled": True}],
+            "configs": [
+                {"name": "bash", "enabled": True, "permission_policy": {"type": "always_allow"}}
+            ],
         }
     )
     reply = await harness.routine()
