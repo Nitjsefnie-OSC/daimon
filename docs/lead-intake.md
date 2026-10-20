@@ -139,10 +139,8 @@ the configured sales channel is still the one the record was captured for.
   not read; health counts all records.
 
 Automatic resume batches select up to 25 readable records from the current
-destination and configuration revision. The store traverses that destination in
-one ordered pass, fetching at most 100 rows at a time and stopping after 26
-eligible records (including the lookahead). Old revisions and unreadable
-records do not fill the processing window; deferred records remain available
+destination and configuration revision, in one ordered pass. Old revisions
+and unreadable records do not fill the processing window; deferred records remain available
 for authorized review and explicit single-ID resume.
 
 ## Who can read a lead
