@@ -167,15 +167,6 @@ class TenantAccessPolicy(BaseModel):
 OPEN_ACCESS_POLICY = TenantAccessPolicy()
 
 
-def server_admin_bypasses_invoker_gate(policy: TenantAccessPolicy, *, is_admin: bool) -> bool:
-    """The single server-admin exemption from the invoker policy.
-
-    Callers supply live native server permissions; persisted roles and token
-    claims cannot establish Discord admin evidence for a membership check.
-    """
-    return is_admin and policy.invoker_admin_bypass
-
-
 def is_invoker_allowed(
     policy: TenantAccessPolicy,
     *,
@@ -187,13 +178,15 @@ def is_invoker_allowed(
     """Apply the user/role union and the current server-admin exemption.
 
     Unknown membership cannot match a role policy. An explicit nonmember
-    cannot invoke, even through a user exception or admin flag.
+    cannot invoke, even through a user exception or admin flag. `is_admin` must
+    be live native server permission: persisted roles and token claims are not
+    admin evidence.
     """
     if policy.invoker_role_ids and verified_membership is not True:
         return False
     if verified_membership is False:
         return False
-    if server_admin_bypasses_invoker_gate(policy, is_admin=is_admin):
+    if is_admin and policy.invoker_admin_bypass:
         return True
     if not (policy.invoker_user_ids or policy.invoker_role_ids):
         return True
