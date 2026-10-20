@@ -30,6 +30,17 @@ async def _discord_get(client: httpx.AsyncClient, path: str) -> httpx.Response:
     raise ValueError("Discord rate limit exhausted")
 
 
+def _discord_client(
+    bot_token: str, transport: httpx.AsyncBaseTransport | None
+) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        base_url="https://discord.com/api/v10/",
+        headers={"Authorization": f"Bot {bot_token}"},
+        timeout=5,
+        transport=transport,
+    )
+
+
 class DiscordRestMembershipResolver(CachedMembershipResolver):
     def __init__(
         self,
@@ -46,12 +57,7 @@ class DiscordRestMembershipResolver(CachedMembershipResolver):
         del tenant_id  # Tenant binding is enforced by the caller and cache key.
         if not guild_id.isdecimal() or not user_id.isdecimal():
             return Membership()
-        async with httpx.AsyncClient(
-            base_url="https://discord.com/api/v10/",
-            headers={"Authorization": f"Bot {self._bot_token}"},
-            timeout=5,
-            transport=self._transport,
-        ) as client:
+        async with _discord_client(self._bot_token, self._transport) as client:
             member = await _discord_get(client, f"guilds/{guild_id}/members/{user_id}")
             if member.status_code == 404:
                 return Membership(is_member=False)
@@ -99,12 +105,7 @@ async def verify_discord_source(
     try:
         async with (
             asyncio.timeout(10),
-            httpx.AsyncClient(
-                base_url="https://discord.com/api/v10/",
-                headers={"Authorization": f"Bot {bot_token}"},
-                timeout=5,
-                transport=transport,
-            ) as client,
+            _discord_client(bot_token, transport) as client,
         ):
             response = await _discord_get(client, f"channels/{channel_id}")
             response.raise_for_status()
