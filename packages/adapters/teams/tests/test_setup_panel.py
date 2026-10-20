@@ -29,6 +29,7 @@ from daimon.core.setup_conversations import setup_thread_name
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.mcp_tokens import get_mcp_token, list_mcp_tokens
+from daimon.core.stores.platform_names import upsert_channel_names
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.thread_agent_bindings import list_active_bindings
@@ -171,6 +172,41 @@ async def test_details_offers_a_member_no_coding_tools_button_that_could_only_re
     assert "Set up " in details, "the way to ask for a change stays"
 
 
+async def test_routing_and_details_name_channels_from_the_stored_names_not_their_ids(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Who answers where and Details say `Research` or a neutral label, never the Teams id."""
+    named, unnamed = "19:research@thread.tacv2", "19:unseen@thread.tacv2"
+    async with db_session_factory.begin() as session:
+        await upsert_channel_names(
+            session, tenant_id=TENANT, platform="teams", names={named: "Research"}
+        )
+        for channel, agent in ((named, "analyst"), (unnamed, "analyst")):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel),
+                tenant_id=TENANT,
+                agent_name=agent,
+                mode="agent",
+                environment_name="lobby-env",
+            )
+    async with _running(db_session_factory, teams_api_fake, admins=(AAD_OBJECT_ID,)) as (
+        service,
+        _,
+    ):
+        routing = json.dumps(await post_activity(service, _click("routing")), ensure_ascii=False)
+        details = json.dumps(
+            await post_activity(service, _click("details", agent="analyst")), ensure_ascii=False
+        )
+
+    assert "Research → **analyst**" in routing and "Research → **lobby-env**" in routing
+    assert "Channel name unavailable → **analyst**" in routing, "no stored name: a neutral label"
+    answers_in = details.partition("**Answers in:** ")[2].partition('"')[0]
+    assert sorted(answers_in.split(", ")) == ["Channel name unavailable", "Research"]
+    for card in (routing, details):
+        assert "19:" not in card, "no Teams conversation id"
+
+
 @pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
 async def test_routing_hides_an_isolated_channels_environment_from_outside(
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -201,6 +237,47 @@ async def test_routing_hides_an_isolated_channels_environment_from_outside(
 
     assert "lobby-env" in routing, "an open channel's environment is listed"
     assert ("vault-env" in routing) is admin, "the isolated channel's shows only to an admin"
+
+
+@pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
+async def test_details_hides_an_isolated_channels_name_from_a_member(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    admin: bool,
+) -> None:
+    """Answers in follows Who answers where: a member never learns an isolated
+    channel's name, or that the agent answers there; an admin sees it."""
+    isolated, open_channel = "19:vault@thread.tacv2", "19:lobby@thread.tacv2"
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(
+                sealed_channel_ids=(isolated,), isolated_channel_ids=(isolated,)
+            ),
+        )
+        await upsert_channel_names(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            names={isolated: "Secret Vault", open_channel: "Lobby"},
+        )
+        for channel in (CONVERSATION_ID, isolated, open_channel):
+            await set_fields(
+                session,
+                scope=ChannelScopeRef(tenant_id=TENANT, channel_id=channel),
+                tenant_id=TENANT,
+                agent_name="analyst",
+                mode="agent",
+            )
+    admins = (AAD_OBJECT_ID,) if admin else ()
+    async with _running(db_session_factory, teams_api_fake, admins=admins) as (service, _):
+        details = json.dumps(
+            await post_activity(service, _click("details", agent="analyst")), ensure_ascii=False
+        )
+
+    assert "Lobby" in details, "an open channel's name is listed"
+    assert ("Secret Vault" in details) is admin, "the isolated channel's shows only to an admin"
 
 
 @pytest.mark.parametrize("admin", [False, True], ids=["member", "admin"])
