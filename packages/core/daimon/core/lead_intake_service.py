@@ -167,13 +167,13 @@ class IntakeService:
         payload: dict[str, str],
         identity: str | None = None,
     ) -> str:
-        await self.reauthorize(
-            IntakeAccess(
-                source=record.submission.source if record.submission else None,
-                thread_id=payload.get("thread") or record.progress.discord_thread_id,
-                create_thread=step == "thread",
-            )
+        # Checked again immediately before the write.
+        access = IntakeAccess(
+            source=record.submission.source if record.submission else None,
+            thread_id=payload.get("thread") or record.progress.discord_thread_id,
+            create_thread=step == "thread",
         )
+        await self.reauthorize(access)
         live_record = await self.store.get(record.id)
         if live_record.submission is None or record.expires_at <= datetime.now(UTC):
             raise ValueError("intake_erased_or_expired")
@@ -218,13 +218,7 @@ class IntakeService:
             # Empty history is not proof a non-idempotent POST did not happen.
             raise ReviewRequired("uncertain_write")
         await self.store.intent(record.id, step, key)
-        await self.reauthorize(
-            IntakeAccess(
-                source=record.submission.source if record.submission else None,
-                thread_id=payload.get("thread") or record.progress.discord_thread_id,
-                create_thread=step == "thread",
-            )
-        )
+        await self.reauthorize(access)
         remote_id = await self.ports.write(config, request)
         await self.store.finish(record.id, step, remote_id)
         return remote_id
