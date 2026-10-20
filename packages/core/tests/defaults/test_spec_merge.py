@@ -141,6 +141,18 @@ def test_merge_skills_keeps_the_version_a_preserved_skill_is_pinned_to() -> None
     assert out[2] == {"skill_id": "sk_latest", "type": "custom"}, "a latest skill stays unpinned"
 
 
+def test_merge_skills_keeps_a_built_in_skill_pin() -> None:
+    ma = _ma_agent(
+        skills=[
+            BetaManagedAgentsAnthropicSkill(skill_id="xlsx", type="anthropic", version="20251013")
+        ]
+    )
+    out = merge_skills_with_ma([], ma)
+    assert out == [{"skill_id": "xlsx", "type": "anthropic", "version": "20251013"}], (
+        "a built-in pinned to one version keeps it too"
+    )
+
+
 def test_merge_skills_spec_wins_on_collision() -> None:
     spec: list[BetaManagedAgentsSkillParams] = [
         cast(BetaManagedAgentsSkillParams, {"skill_id": "sk_same", "type": "custom"})

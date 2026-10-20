@@ -104,7 +104,7 @@ async def test_skill_attach_callsite_preserves_version_retry(monkeypatch, confli
                 skills=[
                     {"type": "custom", "skill_id": "added"},
                     {"type": "anthropic", "skill_id": "xlsx"},
-                    {"type": "custom", "skill_id": "concurrent"},
+                    {"type": "custom", "skill_id": "concurrent", "version": "9"},
                 ],
             )
         note = await skills._attach_synced_skills(
