@@ -1,5 +1,6 @@
-"""DM routines through real admission, session assembly, prepared turns, the S1
-gate and the Discord owner-DM poster, against fake Managed Agents and Discord."""
+"""DM routines through real admission, session assembly, prepared turns, the
+unattended tool gate and the Discord owner-DM poster, against fake Managed Agents
+and Discord."""
 
 from __future__ import annotations
 
@@ -1255,7 +1256,7 @@ async def test_owner_and_destination_are_rechecked_during_real_delivery(
     )
 
 
-async def test_busy_live_owner_skips_slot_without_touching_c8(harness: Harness):
+async def test_busy_live_owner_skips_slot_without_touching_the_live_dm(harness: Harness):
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def waiting(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
