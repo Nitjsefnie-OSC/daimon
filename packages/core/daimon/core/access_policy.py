@@ -104,6 +104,16 @@ def _from_lists(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def is_discord_snowflake(value: str) -> bool:
+    """A canonical decimal Discord id between 1 and 2**64 - 1."""
+    return (
+        value.isascii()
+        and value.isdecimal()
+        and 0 < int(value) < 2**64
+        and str(int(value)) == value
+    )
+
+
 class TenantAccessPolicy(BaseModel):
     """One tenant's access policy. Renaming a field means reading the old name too."""
 
@@ -127,13 +137,7 @@ class TenantAccessPolicy(BaseModel):
     @field_validator("invoker_role_ids")
     @classmethod
     def _role_snowflakes(cls, ids: tuple[str, ...]) -> tuple[str, ...]:
-        if any(
-            not value.isascii()
-            or not value.isdecimal()
-            or not 0 < int(value) < 2**64
-            or str(int(value)) != value
-            for value in ids
-        ):
+        if not all(is_discord_snowflake(value) for value in ids):
             raise ValueError("invoker_role_ids must contain Discord snowflakes")
         return tuple(dict.fromkeys(ids))
 
