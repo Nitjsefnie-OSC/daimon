@@ -1104,8 +1104,8 @@ decider refuse what the session no longer carries, including every built-in
 or custom call. Unattended runs cannot generate files with sandbox tools;
 checkpoint turns cannot create sandbox archives. Prepared turns map their
 origin to an entry point (`unattended_entry_point`: `worker` is a fleet worker,
-`routine` a routine, anything else a wake). For `run_prepared_turn` (fleet workers,
-unattended wakes, and future watches or completion turns), this also covers
+`routine` a routine, anything else a wake). For `run_prepared_turn` (fleet workers
+and unattended wakes), this also covers
 dead-session recovery. Platform queue dispatchers explicitly mark timers and
 worker-completion wakes unattended. User-initiated handoffs and private-input
 continuations retain their attended approval surfaces. Managed Agents runtimes refresh
@@ -1275,8 +1275,9 @@ confirmations and gate updates go out with one attempt (`single_attempt`,
 no SDK retry), so nothing is resent after its gate and decision; a failed or
 ambiguous attempt raises and is left for a new, fully checked call. The
 registry keeps each worker's turn boundary: a worker reads as `running`, and
-a resume reuses it, only for the turn it owns. `annotations_for` is the seam for operator-trusted MCP
-hints; nothing supplies them yet. A read never answers a pause: `get_session`
+a resume reuses it, only for the turn it owns. The worker reads operator-trusted
+MCP hints (`DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS`) through `annotations_for`,
+bound once from the session's own agent and credential. A read never answers a pause: `get_session`
 (both), `get_my_session` and hub `get_session` report `running` while this
 process's worker owns the turn and `paused` with a hint otherwise; list tools
 report the provider's status. Only the session's own account (an agent key,
