@@ -147,6 +147,9 @@ def validate_watch_snapshot(snapshot: BetaManagedAgentsSession) -> None:
     if allowed.allow_builtins or allowed.allow_skills:
         raise AdmissionDenied(reason="backend_unsupported")
     capabilities.require_allowed_capabilities(snapshot, allow_skills=allowed.allow_skills)
+    servers = [tool.mcp_server_name for tool in snapshot.agent.tools if tool.type == "mcp_toolset"]
+    if len(servers) != len(set(servers)):
+        raise AdmissionDenied(reason="backend_unsupported")
     _instance_fields(snapshot)
     _telemetry_fields(snapshot.stats, "active_seconds duration_seconds")
     _telemetry_fields(

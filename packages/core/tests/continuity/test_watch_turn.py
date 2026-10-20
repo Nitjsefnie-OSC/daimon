@@ -571,3 +571,65 @@ async def test_watch_server_names_cannot_alias_shared_allowlist_keys():
     # A server name is not a prefix for enabling an absent tool on another server.
     assert constrained.send.tools == []
     assert constrained.send.mcp_servers == []
+
+
+@pytest.mark.parametrize("effort", ["max", {"type": "high"}])
+def test_watch_model_allowlist_pins_reviewed_preset_fields(effort):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    reviewed = frozenset({"id", "speed", "inference_geo", "effort"})
+    # Watches intentionally adopt this shared schema. Any widening needs review,
+    # including a field newly understood by the SDK rather than a response extra.
+    assert reviewed == capabilities._MODEL
+    snapshot = _explicit_read_snapshot()
+    snapshot.agent.model = snapshot.agent.model.model_copy(
+        update={
+            "inference_geo": "global",
+            "effort": effort,
+        }
+    )
+    assert set(snapshot.agent.model.model_dump()) == reviewed
+    watch_turn.validate_watch_snapshot(snapshot)
+    for name in ("future_execution_capability", "tools", "system", "multiagent"):
+        for value in (None, False, [], {"enabled": True}):
+            unknown = snapshot.model_copy(deep=True)
+            unknown.agent.model = unknown.agent.model.model_copy(update={name: value})
+            with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+                watch_turn.validate_watch_snapshot(unknown)
+
+
+async def test_watch_refuses_duplicate_server_toolsets_before_any_mutation(monkeypatch):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    snapshot = _explicit_read_snapshot()
+    original = snapshot.agent.tools[0]
+    get_issue = original.configs[0]
+    original.configs = [get_issue]
+    snapshot.agent.tools.append(
+        original.model_copy(
+            update={
+                "configs": [
+                    get_issue.model_copy(update={"enabled": False}),
+                    get_issue.model_copy(update={"name": "list_issues", "enabled": True}),
+                ]
+            }
+        )
+    )
+    update = AsyncMock()
+    projection = AsyncMock(wraps=capabilities.constrain_capabilities)
+    monkeypatch.setattr(capabilities, "update_session_record", update)
+    monkeypatch.setattr(capabilities, "constrain_capabilities", projection)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        watch_turn.validate_watch_snapshot(snapshot)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await _apply_watch_capabilities(
+            MagicMock(),
+            snapshot,
+            ToolSafetyPolicy(),
+            scope=Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="g"),
+            public_url=None,
+            sessions=MagicMock(),
+            tenant_id=uuid.uuid4(),
+        )
+    projection.assert_not_awaited()
+    update.assert_not_awaited()
