@@ -630,14 +630,12 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         side_effect=RuntimeError("restore failed") if ending == "restore_error" else None
     )
     if ending == "cache_error":
-        from daimon.core.stores import thread_sessions
-
         monkeypatch.setattr(
-            thread_sessions,
-            "invalidate_session_tools",
+            capabilities,
+            "invalidate_cached_tools",
             AsyncMock(side_effect=RuntimeError("cache failed")),
         )
-    monkeypatch.setattr(capabilities, "apply_capabilities", constrain)
+    monkeypatch.setattr(capabilities, "send_capabilities", constrain)
     monkeypatch.setattr(capabilities, "restore_capabilities", restore)
     monkeypatch.setattr(
         session_ports_compat,
